@@ -1,4 +1,0 @@
-len 25673
-has_mutable 0
-idx_trivial_semi 2602
-has_bool_trivial 1

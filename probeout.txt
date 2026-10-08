@@ -1,3 +1,0 @@
-semi_idx 2601
-seg b'        huge;\n        mutable bool      trivi'
-mutable_count 1
