@@ -1,0 +1,22 @@
+# build artifacts
+build/
+.xmake/
+*.o
+*.obj
+*.exe
+*.a
+*.lib
+
+# vendored third-party (per rules: not committed into git; see scripts/fetch_3rdparty)
+3rdparty/
+
+# temp workspace (per rules; temp is for throwaway data, not committed)
+temp/
+
+# editor
+.vscode/
+.idea/
+
+# os
+Thumbs.db
+.DS_Store
