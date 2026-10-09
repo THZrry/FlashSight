@@ -1,3 +1,0 @@
-[0mchecking for Mingw SDK ... [32;1mC:\Program Files\mingw64 (x86_64-w64-mingw32-)[0m
-[0m[1;33;1mwarning: [33;1m.\xmake.lua:40[0m: cannot match add_files("src\core\**.cpp") in target(fs_core)[0m
-[0m[1;33;1mwarning: [33;1madd -v for getting more warnings ..[0m
