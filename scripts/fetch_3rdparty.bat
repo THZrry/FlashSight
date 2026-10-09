@@ -1,0 +1,25 @@
+@echo off
+rem FlashSight 3rdparty fetch (Windows) - run from repo root
+set PROXY=http://127.0.0.1:10809
+mkdir 3rdparty 2>nul
+curl -sL -x %PROXY% --max-time 90 -o ghfs.tgz https://github.com/gulrak/filesystem/archive/refs/tags/v1.5.14.tar.gz
+tar -xzf ghfs.tgz -C 3rdparty
+del /q ghfs.tgz
+mkdir 3rdparty\json 2>nul
+curl -sL -x %PROXY% --max-time 90 -o 3rdparty\json\json.hpp https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+curl -sL -x %PROXY% --max-time 90 -o dtl.zip https://github.com/cubicdaiya/dtl/archive/refs/tags/v1.20.zip
+powershell -NoProfile -Command "Expand-Archive -Path dtl.zip -DestinationPath 3rdparty -Force"
+del /q dtl.zip
+curl -sL -x %PROXY% --max-time 90 -o md4c.zip https://github.com/mity/md4c/archive/refs/heads/master.zip
+powershell -NoProfile -Command "Expand-Archive -Path md4c.zip -DestinationPath 3rdparty -Force"
+del /q md4c.zip
+mkdir 3rdparty\httplib 2>nul
+curl -sL -x %PROXY% --max-time 90 -o 3rdparty\httplib\httplib.h https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h
+curl -sL -x %PROXY% --max-time 120 -o mbedtls.zip https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v3.6.4.zip
+powershell -NoProfile -Command "Expand-Archive -Path mbedtls.zip -DestinationPath 3rdparty -Force"
+del /q mbedtls.zip
+cd 3rdparty\mbedtls-3.6.4
+git clone -q --depth 1 https://github.com/Mbed-TLS/mbedtls-framework.git framework
+cd ..\..
+python -c "p='3rdparty/dtl-1.20/dtl/Diff.hpp'; d=open(p,'rb').read(); o=b'bool               trivial;'; n=b'mutable bool      trivial;'; assert d.count(o)==1; open(p,'wb').write(d.replace(o,n)); print('dtl patched')"
+echo 3rdparty fetch done
