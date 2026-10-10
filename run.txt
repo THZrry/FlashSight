@@ -1,0 +1,24 @@
+[ RUN  ] m1_full_flow
+[  OK  ] m1_full_flow
+[ RUN  ] session_settings_permission_upgrade
+[  OK  ] session_settings_permission_upgrade
+[ RUN  ] session_refresh_config
+[  OK  ] session_refresh_config
+[ RUN  ] rollback_conflict_honest
+[  OK  ] rollback_conflict_honest
+[ RUN  ] errors_not_found
+[  OK  ] errors_not_found
+[ RUN  ] lock_arbiter_matrix
+[  OK  ] lock_arbiter_matrix
+[ RUN  ] deny_list_match
+[  OK  ] deny_list_match
+[ RUN  ] terminal_registry_flow
+[  OK  ] terminal_registry_flow
+[ RUN  ] usage_store_flow
+[  OK  ] usage_store_flow
+[ RUN  ] settings_two_level
+[  OK  ] settings_two_level
+[ RUN  ] project_registry_flow
+[  OK  ] project_registry_flow
+----
+cases: 11, failed cases: 0, checks: 121, failed checks: 0

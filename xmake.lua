@@ -11,6 +11,7 @@ set_languages("c++14")
 -- common include dirs
 includedirs = {
     "src",
+    "src/common",
     "3rdparty/filesystem-1.5.14/include",
     "3rdparty/json",
     "3rdparty/dtl-1.20",

@@ -1,0 +1,43 @@
+// fs_store.hpp - global & project file paths/schema (session-history.md §1)
+#pragma once
+
+#include <string>
+
+#include <ghc/filesystem.hpp>
+
+#include "fs_error.hpp"
+#include "fs_json.hpp"
+
+namespace fs {
+
+// 全局文件布局（session-history.md §1）
+struct GlobalPaths {
+  ghc::filesystem::path root;             // ~/.flashsight
+  ghc::filesystem::path config;           // config.json
+  ghc::filesystem::path providers;        // providers.json
+  ghc::filesystem::path projects;         // projects.json
+  ghc::filesystem::path usage;            // usage/calls.jsonl 及其目录
+
+  static GlobalPaths resolve();
+};
+
+// 项目级布局
+struct ProjectStore {
+  ghc::filesystem::path project_root;     // <project>
+  ghc::filesystem::path data_dir;         // <project>/.flashsight
+  ghc::filesystem::path project_json;     // project.json
+  ghc::filesystem::path sessions_dir;     // sessions/
+
+  // 会话路径
+  ghc::filesystem::path session_dir(const std::string& sid) const;
+  ghc::filesystem::path full_json(const std::string& sid) const;
+  ghc::filesystem::path runtime_json(const std::string& sid) const;
+  ghc::filesystem::path patches_dir(const std::string& sid) const;
+  ghc::filesystem::path patch(const std::string& sid, const std::string& turn_id) const;
+  ghc::filesystem::path terminals_dir(const std::string& sid) const;
+  ghc::filesystem::path terminal_log(const std::string& sid, const std::string& tid) const;
+
+  static ProjectStore of(const ghc::filesystem::path& project_root);
+};
+
+}  // namespace fs
