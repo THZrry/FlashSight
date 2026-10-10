@@ -1,58 +1,43 @@
-# 1: 网络走代理
+# FlashSight Notes
 
-SOLVED
+The process of project: P0 环境搭建 + P1 AppCore
 
-本机无法直连 GitHub（curl exit 6/28），需经本地 v2ray 代理 127.0.0.1:10809
-（系统代理已启用：HKCU ProxyServer=127.0.0.1:10809, ProxyEnable=1）。
-所有 curl/git clone 加 `-x http://127.0.0.1:10809`。
+<1>(SOLVED): 网络不可直连 GitHub，本机 v2ray 代理 127.0.0.1:10809（系统代理已启用）。
+  所有 curl/git clone 需 `-x http://127.0.0.1:10809`。curl 直连 exit 6/28，走代理后正常。
+  经验：环境里 Bash 是 cmd 兼容（无 unix 管道工具），脚本一律 .bat；且每次 Bash 调用是全新进程，
+  set 的环境变量不保留，必须写进 .bat 里或每条命令带上。
 
-**经验**：本环境 Bash 实际是 cmd 兼容，无 unix 管道工具（grep/head/tail 不可用），
-且每次 Bash 调用是全新进程，`set` 的环境变量不保留，必须写进 .bat 或每条命令带上。
-Python 脚本可正常读写文件、打印（用 .py 文件 + 重定向更稳）。
+<2>(SOLVED): mbedtls 4.x development 分支不可用：`build_info.h` include `tf-psa-crypto/build_info.h`，
+  且 3rdparty 目录里没有对应子模块。改定稿 3.6.4 LTS（v3.6.4 tag），并需 `git clone` mbedtls-framework
+  到 `framework/`（release 包不带该子模块）。CMake 配置时 config.py 依赖 framework 内 mbedtls_framework 模块。
+  构建还要 `-DCMAKE_C_FLAGS=-Wno-error=format`（GCC16 对 `%I64d`/long long 的 -Wformat 升为 error），
+  链接要 `-lcrypt32 -lbcrypt -lws2_32`。这些已全部验证，写进 temp/environment.md 和 scripts/fetch_3rdparty.bat。
 
-# 2: mbedtls 选型与构建
+<3>(SOLVED): dtl v1.20 `enableTrivial() const` 内给成员 `trivial` 赋值，GCC16 报 -Wtemplate-body。
+  解法：`bool trivial;` → `mutable bool trivial;`（Diff.hpp 第 66 行附近）。已 patch 到 3rdparty 里。
 
-SOLVED
+<4>(SOLVED): cpp-httplib(master) 支持 mbedTLS（CPPHTTPLIB_MBEDTLS_SUPPORT），
+  与 mbedtls 3.6.4 链接 OK，并实测通过 127.0.0.1:10809 代理请求 raw.githubusercontent.com 返回 200（1.4MB）。
+  注意 httplib 不读系统代理环境变量，代理需在应用层 set_proxy（P2/P3 网络工具时注意）。
 
-mbedtls development(4.2.0) 分支不可用：build_info.h include "tf-psa-crypto/build_info.h"，
-3rdparty 内无该子模块，且 httplib 对 MBEDTLS_VERSION_MAJOR>=4 走 CPPHTTPLIB_MBEDTLS_V4 分支需 PSA crypto。
-改为定稿 **mbedtls 3.6.4 LTS**（release tag 包）。release 包不带 framework 子模块，需：
-`git clone --depth 1 https://github.com/Mbed-TLS/mbedtls-framework.git framework`（在 mbedtls-3.6.4/ 下）。
-CMake 构建：`-G "MinGW Makefiles" -DCMAKE_C_COMPILER=gcc -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF
--DCMAKE_C_FLAGS=-Wno-error=format`（GCC16 把 `%I64d` 与 long long 不匹配的 -Wformat 升为 error，仅 2 处 debug 宏）。
-链接：`-lws2_32 -lcrypt32 -lbcrypt`。产物：library/libmbedtls.a libmbedx509.a libmbedcrypto.a
-（+ 3rdparty/everest/libeverest.a、3rdparty/p256-m/libp256m.a）。
+<5>(SOLVED): xmake 在 Windows 上默认找 VS 工具链，本机没有 VS。配置时 `xmake f -y --toolchain=mingw`，
+  之后 `xmake -r` 干净构建。空目录 add_files 的 warning 用 `os.files()` 过滤掉。
 
-# 3: dtl MinGW patch
+<6>(SOLVED): repo 曾误提交 3rdparty_tmp（mbedtls 4.x 解压残留）与诊断 scratch 文件，
+  已 git rm --cached 清理并补干净提交。3rdparty/ 不入 git（rules 要求），fetch 脚本可重放。
 
-SOLVED
+<7>(SOLVED): P1 AppCore 存储层+核心管理器+FsApi 骨架+M1 单测全过（11 用例 121 断言）。
+  - ghc::filesystem 不暴露 `error_code`（用 `std::error_code`），全仓替换过；
+  - ifstream/ofstream 不接受 ghc::path 直接构造（用 `.string()`）；
+  - Windows 文本模式 CRLF 翻译坑：写入文件与 patch 记录必须统一二进制模式（测试用 std::ios::binary 写盘），
+    否则回滚 `cur==after` 比较失败报假冲突——P3 工具层写文件也须遵守；
+  - SettingsStore 项目级按 pid 懒构建缓存（FsApi::store_for），避免每次重建；
+  - 权限升级（低→高）令牌确认流：后端发令牌，UI 确认后 set_permission_confirm 生效；
+  - 回滚语义：删除该 turn 及之后 turns（keep=idx），patch 逆向还原，冲突如实报错不静默；
+  - 分叉：复制 full.json 前缀到新 sid，snapshots 按保留 turns 裁剪；
+  - 遗忘：full.json 标 forgotten 不物理删。
 
-dtl v1.20 `Diff::enableTrivial() const`（Diff.hpp:167）给成员 `trivial` 赋值，
-GCC16 以 -Wtemplate-body 报错。解法：成员声明 `bool trivial;` → `mutable bool trivial;`（Diff.hpp:66）。
-已 patch 到 3rdparty/dtl-1.20/dtl/Diff.hpp，scripts/fetch_3rdparty.bat 里有同样 patch。
+## 当前状态
 
-# 4: httplib+mbedTLS HTTPS 实测通过
-
-SOLVED
-
-cpp-httplib master（3rdparty/httplib/httplib.h）定义 CPPHTTPLIB_MBEDTLS_SUPPORT 后
-与 mbedtls 3.6.4 静态库链接成功，temp/verify 里 verify_https_run.exe 经
-`cli.set_proxy("127.0.0.1", 10809)` 请求 raw.githubusercontent.com 返回 200，下载 1403599 字节。
-**注意**：httplib 不读环境变量 HTTP_PROXY/HTTPS_PROXY，代理必须应用层显式 set_proxy
-（P2/P3 网络工具实现时把代理做成可配置）。
-
-# 5: xmake Windows 配置
-
-SOLVED
-
-本机无 Visual Studio，xmake 默认找不到工具链。配置：
-`xmake f -y --toolchain=mingw`（xmake 自动找到 C:/Program Files/mingw64）。
-构建：`xmake -r`。空目录 add_files 会产生 warning，用 `os.files()` 展开后只加存在的文件。
-
-# 6: repo 清理
-
-SOLVED
-
-P0 过程中误把 3rdparty_tmp（mbedtls 4.x 解压残留）和若干诊断 scratch 文件提交进 git，
-已 `git rm --cached` + 后续干净提交清理。3rdparty/ 与 temp/ 不入 git（rules 要求），
-重放方式：`scripts/fetch_3rdparty.bat`（Windows，走代理）。
+- P0+P1 完成，git log e73f384。roadmap 10-appcore.md 已勾选（剩远程入口、spawn/kill/poll 在 P3）。
+- 下一步：P2 Provider（src/provider，见 roadmap/20-provider.md）。
