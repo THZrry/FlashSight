@@ -16,11 +16,11 @@ namespace {
 
 class FakeNet : public NetClient {
  public:
-  std::vector<HttpResponse> responses;
-  std::vector<HttpRequest> requests;
+  mutable std::vector<HttpResponse> responses;  // 弹出式队列（mutable 以兼容 const 接口）
+  mutable std::vector<HttpRequest> requests;
 
   FsResult request(const HttpRequest& req, HttpResponse* out) const override {
-    const_cast<FakeNet*>(this)->requests.push_back(req);
+    requests.push_back(req);
     if (responses.empty()) {
       out->status = 500;
       out->body = "";
