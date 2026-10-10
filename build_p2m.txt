@@ -1,0 +1,74 @@
+[0m[32;1m[  8%]:[0m [35;1m<flashsight>[0m cache compiling.release src\main.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\deny_list.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\fs_api.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\lock_arbiter.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\plan_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\project_manager.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\session_manager.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\settings_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\shell_detect.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\terminal_registry.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\usage_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\model_table.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_client.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_runtime.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_types.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\fs_patch.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\fs_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\project_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\session_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_clock.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_i18n.cpp[0m
+[0m[32;1m[ 10%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_json.cpp[0m
+[0m[32;1m[ 12%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_jsonl.cpp[0m
+[0m[32;1m[ 14%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_log.cpp[0m
+[0m[32;1m[ 16%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_net_http.cpp[0m
+[0m[32;1m[ 18%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_path.cpp[0m
+[0m[32;1m[ 20%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_random.cpp[0m
+[0m[32;1m[ 22%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_serialize.cpp[0m
+[0m[32;1m[ 24%]:[0m [35;1m<fs_core>[0m cache compiling.release 3rdparty\md4c-master\src\md4c.c[0m
+[0m[32;1m[ 26%]:[0m [35;1m<fs_core>[0m cache compiling.release 3rdparty\md4c-master\src\md4c-html.c[0m
+[0m[32;1m[ 28%]:[0m [35;1m<fs_core>[0m cache compiling.release 3rdparty\md4c-master\src\entity.c[0m
+[0m[32;1m[ 30%]:[0m [35;1m<fs_ui>[0m [35;1marchiving.release fs_ui.lib[0m
+[0m[32;1m[ 33%]:[0m [35;1m<fs_tests>[0m cache compiling.release tests\test_framework.cpp[0m
+[0m[32;1m[ 35%]:[0m [35;1m<fs_tests>[0m cache compiling.release tests\test_p1.cpp[0m
+[0m[33;1msrc\core\project_manager.cpp:13:6: warning: 'void fs::{anonymous}::maybe_git_init(const ghc::filesystem::path&, bool)' defined but not used [-Wunused-function]
+   13 | void maybe_git_init(const ghc::filesystem::path& root, bool allowed) {
+      |      ^~~~~~~~~~~~~~
+cc1plus.exe: note: unrecognized command-line option '-Wno-gnu-line-marker' may have been intended to silence earlier diagnostics[0m
+[0m[33;1msrc\provider\provider_runtime.cpp:5:9: warning: 'NOMINMAX' redefined
+    5 | #define NOMINMAX
+      |         ^~~~~~~~
+In file included from C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/x86_64-w64-mingw32/bits/c++config.h:733,
+                 from C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/cstdint:40,
+                 from src\provider\provider_runtime.hpp:4,
+                 from src\provider\provider_runtime.cpp:2:
+C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/x86_64-w64-mingw32/bits/os_defines.h:45:9: note: this is the location of the previous definition
+   45 | #define NOMINMAX 1
+      |         ^~~~~~~~[0m
+[0m[33;1msrc\storage\fs_patch.cpp:32:13: warning: 'std::string fs::{anonymous}::norm_rel(const std::string&)' defined but not used [-Wunused-function]
+   32 | std::string norm_rel(const std::string& p) {
+      |             ^~~~~~~~
+cc1plus.exe: note: unrecognized command-line option '-Wno-gnu-line-marker' may have been intended to silence earlier diagnostics[0m
+[0m[33;1mIn file included from tests\test_framework.cpp:2:
+tests\test_framework.hpp:50:75: warning: backslash-newline at end of file
+   50 | #define ASSERT_TRUE(x)                                                    \[0m
+[0m[1;31;1merror: [0msrc\core\fs_api.hpp:150:19: error: 'HttplibNetClient' was not declared in this scope
+  150 |   std::unique_ptr<HttplibNetClient> net_;
+      |                   ^~~~~~~~~~~~~~~~
+src\core\fs_api.hpp:150:35: error: template argument 1 is invalid
+  150 |   std::unique_ptr<HttplibNetClient> net_;
+      |                                   ^
+src\core\fs_api.hpp:150:35: error: template argument 2 is invalid
+src\core\fs_api.cpp: In constructor 'fs::FsApi::FsApi(const ghc::filesystem::path&, const fs::Clock*, fs::Random*)':
+src\core\fs_api.cpp:29:8: error: request for member 'reset' in '((fs::FsApi*)this)->fs::FsApi::net_', which is of non-class type 'int'
+   29 |   net_.reset(new HttplibNetClient(sample));
+      |        ^~~~~
+src\core\fs_api.cpp:29:18: error: expected type-specifier before 'HttplibNetClient'
+   29 |   net_.reset(new HttplibNetClient(sample));
+      |                  ^~~~~~~~~~~~~~~~
+src\core\fs_api.cpp: In member function 'fs::FsResult fs::FsApi::provider_list_models(const std::string&)':
+src\core\fs_api.cpp:317:59: error: invalid type argument of unary '*' (have 'int')
+  317 |   auto res = model_table_->fetch_models(providerId, conn, *net_);
+  [33m> in [1msrc\core\fs_api.cpp[0m

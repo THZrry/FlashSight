@@ -8,6 +8,7 @@
 #include "fs_clock.hpp"
 #include "fs_error.hpp"
 #include "fs_json.hpp"
+#include "fs_net_http.hpp"
 #include "fs_random.hpp"
 #include "core/deny_list.hpp"
 #include "core/lock_arbiter.hpp"
@@ -18,6 +19,10 @@
 #include "core/shell_detect.hpp"
 #include "core/terminal_registry.hpp"
 #include "core/usage_store.hpp"
+#include "provider/model_table.hpp"
+#include "provider/provider_client.hpp"
+#include "provider/provider_runtime.hpp"
+#include "provider/provider_store.hpp"
 #include "storage/fs_store.hpp"
 
 namespace fs {
@@ -100,14 +105,10 @@ class FsApi {
                            "tool not implemented until P3: " + name);
   }
   FsResult provider_list_providers();
-  FsResult provider_list_models(const std::string& providerId) {
-    (void)providerId;
-    return FsResult::error(ErrCode::kNotSupported, "provider: P2");
-  }
-  FsResult provider_test_connection(const std::string& providerId) {
-    (void)providerId;
-    return FsResult::error(ErrCode::kNotSupported, "provider: P2");
-  }
+  FsResult provider_add_provider(const Json& conn);
+  FsResult provider_remove_provider(const std::string& providerId);
+  FsResult provider_list_models(const std::string& providerId);
+  FsResult provider_test_connection(const std::string& providerId);
   FsResult mcp_stub() {
     return FsResult::error(ErrCode::kNotSupported, "mcp: P3");
   }
@@ -144,6 +145,10 @@ class FsApi {
   std::unique_ptr<TerminalRegistry> terminals_;
   std::unique_ptr<DenyList> deny_list_;
   std::unique_ptr<PlanStore> plans_;
+  // P2: provider 层
+  std::unique_ptr<ProviderStore> providers_;
+  std::unique_ptr<ModelTable> model_table_;
+  std::unique_ptr<HttplibNetClient> net_;
 };
 
 }  // namespace fs

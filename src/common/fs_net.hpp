@@ -31,10 +31,11 @@ struct HttpRequest {
 };
 
 // 网络抽象接口：生产用 httplib+mbedTLS 实现（P2 接 provider 时落地），单测注入 FakeNet
+// request 声明为 const：发请求不改变客户端状态（FakeNet/真实现都满足）
 class NetClient {
  public:
   virtual ~NetClient() = default;
-  virtual FsResult request(const HttpRequest& req, HttpResponse* out) = 0;
+  virtual FsResult request(const HttpRequest& req, HttpResponse* out) const = 0;
 };
 
 }  // namespace fs

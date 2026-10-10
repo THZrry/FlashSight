@@ -21,6 +21,12 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   terminals_.reset(new TerminalRegistry(clock_));
   deny_list_.reset(new DenyList());
   plans_.reset(new PlanStore());
+  // P2: provider 层
+  providers_.reset(new ProviderStore(root_ / "providers.json"));
+  model_table_.reset(new ModelTable());
+  model_table_->set_preset(builtin_models_preset());
+  HttpRequest sample;
+  net_.reset(new HttplibNetClient(sample));
 }
 
 FsApi::~FsApi() {}
@@ -267,11 +273,83 @@ FsResult FsApi::lock_holder(const std::string& pid) {
   return FsResult::success(Json{{"holder", locks_->holder(pid)}});
 }
 
-// ----- provider.*（P1：只列 providers.json，P2 实现真实调用）-----
+// ----- provider.*（P2 真实现）-----
 FsResult FsApi::provider_list_providers() {
-  // providers.json 读取（宽容：不存在返回空数组）
-  Json providers = settings_->get_value("providers", Json::array());
-  return FsResult::success(providers.is_array() ? providers : Json::array());
+  Json arr = Json::array();
+  for (auto& c : providers_->list()) {
+    Json j = c.to_json();
+    j["apiKey"] = mask_secret(c.api_key);  // 脱敏回传，避免密钥泄漏到 UI
+    arr.push_back(j);
+  }
+  return FsResult::success(arr);
+}
+
+FsResult FsApi::provider_add_provider(const Json& conn) {
+  ProviderConn c = ProviderConn::from_json(conn);
+  if (c.base_url.empty()) {
+    return FsResult::error(ErrCode::kInvalidArg, "baseUrl required");
+  }
+  std::string id = providers_->upsert(c);
+  std::string err;
+  if (!providers_->save(&err)) {
+    return FsResult::error(ErrCode::kIo, err);
+  }
+  return FsResult::success(Json{{"id", id}});
+}
+
+FsResult FsApi::provider_remove_provider(const std::string& providerId) {
+  if (!providers_->remove(providerId)) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  std::string err;
+  if (!providers_->save(&err)) {
+    return FsResult::error(ErrCode::kIo, err);
+  }
+  return FsResult::success();
+}
+
+FsResult FsApi::provider_list_models(const std::string& providerId) {
+  ProviderConn conn = providers_->get(providerId);
+  if (conn.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  // 一级：API 一键获取（失败回退预置/保守缺省）
+  auto res = model_table_->fetch_models(providerId, conn, *net_);
+  std::vector<ModelEntry> models;
+  std::string level;
+  std::string message;
+  if (res.ok) {
+    models = res.models;
+    level = "api";
+  } else {
+    level = "preset";
+    message = res.message;
+    // 回退预置：只返回该 provider 未知的常见模型（用户自定义 > API > 预置 > 保守缺省）
+    for (auto& m : builtin_models_preset()) models.push_back(m);
+  }
+  Json arr = Json::array();
+  for (auto& m : models) arr.push_back(m.to_json());
+  return FsResult::success(
+      Json{{"models", arr}, {"level", level}, {"message", message}});
+}
+
+FsResult FsApi::provider_test_connection(const std::string& providerId) {
+  ProviderConn conn = providers_->get(providerId);
+  if (conn.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  ProviderClient client(conn, net_.get());
+  ChatResponse out;
+  FsResult r = client.test_connection(&out);
+  if (!r.ok() || !out.error.empty()) {
+    return FsResult::error(r.ok() ? ErrCode::kRemote : r.code,
+                           out.error.empty() ? r.message : out.error);
+  }
+  return FsResult::success(Json{
+      {"ok", true},
+      {"latencyMs", out.latency_ms},
+      {"status", out.http_status},
+  });
 }
 
 }  // namespace fs

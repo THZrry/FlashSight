@@ -1,0 +1,77 @@
+[0m[32;1m[  8%]:[0m [35;1m<flashsight>[0m cache compiling.release src\main.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\deny_list.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\fs_api.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\lock_arbiter.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\plan_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\project_manager.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\session_manager.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\settings_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\shell_detect.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\terminal_registry.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\core\usage_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\model_table.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_client.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_runtime.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\provider\provider_types.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\fs_patch.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\fs_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\project_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\storage\session_store.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_clock.cpp[0m
+[0m[32;1m[  8%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_i18n.cpp[0m
+[0m[32;1m[ 10%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_json.cpp[0m
+[0m[32;1m[ 12%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_jsonl.cpp[0m
+[0m[32;1m[ 14%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_log.cpp[0m
+[0m[32;1m[ 16%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_net_http.cpp[0m
+[0m[32;1m[ 18%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_path.cpp[0m
+[0m[32;1m[ 20%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_random.cpp[0m
+[0m[32;1m[ 22%]:[0m [35;1m<fs_core>[0m cache compiling.release src\common\fs_serialize.cpp[0m
+[0m[32;1m[ 24%]:[0m [35;1m<fs_core>[0m cache compiling.release 3rdparty\md4c-master\src\md4c.c[0m
+[0m[32;1m[ 26%]:[0m [35;1m<fs_core>[0m cache compiling.release 3rdparty\md4c-master\src\md4c-html.c[0m
+[0m[32;1m[ 28%]:[0m [35;1m<fs_core>[0m cache compiling.release 3rdparty\md4c-master\src\entity.c[0m
+[0m[32;1m[ 30%]:[0m [35;1m<fs_ui>[0m [35;1marchiving.release fs_ui.lib[0m
+[0m[32;1m[ 33%]:[0m [35;1m<fs_tests>[0m cache compiling.release tests\test_framework.cpp[0m
+[0m[32;1m[ 35%]:[0m [35;1m<fs_tests>[0m cache compiling.release tests\test_p1.cpp[0m
+[0m[33;1msrc\core\project_manager.cpp:13:6: warning: 'void fs::{anonymous}::maybe_git_init(const ghc::filesystem::path&, bool)' defined but not used [-Wunused-function]
+   13 | void maybe_git_init(const ghc::filesystem::path& root, bool allowed) {
+      |      ^~~~~~~~~~~~~~
+cc1plus.exe: note: unrecognized command-line option '-Wno-gnu-line-marker' may have been intended to silence earlier diagnostics[0m
+[0m[33;1msrc\provider\provider_runtime.cpp:5:9: warning: 'NOMINMAX' redefined
+    5 | #define NOMINMAX
+      |         ^~~~~~~~
+In file included from C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/x86_64-w64-mingw32/bits/c++config.h:733,
+                 from C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/cstdint:40,
+                 from src\provider\provider_runtime.hpp:4,
+                 from src\provider\provider_runtime.cpp:2:
+C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/x86_64-w64-mingw32/bits/os_defines.h:45:9: note: this is the location of the previous definition
+   45 | #define NOMINMAX 1
+      |         ^~~~~~~~[0m
+[0m[33;1msrc\storage\fs_patch.cpp:32:13: warning: 'std::string fs::{anonymous}::norm_rel(const std::string&)' defined but not used [-Wunused-function]
+   32 | std::string norm_rel(const std::string& p) {
+      |             ^~~~~~~~
+cc1plus.exe: note: unrecognized command-line option '-Wno-gnu-line-marker' may have been intended to silence earlier diagnostics[0m
+[0m[33;1mIn file included from tests\test_framework.cpp:2:
+tests\test_framework.hpp:50:75: warning: backslash-newline at end of file
+   50 | #define ASSERT_TRUE(x)                                                    \[0m
+[0m[33;1mIn file included from tests\test_p1.cpp:9:
+tests\test_framework.hpp:50:75: warning: backslash-newline at end of file
+   50 | #define ASSERT_TRUE(x)                                                    \[0m
+[0m[1;31;1merror: [0msrc\common\fs_net_http.cpp:56:11: error: no match for 'operator=' (operand types are 'std::shared_ptr<httplib::Client>' and 'std::shared_ptr<httplib::SSLClient>')
+   56 |     cli = c;
+      |           ^
+  ? there are 6 candidates
+In file included from C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/memory:82,
+                 from 3rdparty\json/nlohmann/../json.hpp:29,
+                 from 3rdparty\json/nlohmann/json.hpp:2,
+                 from src\common\fs_error.hpp:9,
+                 from src\common\fs_net.hpp:8,
+                 from src\common\fs_net_http.hpp:6,
+                 from src\common\fs_net_http.cpp:2:
+    ? candidate 1: 'template<class _Yp> std::shared_ptr<_Tp>::_Assignable<const std::shared_ptr<_Yp>&> std::shared_ptr<_Tp>::operator=(const std::shared_ptr<_Yp>&) [with _Tp = httplib::Client]'
+      C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/bits/shared_ptr.h:417:9:
+        417 |         operator=(const shared_ptr<_Yp>& __r) noexcept
+            |         ^~~~~~~~
+      ? template argument deduction/substitution failed:
+        ? C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/bits/shared_ptr.h: In substitution of 'template<class _Tp> template<class _Arg> using std::shared_ptr<_Tp>::_Assignable = typename std::enable_if<std::is_assignable<std::__shared_ptr<_Tp>&, _Arg>::value, std::shared_ptr<_Tp>&>::type [with _Arg = const std::shared_ptr<httplib::SSLClient>&; _Tp = httplib::Client]':
+  [33m> in [1msrc\common\fs_net_http.cpp[0m

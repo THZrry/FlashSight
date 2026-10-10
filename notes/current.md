@@ -41,3 +41,19 @@ The process of project: P0 环境搭建 + P1 AppCore
 
 - P0+P1 完成，git log e73f384。roadmap 10-appcore.md 已勾选（剩远程入口、spawn/kill/poll 在 P3）。
 - 下一步：P2 Provider（src/provider，见 roadmap/20-provider.md）。
+<8>(SOLVED): P2 Provider 层完成（FsApi provider.* 真实现，FakeNet 单测不碰真网）。
+  - NetClient 真实现（httplib+mbedTLS）：SSLClient 与 Client 无公共基类，用模板 execute() 分发；
+    httplib::Headers 不支持 operator[]，用 emplace；Error 枚举是 Success/Timeout/SSLConnection 等。
+  - mbedtls 链接：xmake 的 add_links 顺序在 deps 之前导致未解析符号；
+    解决：add_ldflags 传完整 .a 路径（追加在链接命令末尾），系统库 -lbcrypt -lcrypt32 也放末尾。
+  - ProviderStore：providers.json 读写（600 权限），to_json 不回显 apiKey（防泄漏），save 时补回。
+  - ProviderClient：OpenAI Chat/Response/Anthropic 三形态，请求构造+响应解析（usage/tool_calls），
+    远程错误原样透出（provider.md §4 不兜底）。
+  - ProviderRuntime：用量记录（成功失败都记 JSONL）+ 重试（指数退避）+ 连续失败计数（refreshConfig 清）。
+  - ModelTable：四级回退（用户>API>预置>保守缺省），/models 一键获取失败回退提示不清空。
+  - 预置模型表 builtin_models_preset：gpt-4o/o4-mini/claude 系列等。
+
+## 当前状态（更新）
+
+- P0+P1+P2 完成。roadmap 20-provider.md 已勾选（剩钥匙串 TODO）。
+- 下一步：P3 Agent 引擎（src/agent，见 roadmap/30-agent.md）。
