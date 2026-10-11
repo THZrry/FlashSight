@@ -158,3 +158,22 @@ The process of project: P0 环境搭建 + P1 AppCore
 
 - P0-P3 + 缺口补齐 + UI 原型/框架/兼容层/wasm 桩全部完成。
 - 等：WhaleUI 纯 C API（接 WhaleDom 实现）、llvm/emscripten（编 wasm 验证）。
+
+<14>(SOLVED): Widget 库扩充（用户要求控件多些 + 前端框架思路 + 桌面进程内直调）。
+  - ui_widgets.hpp/cpp：Widget 基类 + 21 种控件：展示（Text/CodeBlock/Badge/
+    Progress/Spinner/EmptyState）、输入（TextInput/TextArea/SearchBox）、
+    选择（Button/Select/Checkbox/RadioGroup/Toggle）、容器导航（Tabs/Accordion/
+    ListView/Modal/Tooltip/Splitter）。全部经 IDom 渲染，浏览器与桌面同一套逻辑。
+  - ui_backend.hpp：IUiBackend（call/subscribe）+ NullBackend（单测/演示）。
+    桌面原生预留 NativeBackend 直接调 FsApi（进程内函数调用，不走 HTTP）；
+    以后远端再加 HttpBackend。
+  - UiApp 用 widgets 重写：会话页（顶栏 Select/Toggle/挂起Button/刷新、
+    规划 Accordion、消息 ListView、右侧 Tabs、TextArea+发送Button、ask Modal、
+    终端显隐绑定）、设置页（Select/TextInput/Checkbox/测试连接Button）、
+    用量页 Progress 水位；AppState 扩展 9 个信号；Widget 存活期由 own<> 管理。
+  - web/style.css 补 widget 样式（badge/progress/modal/toggle 等）。
+  - tests/test_ui2.cpp 10 用例；全量 54 用例 390 断言通过。
+## 当前状态（更新）
+
+- UI 层：原型 + 兼容层 + 响应式 + 21 控件 + 后端抽象 + wasm 桩全部完成。
+- 等：emscripten（用户准备中，到时编 wasm 验证）、WhaleUI 纯 C API（接 WhaleDom）。

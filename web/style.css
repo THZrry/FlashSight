@@ -283,3 +283,78 @@ table.stat th, table.stat td {
   text-align: left;
 }
 table.stat th { background: var(--panel); }
+
+/* ---- widget 库新增控件（与 C++ Widget class 名对应）---- */
+.badge {
+  display: inline-block;
+  min-width: 18px;
+  text-align: center;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+}
+.progress {
+  height: 8px;
+  background: #d5d5d5;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+.progress-bar { height: 100%; background: var(--accent); }
+.spinner { color: var(--text-dim); }
+.empty-state {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+.code-block {
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+.search-box { width: 200px; }
+.checkbox, .radio { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+.toggle {
+  min-width: 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  background: #ccc;
+}
+.toggle[data-on="1"] { background: var(--accent); color: #fff; }
+.tabs-wrap { margin-bottom: 8px; }
+.tab-body { padding: 6px 0; }
+.accordion-head {
+  padding: 6px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+}
+.accordion-body { padding: 6px 8px; }
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-box {
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 14px 16px;
+  min-width: 320px;
+}
+.modal-title { font-weight: 600; margin-bottom: 8px; }
+.splitter { display: flex; }
+.list-view .row { padding: 2px 0; }
