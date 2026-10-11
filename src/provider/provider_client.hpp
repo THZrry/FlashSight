@@ -20,6 +20,8 @@ struct ChatRequest {
   double temperature = 0.7;
   int64_t max_tokens = 4096;
   bool stream = true;
+  // 会话亲和 id（kPlan 套餐自动带 x-opencode-session；opencode 实证：亲和/路由 id，非 token）
+  std::string session_id;
 };
 
 // 一次调用的输出（含用量）

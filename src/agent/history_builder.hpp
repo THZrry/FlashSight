@@ -33,8 +33,12 @@ class HistoryBuilder {
 
   explicit HistoryBuilder(Options opts) : opts_(std::move(opts)) {}
 
-  // 从 full.json 构建 history（含压缩决策）
+  // 从 full.json 构建 history（含压缩决策；OpenAI 兼容格式）
   HistoryResult build(const Json& full) const;
+
+  // Anthropic 形态：{system, messages:[{role, content:[{type:text/tool_use/tool_result}]}]}
+  // system 单独字段；tool 结果为 user 角色的 tool_result 块
+  HistoryResult build_anthropic(const Json& full) const;
 
   // 估算 token 数（粗略：英文 4 字符/token，中文 1.5 字符/token）
   static int64_t estimate_tokens(const std::string& s);
@@ -43,8 +47,10 @@ class HistoryBuilder {
  private:
   Options opts_;
 
-  // 把 turn 转成 provider 消息（user/assistant）
+  // 把 turn 转成 provider 消息（user/assistant；OpenAI 格式）
   static Json turn_to_message(const Json& turn);
+  // Anthropic content blocks 装配（text/tool_use/tool_result）
+  static Json turn_to_anthropic(const Json& turn);
   // 生成折叠 summary（首句截断，P3 摘要模型升级留接口）
   static std::string fallback_summary(const std::string& text);
   // 装配前缀

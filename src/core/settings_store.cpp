@@ -91,6 +91,17 @@ SettingValue SettingsStore::get(const std::string& key) const {
   else if (key == kKeyTerminalShell) sv.value = "";   // 空=自动探测
   else if (key == kKeyTerminalEncoding) sv.value = ""; // 空=系统默认
   else if (key == kKeyUiLang) sv.value = "auto";
+  else if (key == kKeyUiTheme) sv.value = "default";
+  else if (key == kKeyUiCodeHighlight) sv.value = true;
+  else if (key == kKeyBrowserEnabled) sv.value = false;
+  else if (key == kKeyComputerEnabled) sv.value = false;
+  else if (key == kKeyComputerScreenshot) sv.value = true;
+  else if (key == kKeyUsageRetainDays) sv.value = 90;
+  else if (key == kKeyHistoryRecentTurns) sv.value = 20;
+  else if (key == kKeyHistoryTokenBudget) sv.value = 8000;
+  else if (key == kKeyOverfitEnabled) sv.value = false;
+  else if (key == kKeySubagentMaxParallel) sv.value = 4;
+  else if (key == kKeySubagentMaxDepth) sv.value = 3;
   else sv.value = nlohmann::json();
   return sv;
 }
@@ -99,6 +110,45 @@ nlohmann::json SettingsStore::get_value(const std::string& key,
                                         const nlohmann::json& def) const {
   SettingValue sv = get(key);
   return sv.value.is_null() ? def : sv.value;
+}
+
+std::map<std::string, std::string> SettingsStore::merged_env() const {
+  std::map<std::string, std::string> out;
+  auto fill = [&out](const nlohmann::json& doc) {
+    auto it = doc.find(kKeyEnvVars);
+    if (it == doc.end() || !it->is_object()) return;
+    for (auto vit = it->begin(); vit != it->end(); ++vit) {
+      // 支持两种形态：{value} 或纯字符串
+      if (vit.value().is_object() && vit.value().contains("value") &&
+          vit.value()["value"].is_string()) {
+        out[vit.key()] = vit.value()["value"].get<std::string>();
+      } else if (vit.value().is_string()) {
+        out[vit.key()] = vit.value().get<std::string>();
+      }
+    }
+  };
+  if (!ignore_global_ && allow_global_read_) fill(global_->doc);
+  fill(project_->doc);  // 项目覆盖全局
+  return out;
+}
+
+std::map<std::string, std::string> SettingsStore::merged_cli_tools() const {
+  std::map<std::string, std::string> out;
+  auto fill = [&out](const nlohmann::json& doc) {
+    auto it = doc.find(kKeyCliTools);
+    if (it == doc.end() || !it->is_object()) return;
+    for (auto vit = it->begin(); vit != it->end(); ++vit) {
+      if (vit.value().is_object() && vit.value().contains("path") &&
+          vit.value()["path"].is_string()) {
+        out[vit.key()] = vit.value()["path"].get<std::string>();
+      } else if (vit.value().is_string()) {
+        out[vit.key()] = vit.value().get<std::string>();
+      }
+    }
+  };
+  if (!ignore_global_ && allow_global_read_) fill(global_->doc);
+  fill(project_->doc);
+  return out;
 }
 
 FsResult SettingsStore::set_global(const std::string& key,

@@ -120,16 +120,32 @@ HistoryResult HistoryBuilder::build(const Json& full) const {
     }
   }
   // 若超预算压缩：折叠最旧的消息（保留 system + 折叠条 + 最新 1 条）
+  // 折叠条附加被压缩 turns 的 keyPoints（单会话持久记忆）
   if (budget_used > budget && msgs.size() > 1) {
     out.compressed = true;
     out.compressed_from = 0;
     out.compressed_to = static_cast<int64_t>(msgs.size() - 2);
+    // 收集被裁掉 turns 的要点（按顺序，最多 20 条；裁掉 msgs[0..size-2]）
+    std::string points;
+    int collected = 0;
+    for (size_t i = start; i + 1 < start + msgs.size() && i < turns.size(); ++i) {
+      const Json& t = turns[i];
+      if (!t.is_object() || !t.contains("keyPoints") || !t["keyPoints"].is_array()) continue;
+      for (auto& kp : t["keyPoints"]) {
+        if (!kp.is_string() || collected >= 20) continue;
+        if (!points.empty()) points += "\n";
+        points += "- " + kp.get<std::string>();
+        ++collected;
+      }
+    }
+    std::string fold = "[早期对话已压缩] " +
+                       fallback_summary(jsonutil::get<std::string>(
+                           msgs[msgs.size() - 2], "content", ""));
+    if (!points.empty()) fold += "\n[历史要点]\n" + points;
     // 用折叠 summary 替代被裁掉的消息
     Json summarized = Json::object();
     summarized["role"] = "user";
-    summarized["content"] = "[早期对话已压缩] " +
-                            fallback_summary(jsonutil::get<std::string>(
-                                msgs[msgs.size() - 2], "content", ""));
+    summarized["content"] = fold;
     Json kept = Json::array();
     kept.push_back(messages[0]);  // system
     kept.push_back(summarized);
@@ -141,6 +157,135 @@ HistoryResult HistoryBuilder::build(const Json& full) const {
   }
   for (auto& m : msgs) messages.push_back(m);
   out.messages = messages;
+  return out;
+}
+
+// Anthropic content blocks：text / tool_use / tool_result
+Json HistoryBuilder::turn_to_anthropic(const Json& turn) {
+  Json msg = Json::object();
+  std::string role = jsonutil::get<std::string>(turn, "role", "user");
+  Json blocks = Json::array();
+  if (role == "user") {
+    msg["role"] = "user";
+    std::string text = jsonutil::get<std::string>(turn, "promptRaw", "");
+    if (text.empty()) text = jsonutil::get<std::string>(turn, "streamSummary", "");
+    Json b = Json::object();
+    b["type"] = "text";
+    b["text"] = text.empty() ? "..." : text;
+    blocks.push_back(b);
+    // tool 结果回填为 tool_result 块（P3 Loop 回填格式：{toolUseId, result}）
+    Json results = turn.contains("toolResults") && turn["toolResults"].is_array()
+                       ? turn["toolResults"] : Json::array();
+    for (auto& r : results) {
+      if (!r.is_object()) continue;
+      Json b2 = Json::object();
+      b2["type"] = "tool_result";
+      b2["tool_use_id"] = jsonutil::get<std::string>(r, "toolUseId", "");
+      Json content = r.contains("result") ? r["result"] : Json::object();
+      b2["content"] = content.is_string() ? content.get<std::string>() : content.dump();
+      blocks.push_back(b2);
+    }
+  } else {
+    msg["role"] = "assistant";
+    std::string text = jsonutil::get<std::string>(turn, "streamSummary", "");
+    if (!text.empty()) {
+      Json b = Json::object();
+      b["type"] = "text";
+      b["text"] = text;
+      blocks.push_back(b);
+    }
+    Json tc = turn.contains("toolCalls") && turn["toolCalls"].is_array()
+                  ? turn["toolCalls"] : Json::array();
+    for (auto& c : tc) {
+      if (!c.is_object()) continue;
+      // 兼容扁平 {id,name,args} 与 OpenAI 原生 {id,function:{name,arguments}}
+      std::string id = jsonutil::get<std::string>(c, "id", "");
+      std::string name = jsonutil::get<std::string>(c, "name", "");
+      Json args = c.contains("args") ? c["args"] : Json::object();
+      if (name.empty() && c.contains("function") && c["function"].is_object()) {
+        const Json& fn = c["function"];
+        name = jsonutil::get<std::string>(fn, "name", "");
+        if (fn.contains("arguments")) {
+          const Json& a = fn["arguments"];
+          if (a.is_string()) {
+            try { args = Json::parse(a.get<std::string>()); } catch (...) {}
+          } else if (a.is_object()) {
+            args = a;
+          }
+        }
+      }
+      if (name.empty()) continue;
+      Json b = Json::object();
+      b["type"] = "tool_use";
+      b["id"] = id;
+      b["name"] = name;
+      b["input"] = args.is_object() ? args : Json::object();
+      blocks.push_back(b);
+    }
+  }
+  msg["content"] = blocks;
+  return msg;
+}
+
+HistoryResult HistoryBuilder::build_anthropic(const Json& full) const {
+  HistoryResult out;
+  // system 单独字段（Anthropic 要求顶层 system，不在 messages 里）
+  Json result = Json::object();
+  result["system"] = build_system()["content"];
+  Json messages = Json::array();
+  if (!full.contains("turns") || !full["turns"].is_array()) {
+    result["messages"] = messages;
+    out.messages = result;
+    return out;
+  }
+  const Json& turns = full["turns"];
+  size_t n = static_cast<size_t>(opts_.recent_turns);
+  size_t start = turns.size() > n ? turns.size() - n : 0;
+  int64_t budget_used = 0;
+  int64_t budget = opts_.token_budget;
+  for (size_t i = start; i < turns.size(); ++i) {
+    const Json& t = turns[i];
+    if (!t.is_object()) continue;
+    if (jsonutil::get<bool>(t, "forgotten", false)) continue;
+    Json m = turn_to_anthropic(t);
+    messages.push_back(m);
+    budget_used += estimate_tokens(m);
+    if (budget_used > budget) break;
+  }
+  if (budget_used > budget && messages.size() > 1) {
+    out.compressed = true;
+    out.compressed_from = 0;
+    out.compressed_to = static_cast<int64_t>(messages.size() - 2);
+    // 收集被裁掉 turns 的要点（单会话持久记忆；裁掉 messages[0..size-2]）
+    std::string points;
+    int collected = 0;
+    for (size_t i = start; i + 1 < start + messages.size() && i < turns.size(); ++i) {
+      const Json& t = turns[i];
+      if (!t.is_object() || !t.contains("keyPoints") || !t["keyPoints"].is_array()) continue;
+      for (auto& kp : t["keyPoints"]) {
+        if (!kp.is_string() || collected >= 20) continue;
+        if (!points.empty()) points += "\n";
+        points += "- " + kp.get<std::string>();
+        ++collected;
+      }
+    }
+    std::string fold = "[早期对话已压缩]";
+    if (!points.empty()) fold += "\n[历史要点]\n" + points;
+    Json kept = Json::array();
+    Json summarized = Json::object();
+    summarized["role"] = "user";
+    Json b = Json::object();
+    b["type"] = "text";
+    b["text"] = fold;
+    summarized["content"] = Json::array({b});
+    kept.push_back(summarized);
+    kept.push_back(messages[messages.size() - 1]);
+    result["messages"] = kept;
+    out.messages = result;
+    return out;
+  }
+  result["messages"] = messages;
+  out.messages = result;
   return out;
 }
 

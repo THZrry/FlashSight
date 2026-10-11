@@ -32,6 +32,37 @@ constexpr char kKeyPermFileWhitelist[] = "permissions.files.whitelist";   // str
 constexpr char kKeyEnvVars[] = "environment.vars";               // {name: {value, source}}
 constexpr char kKeyCliTools[] = "environment.cliTools";          // {key: {path, source}}
 constexpr char kKeyUiLang[] = "ui.language";                     // "auto|zh|en"
+// --- P3 补齐（goal.md 设置面；UI 在 P4 落地，键先行）---
+// 模型偏好（子代理/摘要模型的通用偏好）
+constexpr char kKeyModelPrefSubagent[] = "model.pref.subagent";   // {model, thinking}
+constexpr char kKeyModelPrefSummary[] = "model.pref.summary";     // {model} 空=继承会话模型
+// 子代理开关/模型（settings-子代理；预置名见 builtin_preset_agents）
+constexpr char kKeySubagents[] = "subagents";                     // {name: {enabled, model}}
+// 长期记忆（provider.md 5：用户偏好管理）
+constexpr char kKeyLongMemory[] = "model.longMemory";             // {key: value}
+// 外观（设置-通用-外观）
+constexpr char kKeyUiTheme[] = "ui.theme";                        // 主题名
+constexpr char kKeyUiFont[] = "ui.font";                          // {family, size, monoFamily}
+constexpr char kKeyUiCodeHighlight[] = "ui.codeHighlight";        // bool
+// 浏览器控制（设置-通用-浏览器控制）
+constexpr char kKeyBrowserEnabled[] = "browser.enabled";
+constexpr char kKeyBrowserDriver[] = "browser.driver";            // driver 路径/名
+constexpr char kKeyBrowserPerms[] = "browser.permissions";       // {net, certs}
+// 电脑控制（设置-通用-电脑控制）
+constexpr char kKeyComputerEnabled[] = "computer.enabled";
+constexpr char kKeyComputerScreenshot[] = "computer.screenshot";  // 截图开关
+// 快捷键（设置-其他-快捷键；v1 只做可配表）
+constexpr char kKeyShortcuts[] = "shortcuts";                     // {action: keys}
+// 用量保留天数（usage.md 3；默认 90）
+constexpr char kKeyUsageRetainDays[] = "usage.retainDays";
+// HistoryBuilder 阈值（session-history.md 3；N 与 token 预算进设置）
+constexpr char kKeyHistoryRecentTurns[] = "history.recentTurns";  // 默认 20
+constexpr char kKeyHistoryTokenBudget[] = "history.tokenBudget";  // 默认 8000
+// 防过拟合开关（agent-loop.md 5；默认关）
+constexpr char kKeyOverfitEnabled[] = "session.overfitEnabled";
+// 子代理上限（agent-loop.md 6；默认并行 4/深度 3）
+constexpr char kKeySubagentMaxParallel[] = "subagents.maxParallel";
+constexpr char kKeySubagentMaxDepth[] = "subagents.maxDepth";
 
 // 返回时带来源标注
 struct SettingValue {
@@ -51,6 +82,12 @@ class SettingsStore {
   SettingValue get(const std::string& key) const;
   nlohmann::json get_value(const std::string& key,
                            const nlohmann::json& def) const;
+
+  // 环境变量合并（terminal.md 5：全局 + 项目覆盖，ignoreGlobal 时只取项目）
+  // 返回 {name: value}；附带来源标注版本见 merged_env_sourced
+  std::map<std::string, std::string> merged_env() const;
+  // CLI 工具路径合并（同规则；返回 {key: path}）
+  std::map<std::string, std::string> merged_cli_tools() const;
 
   // 写入全局或项目级
   FsResult set_global(const std::string& key, const nlohmann::json& value);

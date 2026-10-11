@@ -55,6 +55,14 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
   http.url = conn_.base_url + "/chat/completions";
   http.headers["Content-Type"] = "application/json";
   http.headers["Authorization"] = "Bearer " + conn_.api_key;
+  // kPlan 套餐（opencode 实证）：自动带亲和/路由头；认证走 Bearer，session 头非 token
+  if (conn_.kind == ApiKind::kPlan) {
+    if (!req.session_id.empty()) {
+      http.headers["x-opencode-session"] = req.session_id;
+      http.headers["x-opencode-session-id"] = req.session_id;
+    }
+    http.headers["x-opencode-client"] = "flashsight";
+  }
   for (auto& kv : conn_.custom_headers) http.headers[kv.first] = kv.second;
   http.body = body.dump();
   http.timeout_ms = 120000;
@@ -63,6 +71,14 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
   FsResult nr = net_->request(http, &resp);
   if (!nr.ok()) return nr;
   out->http_status = resp.status;
+  if (resp.status == 402) {
+    out->error = "quota exhausted (402 balance-zero)";
+    return FsResult::error(ErrCode::kRemote, out->error);
+  }
+  if (resp.status == 429) {
+    out->error = "rate limited (429)";
+    return FsResult::error(ErrCode::kRemote, out->error);
+  }
   if (resp.status != 200) {
     out->error = "http " + std::to_string(resp.status);
     return FsResult::error(ErrCode::kRemote, out->error);
@@ -85,9 +101,26 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
     out->in_tokens = jsonutil::get_int(u, "prompt_tokens", 0);
     out->out_tokens = jsonutil::get_int(u, "completion_tokens", 0);
     out->cache_tokens = jsonutil::get_int(u, "prompt_tokens_cached", 0);
-    // 成本三态：v1 不接计价表 → unknown（额度/钱在 provider 连接层）
-    out->cost_kind = conn_.has_quota ? conn_.quota_kind : "unknown";
-    out->cost = conn_.has_quota ? conn_.quota_value : 0.0;
+    // cost（opencode 实证：Zen 注入 .cost；"0"=配额内，美元字符串=余额扣费）
+    // 成本三态：cost=="0" -> quota；可解析金额 -> money；否则连接层 quota/unknown
+    std::string cost_str = jsonutil::get<std::string>(j, "cost", "");
+    if (!cost_str.empty()) {
+      if (cost_str == "0" || cost_str == "0.0" || cost_str == "0.00000000") {
+        out->cost_kind = "quota";
+        out->cost = 0.0;
+      } else {
+        try {
+          out->cost = std::stod(cost_str);
+          out->cost_kind = "money";
+        } catch (...) {
+          out->cost_kind = conn_.has_quota ? conn_.quota_kind : "unknown";
+          out->cost = conn_.has_quota ? conn_.quota_value : 0.0;
+        }
+      }
+    } else {
+      out->cost_kind = conn_.has_quota ? conn_.quota_kind : "unknown";
+      out->cost = conn_.has_quota ? conn_.quota_value : 0.0;
+    }
     // 流式：body 已是完整 JSON（NetClient v1 不支持分块流；P2 验收走完整响应 + on_delta 全量推）
     if (req.stream && on_delta && !out->text.empty()) on_delta(out->text);
     return FsResult::success();

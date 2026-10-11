@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "agent_loop.hpp"
 #include "fs_clock.hpp"
@@ -89,6 +90,8 @@ class AgentHost {
   std::map<std::string, std::unique_ptr<AgentLoop>> loops_;
   std::map<std::string, SteeringQueue> steering_;
   std::map<std::string, OverfitDetector> overfit_;
+  // 待落库的要点（session.keypoint 事件收集；persist_turn 时写入 turn.keyPoints）
+  std::map<std::string, std::vector<Json>> pending_keypoints_;
 
   // 或建 Loop
   AgentLoop& loop_for(const std::string& sid, bool auto_mode);

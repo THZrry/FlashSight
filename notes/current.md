@@ -109,3 +109,31 @@ The process of project: P0 环境搭建 + P1 AppCore
 
 - P0+P1+P2+P3 完成。roadmap 30-agent.md 已勾选（剩 network.search 调研）。
 - 下一步：P4 UI（等 WhaleUI；fs_ui 空壳+事件类型先行）或收尾提交。
+
+<11>(SOLVED): P0-P3 回顾审计出的缺口（用户 2026-10-11 提出复查，已全部落地）：
+  1. 设置面后端键缺失：模型偏好（model.pref.*）、子代理开关/模型持久化
+     （subagents.<name>.enabled/model）、长期记忆（存储+读写 API）、外观主题/字体键、
+     浏览器/电脑控制开关（browser.*/computer.*）、快捷键表（shortcuts.*）。
+  2. 环境变量合并注入逻辑缺（terminal.md 5：全局+项目合并，spawn 时注入）——只有键，无函数。
+  3. Anthropic 会话调不通工具：HistoryBuilder 只产 OpenAI 格式 tool_calls，
+     Anthropic 的 tool_use/content-blocks 装配缺失。
+  4. x-opencode-session 套餐协议未落地（等调研子代理结果）。
+  5. 单会话持久记忆缺：需新增 session.summarize 工具（每轮记要点到 turn 要点字段），
+     HistoryBuilder 压缩时把要点附加到上下文（平衡调用与记忆，支持几百轮）。
+
+<12>(SOLVED): 缺口补齐落地细节（39 用例 340 断言全过）：
+  1. 设置键：model.pref.*/subagents.*/model.longMemory/ui.theme-font/ui.* 全部键+默认值；
+     merged_env()/merged_cli_tools()（全局+项目覆盖，ignoreGlobal 只取项目）。
+  2. Anthropic 装配：HistoryBuilder.build_anthropic（system 单独字段 + text/tool_use/tool_result
+     blocks；兼容扁平与 OpenAI 原生 toolCalls；tool 结果经 turn.toolResults 回填）。
+  3. 持久记忆：session.summarize 工具（points 数组 -> session.keypoint 事件）；
+     AgentHost.emit 闭包自动注入 sid；pending_keypoints_ 在 persist_turn 写入 turn.keyPoints；
+     build/build_anthropic 压缩时收集被裁 turns 要点（最多 20 条）附加到折叠条。
+  4. x-opencode-session（子代理实证 opencode 仓库）：亲和/路由 id 非 token；
+     kPlan 自动带 x-opencode-session(+id)/x-opencode-client；解析 .cost（"0"->quota，
+     金额串->money）；402（余额零）/429（限流）映射为带语义的 kRemote 错误。
+  5. ChatRequest 加 session_id 字段（亲和 id 透传）。
+## 当前状态（更新）
+
+- P0-P3 + 缺口补齐全部完成。UI 以外后端全通。
+- 下一步：P4 UI（等 WhaleUI；fs_ui 空壳+事件类型先行）或收尾。

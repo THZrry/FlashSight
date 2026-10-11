@@ -5,6 +5,7 @@
 #include "file_tools.hpp"
 #include "mcp_tools.hpp"
 #include "net_tools.hpp"
+#include "summarize_tool.hpp"
 #include "term_tools.hpp"
 #include "vision_tools.hpp"
 
@@ -24,6 +25,17 @@ AgentHost::AgentHost(AgentHostDeps deps) : deps_(std::move(deps)), wakes_(deps_.
 }
 
 void AgentHost::emit(const std::string& event, const Json& payload) {
+  // session.keypoint：收集要点，persist_turn 时写入当前 turn（单会话持久记忆）
+  if (event == "session.keypoint" && payload.contains("points") &&
+      payload["points"].is_array()) {
+    // sid 需由调用方在 payload 带上；ToolContext.emit 闭包可注入
+    std::string sid = jsonutil::get<std::string>(payload, "sid", "");
+    if (!sid.empty()) {
+      for (auto& kp : payload["points"]) {
+        if (kp.is_string()) pending_keypoints_[sid].push_back(kp);
+      }
+    }
+  }
   if (deps_.event) deps_.event(event, payload);
 }
 
@@ -34,6 +46,7 @@ void AgentHost::register_builtin_tools(McpRegistry* mcp) {
   register_vision_tools(&tools_);
   register_mcp_tools(&tools_, mcp);
   register_ask_tool(&tools_);
+  register_summarize_tool(&tools_);
 }
 
 AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode) {
@@ -60,7 +73,12 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
   ToolContext ctx;
   ctx.sid = sid;
   ctx.auto_mode = auto_mode;
-  ctx.emit = [this](const std::string& e, const Json& p) { emit(e, p); };
+  // emit 闭包自动注入 sid（session.keypoint 等需要归属会话）
+  ctx.emit = [this, sid](const std::string& e, const Json& p) {
+    Json pp = p.is_object() ? p : Json::object();
+    if (!pp.contains("sid")) pp["sid"] = sid;
+    emit(e, pp);
+  };
   ctx.invoke_tool = [this, sid, auto_mode](const std::string& name,
                                           const Json& args) -> FsResult {
     ToolContext inner = make_ctx(sid, auto_mode);
@@ -199,7 +217,17 @@ FsResult AgentHost::persist_turn(const std::string& sid, const Json& turn) {
   if (!deps_.append_turn) {
     return FsResult::error(ErrCode::kInternal, "persist not wired");
   }
-  return deps_.append_turn(sid, turn);
+  // 附上待落库的要点（session.summarize 经 session.keypoint 事件收集）
+  Json t = turn;
+  auto it = pending_keypoints_.find(sid);
+  if (it != pending_keypoints_.end() && !it->second.empty()) {
+    Json kps = Json::array();
+    if (t.contains("keyPoints") && t["keyPoints"].is_array()) kps = t["keyPoints"];
+    for (auto& kp : it->second) kps.push_back(kp);
+    t["keyPoints"] = kps;
+    it->second.clear();
+  }
+  return deps_.append_turn(sid, t);
 }
 
 }  // namespace fs

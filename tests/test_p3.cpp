@@ -12,6 +12,7 @@
 #include "agent/steering_queue.hpp"
 #include "agent/wake_scheduler.hpp"
 #include "common/fs_clock.hpp"
+#include "common/fs_path.hpp"
 
 using namespace fs;
 
@@ -638,4 +639,262 @@ FS_TEST(history_token_estimate) {
   Json j = Json::object();
   j["a"] = "hello";
   EXPECT_TRUE(HistoryBuilder::estimate_tokens(j) > 0);
+}
+
+#include "agent/history_builder.hpp"
+#include "core/settings_store.hpp"
+#include "provider/provider_client.hpp"
+#include "tools/summarize_tool.hpp"
+#include "tools/tool_registry.hpp"
+
+// ---------- Anthropic 装配：tool_use/tool_result blocks ----------
+FS_TEST(anthropic_history_assemble) {
+  HistoryBuilder::Options opts;
+  opts.recent_turns = 20;
+  opts.token_budget = 100000;
+  opts.system_prefix = "sys";
+  HistoryBuilder hb(opts);
+  Json full = Json::object();
+  Json turns = Json::array();
+  Json u = Json::object();
+  u["turnId"] = "t1";
+  u["role"] = "user";
+  u["promptRaw"] = "read a.txt";
+  turns.push_back(u);
+  Json a = Json::object();
+  a["turnId"] = "t2";
+  a["role"] = "assistant";
+  a["streamSummary"] = "reading";
+  Json call = Json::object();
+  call["id"] = "toolu_1";
+  call["name"] = "file.read";
+  call["args"] = Json{{"path", "a.txt"}};
+  a["toolCalls"] = Json::array({call});
+  turns.push_back(a);
+  Json tr = Json::object();
+  tr["turnId"] = "t3";
+  tr["role"] = "user";
+  tr["promptRaw"] = "";
+  Json res = Json::object();
+  res["toolUseId"] = "toolu_1";
+  res["result"] = "content here";
+  tr["toolResults"] = Json::array({res});
+  turns.push_back(tr);
+  full["turns"] = turns;
+
+  HistoryResult hr = hb.build_anthropic(full);
+  EXPECT_FALSE(hr.compressed);
+  // system 单独字段
+  EXPECT_TRUE(hr.messages.contains("system"));
+  Json msgs = hr.messages["messages"];
+  EXPECT_EQ((int)msgs.size(), 3);
+  // assistant 消息含 tool_use 块
+  Json amsg = msgs[1];
+  EXPECT_EQ(amsg["role"].get<std::string>(), std::string("assistant"));
+  bool has_tool_use = false;
+  for (auto& b : amsg["content"]) {
+    if (b.is_object() && b["type"] == "tool_use" && b["name"] == "file.read") {
+      has_tool_use = true;
+      EXPECT_EQ(b["id"].get<std::string>(), std::string("toolu_1"));
+      EXPECT_EQ(b["input"]["path"].get<std::string>(), std::string("a.txt"));
+    }
+  }
+  EXPECT_TRUE(has_tool_use);
+  // tool 结果回填为 tool_result 块
+  Json tmsg = msgs[2];
+  bool has_result = false;
+  for (auto& b : tmsg["content"]) {
+    if (b.is_object() && b["type"] == "tool_result" &&
+        b["tool_use_id"] == "toolu_1") {
+      has_result = true;
+    }
+  }
+  EXPECT_TRUE(has_result);
+}
+
+// ---------- summarize 工具 + 压缩附加要点 ----------
+FS_TEST(summarize_and_compress_points) {
+  // 工具：空 points 拒绝；正常记录发事件
+  ToolRegistry reg;
+  register_summarize_tool(&reg);
+  ToolContext ctx;
+  bool emitted = false;
+  ctx.emit = [&emitted](const std::string& e, const Json&) {
+    if (e == "session.keypoint") emitted = true;
+  };
+  Json bad = Json::object();
+  bad["points"] = Json::array();
+  EXPECT_FALSE(reg.invoke(ctx, "session.summarize", bad).ok());
+  Json good = Json::object();
+  good["points"] = Json::array({"fixed login bug", "added retry"});
+  FsResult r = reg.invoke(ctx, "session.summarize", good);
+  ASSERT_TRUE(r.ok());
+  EXPECT_TRUE(emitted);
+  EXPECT_EQ((int)r.data["recorded"].get<int64_t>(), 2);
+
+  // 压缩附加要点（budget 设小，容纳 2 条后超预算触发压缩）
+  HistoryBuilder::Options opts;
+  opts.recent_turns = 20;
+  opts.token_budget = 20;
+  opts.system_prefix = "sys";
+  HistoryBuilder hb(opts);
+  Json full = Json::object();
+  Json turns = Json::array();
+  for (int i = 0; i < 4; ++i) {
+    Json t = Json::object();
+    t["turnId"] = "t" + std::to_string(i);
+    t["role"] = (i % 2 == 0) ? "user" : "assistant";
+    t["promptRaw"] = "question number " + std::to_string(i) + " with some text";
+    t["streamSummary"] = "answer number " + std::to_string(i) + " with some text";
+    if (i == 0) t["keyPoints"] = Json::array({"point-alpha", "point-beta"});
+    turns.push_back(t);
+  }
+  full["turns"] = turns;
+  HistoryResult hr = hb.build(full);
+  EXPECT_TRUE(hr.compressed);
+  // 折叠条含要点
+  std::string fold = hr.messages[1]["content"].get<std::string>();
+  EXPECT_TRUE(fold.find("point-alpha") != std::string::npos);
+  EXPECT_TRUE(fold.find("point-beta") != std::string::npos);
+}
+
+// ---------- x-opencode-session：kPlan 自动带头 + cost 解析 + 402/429 ----------
+FS_TEST(plan_session_headers_and_cost) {
+  // 用 FakeNet 捕获请求头
+  FakeNet3 net;
+  HttpResponse ok;
+  ok.status = 200;
+  ok.body = R"({"choices":[{"message":{"role":"assistant","content":"hi"}}],
+    "usage":{"prompt_tokens":3,"completion_tokens":1},"cost":"0"})";
+  net.responses.push_back(ok);
+  ProviderConn conn;
+  conn.id = "plan1";
+  conn.kind = ApiKind::kPlan;
+  conn.base_url = "https://opencode.ai/zen/v1";
+  conn.api_key = "zen-key";
+  ProviderClient client(conn, &net);
+  ChatRequest req;
+  req.model = "m";
+  req.messages = Json::array({Json{{"role", "user"}, {"content", "ping"}}});
+  req.session_id = "s_abc123";
+  ChatResponse out;
+  FsResult r = client.chat(req, &out, nullptr);
+  ASSERT_TRUE(r.ok());
+  ASSERT_TRUE(!net.requests.empty());
+  // 会话头
+  EXPECT_EQ(net.requests[0].headers["x-opencode-session"], std::string("s_abc123"));
+  EXPECT_EQ(net.requests[0].headers["x-opencode-session-id"], std::string("s_abc123"));
+  EXPECT_EQ(net.requests[0].headers["x-opencode-client"], std::string("flashsight"));
+  // cost "0" -> quota
+  EXPECT_EQ(out.cost_kind, std::string("quota"));
+
+  // cost 美元字符串 -> money
+  FakeNet3 net2;
+  HttpResponse ok2;
+  ok2.status = 200;
+  ok2.body = R"({"choices":[{"message":{"role":"assistant","content":"hi"}}],
+    "usage":{"prompt_tokens":3,"completion_tokens":1},"cost":"0.00123456"})";
+  net2.responses.push_back(ok2);
+  ProviderClient client2(conn, &net2);
+  ChatResponse out2;
+  EXPECT_TRUE(client2.chat(req, &out2, nullptr).ok());
+  EXPECT_EQ(out2.cost_kind, std::string("money"));
+
+  // 402 -> quota 耗尽错误
+  FakeNet3 net3;
+  HttpResponse e402;
+  e402.status = 402;
+  e402.body = "balance zero";
+  net3.responses.push_back(e402);
+  ProviderClient client3(conn, &net3);
+  ChatResponse out3;
+  FsResult r3 = client3.chat(req, &out3, nullptr);
+  EXPECT_TRUE(r3.code == ErrCode::kRemote);
+  EXPECT_TRUE(out3.error.find("402") != std::string::npos);
+
+  // 429 -> 限流错误
+  FakeNet3 net4;
+  HttpResponse e429;
+  e429.status = 429;
+  e429.body = "limits";
+  net4.responses.push_back(e429);
+  ProviderClient client4(conn, &net4);
+  ChatResponse out4;
+  FsResult r4 = client4.chat(req, &out4, nullptr);
+  EXPECT_TRUE(r4.code == ErrCode::kRemote);
+}
+
+// ---------- 设置新键默认值 ----------
+FS_TEST(settings_new_keys_defaults) {
+  fstest::TempDir td("newkeys");
+  ghc::filesystem::path root = ghc::filesystem::path(td.path());
+  ghc::filesystem::path proj = root / "proj";
+  ghc::filesystem::create_directories(proj);
+  SettingsStore s(root, pathutil::project_dir(proj), true);
+  EXPECT_EQ(s.get(kKeyUiTheme).value.get<std::string>(), std::string("default"));
+  EXPECT_EQ(s.get(kKeyUsageRetainDays).value.get<int64_t>(), 90);
+  EXPECT_EQ(s.get(kKeyHistoryRecentTurns).value.get<int64_t>(), 20);
+  EXPECT_EQ(s.get(kKeyHistoryTokenBudget).value.get<int64_t>(), 8000);
+  EXPECT_EQ(s.get(kKeyOverfitEnabled).value.get<bool>(), false);
+  EXPECT_EQ(s.get(kKeySubagentMaxParallel).value.get<int64_t>(), 4);
+  EXPECT_EQ(s.get(kKeySubagentMaxDepth).value.get<int64_t>(), 3);
+  EXPECT_EQ(s.get(kKeyBrowserEnabled).value.get<bool>(), false);
+  EXPECT_EQ(s.get(kKeyComputerEnabled).value.get<bool>(), false);
+  // 读写
+  EXPECT_TRUE(s.set_global(kKeyUiTheme, "dark-pro").ok());
+  EXPECT_EQ(s.get(kKeyUiTheme).value.get<std::string>(), std::string("dark-pro"));
+  // 长期记忆
+  Json mem = Json::object();
+  mem["tone"] = "concise";
+  EXPECT_TRUE(s.set_global(kKeyLongMemory, mem).ok());
+  EXPECT_EQ(s.get(kKeyLongMemory).value["tone"].get<std::string>(),
+            std::string("concise"));
+}
+
+FS_TEST(settings_env_merge) {
+  fstest::TempDir td("envmerge");
+  ghc::filesystem::path root = ghc::filesystem::path(td.path());
+  ghc::filesystem::path proj = root / "proj";
+  ghc::filesystem::create_directories(proj);
+  SettingsStore s(root, pathutil::project_dir(proj), true);
+  // 全局
+  Json gvars = Json::object();
+  Json ga = Json::object();
+  ga["value"] = "global-a";
+  ga["source"] = "global";
+  gvars["A"] = ga;
+  Json gb = Json::object();
+  gb["value"] = "global-b";
+  gvars["B"] = gb;
+  EXPECT_TRUE(s.set_global(kKeyEnvVars, gvars).ok());
+  // 项目覆盖 B + 新增 C
+  Json pvars = Json::object();
+  Json pb = Json::object();
+  pb["value"] = "project-b";
+  pvars["B"] = pb;
+  pvars["C"] = "plain-c";
+  EXPECT_TRUE(s.set_project(kKeyEnvVars, pvars).ok());
+  auto merged = s.merged_env();
+  EXPECT_EQ(merged["A"], std::string("global-a"));
+  EXPECT_EQ(merged["B"], std::string("project-b"));
+  EXPECT_EQ(merged["C"], std::string("plain-c"));
+  // ignoreGlobal：只取项目
+  EXPECT_TRUE(s.set_ignore_global(true).ok());
+  auto merged2 = s.merged_env();
+  EXPECT_TRUE(merged2.find("A") == merged2.end());
+  EXPECT_EQ(merged2["B"], std::string("project-b"));
+  EXPECT_TRUE(s.set_ignore_global(false).ok());
+
+  // CLI 工具路径合并
+  Json gtools = Json::object();
+  Json gt = Json::object();
+  gt["path"] = "/usr/bin/code";
+  gtools["vscode"] = gt;
+  EXPECT_TRUE(s.set_global(kKeyCliTools, gtools).ok());
+  Json ptools = Json::object();
+  ptools["nvim"] = "/usr/bin/nvim";
+  EXPECT_TRUE(s.set_project(kKeyCliTools, ptools).ok());
+  auto ctools = s.merged_cli_tools();
+  EXPECT_EQ(ctools["vscode"], std::string("/usr/bin/code"));
+  EXPECT_EQ(ctools["nvim"], std::string("/usr/bin/nvim"));
 }
