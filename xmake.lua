@@ -111,3 +111,28 @@ target("fs_tests")
         add_syslinks("ws2_32", "user32", "shell32", "crypt32", "bcrypt")
     end
     mbedtls_link()
+
+-- wasm 分支：浏览器里跑 UI 逻辑（C++ -> wasm，经 web/glue.js 操作 DOM）。
+-- 本机无 llvm/emscripten：默认关闭。有环境后 `xmake f --wasm=y` 开启。
+-- 注意：仅 src/ui + src/common 进 wasm（fs_core 的进程/网络部分暂不进；远程版以后再拆）。
+option("wasm")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build wasm UI variant (needs emscripten/llvm)")
+option_end()
+
+if has_config("wasm") then
+    target("fs_ui_wasm")
+        set_kind("binary")
+        set_languages("c++14")
+        add_includedirs(includedirs)
+        add_files("src/ui/**.cpp")
+        add_files("src/common/fs_json.cpp", "src/common/fs_log.cpp")
+        add_cxxflags("-Wall", "-Os")
+        add_defines("__EMSCRIPTEN__")
+        -- emcc 链由 emscripten 工具链提供；无环境时此 target 不会被配置
+        after_build(function (target)
+            print("wasm target built: " .. target:targetfile())
+            print("serve web/ + load glue.js, then instantiate the wasm module")
+        end)
+end

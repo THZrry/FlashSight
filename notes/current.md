@@ -137,3 +137,24 @@ The process of project: P0 环境搭建 + P1 AppCore
 
 - P0-P3 + 缺口补齐全部完成。UI 以外后端全通。
 - 下一步：P4 UI（等 WhaleUI；fs_ui 空壳+事件类型先行）或收尾。
+
+<13>(SOLVED): UI 原型 + C++ 响应式框架 + 兼容层 + wasm 分支桩（用户 2026-10-11 指示）。
+  - 设计稿分析：temp/design.json 只有 5 种控件（tabs/box/text/button/listItem），
+    4 个 frame（主页项目/用量/设置/会话），frames 仅几何，控件全在 groups.items。
+  - web/ 纯 HTML+CSS 桌面风原型（非 Material）：标题栏/tabstrip/主页双栏/会话
+    （顶栏+规划栏+历史+侧栏+输入+终端）/设置双栏/用量图表占位；tab 用 :target 纯 CSS 切换，无 JS。
+  - src/ui 兼容层 ui_dom.hpp：IDom 抽象（create/append/remove/clear/text/attr/visible/on）；
+    NullDom 空实现（含调用记录，单测用）；BrowserDom（wasm，经 web/glue.js）。
+    WhaleUI 就绪后加 WhaleDom 实现即可，UI 逻辑不动——不预设 WhaleUI API。
+  - 响应式 ui_reactive.hpp：Signal<T>（shared_ptr+RAII 退订）/Effect.watch
+    （pack 展开重订阅）/bind_text/bind_visible。修过两个真 bug：
+    notify 时遍历 map 又 erase 导致访问违例（改快照后调用）；dispose 未退订
+    （先 clear subs 再 reset）。
+  - UiApp 四页骨架（class 名与原型一致，方便对照），Signal 驱动切页/显隐。
+  - xmake fs_ui_wasm target（option(wasm) 默认关；仅 src/ui+common 进 wasm；
+    fs_core 进程/网络暂不进）。本机无 llvm/emscripten，只写不编。
+  - 单测 tests/test_ui.cpp 5 用例；全量 44 用例 361 断言通过。
+## 当前状态（更新）
+
+- P0-P3 + 缺口补齐 + UI 原型/框架/兼容层/wasm 桩全部完成。
+- 等：WhaleUI 纯 C API（接 WhaleDom 实现）、llvm/emscripten（编 wasm 验证）。
