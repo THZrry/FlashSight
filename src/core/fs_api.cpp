@@ -27,6 +27,70 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   model_table_->set_preset(builtin_models_preset());
   HttpRequest sample;
   net_.reset(new HttplibNetClient(sample));
+  // P3: agent 宿主
+  mcp_registry_.reset(new McpRegistry());
+  AgentHostDeps deps;
+  deps.clock = clock_;
+  SessionManager* sm = sessions_.get();
+  ProviderStore* ps = providers_.get();
+  ModelTable* mt = model_table_.get();
+  HttplibNetClient* net = net_.get();
+  UsageStore* us = usage_.get();
+  deps.load_full = [sm](const std::string& sid, Json* out) -> FsResult {
+    return sm->load_full(sid, out);
+  };
+  deps.append_turn = [sm](const std::string& sid, const Json& turn) -> FsResult {
+    return sm->append_turn(sid, turn);
+  };
+  deps.write_patch = [sm](const std::string& sid, const Json& patch) -> FsResult {
+    Json tid = patch.contains("turnId") ? patch["turnId"] : Json("");
+    return sm->make_store(sid).write_patch(
+        sid, tid.is_string() ? tid.get<std::string>() : "", patch);
+  };
+  const Clock* clk = clock_;
+  deps.call_model = [ps, mt, net, us, clk](const ModelCallRequest& req,
+                                           ModelCallResult* out) -> FsResult {
+    if (!out) return FsResult::error(ErrCode::kInvalidArg, "null result");
+    // 按模型名找 provider：v1 用第一个启用的连接
+    std::vector<ProviderConn> conns = ps->list();
+    ProviderConn conn;
+    bool found = false;
+    for (auto& c : conns) {
+      if (c.enabled) {
+        conn = c;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      // 无 provider：回显模式（单测/无 key 时可跑通 Loop）
+      out->text = "(no provider configured; echo)";
+      out->error = "";
+      return FsResult::success();
+    }
+    ChatRequest creq;
+    creq.model = req.model.empty() ? "gpt-4o-mini" : req.model;
+    creq.messages = req.messages;
+    creq.tools = req.tools;
+    creq.stream = false;
+    ProviderRuntime runtime(conn, net, us, clk);
+    ChatResponse cresp;
+    FsResult r = runtime.call(creq, &cresp, nullptr);
+    if (!r.ok()) {
+      out->error = cresp.error.empty() ? r.message : cresp.error;
+      return r;
+    }
+    out->text = cresp.text;
+    out->tool_calls = cresp.tool_calls;
+    out->error = "";
+    return FsResult::success();
+  };
+  deps.event = [](const std::string& e, const Json& p) {
+    (void)e;
+    (void)p;
+  };
+  agent_host_.reset(new AgentHost(std::move(deps)));
+  agent_host_->register_builtin_tools(mcp_registry_.get());
 }
 
 FsApi::~FsApi() {}
@@ -105,6 +169,76 @@ FsResult FsApi::session_append_turn(const std::string& sid, const Json& turn) {
   return sessions_->append_turn(sid, turn);
 }
 FsResult FsApi::session_get(const std::string& sid) { return sessions_->get_session(sid); }
+
+// ----- P3: send/append/suspend/resume/cancelWake -----
+FsResult FsApi::session_send(const std::string& sid, const std::string& text,
+                             const Json& attachments) {
+  Json full;
+  FsResult r = sessions_->load_full(sid, &full);
+  if (!r.ok()) return r;
+  bool auto_mode = jsonutil::get<bool>(full.value("sessionSettings", Json::object()),
+                                       "autoMode", false);
+  return agent_host_->send(sid, text, attachments, auto_mode);
+}
+
+FsResult FsApi::session_append(const std::string& sid, const std::string& text) {
+  return agent_host_->append(sid, text);
+}
+
+FsResult FsApi::session_suspend(const std::string& sid) {
+  return agent_host_->suspend(sid);
+}
+
+FsResult FsApi::session_resume(const std::string& sid) {
+  return agent_host_->resume(sid);
+}
+
+FsResult FsApi::session_cancel_wake(const std::string& sid) {
+  return agent_host_->cancel_wake(sid);
+}
+
+// ----- P3: tool.* / ask / subagent / steering -----
+FsResult FsApi::tool_invoke(const std::string& sid, const std::string& name,
+                            const Json& args) {
+  Json full;
+  FsResult r = sessions_->load_full(sid, &full);
+  if (!r.ok()) return r;
+  bool auto_mode = jsonutil::get<bool>(full.value("sessionSettings", Json::object()),
+                                       "autoMode", false);
+  return agent_host_->tool_invoke(sid, name, args, auto_mode);
+}
+
+FsResult FsApi::ask_answer(const std::string& sid, int ask_id,
+                           const std::string& selection) {
+  return agent_host_->ask_answer(sid, ask_id, selection);
+}
+
+FsResult FsApi::subagent_spawn(const std::string& sid, const std::string& kind,
+                               const std::string& task, const std::string& model,
+                               int depth, int64_t timeout_ms) {
+  std::string id;
+  FsResult r = agent_host_->subagent_spawn(sid, kind, task, model, depth,
+                                           timeout_ms, &id);
+  if (!r.ok()) return r;
+  return FsResult::success(Json{{"id", id}});
+}
+
+FsResult FsApi::subagent_cancel(const std::string& id) {
+  return agent_host_->subagent_cancel(id);
+}
+
+FsResult FsApi::subagent_list(const std::string& sid) {
+  return agent_host_->subagent_list(sid);
+}
+
+FsResult FsApi::steering_push(const std::string& sid, const std::string& kind,
+                              const std::string& text) {
+  return agent_host_->steering_push(sid, kind, text);
+}
+
+FsResult FsApi::steering_list(const std::string& sid) {
+  return agent_host_->steering_list(sid);
+}
 
 // ----- terminal.* -----
 FsResult FsApi::terminal_list(const std::string& sid) {

@@ -15,6 +15,8 @@ includedirs = {
     "src/core",
     "src/storage",
     "src/provider",
+    "src/agent",
+    "src/tools",
     "3rdparty/filesystem-1.5.14/include",
     "3rdparty/json",
     "3rdparty/dtl-1.20",

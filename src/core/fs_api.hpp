@@ -19,11 +19,13 @@
 #include "core/shell_detect.hpp"
 #include "core/terminal_registry.hpp"
 #include "core/usage_store.hpp"
+#include "agent/agent_host.hpp"
 #include "provider/model_table.hpp"
 #include "provider/provider_client.hpp"
 #include "provider/provider_runtime.hpp"
 #include "provider/provider_store.hpp"
 #include "storage/fs_store.hpp"
+#include "tools/mcp_tools.hpp"
 
 namespace fs {
 
@@ -63,12 +65,13 @@ class FsApi {
   FsResult session_refresh_config(const std::string& sid);
   FsResult session_append_turn(const std::string& sid, const Json& turn);
   FsResult session_get(const std::string& sid);
-  // P3 接：send/append/suspend/resume/cancelWake
+  // P3: send/append/suspend/resume/cancelWake（AgentHost）
   FsResult session_send(const std::string& sid, const std::string& text,
-                        const Json& attachments) {
-    (void)sid; (void)text; (void)attachments;
-    return FsResult::error(ErrCode::kNotSupported, "agent loop: P3");
-  }
+                        const Json& attachments);
+  FsResult session_append(const std::string& sid, const std::string& text);
+  FsResult session_suspend(const std::string& sid);
+  FsResult session_resume(const std::string& sid);
+  FsResult session_cancel_wake(const std::string& sid);
 
   // ----- terminal.*（注册表部分 P1；spawn/exec 实际执行 P3 reproc）-----
   FsResult terminal_list(const std::string& sid);
@@ -99,11 +102,25 @@ class FsApi {
   FsResult lock_release(const std::string& sid);
   FsResult lock_holder(const std::string& pid);
 
-  // ----- tool.* / provider.* / mcp.*：P1 桩 -----
+  // ----- tool.*（P3 真实现，经 AgentHost）-----
+  FsResult tool_invoke(const std::string& sid, const std::string& name,
+                       const Json& args);
   FsResult tool_stub(const std::string& name) {
     return FsResult::error(ErrCode::kNotSupported,
                            "tool not implemented until P3: " + name);
   }
+  // ----- ask 回答 -----
+  FsResult ask_answer(const std::string& sid, int ask_id, const std::string& selection);
+  // ----- subagent.* -----
+  FsResult subagent_spawn(const std::string& sid, const std::string& kind,
+                          const std::string& task, const std::string& model,
+                          int depth, int64_t timeout_ms);
+  FsResult subagent_cancel(const std::string& id);
+  FsResult subagent_list(const std::string& sid);
+  // ----- steering.*（addon1.md 引导队列）-----
+  FsResult steering_push(const std::string& sid, const std::string& kind,
+                         const std::string& text);
+  FsResult steering_list(const std::string& sid);
   FsResult provider_list_providers();
   FsResult provider_add_provider(const Json& conn);
   FsResult provider_remove_provider(const std::string& providerId);
@@ -149,6 +166,9 @@ class FsApi {
   std::unique_ptr<ProviderStore> providers_;
   std::unique_ptr<ModelTable> model_table_;
   std::unique_ptr<HttplibNetClient> net_;
+  // P3: agent 宿主（Loop/工具/子代理/唤醒/引导队列）
+  std::unique_ptr<AgentHost> agent_host_;
+  std::unique_ptr<McpRegistry> mcp_registry_;
 };
 
 }  // namespace fs

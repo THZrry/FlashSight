@@ -73,3 +73,39 @@ The process of project: P0 环境搭建 + P1 AppCore
 
 - P0+P1+P2 完成。roadmap 20-provider.md 已勾选（剩钥匙串+套餐 TODO）。
 - 下一步：P3 Agent 引擎（src/agent，见 roadmap/30-agent.md）。
+
+<9>(TIPS): rules/addon1.md 补充了 P3 关键设计，必须落实：
+  - 预置子代理：/local-research（只读查 bug）、/complete-step（分派完成 step，不支持并行）、
+    /return（子代理多轮后输出结束自动执行，只回主代理摘要）、/round-plan（本轮规划，
+    阻塞不并行，直接主会话显示）、/check-files（指定文件分析改错返回摘要）。名字可对接行业惯例。
+  - 提示词必须显式建议模型用子代理解决问题。
+  - 子代理历史不进主会话历史但必须保留（会话存储需相关设计）。
+  - 默认子代理嵌套 max 3 层，设置可改。
+  - 引导机制：本轮结束传递（显式表达）与当前传递（工具调用完成后输入，不需要显式）；
+    auto 模式也有队列（每轮可加备注）；"引导当前"入当前队列；当前队列 >1 合并输入；
+    可编辑/拖动排序/删除。这影响 Loop 的输入处理。
+  - 界面：滚动优化（底部时自动滚动否则不滚动）、会话进入滚动同步、
+    侧边栏项目+会话罗列（无打开标签页概念）、排序/筛选/搜索/折叠、标签页缓存秒开。
+
+<10>(SOLVED): P3 Agent 引擎完成（34 用例 288 断言全过，M3 验收达成）。
+  - AgentLoop 状态机：idle/planning/toolCalling/waiting/turnDone；send 运行中进引导队列；
+    高风险工具（写/删/网/终端）手动+自动都走 permission.prompt；approve 拒绝回填继续。
+  - 工具调用格式兼容：ProviderClient 返回 OpenAI 原生 {function:{name,arguments}}，
+    Loop.handle_tool_call 兼容扁平与原生两种格式（arguments 字符串解析为 Json）。
+  - AgentHost 宿主：按 sid 管理 Loop；工具回调接线（terminal/net/vision 走宿主回调，
+    未接线返回 not-wired）；call_model 无 provider 时回显模式（单测可跑通）。
+  - HistoryBuilder：短视图 + token 预算 + 压缩折叠 + forgotten 剔除；
+    压缩条件 msgs.size()>1（修过 >2 导致小预算不压缩的 bug）。
+  - 引导队列（addon1.md）：immediate/round-end 双队列，合并/编辑/排序/删除/to_json。
+  - 子代理：spawn/深度上限/并行上限/cancel/timeout 落库；预置 7 代理
+    （addon1.md 5 个：local-research 只读、complete-step 不并行、return 自动摘要、
+    round-plan 阻塞、check-files + research/explore）。
+  - 文件工具：read 分页 + 二进制守卫 + 路径逃逸检查；diffWrite 精确匹配一次；
+    Windows 文本模式 CRLF 坑延续（工具内部统一二进制读写）。
+  - 终端/网络/vision/MCP 全部回调式（宿主层实现，工具层只调回调）。
+  - 写入干扰教训：本轮输出流频繁注入垃圾 token；全部经"temp 写->扫描->复制->构建验证"
+    可靠路径，源码全仓扫描干净。
+## 当前状态（更新）
+
+- P0+P1+P2+P3 完成。roadmap 30-agent.md 已勾选（剩 network.search 调研）。
+- 下一步：P4 UI（等 WhaleUI；fs_ui 空壳+事件类型先行）或收尾提交。
