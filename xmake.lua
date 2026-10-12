@@ -14,6 +14,12 @@ set_xmakever("2.8.0")
 
 add_rules("mode.debug", "mode.release")
 set_languages("c++14")
+-- Build targets sequentially in dependency order. The wasm bundle is a build
+-- input to the native UI (its bytes are embedded in ui_assets_gen.hpp), and
+-- xmake's default parallel-across-targets scheduling starts fs_ui's compile
+-- before fs_ui_wasm has produced web/fs_ui.js. Serializing makes add_deps a
+-- real ordering edge for compilation, not just linking.
+set_policy("build.across_targets_in_parallel", false)
 
 -- include dirs (native)
 includedirs = {
@@ -105,19 +111,21 @@ target("fs_ui_wasm")
     add_cxxflags("-Wall", "-Os")
     set_targetdir("web")
     set_basename("fs_ui")
+    -- Output fs_ui.js (+ fs_ui.wasm); the default .html would be a single
+    -- self-contained file with no separate js/wasm for the packer to embed.
+    set_extension(".js")
     add_ldflags("-lembind", "-sALLOW_MEMORY_GROWTH=1", "-sDISABLE_EXCEPTION_CATCHING=0",
                 "--no-entry", {force = true})
     add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_malloc,_free",
                 {force = true})
     add_ldflags("-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8",
                 {force = true})
+    -- Pack web/ into src/ui/ui_assets_gen.hpp. fs_ui depends on this target and
+    -- the project builds targets sequentially, so the header exists before
+    -- fs_ui compiles. Must live in target scope: xmake only exposes io/path
+    -- helpers there.
     after_build(function (target)
         print("[wasm] built " .. target:targetfile())
-        -- ------------------------------------------------------------------
-        -- Pack web/ assets into src/ui/ui_assets_gen.hpp so the native exe can
-        -- serve the UI from memory. Done here (not in a file-level function)
-        -- because xmake only exposes io/path helpers inside target scope.
-        -- ------------------------------------------------------------------
         local root = os.projectdir()
         local items = {
             {name = "index.html", mime = "text/html; charset=utf-8"},
@@ -147,15 +155,14 @@ target("fs_ui_wasm")
         lines[#lines + 1] = "  size_t size;"
         lines[#lines + 1] = "};"
         lines[#lines + 1] = ""
-
         local present = {}
         for _, it in ipairs(items) do
             local p = path.join(root, "web", it.name)
-            -- NOTE: must use io.open(..,"rb") - xmake's io.readfile is text-mode
-            -- and corrupts binary (UTF-8 replacement bytes), which breaks .wasm.
+            -- NOTE: io.open(..,"rb") - xmake's io.readfile is text-mode and
+            -- corrupts binary (UTF-8 replacement bytes), which breaks .wasm.
             local f = io.open(p, "rb")
             if not f then
-                raise("[assets] missing " .. p .. " (wasm link failed?)")
+                raise("[assets] missing " .. p .. " (build fs_ui_wasm first)")
             end
             local data = f:read("*a")
             f:close()
@@ -178,7 +185,6 @@ target("fs_ui_wasm")
             lines[#lines + 1] = ""
             present[#present + 1] = {it = it, ident = ident}
         end
-
         lines[#lines + 1] = "static inline const std::vector<Asset>& kFiles() {"
         lines[#lines + 1] = "  static const std::vector<Asset> files = {"
         for _, e in ipairs(present) do
@@ -193,7 +199,6 @@ target("fs_ui_wasm")
         lines[#lines + 1] = "}  // namespace ui"
         lines[#lines + 1] = "}  // namespace fs"
         lines[#lines + 1] = ""
-
         -- io.open wb (not io.writefile) for the same binary-safety reason
         local out = io.open(out_path, "wb")
         if not out then raise("[assets] cannot write " .. out_path) end
@@ -276,7 +281,8 @@ target("fs_ui")
     add_files(dir_files("src/ui"))
     add_cxxflags("-Wall")
     if emcc_ok then
-        -- ensures the wasm target (and the generated asset header) build first
+        -- fs_ui_wasm is built first (sequential policy above); its after_build
+        -- packs web/ into src/ui/ui_assets_gen.hpp, which fs_ui then includes.
         add_deps("fs_ui_wasm", {link = false})
     end
 

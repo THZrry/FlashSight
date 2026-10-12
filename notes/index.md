@@ -100,8 +100,12 @@ The process of project: P0 环境搭建
 <21>(SOLVED): 终端接线 reproc（TerminalManager + 工具回调 + sid 注入），
   network.fetch 接线（NetClient）；vision 改为明确 not-supported（需平台后端）。详见 current.md <21>。
 
+<22>(SOLVED): 纯 xmake 依赖顺序坑 —— xmake 默认跨 target 并行编译，add_deps 只保链接顺序，
+  需 set_policy("build.across_targets_in_parallel", false) 串行化；wasm target 需
+  set_extension(".js") 才产独立 js/wasm。详见 current.md <22>。
+
 ## 当前状态（更新 2026-10-13）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（无 bat/脚本），事件端到端已验证；86 用例 578 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；86 用例 578 断言通过。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

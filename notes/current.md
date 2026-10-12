@@ -263,3 +263,16 @@ The process of project: P0 环境搭建 + P1 AppCore
     net 接线后它会真发网络请求）；需要平台截图/图像解码后端，暂缓。
   - 新增 tests/test_terminal.cpp（真实起 shell 验证输出/kill）；86 用例 578 断言通过。
 
+<22>(SOLVED): 纯 xmake 构建的依赖顺序坑（addon3 §构建的落地修正）。
+  - 症状：`xmake` 一条命令时，fs_ui 的编译在 fs_ui_wasm 产出 web/fs_ui.js 之前就开始，
+    生成的 ui_assets_gen.hpp 还没写出来 -> `ui_server.cpp:8 fatal error: ui_assets_gen.hpp`。
+    原因：xmake 默认跨 target 并行编译（build.across_targets_in_parallel=true），
+    add_deps 只保证链接顺序，不保证"依赖目标的产物先于本目标编译"。
+  - 解决：`set_policy("build.across_targets_in_parallel", false)` 串行化 target，
+    使 add_deps 成为真正的编译顺序边；资源打包仍放在 fs_ui_wasm 的 after_build 里。
+  - 另：wasm target 必须 `set_extension(".js")`，否则 emcc 默认产出单个自包含 .html，
+    没有独立的 js/wasm 供打包（原来靠手工删掉 .html 才对，现在直接产 .js+.wasm）。
+  - 验证：删掉 build/.xmake/web 产物 + ui_assets_gen.hpp 后，单条 `xmake` 从零构建成功，
+    86 用例 578 断言通过，浏览器渲染正常。
+
+
