@@ -14,7 +14,8 @@ build/
 # temp workspace (per rules; temp/ is for throwaway data)
 temp/
 
-# generated wasm bundle + embedded-asset header (regenerate via scripts/build_ui.bat)
+# generated wasm bundle + embedded-asset header (built by xmake; fs_ui_wasm
+# after_build packs web/ into src/ui/ui_assets_gen.hpp - see rules/addon3.md)
 web/fs_ui.js
 web/fs_ui.wasm
 web/fs_ui.html

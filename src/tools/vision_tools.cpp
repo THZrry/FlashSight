@@ -1,14 +1,23 @@
-// vision_tools.cpp - vision.screenshot/readImage（回调式）
+// vision_tools.cpp - vision.screenshot / vision.readImage
+//
+// Neither is implemented yet:
+//   * screenshot needs an OS screen-capture backend (Win32 GDI / X11 / Wayland)
+//     and, on the desktop build, the WhaleUI window surface; there is no such
+//     backend in the tree, so it reports not-supported instead of pretending.
+//   * readImage needs an image decode + downscale path; the file gate already
+//     exists (file_tools), but the pixel pipeline does not.
+// Both are deliberately *not* faked through net_fetch (an earlier version
+// forwarded a marker there, which silently issued a network request once the
+// net callback was wired). They return a clear error the model can act on.
 #include "vision_tools.hpp"
 
 namespace fs {
 
 void register_vision_tools(ToolRegistry* registry) {
-  // vision.screenshot（屏/窗口/区域走权限门；截图数据由宿主回调提供）
   {
     ToolDef def;
     def.name = "vision.screenshot";
-    def.description = "截图（screen/window/region；返回图像引用）";
+    def.description = "截图（screen/window/region）。尚未接线：需要平台截图后端。";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
@@ -17,27 +26,17 @@ void register_vision_tools(ToolRegistry* registry) {
     params["properties"] = props;
     def.parameters = params;
     registry->register_tool("vision.screenshot", def,
-      [](const ToolContext& ctx, const Json& args) -> FsResult {
-        // 截图由宿主回调（通过 emit 请求宿主截图，再由宿主回填）
-        // v1：通过 net_fetch 的特殊标记转发（宿主识别 screenshot 标记）
-        if (!ctx.net_fetch) {
-          return FsResult::error(ErrCode::kNotSupported, "screenshot not wired");
-        }
-        Json fwd = Json::object();
-        fwd["screenshot"] = true;
-        fwd["target"] = jsonutil::get<std::string>(args, "target", "screen");
-        fwd["region"] = jsonutil::get<std::string>(args, "region", "");
-        Json out;
-        FsResult r = ctx.net_fetch(fwd, &out);
-        return r.ok() ? FsResult::success(out) : r;
+      [](const ToolContext&, const Json&) -> FsResult {
+        return FsResult::error(
+            ErrCode::kNotSupported,
+            "vision.screenshot not wired: needs a platform capture backend");
       });
   }
 
-  // vision.readImage（读本地图；走文件门；最大边+质量压缩可设）
   {
     ToolDef def;
     def.name = "vision.readImage";
-    def.description = "读取本地图片（走文件门；maxSide/quality 可设压缩）";
+    def.description = "读取本地图片（走文件门；maxSide/quality 压缩）。尚未接线：需要图像解码/缩放后端。";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
@@ -48,19 +47,10 @@ void register_vision_tools(ToolRegistry* registry) {
     params["required"] = Json::array({"path"});
     def.parameters = params;
     registry->register_tool("vision.readImage", def,
-      [](const ToolContext& ctx, const Json& args) -> FsResult {
-        // 读图走文件门（宿主实现；通过 net_fetch 特殊标记转发）
-        if (!ctx.net_fetch) {
-          return FsResult::error(ErrCode::kNotSupported, "readImage not wired");
-        }
-        Json fwd = Json::object();
-        fwd["readImage"] = true;
-        fwd["path"] = jsonutil::get<std::string>(args, "path", "");
-        fwd["maxSide"] = jsonutil::get_int(args, "maxSide", 1024);
-        fwd["quality"] = jsonutil::get_int(args, "quality", 80);
-        Json out;
-        FsResult r = ctx.net_fetch(fwd, &out);
-        return r.ok() ? FsResult::success(out) : r;
+      [](const ToolContext&, const Json&) -> FsResult {
+        return FsResult::error(
+            ErrCode::kNotSupported,
+            "vision.readImage not wired: needs an image decode/resize backend");
       });
   }
 }

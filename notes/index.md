@@ -87,3 +87,21 @@ The process of project: P0 环境搭建
   - emcc 6.0.12（C:\Program Files\emscripten）；xmake emcc 工具链默认 -fvisibility=hidden
     会隐藏 extern "C" 入口，需 -fvisibility=default。
   - 已知：响应式框架粗糙，后续大规模重构（用户明确）。
+
+<19>(SOLVED): addon3 —— UI 框架四层重构（DOM Adapter/Framework/Composers/user）。
+  完整 IDom + WasmDom(val.h)/NullDom；VNode + keyed diff/patch + EventBus；
+  组件库（可关闭标签条/文章式对话/折叠流程块/自由侧栏）；AppState 整体重渲染 + patch。
+  关键坑：xmake io.readfile 文本模式毁二进制 wasm（必须 io.open rb/wb）；
+  val.h 需 C++17；import()/io 只在 target scope 可见。详见 current.md <19>。
+
+<20>(SOLVED): 构建流程纯 xmake（fs_ui_wasm 作 dep + after_build Lua 打包资源），
+  删除 scripts/build_ui.bat 与 gen_assets.py；无硬编码路径；事件端到端已验证。详见 current.md <20>。
+
+<21>(SOLVED): 终端接线 reproc（TerminalManager + 工具回调 + sid 注入），
+  network.fetch 接线（NetClient）；vision 改为明确 not-supported（需平台后端）。详见 current.md <21>。
+
+## 当前状态（更新 2026-10-13）
+
+- P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
+- UI 四层重构，构建纯 xmake（无 bat/脚本），事件端到端已验证；86 用例 578 断言通过。
+- 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

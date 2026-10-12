@@ -80,15 +80,13 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
     return deps_.call_model(req, out);
   };
   // 工具执行走宿主注入的 invoke_tool（addon2：工具真调）
-  // 补齐 Loop 层拿不到的宿主上下文：cwd/pid/todo_op（进程工具）
+  // 用 make_ctx 重建完整上下文（含 terminal/net/todo 回调），再补 Loop 已知字段
   loop->invoke_tool = [this](const ToolContext& in, const std::string& name,
                              const Json& args) -> FsResult {
-    ToolContext ctx = in;
-    ctx.todo_op = [this, in](const Json& a, Json* out) -> FsResult {
-      FsResult r = todo_op(in.sid, a);
-      if (r.ok() && out) *out = r.data;
-      return r;
-    };
+    ToolContext ctx = make_ctx(in.sid, in.auto_mode);
+    ctx.permission = in.permission;
+    ctx.cwd = in.cwd;
+    ctx.pid = in.pid;
     return tools_.invoke(ctx, name, args);
   };
   AgentLoop& ref = *loop;
@@ -118,7 +116,19 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
     if (r.ok() && out) *out = r.data;
     return r;
   };
-  // terminal/net 回调由 FsApi 层注入（v1 留空，工具返回 not-wired）
+  // 终端/网络回调由 FsApi 注入（reproc / NetClient）
+  // 终端回调包一层：注入会话 sid（注册表按会话归属终端；工具层不感知）
+  ctx.terminal_spawn = [this, sid](const Json& a, Json* out) -> FsResult {
+    if (!deps_.terminal_spawn) {
+      return FsResult::error(ErrCode::kNotSupported, "terminal spawn not wired");
+    }
+    Json args = a;
+    if (!args.contains("sid")) args["sid"] = sid;
+    return deps_.terminal_spawn(args, out);
+  };
+  ctx.terminal_poll = deps_.terminal_poll;
+  ctx.terminal_kill = deps_.terminal_kill;
+  ctx.net_fetch = deps_.net_fetch;
   return ctx;
 }
 

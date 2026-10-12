@@ -12,6 +12,16 @@
 | `httplib/` | yhirose/cpp-httplib | master | MIT | HTTP(S) 客户端（NetClient） |
 | `mbedtls-3.6.4/` | Mbed-TLS/mbedtls | v3.6.4 LTS | Apache-2.0 | TLS（httplib 的 mbedTLS 后端） |
 | `qjs-regex/` | QuickJS regex engine | 2024-01-13 | MIT | `file.regex` 工具的正则引擎 |
+| `reproc/` | DaanDeMeyer/reproc | v14.2.5 | MIT | 子进程管理（terminal.spawn/exec，rules/user.md） |
+
+## reproc 明细（子进程管理）
+
+- 只用 C 源码与头文件：`src/*.c|*.h` + `include/reproc/*.h`；平台相关文件
+  （`*.windows.c` / `*.posix.c`）由 `xmake.lua` 按目标 OS 选择，不混编。
+- 来源：GitHub release tarball `v14.2.5`（`scripts/fetch_3rdparty.*` 拉取）。
+- 许可：MIT（见 `3rdparty/reproc/LICENSE`）。
+- 集成点：`src/core/terminal_registry.cpp` + `src/tools/term_tools.cpp` 的
+  spawn/poll/kill 回调（由 FsApi 注入 AgentHost，见 doc-internal/terminal.md）。
 
 ## qjs-regex 明细（addon2：regex 工具）
 

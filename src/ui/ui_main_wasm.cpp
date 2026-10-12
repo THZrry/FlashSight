@@ -1,43 +1,41 @@
-// ui_main_wasm.cpp - wasm 入口：BrowserDom + UiApp + NullBackend 装配
-// 仅 emscripten 下编译（xmake -p wasm 的 fs_ui_wasm target）。
+// ui_main_wasm.cpp - wasm entry point: platform DOM + UiApp + backend.
+// Compiled only for the wasm target (ui_dom_wasm.cpp provides make_platform_dom).
 #include "ui_app.hpp"
 #include "ui_backend.hpp"
-#include "ui_dom_browser.hpp"
+#include "ui_dom.hpp"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 
 namespace fs {
 namespace ui {
+
+// Provided by ui_dom_wasm.cpp
+IDom* make_platform_dom();
+
 namespace {
-BrowserDom* g_dom = nullptr;
 UiApp* g_app = nullptr;
 NullBackend* g_backend = nullptr;
 AppState g_state;
 }  // namespace
 
-// 由 JS 调用（web/index.html 的 onRuntimeInitialized）启动 UI
+// Called from index.html once the wasm runtime is ready.
 extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_start() {
   if (g_app) return;
-  g_dom = new BrowserDom();
+  IDom* dom = make_platform_dom();
   g_state = AppState::make();
   g_backend = new NullBackend();
-  g_app = new UiApp(*g_dom, g_state, g_backend);
+  g_app = new UiApp(*dom, g_state, g_backend);
   g_app->mount();
 }
 
-// 由 JS 调用：切换顶层页（0=主页 1=会话 2=设置）
-extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_show(int page) {
+// Switch top-level tab by id ("home", "settings", "s1"...).
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_show(const char* tab_id) {
   if (!g_app) return;
-  switch (page) {
-    case 0: g_app->show(Page::kHome); break;
-    case 1: g_app->show(Page::kSession); break;
-    case 2: g_app->show(Page::kSettings); break;
-    default: break;
-  }
+  g_app->show(tab_id ? tab_id : "home");
 }
 
-// 由 JS 调用：推后端事件（演示/联调用）
+// Push a backend event (demo/dev hook).
 extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_fire_event(const char* event,
                                                       const char* payload) {
   if (!g_backend) return;
@@ -49,6 +47,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_fire_event(const char* event,
     }
   }
   g_backend->fire(event ? event : "", p);
+}
+
+// Event callback from the DOM adapter (see ui_dom_wasm.cpp fs_dom_bind).
+extern "C" void fs_ui_fire(int handler_id, const char* value) {
+  bus().fire(handler_id, value ? value : "");
 }
 
 }  // namespace ui

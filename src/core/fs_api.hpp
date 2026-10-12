@@ -18,6 +18,7 @@
 #include "core/session_manager.hpp"
 #include "core/settings_store.hpp"
 #include "core/shell_detect.hpp"
+#include "core/terminal_manager.hpp"
 #include "core/terminal_registry.hpp"
 #include "core/usage_store.hpp"
 #include "core/workflow.hpp"
@@ -165,6 +166,7 @@ class FsApi {
   UsageStore& usage() { return *usage_; }
   LockArbiter& locks() { return *locks_; }
   TerminalRegistry& terminals() { return *terminals_; }
+  TerminalManager& terminal_mgr() { return *terminal_mgr_; }
   DenyList& deny_list() { return *deny_list_; }
   PlanStore& plans() { return *plans_; }
   WorkflowStore& workflows() { return *workflows_; }
@@ -202,6 +204,7 @@ class FsApi {
   std::unique_ptr<UsageStore> usage_;
   std::unique_ptr<LockArbiter> locks_;
   std::unique_ptr<TerminalRegistry> terminals_;
+  std::unique_ptr<TerminalManager> terminal_mgr_;
   std::unique_ptr<DenyList> deny_list_;
   std::unique_ptr<PlanStore> plans_;
   std::unique_ptr<WorkflowStore> workflows_;

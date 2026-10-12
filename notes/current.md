@@ -218,3 +218,48 @@ The process of project: P0 环境搭建 + P1 AppCore
   - emcc 6.0.12 在 C:\Program Files\emscripten（xmake 的 emcc 工具链可用；
     默认 -fvisibility=hidden 会隐藏 extern "C" 入口，需 -fvisibility=default）。
   - 已知：响应式框架较粗糙，后续大概率大规模重构（用户明确）。
+
+<19>(SOLVED): 按 rules/addon3.md 重做 UI 框架 + 构建流程（用户："你做的太烂了"）。
+  分层重构为四层（addon3 架构）：
+  - DOM Adapter：ui_dom.hpp 重写为完整 IDom（create_element/create_text/append/
+    insert_before/remove/clear/set_text/set_attr/remove_attr/set_style/set_visible/
+    get_value/on/off/root）。NullDom（带树模型 + dump()，测试断言）供 native/测试；
+    WasmDom（ui_dom_wasm.cpp，emscripten/val.h + EM_JS 事件绑定）供 wasm。
+    WhaleUI 就绪后加 WhaleDom 即可，上层不动。
+  - Framework：ui_vdom.hpp/cpp —— VNode 树 + H 流式构建器 + EventBus（整型 handler id）
+    + keyed diff/patch（后向遍历 insertBefore 重排；事件 handler 变化时先 off 再 on，
+    否则每次渲染都叠加旧监听器导致一次点击触发多个 handler）。
+  - Composers：ui_components.hpp/cpp —— button/title_button（探索/项目/用量：仅颜色+
+    下划线，无背景）/tab_strip（可关闭+加号）/panel_tabs（自由侧栏标签）/
+    chat_message（user=气泡、assistant=文章无气泡、system=居中浅字）/
+    tool_block（折叠流程块）/turn_summary（不折叠无边框）/markdown_blocks（标题/列表/
+    围栏代码/行内 code·bold·italic）/modal/menu 等。
+  - user：ui_app.cpp 重写 —— 顶部可增删标签条（主页/会话N/设置）；主页居中标题按钮 +
+    项目卡片（左信息右可展开会话列表）+ 用量图表/表格；会话页文章式对话 + 自由侧栏
+    标签 + 终端选择器抽屉；设置页两栏。整个 AppState 一次性重渲染 + patch。
+  - 关键 bug：① xmake 的 io.readfile 是文本模式，会把二进制 wasm 的 UTF-8 字节替换坏
+    （header 长度 400466 vs 真实 314151，wasm 魔数被毁）→ 必须 io.open(...,"rb") 读、
+    io.open(...,"wb") 写；② val.h 需要 C++17（wasm target 用 c++17，native 仍 c++14）；
+    ③ xmake 的 import()/io 只在 target scope 可见，文件顶层用 os.getenv/os.isfile。
+
+<20>(SOLVED): 构建流程改为纯 xmake（删掉 scripts/build_ui.bat 与 gen_assets.py）。
+  - fs_ui_wasm 用 set_plat("wasm")+set_toolchains("emcc") 作为 fs_ui 的 dep
+    （add_deps("fs_ui_wasm", {link=false})），一条 `xmake` 自动先编 wasm 再编 native。
+  - 资源打包在 fs_ui_wasm 的 after_build 里用 Lua 直接生成 src/ui/ui_assets_gen.hpp
+    （web/index.html+style.css+fs_ui.js+fs_ui.wasm；glue.js 已由 --post-js 内联，
+    不再单独存在）。无硬编码路径、无外部脚本、跨平台。
+  - 事件端到端已验证（浏览器）：tab 切换、项目展开、开会话、侧栏切子代理/终端、
+    输入+发送、规划面板、用量图表、模态全部有响应；86 用例 578 断言通过。
+  - 新增 test_ui.cpp（DOM/diff/组件）+ test_ui_app.cpp（App 集成）替换旧 UI 测试。
+
+<21>(SOLVED): 终端接线（reproc，rules/user.md）。
+  - 引入 3rdparty/reproc v14.2.5（MIT，只用 C 源+头；平台文件由 xmake 按 OS 选）。
+  - src/core/terminal_manager.{hpp,cpp}：reproc 封装 spawn/poll/kill；前台 exec 超时
+    自动转后台；输出累积（上限 1MB）；shell 经 ShellDetector 解析（cmd/pwsh/bash 参数不同）。
+  - FsApi 构造 TerminalManager 并注入 AgentHostDeps 的 terminal_spawn/poll/kill；
+    make_ctx 补齐 sid（注册表按会话归属终端）+ terminal/net 回调。
+  - network.fetch 回调也接上（NetClient，method/headers/body/timeoutMs/sizeCap/verifyCert）。
+  - vision.screenshot/readImage 改为明确的 not-supported（之前经 net_fetch 转发是错的：
+    net 接线后它会真发网络请求）；需要平台截图/图像解码后端，暂缓。
+  - 新增 tests/test_terminal.cpp（真实起 shell 验证输出/kill）；86 用例 578 断言通过。
+

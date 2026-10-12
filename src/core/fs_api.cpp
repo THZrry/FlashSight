@@ -20,6 +20,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   usage_.reset(new UsageStore(root_ / "usage" / "calls.jsonl"));
   locks_.reset(new LockArbiter(clock_));
   terminals_.reset(new TerminalRegistry(clock_));
+  terminal_mgr_.reset(new TerminalManager(terminals_.get(), clock_));
   deny_list_.reset(new DenyList());
   plans_.reset(new PlanStore());
   workflows_.reset(new WorkflowStore(clock_));
@@ -94,6 +95,49 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
       if (!sub_id.empty()) workflow_on_subagent_done(sub_id);
     }
     emit_event(e, p);
+  };
+  // 终端回调（reproc 经 TerminalManager；工具层只调回调）
+  TerminalManager* tm = terminal_mgr_.get();
+  deps.terminal_spawn = [tm](const Json& a, Json* out) -> FsResult {
+    return tm->spawn(a, out);
+  };
+  deps.terminal_poll = [tm](const Json& a, Json* out) -> FsResult {
+    return tm->poll(a, out);
+  };
+  deps.terminal_kill = [tm](const Json& a, Json* out) -> FsResult {
+    return tm->kill(a, out);
+  };
+  // 网络回调（network.fetch / network.search 经 NetClient；宿主负责证书/超时/大小）
+  deps.net_fetch = [net](const Json& a, Json* out) -> FsResult {
+    HttpRequest req;
+    req.method = jsonutil::get<std::string>(a, "method", "GET");
+    req.url = jsonutil::get<std::string>(a, "url", "");
+    req.timeout_ms = static_cast<int>(jsonutil::get_int(a, "timeoutMs", 30000));
+    req.size_cap = jsonutil::get_int(a, "sizeCap", 0);
+    req.verify_cert = jsonutil::get<bool>(a, "verifyCert", true);
+    if (a.contains("headers") && a["headers"].is_object()) {
+      for (auto it = a["headers"].begin(); it != a["headers"].end(); ++it) {
+        if (it.value().is_string()) req.headers[it.key()] = it.value().get<std::string>();
+      }
+    }
+    if (a.contains("body") && a["body"].is_string()) {
+      req.body = a["body"].get<std::string>();
+    }
+    if (req.url.empty()) {
+      return FsResult::error(ErrCode::kInvalidArg, "empty url");
+    }
+    HttpResponse resp;
+    FsResult r = net->request(req, &resp);
+    if (!r.ok()) return r;
+    if (resp.status == 0) {
+      return FsResult::error(ErrCode::kNetwork,
+                             resp.error.empty() ? "network error" : resp.error);
+    }
+    Json o = Json::object();
+    o["status"] = resp.status;
+    o["body"] = resp.body;
+    if (out) *out = o;
+    return FsResult::success(o);
   };
   agent_host_.reset(new AgentHost(std::move(deps)));
   agent_host_->register_builtin_tools(mcp_registry_.get());
@@ -309,8 +353,14 @@ FsResult FsApi::terminal_show(const std::string& tid) {
   return FsResult::success(j);
 }
 FsResult FsApi::terminal_kill(const std::string& tid) {
-  // P1 注册表标记；实际 kill 在 P3（reproc）
-  return terminals_->mark_exited(tid, -1, clock_->now_ms());
+  Json out;
+  FsResult r = terminal_mgr_->kill(Json{{"tid", tid}}, &out);
+  if (!r.ok()) {
+    // 注册表里存在但管理器没有（如 P1 建的历史条目）仍标记退出
+    TermEntry* e = terminals_->find(tid);
+    if (e) return terminals_->mark_exited(tid, -1, clock_->now_ms());
+  }
+  return r;
 }
 FsResult FsApi::terminal_set_encoding(const std::string& tid, const std::string& enc) {
   return terminals_->set_encoding(tid, enc);

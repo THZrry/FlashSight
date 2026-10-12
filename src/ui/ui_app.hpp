@@ -1,5 +1,16 @@
-// ui_app.hpp - 页面装配（顶部标签页模式；对齐 web/index.html）
-// 单模式：顶部 tab（主页/会话/+），页面内可用 subtabs。不做侧边栏模式。
+// ui_app.hpp - User layer (rules/addon3.md "user"): the actual FlashSight UI.
+//
+// Model: one observable AppState; any change re-renders the whole VNode tree;
+// patch() applies the minimal DOM diff. No widget objects, no manual DOM
+// bookkeeping - the app is a pure function from state to tree.
+//
+// Navigation (per user feedback, single mode):
+//   * top tab strip: 主页 / 会话N / 设置 - tabs can be added and closed
+//   * home: centered title buttons 探索/项目/用量统计 (no background, only
+//     color + underline); 项目 renders project cards whose right half is an
+//     expandable session list
+//   * session: chat article layout + composer + free side-panel tabs
+//   * settings: two-column settings page
 #pragma once
 
 #include <memory>
@@ -7,103 +18,150 @@
 #include <vector>
 
 #include "ui_backend.hpp"
+#include "ui_components.hpp"
 #include "ui_dom.hpp"
-#include "ui_reactive.hpp"
-#include "ui_widgets.hpp"
+#include "ui_vdom.hpp"
 
 namespace fs {
 namespace ui {
 
-// 顶层页面
-enum class Page {
-  kHome,
-  kSession,
-  kSettings,
+// One session tab.
+struct SessionTab {
+  std::string id;      // "s1", "s2", ...
+  std::string title;   // "会话1"
+  bool dirty = false;
 };
 
-// 主页内的子页（探索/项目/用量统计）
-enum class HomeTab {
-  kExplore,
-  kProject,
-  kUsage,
+// One project card (home/项目).
+struct ProjectCard {
+  std::string pid;
+  std::string name;
+  std::string path;
+  std::string updated;              // "2 分钟前"
+  int session_count = 0;
+  bool expanded = false;            // right half: session list open?
+  std::vector<std::pair<std::string, std::string> > sessions;  // sid, title
 };
 
-// UI 应用状态（响应式源）
+// Side panel tab (session page). Free-form: add/close.
+struct SideTab {
+  std::string id;
+  std::string title;
+  std::string kind;   // "usage" | "files" | "ops" | "git" | "subagents" | "calls" | "terminal"
+};
+
+// Terminal entry for the selector.
+struct TermItem {
+  std::string tid;
+  std::string shell;
+  std::string status;  // "running" | "exited"
+};
+
+// The app state. Everything the UI shows derives from this.
 struct AppState {
-  std::shared_ptr<Signal<Page>> page;
-  std::shared_ptr<Signal<HomeTab>> home_tab;
-  std::shared_ptr<Signal<std::string>> title;
-  // 会话
-  std::shared_ptr<Signal<std::string>> session_input;
-  std::shared_ptr<Signal<int>> model_index;
-  std::shared_ptr<Signal<int>> perm_index;
-  std::shared_ptr<Signal<bool>> auto_mode;
-  std::shared_ptr<Signal<bool>> suspended;
-  std::shared_ptr<Signal<bool>> plan_open;
-  std::shared_ptr<Signal<int>> side_tab;
-  std::shared_ptr<Signal<int>> context_pct;
-  std::shared_ptr<Signal<bool>> terminal_visible;
-  std::shared_ptr<Signal<bool>> ask_modal;
-  // 设置
-  std::shared_ptr<Signal<int>> settings_nav;
-  std::shared_ptr<Signal<int>> provider_index;
+  // ---- top tabs ----
+  std::vector<std::string> tab_ids;   // "home", "s1", "settings"
+  std::string active_tab = "home";
+  std::vector<SessionTab> sessions;
+  int session_seq = 0;
 
-  static AppState make() {
-    AppState s;
-    s.page = Signal<Page>::make(Page::kHome);
-    s.home_tab = Signal<HomeTab>::make(HomeTab::kProject);
-    s.title = Signal<std::string>::make("FlashSight");
-    s.session_input = Signal<std::string>::make("");
-    s.model_index = Signal<int>::make(0);
-    s.perm_index = Signal<int>::make(0);
-    s.auto_mode = Signal<bool>::make(true);
-    s.suspended = Signal<bool>::make(false);
-    s.plan_open = Signal<bool>::make(false);
-    s.side_tab = Signal<int>::make(0);
-    s.context_pct = Signal<int>::make(42);
-    s.terminal_visible = Signal<bool>::make(false);
-    s.ask_modal = Signal<bool>::make(false);
-    s.settings_nav = Signal<int>::make(0);
-    s.provider_index = Signal<int>::make(0);
-    return s;
-  }
+  // ---- home ----
+  int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计
+  std::vector<ProjectCard> projects;
+  std::string explore_query;
+
+  // ---- session (active one) ----
+  std::string session_input;
+  std::vector<comp::ChatMsg> messages;
+  std::string model = "gpt-4o-mini";
+  int model_index = 0;
+  std::string permission = "permissive";
+  int perm_index = 1;
+  bool auto_mode = true;
+  bool suspended = false;
+  int context_pct = 42;
+  std::string session_cost = "¥0.21";
+
+  // ---- side panel ----
+  std::vector<SideTab> side_tabs;
+  std::string active_side = "usage";
+  int side_seq = 0;
+
+  // ---- terminal ----
+  std::vector<TermItem> terminals;
+  std::string active_term;
+  bool terminal_open = false;
+
+  // ---- subagents ----
+  struct SubagentRow {
+    std::string id;
+    std::string kind;
+    std::string status;
+    std::string task;
+  };
+  std::vector<SubagentRow> subagents;
+
+  // ---- settings ----
+  int settings_nav = 0;
+  int provider_index = 0;
+  std::string provider_endpoint = "https://opencode.ai/zen/v1";
+  std::string provider_key;
+  std::string provider_header = "x-opencode-session: auto";
+  std::string thinking_lang = "auto";
+
+  // ---- overlays ----
+  bool ask_modal = false;
+  std::string ask_text;
+  bool plan_open = false;
+  std::vector<std::string> plan_steps;
+  std::string toast;
+
+  static AppState make();
 };
 
-// UiApp：Widget 库装配；后端经 IUiBackend 注入
-// （桌面 NativeBackend 进程内直调 FsApi；浏览器 wasm 同一套逻辑）。
+// UiApp: owns the render loop. backend_ is the transport to the core
+// (NullBackend today; NativeBackend/WhaleBackend later).
 class UiApp {
  public:
   UiApp(IDom& dom, AppState state, IUiBackend* backend = nullptr);
+  ~UiApp();
 
   void mount();
-  void show(Page p);
+  // re-render whole tree and patch
+  void render();
+  void show(const std::string& tab_id);
+
+  AppState& state() { return st_; }
+  // mutate + render in one call (the common path)
+  void update(const std::function<void(AppState&)>& f);
+
+  // actions (public: also callable from tests and future menu bindings)
+  void toast(const std::string& text);
+  void send_message();
+  void open_new_session();
+  void close_tab(const std::string& id);
+  void open_side_tab(const std::string& kind);
+  void close_side_tab(const std::string& id);
 
  private:
   IDom& dom_;
-  AppState state_;
+  AppState st_;
   IUiBackend* backend_ = nullptr;
-  Node content_{0};
-  std::vector<Subscription> bindings_;
-  std::vector<std::shared_ptr<Widget>> widgets_;
+  VNodePtr tree_;
+  Node root_{0};
+  std::string last_rendered_tab_;
 
-  template <typename W, typename... Args>
-  W* own(Args&&... args) {
-    auto w = std::make_shared<W>(std::forward<Args>(args)...);
-    W* p = w.get();
-    widgets_.push_back(std::move(w));
-    return p;
-  }
-  void drop_widgets() { widgets_.clear(); }
-
-  void rebuild_content();
-  void build_tabstrip(Node parent);
-  void build_home(Node parent);
-  void build_home_project(Node parent);
-  void build_home_usage(Node parent);
-  void build_session(Node parent);
-  void build_settings(Node parent);
-  static const char* page_name(Page p);
-  static const char* home_tab_name(HomeTab t);
+  // ---- page builders (return the page body for the active tab) ----
+  VNodePtr build_shell();
+  VNodePtr build_home();
+  VNodePtr build_home_explore();
+  VNodePtr build_home_projects();
+  VNodePtr build_home_usage();
+  VNodePtr build_session();
+  VNodePtr build_settings();
+  VNodePtr build_side_panel();
+  VNodePtr build_terminal_drawer();
+  VNodePtr build_overlays();
 };
 
 }  // namespace ui

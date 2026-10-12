@@ -44,4 +44,13 @@ curl -sL -x $PROXY --max-time 120 -o qjs.tar.xz https://bellard.org/quickjs/quic
 tar -xf qjs.tar.xz -C temp
 cp temp/quickjs-2024-01-13/{libregexp.c,libunicode.c,cutils.h,libregexp.h,libunicode.h,libregexp-opcode.h,libunicode-table.h} 3rdparty/qjs-regex/ 2>/dev/null || true
 rm -f qjs.tar.xz
+# --- reproc (subprocess management; rules/user.md) ---
+# only the C sources + headers; xmake.lua picks the platform files per OS
+mkdir -p 3rdparty/reproc/src 3rdparty/reproc/include/reproc
+curl -sL -x $PROXY --max-time 120 -o reproc.tar.gz https://github.com/DaanDeMeyer/reproc/archive/refs/tags/v14.2.5.tar.gz
+tar -xzf reproc.tar.gz -C temp
+cp temp/reproc-14.2.5/reproc/include/reproc/*.h 3rdparty/reproc/include/reproc/
+cp temp/reproc-14.2.5/reproc/src/*.c temp/reproc-14.2.5/reproc/src/*.h 3rdparty/reproc/src/
+cp temp/reproc-14.2.5/LICENSE 3rdparty/reproc/LICENSE
+rm -f reproc.tar.gz
 echo "3rdparty fetch done"

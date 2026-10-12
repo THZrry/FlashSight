@@ -39,4 +39,15 @@ if exist temp\quickjs-2024-01-13 (
 )
 del /q qjs.zip qjs.tar.xz 2>nul
 rem 如本机已有 WhaleJS：可直接 copy C:\aaa\WhaleJS\src\{libregexp.c,libunicode.c,cutils.h,libregexp.h,libunicode.h,libregexp-opcode.h,libunicode-table.h} 3rdparty\qjs-regex\
+rem --- reproc (subprocess management; rules/user.md) ---
+rem 只用 C 源码 + 头文件；平台文件由 xmake.lua 按 OS 选择
+mkdir 3rdparty\reproc\src 2>nul
+mkdir 3rdparty\reproc\include\reproc 2>nul
+curl -sL -x %PROXY% --max-time 120 -o reproc.tar.gz https://github.com/DaanDeMeyer/reproc/archive/refs/tags/v14.2.5.tar.gz
+tar -xzf reproc.tar.gz -C temp
+copy /y temp\reproc-14.2.5\reproc\include\reproc\*.h 3rdparty\reproc\include\reproc\ >nul
+copy /y temp\reproc-14.2.5\reproc\src\*.c 3rdparty\reproc\src\ >nul
+copy /y temp\reproc-14.2.5\reproc\src\*.h 3rdparty\reproc\src\ >nul
+copy /y temp\reproc-14.2.5\LICENSE 3rdparty\reproc\LICENSE >nul
+del /q reproc.tar.gz
 echo 3rdparty fetch done

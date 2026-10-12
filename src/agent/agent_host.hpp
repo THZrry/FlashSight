@@ -32,6 +32,12 @@ struct AgentHostDeps {
   std::function<FsResult(const ModelCallRequest&, ModelCallResult*)> call_model;
   // 事件扇出（UI 订阅）
   EventFn event;
+  // 终端回调（FsApi 的 TerminalManager；工具层只调回调）
+  std::function<FsResult(const Json&, Json*)> terminal_spawn;
+  std::function<FsResult(const Json&, Json*)> terminal_poll;
+  std::function<FsResult(const Json&, Json*)> terminal_kill;
+  // 网络回调（fetch/search；FsApi 的 NetClient）
+  std::function<FsResult(const Json&, Json*)> net_fetch;
   const Clock* clock = nullptr;
 };
 
