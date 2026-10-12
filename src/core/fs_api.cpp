@@ -2,6 +2,7 @@
 #include "fs_api.hpp"
 
 #include "fs_path.hpp"
+#include "tools/skill_registry.hpp"
 
 namespace fs {
 
@@ -21,6 +22,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   terminals_.reset(new TerminalRegistry(clock_));
   deny_list_.reset(new DenyList());
   plans_.reset(new PlanStore());
+  workflows_.reset(new WorkflowStore(clock_));
   // P2: provider 层
   providers_.reset(new ProviderStore(root_ / "providers.json"));
   model_table_.reset(new ModelTable());
@@ -85,12 +87,26 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     out->error = "";
     return FsResult::success();
   };
-  deps.event = [](const std::string& e, const Json& p) {
-    (void)e;
-    (void)p;
+  deps.event = [this](const std::string& e, const Json& p) {
+    // 子代理完成 -> 推进工作流（addon2）；同时转发给 UI 订阅者
+    if (e == "subagent.done") {
+      std::string sub_id = jsonutil::get<std::string>(p, "id", "");
+      if (!sub_id.empty()) workflow_on_subagent_done(sub_id);
+    }
+    emit_event(e, p);
   };
   agent_host_.reset(new AgentHost(std::move(deps)));
   agent_host_->register_builtin_tools(mcp_registry_.get());
+  // addon2：思考语言设置（工具 skill 中英双语）注入宿主
+  Json tl = settings_->get_value(kKeyThinkingLang, Json("auto"));
+  agent_host_->set_thinking_lang(tl.is_string() ? tl.get<std::string>() : "auto");
+  // addon2：内置示例工作流
+  for (auto& d : builtin_workflows()) workflows_->define(d.to_json());
+}
+
+// 事件扇出：优先给 UI 订阅者；未订阅则丢弃（后端不依赖 UI）
+void FsApi::emit_event(const std::string& event, const Json& payload) {
+  if (event_sink_) event_sink_(event, payload);
 }
 
 FsApi::~FsApi() {}
@@ -176,9 +192,10 @@ FsResult FsApi::session_send(const std::string& sid, const std::string& text,
   Json full;
   FsResult r = sessions_->load_full(sid, &full);
   if (!r.ok()) return r;
-  bool auto_mode = jsonutil::get<bool>(full.value("sessionSettings", Json::object()),
-                                       "autoMode", false);
-  return agent_host_->send(sid, text, attachments, auto_mode);
+  Json ss = full.value("sessionSettings", Json::object());
+  bool auto_mode = jsonutil::get<bool>(ss, "autoMode", false);
+  std::string perm = jsonutil::get<std::string>(ss, "filePerm", "permissive");
+  return agent_host_->send(sid, text, attachments, auto_mode, perm);
 }
 
 FsResult FsApi::session_append(const std::string& sid, const std::string& text) {
@@ -197,15 +214,26 @@ FsResult FsApi::session_cancel_wake(const std::string& sid) {
   return agent_host_->cancel_wake(sid);
 }
 
+// addon2 任务健壮性：打断后续接
+FsResult FsApi::session_continue(const std::string& sid, const std::string& guidance) {
+  return agent_host_->continue_task(sid, guidance);
+}
+
+// approve 档权限门
+FsResult FsApi::session_approve(const std::string& sid, bool yes) {
+  return agent_host_->approve(sid, yes);
+}
+
 // ----- P3: tool.* / ask / subagent / steering -----
 FsResult FsApi::tool_invoke(const std::string& sid, const std::string& name,
                             const Json& args) {
   Json full;
   FsResult r = sessions_->load_full(sid, &full);
   if (!r.ok()) return r;
-  bool auto_mode = jsonutil::get<bool>(full.value("sessionSettings", Json::object()),
-                                       "autoMode", false);
-  return agent_host_->tool_invoke(sid, name, args, auto_mode);
+  Json ss = full.value("sessionSettings", Json::object());
+  bool auto_mode = jsonutil::get<bool>(ss, "autoMode", false);
+  std::string perm = jsonutil::get<std::string>(ss, "filePerm", "permissive");
+  return agent_host_->tool_invoke(sid, name, args, auto_mode, perm);
 }
 
 FsResult FsApi::ask_answer(const std::string& sid, int ask_id,
@@ -231,6 +259,11 @@ FsResult FsApi::subagent_list(const std::string& sid) {
   return agent_host_->subagent_list(sid);
 }
 
+// addon2：子代理引导（子代理无轮概念，只需当前引导）
+FsResult FsApi::subagent_steer(const std::string& id, const std::string& text) {
+  return agent_host_->subagent_steer(id, text);
+}
+
 FsResult FsApi::steering_push(const std::string& sid, const std::string& kind,
                               const std::string& text) {
   return agent_host_->steering_push(sid, kind, text);
@@ -238,6 +271,27 @@ FsResult FsApi::steering_push(const std::string& sid, const std::string& kind,
 
 FsResult FsApi::steering_list(const std::string& sid) {
   return agent_host_->steering_list(sid);
+}
+
+// ----- skill.*（addon2：中英双语 skill，按需加载）-----
+FsResult FsApi::skill_list() {
+  return FsResult::success(
+      agent_host_->skills().list_json(parse_think_lang(agent_host_->thinking_lang())));
+}
+
+FsResult FsApi::skill_load(const std::string& name) {
+  return agent_host_->skills().load(name,
+                                    parse_think_lang(agent_host_->thinking_lang()));
+}
+
+// 浏览器控制 skill 的加载口（addon2：/browser-load 按需加载，不直接提供）
+FsResult FsApi::browser_load() { return skill_load("browser-control"); }
+
+FsResult FsApi::set_thinking_lang(const std::string& lang) {
+  agent_host_->set_thinking_lang(lang);
+  settings_->set_global(kKeyThinkingLang, lang);
+  settings_->save_global();
+  return FsResult::success(Json{{"thinkingLang", lang}});
 }
 
 // ----- terminal.* -----
@@ -382,6 +436,188 @@ FsResult FsApi::plan_update(const std::string& sid, const Json& planTree) {
   // v1：整体替换；delta 合并留 P3（agent-loop.md §7 planDelta）
   plans_->update(sid, planTree);
   return FsResult::success(planTree);
+}
+
+// addon2 长任务-计划：评审（approve/reject/revise + 评价建议）
+// revise：把评价作为引导注入当前会话，模型据此微调计划。
+FsResult FsApi::plan_review(const std::string& sid, const std::string& verdict,
+                            const std::string& comment) {
+  if (verdict != "approve" && verdict != "reject" && verdict != "revise") {
+    return FsResult::error(ErrCode::kInvalidArg, "verdict must be approve|reject|revise");
+  }
+  int64_t now = clock_->now_ms();
+  Json plan = plans_->review(sid, verdict, comment, now);
+  emit_event("plan.reviewed", Json{{"sid", sid}, {"verdict", verdict},
+                                   {"comment", comment}});
+  if (verdict == "revise" && !comment.empty()) {
+    // 评价作为引导注入（走会话引导队列；模型下轮读到并微调）
+    agent_host_->steering_push(sid, "immediate", comment);
+  }
+  return FsResult::success(Json{{"plan", plan}, {"verdict", verdict}});
+}
+
+// ----- workflow.*（addon2 长任务-工作流）-----
+FsResult FsApi::workflow_define(const Json& def) { return workflows_->define(def); }
+
+FsResult FsApi::workflow_list() {
+  return FsResult::success(Json{{"defs", workflows_->list_defs()}});
+}
+
+FsResult FsApi::workflow_start(const std::string& sid, const std::string& name) {
+  const WorkflowDef* def = workflows_->find_def(name);
+  if (!def) return FsResult::error(ErrCode::kNotFound, "workflow not found: " + name);
+  WorkflowRun* run = workflows_->create_run(*def, sid);
+  if (!run) return FsResult::error(ErrCode::kInternal, "create_run failed");
+  emit_event("workflow.started", Json{{"runId", run->id}, {"sid", sid},
+                                      {"name", name}});
+  start_next_pending_step(run);
+  return FsResult::success(run->to_json());
+}
+
+FsResult FsApi::workflow_get(const std::string& runId) {
+  WorkflowRun* run = workflows_->find_run(runId);
+  if (!run) return FsResult::error(ErrCode::kNotFound, "run not found: " + runId);
+  Json j = run->to_json();
+  j["graph"] = run->graph_json();  // 侧栏图/嵌套列表用
+  return FsResult::success(j);
+}
+
+FsResult FsApi::workflow_retry_step(const std::string& runId, const std::string& stepId) {
+  if (!workflows_->retry_step(runId, stepId)) {
+    return FsResult::error(ErrCode::kInvalidArg, "step not failed or not found");
+  }
+  emit_event("workflow.step", Json{{"runId", runId}, {"stepId", stepId},
+                                   {"state", "pending"}});
+  WorkflowRun* run = workflows_->find_run(runId);
+  if (run) start_next_pending_step(run);
+  return FsResult::success(run ? run->to_json() : Json::object());
+}
+
+FsResult FsApi::workflow_skip_step(const std::string& runId, const std::string& stepId) {
+  if (!workflows_->skip_step(runId, stepId)) {
+    return FsResult::error(ErrCode::kNotFound, "step not found: " + stepId);
+  }
+  emit_event("workflow.step", Json{{"runId", runId}, {"stepId", stepId},
+                                   {"state", "skipped"}});
+  WorkflowRun* run = workflows_->find_run(runId);
+  if (run) start_next_pending_step(run);
+  return FsResult::success(run ? run->to_json() : Json::object());
+}
+
+// 用户定向引导到某步的子代理（addon2：工作流也允许用户引导）
+FsResult FsApi::workflow_steer(const std::string& runId, const std::string& stepId,
+                               const std::string& text) {
+  if (!workflows_->steer_step(runId, stepId, text)) {
+    return FsResult::error(ErrCode::kNotFound, "step not found: " + stepId);
+  }
+  // 转发给该步正在运行的子代理（子代理只需当前引导）
+  WorkflowRun* run = workflows_->find_run(runId);
+  if (run) {
+    for (auto& s : run->steps) {
+      if (s.id != stepId) continue;
+      for (auto& a : s.agents) {
+        if (!a.subagentId.empty()) agent_host_->subagent_steer(a.subagentId, text);
+      }
+    }
+  }
+  return FsResult::success();
+}
+
+// 启动某步：spawn 其 agents 子代理（parallel 决定并行/顺序语义，均由 SubagentManager
+// 的并行上限与 spawn 顺序体现）
+FsResult FsApi::start_step(WorkflowRun* run, const std::string& stepId) {
+  if (!run) return FsResult::error(ErrCode::kInternal, "null run");
+  int64_t now = clock_->now_ms();
+  workflows_->mark_step_running(run->id, stepId, now);
+  WorkflowStep* step = nullptr;
+  for (auto& s : run->steps) {
+    if (s.id == stepId) { step = &s; break; }
+  }
+  if (!step) return FsResult::error(ErrCode::kNotFound, "step not found");
+  emit_event("workflow.step", Json{{"runId", run->id}, {"stepId", stepId},
+                                   {"state", "running"}});
+  if (step->agents.empty()) {
+    // 无子代理的步：直接完成
+    workflows_->mark_step_done(run->id, stepId, now);
+    return FsResult::success();
+  }
+  bool spawned_any = false;
+  for (auto& a : step->agents) {
+    std::string sub_id;
+    // cwd 用会话项目根（v1：空=宿主默认）
+    FsResult r = agent_host_->subagent_spawn(run->sid, a.kind, a.task, a.model,
+                                             1, 0, &sub_id);
+    if (r.ok()) {
+      a.subagentId = sub_id;
+      spawned_any = true;
+    } else {
+      // 单个 agent 失败不整体中断：记录错误，步标记 failed（可重试/跳过）
+      workflows_->mark_step_failed(run->id, stepId, r.message, now);
+      return r;
+    }
+  }
+  (void)spawned_any;
+  return FsResult::success();
+}
+
+// 子代理完成回调：推进其所属工作流步（全部 agent 完成后步 -> done）
+void FsApi::workflow_on_subagent_done(const std::string& subagentId) {
+  WorkflowRun* run = workflows_->find_run_by_subagent(subagentId);
+  if (!run) return;
+  int64_t now = clock_->now_ms();
+  FsResult lr = agent_host_->subagent_list(run->sid);
+  Json subs = lr.ok() ? lr.data : Json::array();
+  for (auto& s : run->steps) {
+    if (s.state != StepState::kRunning) continue;
+    bool owns = false;
+    for (auto& a : s.agents) {
+      if (a.subagentId == subagentId) owns = true;
+    }
+    if (!owns) continue;
+    // 该步全部 agent 的 status 都是终态（done/cancelled/timeout）→ 步完成
+    bool all_settled = true;
+    bool any_failed = false;
+    for (auto& a : s.agents) {
+      bool found = false;
+      for (auto& rj : subs) {
+        if (jsonutil::get<std::string>(rj, "id", "") != a.subagentId) continue;
+        found = true;
+        std::string st = jsonutil::get<std::string>(rj, "status", "");
+        if (st == "running") all_settled = false;
+        if (st == "cancelled" || st == "timeout") any_failed = true;
+        break;
+      }
+      if (!found) all_settled = false;
+    }
+    if (!all_settled) return;
+    if (any_failed) {
+      workflows_->mark_step_failed(run->id, s.id, "subagent failed", now);
+      emit_event("workflow.step", Json{{"runId", run->id}, {"stepId", s.id},
+                                       {"state", "failed"}});
+      // 失败不整体中断：等待用户重试/跳过
+      return;
+    }
+    workflows_->mark_step_done(run->id, s.id, now);
+    emit_event("workflow.step", Json{{"runId", run->id}, {"stepId", s.id},
+                                     {"state", "done"}});
+    start_next_pending_step(run);
+    return;
+  }
+}
+
+// 启动下一个 pending 步骤（顺序流水线：前一步 settled 才继续）
+void FsApi::start_next_pending_step(WorkflowRun* run) {
+  if (!run) return;
+  // 找第一个 pending；若其前面的步都 settled（done/skipped），启动它
+  for (auto& s : run->steps) {
+    if (s.state == StepState::kPending) {
+      start_step(run, s.id);
+      return;
+    }
+    if (s.state == StepState::kRunning || s.state == StepState::kFailed) {
+      return;  // 未 settled：等待
+    }
+  }
 }
 
 // ----- lock.*（供 P3 工具层权限门；P1 单测直接调）-----

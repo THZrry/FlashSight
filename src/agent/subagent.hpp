@@ -72,6 +72,13 @@ class SubagentManager {
   // cancel：取消与超时落库
   FsResult cancel(const std::string& id);
 
+  // steer：向运行中的子代理发送引导（addon2 任务健壮性：打断后续接；
+  // 子代理没有轮的概念，只需要当前引导）。文本进入该子代理的引导队列。
+  FsResult steer(const std::string& id, const std::string& text);
+  // 取出并清空该子代理的引导（子代理执行器在工具调用间隙消费）
+  std::string drain_steering(const std::string& id);
+  std::vector<std::string> steering_for(const std::string& id) const;
+
   // 查询
   const SubagentRecord* find(const std::string& id) const;
   std::vector<SubagentRecord> list_for_sid(const std::string& sid) const;
@@ -87,6 +94,7 @@ class SubagentManager {
   const Clock* clock_;
   WallClock default_clock_;
   std::map<std::string, SubagentRecord> records_;
+  std::map<std::string, std::vector<std::string>> steering_;
   int next_id_ = 1;
   SubagentDoneFn done_fn_;
 };

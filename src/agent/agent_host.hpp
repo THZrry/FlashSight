@@ -12,9 +12,11 @@
 #include "fs_error.hpp"
 #include "fs_json.hpp"
 #include "overfit.hpp"
+#include "skill_registry.hpp"
 #include "steering_queue.hpp"
 #include "subagent.hpp"
 #include "mcp_tools.hpp"
+#include "todo_store.hpp"
 #include "tool_registry.hpp"
 #include "wake_scheduler.hpp"
 
@@ -42,8 +44,16 @@ class AgentHost {
 
   // ----- send/append（FsApi session.send/append）-----
   FsResult send(const std::string& sid, const std::string& text,
-                const Json& attachments, bool auto_mode);
+                const Json& attachments, bool auto_mode,
+                const std::string& permission = "permissive");
   FsResult append(const std::string& sid, const std::string& text);
+
+  // 打断后续接（addon2 任务健壮性）：给原任务发送特定引导并续跑
+  FsResult continue_task(const std::string& sid, const std::string& guidance);
+  // 子代理引导（addon2：子代理无轮概念，只需当前引导）
+  FsResult subagent_steer(const std::string& id, const std::string& text);
+  // 批准/拒绝（approve 档权限门）
+  FsResult approve(const std::string& sid, bool yes);
 
   // ----- 挂起/恢复/取消唤醒 -----
   FsResult suspend(const std::string& sid);
@@ -52,7 +62,8 @@ class AgentHost {
 
   // ----- 工具直接调用（FsApi tool.*）-----
   FsResult tool_invoke(const std::string& sid, const std::string& name,
-                       const Json& args, bool auto_mode);
+                       const Json& args, bool auto_mode,
+                       const std::string& permission = "permissive");
 
   // ----- ask 回答（FsApi tool.ask.answer）-----
   FsResult ask_answer(const std::string& sid, int ask_id, const std::string& selection);
@@ -77,6 +88,19 @@ class AgentHost {
   FsResult steering_reorder(const std::string& sid, const std::vector<int>& order);
   FsResult steering_list(const std::string& sid);
 
+  // ----- 进程（todo，addon2 长任务-进程）-----
+  // owner 缺省为 sid；子代理传自己的 id 得到独立进程树
+  FsResult todo_op(const std::string& owner, const Json& args);
+  int todo_pending(const std::string& owner) const;
+  TodoStore& todos() { return todos_; }
+
+  // ----- skill（addon2：中英双语，按需加载）-----
+  SkillRegistry& skills() { return skills_; }
+
+  // 思考语言设置（addon2；"auto|zh|en"）
+  void set_thinking_lang(const std::string& lang) { thinking_lang_ = lang; }
+  const std::string& thinking_lang() const { return thinking_lang_; }
+
   // 工具注册表（测试/上层用）
   ToolRegistry& tools() { return tools_; }
   SubagentManager& subagents() { return subagents_; }
@@ -87,6 +111,9 @@ class AgentHost {
   ToolRegistry tools_;
   SubagentManager subagents_;
   WakeScheduler wakes_;
+  TodoStore todos_;
+  SkillRegistry skills_;
+  std::string thinking_lang_ = "auto";
   std::map<std::string, std::unique_ptr<AgentLoop>> loops_;
   std::map<std::string, SteeringQueue> steering_;
   std::map<std::string, OverfitDetector> overfit_;
@@ -94,7 +121,8 @@ class AgentHost {
   std::map<std::string, std::vector<Json>> pending_keypoints_;
 
   // 或建 Loop
-  AgentLoop& loop_for(const std::string& sid, bool auto_mode);
+  AgentLoop& loop_for(const std::string& sid, bool auto_mode,
+                      const std::string& permission = "permissive");
   // 工具调用上下文
   ToolContext make_ctx(const std::string& sid, bool auto_mode);
   // 事件转发

@@ -94,6 +94,36 @@ const SubagentRecord* SubagentManager::find(const std::string& id) const {
   return it == records_.end() ? nullptr : &it->second;
 }
 
+// steer：向子代理发引导（addon2：子代理只需当前引导，无轮概念）
+FsResult SubagentManager::steer(const std::string& id, const std::string& text) {
+  auto it = records_.find(id);
+  if (it == records_.end()) {
+    return FsResult::error(ErrCode::kNotFound, "subagent not found: " + id);
+  }
+  if (it->second.status != SubagentStatus::kRunning) {
+    return FsResult::error(ErrCode::kBusy, "subagent not running: " + id);
+  }
+  steering_[id].push_back(text);
+  return FsResult::success(Json{{"queued", (int)steering_[id].size()}});
+}
+
+std::string SubagentManager::drain_steering(const std::string& id) {
+  auto it = steering_.find(id);
+  if (it == steering_.end() || it->second.empty()) return "";
+  std::string out;
+  for (size_t i = 0; i < it->second.size(); ++i) {
+    if (i) out += "\n";
+    out += it->second[i];
+  }
+  it->second.clear();
+  return out;
+}
+
+std::vector<std::string> SubagentManager::steering_for(const std::string& id) const {
+  auto it = steering_.find(id);
+  return it == steering_.end() ? std::vector<std::string>() : it->second;
+}
+
 std::vector<SubagentRecord> SubagentManager::list_for_sid(const std::string& sid) const {
   std::vector<SubagentRecord> out;
   for (auto& kv : records_) {

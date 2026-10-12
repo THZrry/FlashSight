@@ -38,3 +38,10 @@ print('dtl patched')
 PY
 
 echo "3rdparty fetch done"
+# --- qjs regex engine (QuickJS, MIT, Fabrice Bellard) ---
+mkdir -p 3rdparty/qjs-regex
+curl -sL -x $PROXY --max-time 120 -o qjs.tar.xz https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
+tar -xf qjs.tar.xz -C temp
+cp temp/quickjs-2024-01-13/{libregexp.c,libunicode.c,cutils.h,libregexp.h,libunicode.h,libregexp-opcode.h,libunicode-table.h} 3rdparty/qjs-regex/ 2>/dev/null || true
+rm -f qjs.tar.xz
+echo "3rdparty fetch done"

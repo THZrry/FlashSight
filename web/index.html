@@ -2,174 +2,22 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>FlashSight 原型</title>
+<meta name="color-scheme" content="light dark">
+<title>FlashSight</title>
 <link rel="stylesheet" href="style.css">
-<style>
-  /* 纯 CSS tab 切换：无 JS */
-  .page-view { display: none; }
-  .page-view:target { display: flex; }
-  #view-home { display: flex; }
-  .page-view:target ~ #view-home { display: none; }
-</style>
 </head>
 <body>
-<div class="titlebar">
-  <span class="app-name">FlashSight</span>
-  <span class="dim" style="color:#aaa">原型 v0.1（静态）</span>
-  <span class="spacer"></span>
-  <button title="最小化">_</button>
-  <button title="最大化">▢</button>
-  <button class="close" title="关闭">✕</button>
-</div>
-<div class="tabstrip">
-  <a class="tab active" href="#view-home">主页</a>
-  <a class="tab" href="#view-session">会话1</a>
-  <a class="tab" href="#view-usage">用量</a>
-  <a class="tab" href="#view-settings">设置</a>
-  <a class="tab new" href="#view-home">+</a>
-</div>
-
-<!-- ============ 会话页 ============ -->
-<div class="page page-view" id="view-session">
-  <div style="display:flex;flex-direction:column;flex:1;min-width:0">
-    <div class="session-topbar">
-      <select title="模型"><option>gpt-4o</option><option>claude-sonnet-4</option></select>
-      <select title="思考强度"><option>标准</option><option>深度</option></select>
-      <select title="文件权限"><option>项目放行</option><option>每次询问</option><option>完整</option></select>
-      <button class="btn">自动挡：开</button>
-      <button class="btn" title="挂起任务">挂起</button>
-      <span class="spacer" style="flex:1"></span>
-      <button class="btn">刷新配置</button>
-    </div>
-    <div class="session-body">
-      <div class="plan-rail">
-        <h3>规划</h3>
-        <div>◉ 实现登录鉴权</div>
-        <div style="margin-left:12px">◉ 接入 OAuth</div>
-        <div style="margin-left:12px">○ 写单测</div>
-        <h3>Git</h3>
-        <div class="dim">main · 已修改 3 · 2分钟前</div>
-      </div>
-      <div class="history">
-        <div class="msg">
-          <div class="role">你 · 10:02</div>
-          <div class="bubble">给登录页加一个“忘记密码”入口</div>
-          <div class="actions"><button>复制</button><button>分叉</button><button>回滚</button><button>遗忘</button><button>diff</button></div>
-        </div>
-        <div class="msg assistant">
-          <div class="role">gpt-4o · 10:03 · 总结：已加入口并通过单测</div>
-          <div class="bubble">已在登录表单下方添加入口，点击跳转 /reset。改动两个文件。</div>
-          <div class="tools">
-            <details class="tool">
-              <summary>file.diffWrite src/login.html … +12 −3</summary>
-              <pre>+  &lt;a href="/reset"&gt;忘记密码&lt;/a&gt;
- …</pre>
-            </details>
-            <details class="tool">
-              <summary>terminal.exec npm test … exit 0</summary>
-              <pre>PASS  login.test.js (1.2s)</pre>
-            </details>
-          </div>
-          <div class="actions"><button>复制</button><button>分叉</button><button>回滚</button><button>遗忘</button><button>diff</button></div>
-          <div class="hint-bar">检测到重复输出 3 次，可 <button class="btn">折叠</button>（过拟合提示，未自动截断）</div>
-        </div>
-        <div class="msg">
-          <div class="role">你 · 正在输入…</div>
-          <div class="bubble dim">流式输出中…</div>
-        </div>
-      </div>
-      <div class="side-rail">
-        <div class="side-tabs">
-          <button class="active">用量</button><button>文件</button><button>操作</button><button>Git</button><button>子代理</button><button>调用</button>
-        </div>
-        <div class="side-pane">
-          <h3>上下文水位 42%</h3>
-          <div class="dim">输入 12.1k / 输出 3.4k · 本会话 ¥0.21</div>
-          <h3>子代理 local-research</h3>
-          <div class="dim">运行中… 摘要稍后回填</div>
-        </div>
-      </div>
-    </div>
-    <div class="input-area">
-      <textarea placeholder="输入消息…（Enter 发送，Shift+Enter 换行；/ 触发指令补全）"></textarea>
-      <div class="input-row">
-        <button class="btn primary">发送/追加</button>
-        <button class="btn">加入文件</button>
-        <button class="btn">/ skill命令</button>
-        <span class="dim">待唤醒：终端 #2 退出后继续（可取消）</span>
-      </div>
-    </div>
-    <div class="terminal-zone">
-      <div class="t-head">#1 pwsh · #2 bash（后台运行中…） [手动停止]</div>
-      <div>$ npm test</div>
-      <div>PASS  login.test.js (1.2s)</div>
-    </div>
-  </div>
-</div>
-
-<!-- ============ 用量页 ============ -->
-<div class="page page-view" id="view-usage">
-  <div class="main">
-    <h2>用量统计</h2>
-    <div class="chart">按模型与时间的柱状图（12h / 1d / 7d / 30d 可调）</div>
-    <div class="chart">模型占比扇形图</div>
-    <h3>Token 分布</h3>
-    <table class="stat"><tr><th>模型</th><th>输入</th><th>输出</th><th>缓存</th></tr>
-    <tr><td>gpt-4o</td><td>120k</td><td>31k</td><td>40k</td></tr></table>
-    <h3>成本分析（钱 / 额度 / 无法统计）</h3>
-    <table class="stat"><tr><th>供应商</th><th>费用</th><th>类型</th></tr>
-    <tr><td>opencode-zen</td><td>0（配额内）</td><td>额度</td></tr></table>
-  </div>
-</div>
-
-<!-- ============ 设置页 ============ -->
-<div class="page page-view" id="view-settings">
-  <div class="settings">
-    <nav>
-      <div class="group">通用</div>
-      <a class="active">常规</a><a>外观</a><a>浏览器控制</a><a>电脑控制</a>
-      <div class="group">模型</div>
-      <a>供应商</a><a>模型偏好</a><a>MCP 与 Skill</a><a>子代理</a><a>长期记忆</a>
-      <div class="group">权限</div>
-      <a>网络</a><a>终端</a><a>文件</a><a>环境</a>
-      <div class="group">其他</div>
-      <a>快捷键</a><a>关于</a>
-    </nav>
-    <div class="content">
-      <h2>供应商设置</h2>
-      <div class="row"><label>供应商</label><select><option>opencode-zen（套餐）</option><option>OpenAI 兼容</option><option>Anthropic</option><option>自定义</option></select></div>
-      <div class="row"><label>Endpoint</label><input type="text" value="https://opencode.ai/zen/v1" size="40"></div>
-      <div class="row"><label>API Key</label><input type="text" value="****" size="40"><button class="btn">测试连接</button></div>
-      <div class="row"><label>自定义 Header</label><input type="text" placeholder="x-opencode-session: auto" size="40"></div>
-      <div class="row"><label></label><button class="btn">一键获取模型列表</button></div>
-      <h2>模型偏好</h2>
-      <div class="row"><label>子代理模型</label><select><option>继承会话</option><option>gpt-4o-mini</option></select></div>
-      <div class="row"><label>摘要模型</label><select><option>继承会话</option></select></div>
-    </div>
-  </div>
-</div>
-
-<!-- ============ 主页 ============ -->
-<div class="page" id="view-home">
-  <div class="sidebar">
-    <h3>项目</h3>
-    <div class="row" style="margin-bottom:6px"><button class="btn">新建</button><button class="btn">打开文件夹</button></div>
-    <ul class="proj-list">
-      <li>FlashSight<div class="path">C:\aaa\FlashSight · 最后会话 2分钟前</div></li>
-      <li>demo-web<div class="path">D:\demo · 昨天</div></li>
-    </ul>
-    <h3>侧栏</h3>
-    <div class="dim">排序：更新时间 ▾ · 搜索框 · 可折叠</div>
-  </div>
-  <div class="main">
-    <h2>项目概览</h2>
-    <p class="dim">点击左侧项目进入最近会话；主页只做清晰的信息显示。</p>
-    <h3>用量速览</h3>
-    <div class="chart">近 7 天柱状（迷你）</div>
-    <h3>待唤醒</h3>
-    <p class="dim">暂无后台任务。</p>
-  </div>
-</div>
-
+<!-- C++ UI (wasm) builds the whole DOM into #fs-root on startup. -->
+<div id="fs-root"></div>
+<script src="fs_ui.js"></script>
+<script>
+  // emscripten runtime ready -> start the C++ UI
+  var Module = Module || {};
+  Module.onRuntimeInitialized = function () {
+    if (typeof Module._fs_ui_start === 'function') {
+      Module._fs_ui_start();
+    }
+  };
+</script>
 </body>
 </html>

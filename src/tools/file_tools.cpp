@@ -8,6 +8,7 @@
 #include <ghc/filesystem.hpp>
 
 #include "fs_path.hpp"
+#include "noise_detect.hpp"
 #include "storage/fs_patch.hpp"
 
 namespace fs {
@@ -53,6 +54,44 @@ ghc::filesystem::path resolve_in(const std::string& cwd, const std::string& rel)
     return ghc::filesystem::path();
   }
   return p;
+}
+
+// full 权限下解析路径：允许项目外（绝对或相对），但仍拒绝 .. 逃逸到无法规范化处
+ghc::filesystem::path resolve_any(const std::string& cwd, const std::string& rel) {
+  ghc::filesystem::path raw(rel);
+  if (raw.is_absolute()) return pathutil::normalize(raw);
+  return pathutil::normalize(pathutil::normalize(cwd) / rel);
+}
+
+// 按权限档解析路径：full -> 项目内外皆可；其余 -> 仅项目内
+ghc::filesystem::path resolve_by_perm(const ToolContext& ctx, const std::string& rel) {
+  if (ctx.permission == "full") {
+    ghc::filesystem::path p = resolve_any(ctx.cwd, rel);
+    return p;
+  }
+  return resolve_in(ctx.cwd, rel);
+}
+
+// 写权限门（addon2 A4 + permissions.md）：approve 档需人工批准（由 Loop 权限门拦），
+// 这里做兜底：非 full 权限时拒绝绝对路径/项目外路径；full 允许项目外。
+FsResult check_write_perm(const ToolContext& ctx, const ghc::filesystem::path& p,
+                          const std::string& rel) {
+  if (ctx.permission == "full") return FsResult::success();
+  ghc::filesystem::path raw(rel);
+  if (raw.is_absolute()) {
+    return FsResult::deny("approve", "absolute path requires full permission");
+  }
+  (void)p;
+  return FsResult::success();
+}
+
+// 写入噪声检测（addon2）：命中则拒绝写盘并提示模型重检查
+FsResult check_noise(const std::string& content) {
+  NoiseReport rep = detect_noise(content);
+  if (!rep.noisy) return FsResult::success();
+  FsResult r = FsResult::error(ErrCode::kInvalidArg, rep.reason);
+  r.data = Json{{"noise", true}, {"suspiciousChars", rep.suspicious_chars}};
+  return r;
 }
 
 }  // namespace
@@ -110,19 +149,25 @@ void register_file_tools(ToolRegistry* registry) {
   }
 
   // file.ls
+  // addon2（用户 2026-10-12）：基础/详细两种模式。
+  // 基础（默认）：只返回文件名列表，省 token；详细：带类型/日期/大小，CSV 多行。
   {
     ToolDef def;
     def.name = "file.ls";
-    def.description = "列目录（默认深度1；含类型与大小）";
+    def.description = "列出目录内容. List directory. "
+                      "detail=false(默认): 仅文件名 one name per line; "
+                      "detail=true: name,type,date,size CSV 每行一个条目.";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
     props["path"] = Json{{"type", "string"}, {"description", "项目内相对路径（默认.）"}};
+    props["detail"] = Json{{"type", "boolean"}, {"description", "详细模式（默认false，仅文件名）"}};
     params["properties"] = props;
     def.parameters = params;
     registry->register_tool("file.ls", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         std::string rel = jsonutil::get<std::string>(args, "path", ".");
+        bool detail = jsonutil::get<bool>(args, "detail", false);
         ghc::filesystem::path p = resolve_in(ctx.cwd, rel);
         if (p.empty()) return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
         std::error_code ec;
@@ -130,16 +175,54 @@ void register_file_tools(ToolRegistry* registry) {
           return FsResult::error(ErrCode::kNotFound, "dir not found: " + rel);
         }
         Json arr = Json::array();
+        // 基础：每行一个文件名
+        std::string names;
+        // 详细：name,type,date,size CSV
+        std::string csv;
         for (auto& e : ghc::filesystem::directory_iterator(p, ec)) {
           Json j = Json::object();
-          j["name"] = e.path().filename().string();
-          j["isDir"] = ghc::filesystem::is_directory(e.path(), ec);
+          std::string name = e.path().filename().string();
+          j["name"] = name;
+          bool isdir = ghc::filesystem::is_directory(e.path(), ec);
+          j["isDir"] = isdir;
           std::error_code ec2;
-          j["size"] = j["isDir"].get<bool>() ? 0
-                      : static_cast<int64_t>(ghc::filesystem::file_size(e.path(), ec2));
+          auto ftime = ghc::filesystem::last_write_time(e.path(), ec2);
+          int64_t size = isdir ? 0
+                          : static_cast<int64_t>(ghc::filesystem::file_size(e.path(), ec2));
+          j["size"] = size;
+          // 日期（epoch 秒，UI/模型自行格式化；避免依赖系统 locale）
+          int64_t mtime = 0;
+          try {
+            mtime = static_cast<int64_t>(ftime.time_since_epoch().count());
+          } catch (...) {}
+          j["mtime"] = mtime;
           arr.push_back(j);
+          if (detail) {
+            // CSV: 名称含逗号时用引号包裹（RFC 4180 简化版）
+            std::string q = name;
+            if (q.find(',') != std::string::npos || q.find('"') != std::string::npos) {
+              std::string esc;
+              for (char c : q) {
+                if (c == '"') esc += "\"\"";
+                else esc += c;
+              }
+              q = "\"" + esc + "\"";
+            }
+            csv += q + "," + (isdir ? "dir" : "file") + "," +
+                   std::to_string(mtime) + "," + std::to_string(size) + "\n";
+          } else {
+            names += name + "\n";
+          }
         }
-        return FsResult::success(Json{{"entries", arr}});
+        Json data = Json::object();
+        data["entries"] = arr;               // 结构化（兼容旧接口）
+        data["detail"] = detail;
+        if (detail) {
+          data["entriesCsv"] = csv;          // name,type,date,size
+        } else {
+          data["names"] = names;             // 基础：仅文件名
+        }
+        return FsResult::success(data);
       });
   }
 
@@ -219,8 +302,12 @@ void register_file_tools(ToolRegistry* registry) {
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         std::string rel = jsonutil::get<std::string>(args, "path", "");
         std::string content = jsonutil::get<std::string>(args, "content", "");
-        ghc::filesystem::path p = resolve_in(ctx.cwd, rel);
+        FsResult perm = check_write_perm(ctx, ghc::filesystem::path(rel), rel);
+        if (!perm.ok()) return perm;
+        ghc::filesystem::path p = resolve_by_perm(ctx, rel);
         if (p.empty()) return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
+        FsResult noise = check_noise(content);
+        if (!noise.ok()) return noise;
         std::string before;
         read_text_file(p, &before);  // 不存在则 before 空
         if (!write_text_file(p, content)) {
@@ -253,8 +340,12 @@ void register_file_tools(ToolRegistry* registry) {
         std::string rel = jsonutil::get<std::string>(args, "path", "");
         std::string oldb = jsonutil::get<std::string>(args, "oldBlock", "");
         std::string newb = jsonutil::get<std::string>(args, "newBlock", "");
-        ghc::filesystem::path p = resolve_in(ctx.cwd, rel);
+        FsResult perm = check_write_perm(ctx, ghc::filesystem::path(rel), rel);
+        if (!perm.ok()) return perm;
+        ghc::filesystem::path p = resolve_by_perm(ctx, rel);
         if (p.empty()) return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
+        FsResult noise = check_noise(newb);
+        if (!noise.ok()) return noise;
         std::string content;
         if (!read_text_file(p, &content)) {
           return FsResult::error(ErrCode::kNotFound, "file not found: " + rel);
@@ -297,7 +388,9 @@ void register_file_tools(ToolRegistry* registry) {
     registry->register_tool("file.rm", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         std::string rel = jsonutil::get<std::string>(args, "path", "");
-        ghc::filesystem::path p = resolve_in(ctx.cwd, rel);
+        FsResult perm = check_write_perm(ctx, ghc::filesystem::path(rel), rel);
+        if (!perm.ok()) return perm;
+        ghc::filesystem::path p = resolve_by_perm(ctx, rel);
         if (p.empty()) return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
         std::error_code ec;
         if (!ghc::filesystem::exists(p, ec)) {

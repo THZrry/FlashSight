@@ -22,4 +22,21 @@ cd 3rdparty\mbedtls-3.6.4
 git clone -q --depth 1 https://github.com/Mbed-TLS/mbedtls-framework.git framework
 cd ..\..
 python -c "p='3rdparty/dtl-1.20/dtl/Diff.hpp'; d=open(p,'rb').read(); o=b'bool               trivial;'; n=b'mutable bool      trivial;'; assert d.count(o)==1; open(p,'wb').write(d.replace(o,n)); print('dtl patched')"
+rem --- qjs regex engine (QuickJS, MIT, Fabrice Bellard) ---
+rem regex 工具用：libregexp + libunicode；来源 quickjs 发行包（与 WhaleJS src 同源）
+mkdir 3rdparty\qjs-regex 2>nul
+curl -sL -x %PROXY% --max-time 120 -o qjs.zip https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
+if errorlevel 1 curl -sL -x %PROXY% --max-time 120 -o qjs.tar.xz https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.5.0.tar.gz
+tar -xf qjs.zip -C temp 2>nul
+if exist temp\quickjs-2024-01-13 (
+  copy /y temp\quickjs-2024-01-13\libregexp.c 3rdparty\qjs-regex\ >nul
+  copy /y temp\quickjs-2024-01-13\libunicode.c 3rdparty\qjs-regex\ >nul
+  copy /y temp\quickjs-2024-01-13\cutils.h 3rdparty\qjs-regex\ >nul
+  copy /y temp\quickjs-2024-01-13\libregexp.h 3rdparty\qjs-regex\ >nul
+  copy /y temp\quickjs-2024-01-13\libunicode.h 3rdparty\qjs-regex\ >nul
+  copy /y temp\quickjs-2024-01-13\libregexp-opcode.h 3rdparty\qjs-regex\ >nul
+  copy /y temp\quickjs-2024-01-13\libunicode-table.h 3rdparty\qjs-regex\ >nul
+)
+del /q qjs.zip qjs.tar.xz 2>nul
+rem 如本机已有 WhaleJS：可直接 copy C:\aaa\WhaleJS\src\{libregexp.c,libunicode.c,cutils.h,libregexp.h,libunicode.h,libregexp-opcode.h,libunicode-table.h} 3rdparty\qjs-regex\
 echo 3rdparty fetch done

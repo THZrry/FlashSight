@@ -2,6 +2,7 @@
 // 同进程函数调用；以后整体换 HTTP（UI 与后端不耦合）。
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -19,6 +20,7 @@
 #include "core/shell_detect.hpp"
 #include "core/terminal_registry.hpp"
 #include "core/usage_store.hpp"
+#include "core/workflow.hpp"
 #include "agent/agent_host.hpp"
 #include "provider/model_table.hpp"
 #include "provider/provider_client.hpp"
@@ -72,6 +74,10 @@ class FsApi {
   FsResult session_suspend(const std::string& sid);
   FsResult session_resume(const std::string& sid);
   FsResult session_cancel_wake(const std::string& sid);
+  // addon2 任务健壮性：打断后续接（给原任务发引导并续跑）
+  FsResult session_continue(const std::string& sid, const std::string& guidance);
+  // approve 档权限门：批准/拒绝当前等待的 tool
+  FsResult session_approve(const std::string& sid, bool yes);
 
   // ----- terminal.*（注册表部分 P1；spawn/exec 实际执行 P3 reproc）-----
   FsResult terminal_list(const std::string& sid);
@@ -96,6 +102,19 @@ class FsApi {
   // ----- plan.* -----
   FsResult plan_get(const std::string& sid);
   FsResult plan_update(const std::string& sid, const Json& planTree);
+  // addon2：计划评审（approve/reject/revise + 评价建议；revise 注入引导微调）
+  FsResult plan_review(const std::string& sid, const std::string& verdict,
+                       const std::string& comment);
+
+  // ----- workflow.*（addon2 长任务-工作流）-----
+  FsResult workflow_define(const Json& def);
+  FsResult workflow_list();
+  FsResult workflow_start(const std::string& sid, const std::string& name);
+  FsResult workflow_get(const std::string& runId);
+  FsResult workflow_retry_step(const std::string& runId, const std::string& stepId);
+  FsResult workflow_skip_step(const std::string& runId, const std::string& stepId);
+  FsResult workflow_steer(const std::string& runId, const std::string& stepId,
+                          const std::string& text);
 
   // ----- 锁（供 P3 工具层过权限门用；P1 单测直接调）-----
   FsResult lock_acquire(const std::string& sid);  // 按会话权限档申请项目写锁
@@ -117,6 +136,8 @@ class FsApi {
                           int depth, int64_t timeout_ms);
   FsResult subagent_cancel(const std::string& id);
   FsResult subagent_list(const std::string& sid);
+  // addon2：子代理引导（子代理无轮概念，只需当前引导）
+  FsResult subagent_steer(const std::string& id, const std::string& text);
   // ----- steering.*（addon1.md 引导队列）-----
   FsResult steering_push(const std::string& sid, const std::string& kind,
                          const std::string& text);
@@ -126,6 +147,13 @@ class FsApi {
   FsResult provider_remove_provider(const std::string& providerId);
   FsResult provider_list_models(const std::string& providerId);
   FsResult provider_test_connection(const std::string& providerId);
+  // ----- skill.*（addon2：中英双语 skill，按需加载）-----
+  FsResult skill_list();
+  FsResult skill_load(const std::string& name);
+  // 浏览器控制 skill 的加载口（addon2：不直接提供，用 /browser-load 按需加载）
+  FsResult browser_load();
+  // 思考语言（"auto|zh|en"）
+  FsResult set_thinking_lang(const std::string& lang);
   FsResult mcp_stub() {
     return FsResult::error(ErrCode::kNotSupported, "mcp: P3");
   }
@@ -139,12 +167,26 @@ class FsApi {
   TerminalRegistry& terminals() { return *terminals_; }
   DenyList& deny_list() { return *deny_list_; }
   PlanStore& plans() { return *plans_; }
+  WorkflowStore& workflows() { return *workflows_; }
+
+  // 事件订阅（P4 UI 接入；addon2 工作流推进也经此驱动）
+  void set_event_sink(std::function<void(const std::string&, const Json&)> sink) {
+    event_sink_ = std::move(sink);
+  }
 
  private:
   // 确保某个 pid 的项目级 SettingsStore 已构建（无 pid 用空路径占位 = 只有全局）
   SettingsStore& store_for(const std::string& pid);
   // 项目注册表里查 pid 的路径（未注册返回空串）
   std::string path_for(const std::string& pid) const;
+  // 工作流：启动某步（spawn 其 agents 的子代理）
+  FsResult start_step(WorkflowRun* run, const std::string& stepId);
+  // 工作流：子代理完成时推进（全 settled -> done/failed，再启下一步）
+  void workflow_on_subagent_done(const std::string& subagentId);
+  // 工作流：启动下一个 pending 步骤（顺序流水线）
+  void start_next_pending_step(WorkflowRun* run);
+  // 事件扇出（UI 订阅；未订阅则丢弃）
+  void emit_event(const std::string& event, const Json& payload);
 
   ghc::filesystem::path root_;
   WallClock default_clock_;
@@ -162,6 +204,8 @@ class FsApi {
   std::unique_ptr<TerminalRegistry> terminals_;
   std::unique_ptr<DenyList> deny_list_;
   std::unique_ptr<PlanStore> plans_;
+  std::unique_ptr<WorkflowStore> workflows_;
+  std::function<void(const std::string&, const Json&)> event_sink_;
   // P2: provider 层
   std::unique_ptr<ProviderStore> providers_;
   std::unique_ptr<ModelTable> model_table_;

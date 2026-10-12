@@ -2,11 +2,16 @@
 #include "agent_host.hpp"
 
 #include "ask_tool.hpp"
+#include "check_dir_tools.hpp"
 #include "file_tools.hpp"
+#include "lsp_tools.hpp"
 #include "mcp_tools.hpp"
 #include "net_tools.hpp"
+#include "regex_tools.hpp"
+#include "skill_registry.hpp"
 #include "summarize_tool.hpp"
 #include "term_tools.hpp"
+#include "todo_tools.hpp"
 #include "vision_tools.hpp"
 
 namespace fs {
@@ -41,19 +46,29 @@ void AgentHost::emit(const std::string& event, const Json& payload) {
 
 void AgentHost::register_builtin_tools(McpRegistry* mcp) {
   register_file_tools(&tools_);
+  register_check_dir_tools(&tools_);
   register_term_tools(&tools_);
   register_net_tools(&tools_);
   register_vision_tools(&tools_);
   register_mcp_tools(&tools_, mcp);
   register_ask_tool(&tools_);
+  register_regex_tools(&tools_);
+  register_todo_tools(&tools_);
+  register_lsp_tools(&tools_);
+  register_skill_tools(&tools_, &skills_);
   register_summarize_tool(&tools_);
 }
 
-AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode) {
+AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
+                               const std::string& permission) {
   auto it = loops_.find(sid);
-  if (it != loops_.end()) return *it->second;
+  if (it != loops_.end()) {
+    it->second->set_permission(permission);
+    return *it->second;
+  }
   AgentLoop::Options opts;
   opts.sid = sid;
+  opts.permission = permission;
   opts.event = [this](const std::string& e, const Json& p) { emit(e, p); };
   (void)auto_mode;
   auto loop = std::unique_ptr<AgentLoop>(new AgentLoop(std::move(opts)));
@@ -64,6 +79,18 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode) {
     }
     return deps_.call_model(req, out);
   };
+  // 工具执行走宿主注入的 invoke_tool（addon2：工具真调）
+  // 补齐 Loop 层拿不到的宿主上下文：cwd/pid/todo_op（进程工具）
+  loop->invoke_tool = [this](const ToolContext& in, const std::string& name,
+                             const Json& args) -> FsResult {
+    ToolContext ctx = in;
+    ctx.todo_op = [this, in](const Json& a, Json* out) -> FsResult {
+      FsResult r = todo_op(in.sid, a);
+      if (r.ok() && out) *out = r.data;
+      return r;
+    };
+    return tools_.invoke(ctx, name, args);
+  };
   AgentLoop& ref = *loop;
   loops_[sid] = std::move(loop);
   return ref;
@@ -73,6 +100,7 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
   ToolContext ctx;
   ctx.sid = sid;
   ctx.auto_mode = auto_mode;
+  ctx.thinking_lang = thinking_lang_;
   // emit 闭包自动注入 sid（session.keypoint 等需要归属会话）
   ctx.emit = [this, sid](const std::string& e, const Json& p) {
     Json pp = p.is_object() ? p : Json::object();
@@ -84,20 +112,96 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
     ToolContext inner = make_ctx(sid, auto_mode);
     return tools_.invoke(inner, name, args);
   };
+  // 进程（todo）：owner = 会话 sid（子代理上下文由 spawn 时另建 ctx 覆盖 owner）
+  ctx.todo_op = [this, sid](const Json& args, Json* out) -> FsResult {
+    FsResult r = todo_op(sid, args);
+    if (r.ok() && out) *out = r.data;
+    return r;
+  };
   // terminal/net 回调由 FsApi 层注入（v1 留空，工具返回 not-wired）
   return ctx;
 }
 
+// 进程（todo）操作：owner 为会话 sid 或子代理 id（addon2：子代理独立进程树）
+FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
+  std::string op = jsonutil::get<std::string>(args, "op", "");
+  int64_t now = deps_.clock ? deps_.clock->now_ms() : 0;
+  if (op == "add") {
+    std::string task = jsonutil::get<std::string>(args, "task", "");
+    if (task.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty task");
+    int id = todos_.add(owner, task);
+    emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
+    return FsResult::success(Json{{"id", id}, {"items", todos_.to_json(owner)}});
+  }
+  if (op == "list") {
+    return FsResult::success(
+        Json{{"items", todos_.to_json(owner)}, {"pending", todos_.pending_count(owner)}});
+  }
+  if (op == "check") {
+    int id = static_cast<int>(jsonutil::get_int(args, "id", 0));
+    bool done = jsonutil::get<bool>(args, "done", true);
+    if (!todos_.check(owner, id, done, now)) {
+      return FsResult::error(ErrCode::kNotFound, "todo item not found");
+    }
+    emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
+    return FsResult::success(Json{{"items", todos_.to_json(owner)},
+                                  {"pending", todos_.pending_count(owner)}});
+  }
+  if (op == "erase") {
+    int id = static_cast<int>(jsonutil::get_int(args, "id", 0));
+    if (!todos_.erase(owner, id)) {
+      return FsResult::error(ErrCode::kNotFound, "todo item not found");
+    }
+    return FsResult::success(Json{{"items", todos_.to_json(owner)}});
+  }
+  if (op == "clear") {
+    todos_.clear(owner);
+    emit("todo.updated", Json{{"owner", owner}, {"items", Json::array()}});
+    return FsResult::success(Json{{"items", Json::array()}});
+  }
+  return FsResult::error(ErrCode::kInvalidArg, "unknown todo op: " + op);
+}
+
+int AgentHost::todo_pending(const std::string& owner) const {
+  return todos_.pending_count(owner);
+}
+
 FsResult AgentHost::send(const std::string& sid, const std::string& text,
-                         const Json& attachments, bool auto_mode) {
+                         const Json& attachments, bool auto_mode,
+                         const std::string& permission) {
   (void)attachments;
-  AgentLoop& loop = loop_for(sid, auto_mode);
+  AgentLoop& loop = loop_for(sid, auto_mode, permission);
   return loop.send(text);
 }
 
 FsResult AgentHost::append(const std::string& sid, const std::string& text) {
   AgentLoop& loop = loop_for(sid, false);
   return loop.append(text);
+}
+
+// addon2 任务健壮性：打断后续接（给原任务发引导，从断点续跑）
+FsResult AgentHost::continue_task(const std::string& sid, const std::string& guidance) {
+  auto it = loops_.find(sid);
+  if (it == loops_.end()) {
+    return FsResult::error(ErrCode::kNotFound, "no loop for session: " + sid);
+  }
+  return it->second->continue_task(guidance);
+}
+
+// addon2：子代理引导（子代理没有轮的概念，只需当前引导）
+FsResult AgentHost::subagent_steer(const std::string& id, const std::string& text) {
+  FsResult r = subagents_.steer(id, text);
+  if (r.ok()) emit("subagent.steered", Json{{"id", id}});
+  return r;
+}
+
+// 权限门批准/拒绝（approve 档）
+FsResult AgentHost::approve(const std::string& sid, bool yes) {
+  auto it = loops_.find(sid);
+  if (it == loops_.end()) {
+    return FsResult::error(ErrCode::kNotFound, "no loop for session: " + sid);
+  }
+  return it->second->approve(yes);
 }
 
 FsResult AgentHost::suspend(const std::string& sid) {
@@ -123,12 +227,14 @@ FsResult AgentHost::cancel_wake(const std::string& sid) {
 }
 
 FsResult AgentHost::tool_invoke(const std::string& sid, const std::string& name,
-                                const Json& args, bool auto_mode) {
+                                const Json& args, bool auto_mode,
+                                const std::string& permission) {
   // 自动模式：ask 已从工具列表移除
   if (auto_mode && name == "ask") {
     return FsResult::error(ErrCode::kBusy, "ask not available in auto mode");
   }
   ToolContext ctx = make_ctx(sid, auto_mode);
+  ctx.permission = permission;
   FsResult r = tools_.invoke(ctx, name, args);
   // 落库 tool 调用记录（由调用方拼 turn；此处发 tool.update 事件）
   emit("tool.update", Json{{"sid", sid}, {"name", name}, {"ok", r.ok()}});

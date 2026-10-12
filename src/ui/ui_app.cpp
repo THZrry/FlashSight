@@ -1,4 +1,4 @@
-// ui_app.cpp - UiApp 实现（Widget 库装配；class 名与 web 原型一致）
+// ui_app.cpp - UiApp 实现（顶部标签页模式；class 名与 web/index.html 一致）
 #include "ui_app.hpp"
 
 namespace fs {
@@ -10,20 +10,31 @@ UiApp::UiApp(IDom& dom, AppState state, IUiBackend* backend)
 const char* UiApp::page_name(Page p) {
   switch (p) {
     case Page::kHome: return "主页";
-    case Page::kSession: return "会话";
-    case Page::kUsage: return "用量";
+    case Page::kSession: return "会话1";
     case Page::kSettings: return "设置";
+  }
+  return "";
+}
+
+const char* UiApp::home_tab_name(HomeTab t) {
+  switch (t) {
+    case HomeTab::kExplore: return "探索";
+    case HomeTab::kProject: return "项目";
+    case HomeTab::kUsage: return "用量统计";
   }
   return "";
 }
 
 void UiApp::mount() {
   Node root = dom_.root();
-  build_titlebar(root);
-  build_tabs(root);
+  Node win = dom_.create("div", "window", "");
+  dom_.append(root, win);
+  build_tabstrip(win);
   content_ = dom_.create("div", "page", "");
-  dom_.append(root, content_);
+  dom_.append(win, content_);
   bindings_.push_back(state_.page->subscribe([this](const Page&) { rebuild_content(); }));
+  bindings_.push_back(
+      state_.home_tab->subscribe([this](const HomeTab&) { rebuild_content(); }));
   rebuild_content();
 }
 
@@ -35,174 +46,264 @@ void UiApp::rebuild_content() {
   switch (state_.page->get()) {
     case Page::kHome: build_home(content_); break;
     case Page::kSession: build_session(content_); break;
-    case Page::kUsage: build_usage(content_); break;
     case Page::kSettings: build_settings(content_); break;
   }
 }
 
-void UiApp::build_titlebar(Node parent) {
-  Node bar = dom_.create("div", "titlebar", "");
-  Node name = dom_.create("span", "app-name", "");
-  dom_.append(bar, name);
-  bindings_.push_back(bind_text(dom_, name, state_.title));
+// 顶部 tab 条（唯一导航模式）
+void UiApp::build_tabstrip(Node parent) {
+  Node bar = dom_.create("div", "tabs", "");
+  const Page pages[2] = {Page::kHome, Page::kSession};
+  for (int i = 0; i < 2; ++i) {
+    bool active = state_.page->get() == pages[i];
+    Node t = dom_.create("a", active ? "tab active" : "tab", page_name(pages[i]));
+    Page p = pages[i];
+    dom_.on(t, EventKind::kClick, [this, p](const std::string&) { show(p); });
+    dom_.append(bar, t);
+  }
+  Node spacer = dom_.create("span", "spacer", "");
+  dom_.append(bar, spacer);
+  Node add = dom_.create("a", "tab add", "+");
+  dom_.append(bar, add);
   dom_.append(parent, bar);
 }
 
-void UiApp::build_tabs(Node parent) {
-  std::vector<std::string> titles = {"主页", "会话", "用量", "设置"};
-  auto cur = Signal<int>::make(0);
-  // tab 与 page 双向：点击切页
-  std::vector<Tabs::PageFn> pages(4);
-  Tabs* tabs = own<Tabs>(dom_, titles, cur, pages);
-  // tab 点击后同步 AppState（Tabs 内部只切自己的 current）
-  auto page = state_.page;
-  cur->subscribe([this, page](const int& idx) {
-    const Page ps[4] = {Page::kHome, Page::kSession, Page::kUsage, Page::kSettings};
-    if (idx >= 0 && idx < 4) page->set(ps[idx]);
-  });
-  tabs->mount(parent);
-  (void)pages;
-}
-
+// ---------- 主页 ----------
 void UiApp::build_home(Node parent) {
-  Node side = dom_.create("div", "sidebar", "");
-  own<Text>(dom_, "项目", "")->mount(side);
-  // 项目列表（v1 静态两行；P4 接后端 project.list）
-  Node list = dom_.create("ul", "proj-list", "");
-  dom_.append(side, list);
-  Node item = dom_.create("li", "", "FlashSight");
-  dom_.append(list, item);
-  dom_.append(parent, side);
-  Node main = dom_.create("div", "main", "");
-  own<Text>(dom_, "项目概览", "")->mount(main);
-  own<Text>(dom_, "点击左侧项目进入最近会话。", "dim")->mount(main);
-  // 搜索框（addon1 侧栏搜索）
-  own<SearchBox>(dom_, [](const std::string&) {}, "搜索项目/会话…")->mount(main);
-  dom_.append(parent, main);
+  Node inner = dom_.create("div", "page-inner", "");
+  // 子 tab（探索/项目/用量统计）
+  Node sub = dom_.create("div", "subtabs", "");
+  const HomeTab tabs[3] = {HomeTab::kExplore, HomeTab::kProject, HomeTab::kUsage};
+  for (int i = 0; i < 3; ++i) {
+    bool active = state_.home_tab->get() == tabs[i];
+    Node t = dom_.create("a", active ? "tab active" : "tab", home_tab_name(tabs[i]));
+    HomeTab h = tabs[i];
+    dom_.on(t, EventKind::kClick, [this, h](const std::string&) { state_.home_tab->set(h); });
+    dom_.append(sub, t);
+  }
+  dom_.append(inner, sub);
+  switch (state_.home_tab->get()) {
+    case HomeTab::kProject: build_home_project(inner); break;
+    case HomeTab::kUsage: build_home_usage(inner); break;
+    case HomeTab::kExplore: {
+      Node box = dom_.create("div", "big-card dim", "探索（暂未开放）");
+      dom_.append(inner, box);
+      break;
+    }
+  }
+  // 底栏药丸
+  Node foot = dom_.create("div", "footbar", "");
+  own<Button>(dom_, "⚙ 设置", [this](const std::string&) { show(Page::kSettings); })
+      ->mount(foot);
+  IUiBackend* be = backend_;
+  own<Button>(dom_, "新建项目", [be](const std::string&) {
+    if (be) be->call("project.create", Json::object());
+  })->mount(foot);
+  own<Button>(dom_, "打开文件夹", [be](const std::string&) {
+    if (be) be->call("project.open", Json::object());
+  })->mount(foot);
+  dom_.append(inner, foot);
+  dom_.append(parent, inner);
 }
 
-void UiApp::build_session(Node parent) {
-  Node wrap = dom_.create("div", "", "");
-  dom_.set_attr(wrap, "style", "display:flex;flex-direction:column;flex:1;min-width:0");
-
-  // ---- 顶栏：模型/权限 Select + 自动挡 Toggle + 挂起 Button（label 绑定）+ 刷新 ----
-  Node top = dom_.create("div", "session-topbar", "");
-  std::vector<std::string> models = {"gpt-4o", "claude-sonnet-4", "gpt-4o-mini"};
-  own<Select>(dom_, models, state_.model_index)->mount(top);
-  std::vector<std::string> perms = {"项目放行", "每次询问", "完整"};
-  own<Select>(dom_, perms, state_.perm_index)->mount(top);
-  own<Toggle>(dom_, state_.auto_mode)->mount(top);
-  // 挂起按钮：label 随 suspended 切换
-  auto suspend_label = Signal<std::string>::make("挂起");
-  {
-    auto s = state_.suspended;
-    auto l = suspend_label;
-    state_.suspended->subscribe([s, l](const bool&) {
-      l->set(s->get() ? "恢复" : "挂起");
-    });
+void UiApp::build_home_project(Node parent) {
+  Node home = dom_.create("div", "home", "");
+  Node list = dom_.create("div", "list-col", "");
+  // v1 静态项目行；P4 接 project.list
+  const char* names[2] = {"项目1", "demo-web"};
+  for (int i = 0; i < 2; ++i) {
+    Node it = dom_.create("div", "item", "");
+    Node n = dom_.create("span", "", names[i]);
+    dom_.append(it, n);
+    Node arrow = dom_.create("span", "dim", "›");
+    dom_.append(it, arrow);
+    dom_.append(list, it);
   }
-  auto susp = state_.suspended;
-  own<Button>(dom_, suspend_label, [susp](const std::string&) { susp->set(!susp->get()); })
-      ->mount(top);
-  IUiBackend* be = backend_;
-  own<Button>(dom_, "刷新配置", [be](const std::string&) {
-    if (be) be->call("session.refreshConfig", Json::object());
-  })->mount(top);
-  dom_.append(wrap, top);
+  dom_.append(home, list);
+  Node card = dom_.create("div", "big-card dim", "（选中项目的最近会话与概览）");
+  dom_.append(home, card);
+  dom_.append(parent, home);
+}
 
-  // ---- 历史区：规划 Accordion + 消息 ListView + 右侧 Tabs ----
-  Node body = dom_.create("div", "session-body", "");
-  auto plan_open = Signal<bool>::make(true);
-  own<Accordion>(dom_, "规划", plan_open, [](IDom& d, Node p) {
-    Node t = d.create("div", "", "◉ 实现登录鉴权\n◉ 接入 OAuth\n○ 写单测");
-    d.append(p, t);
-  })->mount(body);
-  // 消息列表（v1 静态 3 行占位；P4 接虚拟化历史）
+void UiApp::build_home_usage(Node parent) {
+  Node usage = dom_.create("div", "usage", "");
+  Node list = dom_.create("div", "list-col", "");
+  const char* rows[3] = {"总计", "供应商1", "供应商2"};
+  for (int i = 0; i < 3; ++i) {
+    Node it = dom_.create("div", "item", "");
+    Node n = dom_.create("span", "", rows[i]);
+    dom_.append(it, n);
+    Node arrow = dom_.create("span", "dim", "›");
+    dom_.append(it, arrow);
+    dom_.append(list, it);
+  }
+  dom_.append(usage, list);
+  Node panel = dom_.create("div", "panel", "");
+  Node b1 = dom_.create("div", "block tall", "按模型与时间的柱状统计图（12h/1天/7天/30天）");
+  dom_.append(panel, b1);
+  Node row = dom_.create("div", "row", "");
+  Node b2 = dom_.create("div", "block grow", "模型扇形统计图");
+  Node b3 = dom_.create("div", "block grow", "token 分布表格");
+  dom_.append(row, b2);
+  dom_.append(row, b3);
+  dom_.append(panel, row);
+  Node b4 = dom_.create("div", "block tall", "成本分析表格（钱/额度/无法统计）");
+  dom_.append(panel, b4);
+  dom_.append(usage, panel);
+  dom_.append(parent, usage);
+}
+
+// ---------- 会话 ----------
+void UiApp::build_session(Node parent) {
+  Node inner = dom_.create("div", "page-inner", "");
+  Node sess = dom_.create("div", "session", "");
+
+  // 规划药丸
+  own<Button>(dom_, "规划", [this](const std::string&) {
+    state_.plan_open->set(!state_.plan_open->get());
+  })->mount(sess);
+
+  // 中部：历史 + 侧栏
+  Node mid = dom_.create("div", "mid", "");
+  Node hist = dom_.create("div", "history", "");
+  // 消息列表（v1 静态 3 条；P4 虚拟化）
   auto msg_count = Signal<int>::make(3);
   own<ListView>(dom_, msg_count, 10, [](IDom& d, Node p, int i) {
     Node m = d.create("div", "msg", "");
-    Node b = d.create("div", "bubble", i == 2 ? "流式输出中…" : "历史消息");
+    Node role = d.create("div", "role", i == 0 ? "你" : "gpt-4o");
+    d.append(m, role);
+    Node b = d.create("div", "bubble", i == 2 ? "流式输出中…" : "历史消息内容");
     d.append(m, b);
     d.append(p, m);
-  })->mount(body);
-  // 右侧栏 Tabs
+  })->mount(hist);
+  dom_.append(mid, hist);
+
+  Node side = dom_.create("div", "sidebar", "");
   std::vector<std::string> side_titles = {"用量", "文件", "操作", "Git", "子代理", "调用"};
   std::vector<Tabs::PageFn> side_pages(6);
   side_pages[0] = [](IDom& d, Node p) {
-    Node t = d.create("div", "side-pane", "上下文水位 42%");
+    Node t = d.create("div", "dim", "上下文水位 42% · 本会话 ¥0.21");
     d.append(p, t);
   };
-  own<Tabs>(dom_, side_titles, state_.side_tab, side_pages)->mount(body);
-  dom_.append(wrap, body);
+  own<Tabs>(dom_, side_titles, state_.side_tab, side_pages)->mount(side);
+  dom_.append(mid, side);
+  dom_.append(sess, mid);
 
-  // ---- 输入区 ----
-  Node input = dom_.create("div", "input-area", "");
+  // 输入区（composer）
+  Node comp = dom_.create("div", "composer", "");
   own<TextArea>(dom_, state_.session_input, "输入消息…（Enter 发送，Shift+Enter 换行）")
-      ->mount(input);
-  IUiBackend* be2 = backend_;
+      ->mount(comp);
+  Node tools = dom_.create("div", "tools", "");
+  own<Button>(dom_, "+ 加入文件", [](const std::string&) {})->mount(tools);
+  own<Button>(dom_, "/ skill命令", [](const std::string&) {})->mount(tools);
+  Node grow = dom_.create("span", "grow", "");
+  dom_.append(tools, grow);
+  auto susp = state_.suspended;
+  auto susp_label = Signal<std::string>::make("挂起（暂停）");
+  {
+    auto s = susp;
+    auto l = susp_label;
+    state_.suspended->subscribe([s, l](const bool&) {
+      l->set(s->get() ? "恢复" : "挂起（暂停）");
+    });
+  }
+  own<Button>(dom_, susp_label, [susp](const std::string&) { susp->set(!susp->get()); })
+      ->mount(tools);
+  IUiBackend* be = backend_;
   auto sinput = state_.session_input;
-  own<Button>(dom_, "发送/追加", [be2, sinput](const std::string&) {
-    if (be2 && !sinput->get().empty()) {
+  own<Button>(dom_, "发送/追加", [be, sinput](const std::string&) {
+    if (be && !sinput->get().empty()) {
       Json args = Json::object();
       args["text"] = sinput->get();
-      be2->call("session.send", args);
+      be->call("session.send", args);
       sinput->set("");
     }
-  }, true)->mount(input);
-  dom_.append(wrap, input);
+  })->mount(tools);
+  dom_.append(comp, tools);
+  dom_.append(sess, comp);
 
-  // ---- ask 弹窗 ----
-  own<Modal>(dom_, state_.ask_modal, "需要确认", [](IDom& d, Node p) {
-    Node t = d.create("div", "", "模型请求确认，请选择。");
-    d.append(p, t);
-  }, [](const std::string&) {})->mount(wrap);
+  // ask 弹窗
+  own<Modal>(dom_, state_.ask_modal, "需要确认",
+             [](IDom& d, Node p) {
+               Node t = d.create("div", "", "模型请求确认，请选择。");
+               d.append(p, t);
+             },
+             [](const std::string&) {})
+      ->mount(sess);
 
-  // ---- 终端区（绑定显隐） ----
-  Node term = dom_.create("div", "terminal-zone", "#1 shell · 手动停止");
-  dom_.append(wrap, term);
+  // 终端抽屉（默认隐藏）
+  Node term = dom_.create("div", "terminal", "");
+  Node th = dom_.create("div", "th", "#1 pwsh · 手动停止");
+  dom_.append(term, th);
   bindings_.push_back(bind_visible(dom_, term, state_.terminal_visible));
+  dom_.append(sess, term);
 
-  dom_.append(parent, wrap);
+  dom_.append(inner, sess);
+  dom_.append(parent, inner);
 }
 
-void UiApp::build_usage(Node parent) {
-  Node main = dom_.create("div", "main", "");
-  own<Text>(dom_, "用量统计", "")->mount(main);
-  // 上下文水位进度条
-  own<Progress>(dom_, state_.context_pct)->mount(main);
-  Node c1 = dom_.create("div", "chart", "按模型与时间的柱状图");
-  dom_.append(main, c1);
-  Node c2 = dom_.create("div", "chart", "模型占比扇形图");
-  dom_.append(main, c2);
-  dom_.append(parent, main);
-}
-
+// ---------- 设置 ----------
 void UiApp::build_settings(Node parent) {
   Node wrap = dom_.create("div", "settings", "");
-  // 左导航 Tabs（纵向用普通按钮列；v1 简化）
-  Node nav = dom_.create("nav", "", "");
+  Node nav = dom_.create("div", "nav", "");
   const char* groups[4] = {"通用", "模型", "权限", "其他"};
-  for (int i = 0; i < 4; ++i) {
-    Node g = dom_.create("div", "group", groups[i]);
-    dom_.append(nav, g);
+  const char* items[4][5] = {
+      {"常规", "外观", "浏览器控制", "电脑控制", ""},
+      {"供应商", "模型偏好", "MCP 与 Skill", "子代理", "长期记忆"},
+      {"网络", "终端", "文件", "环境", ""},
+      {"快捷键", "关于", "", "", ""},
+  };
+  for (int g = 0; g < 4; ++g) {
+    Node grp = dom_.create("div", "grp", groups[g]);
+    dom_.append(nav, grp);
+    for (int i = 0; i < 5; ++i) {
+      if (items[g][i][0] == '\0') break;
+      Node n = dom_.create("div", "n", items[g][i]);
+      dom_.append(nav, n);
+    }
   }
   dom_.append(wrap, nav);
-  Node content = dom_.create("div", "content", "");
-  own<Text>(dom_, "供应商设置", "")->mount(content);
-  std::vector<std::string> provs = {"opencode-zen（套餐）", "OpenAI 兼容", "Anthropic", "自定义"};
-  auto prov_idx = Signal<int>::make(0);
-  own<Select>(dom_, provs, prov_idx)->mount(content);
+
+  Node body = dom_.create("div", "body", "");
+  Node h = dom_.create("h2", "", "供应商设置");
+  dom_.set_attr(h, "style", "margin:0 0 14px");
+  dom_.append(body, h);
+  Node f1 = dom_.create("div", "field", "");
+  Node l1 = dom_.create("label", "", "供应商");
+  dom_.append(f1, l1);
+  std::vector<std::string> provs = {"opencode-zen（套餐）", "[OI] 兼容", "Anthropic", "自定义"};
+  own<Select>(dom_, provs, state_.provider_index)->mount(f1);
+  dom_.append(body, f1);
+  Node f2 = dom_.create("div", "field", "");
+  Node l2 = dom_.create("label", "", "Endpoint");
+  dom_.append(f2, l2);
+  auto ep = Signal<std::string>::make("https://opencode.ai/zen/v1");
+  own<TextInput>(dom_, ep, "")->mount(f2);
+  dom_.append(body, f2);
+  Node f3 = dom_.create("div", "field", "");
+  Node l3 = dom_.create("label", "", "API Key");
+  dom_.append(f3, l3);
   auto key = Signal<std::string>::make("****");
-  own<TextInput>(dom_, key, "API Key")->mount(content);
+  own<TextInput>(dom_, key, "")->mount(f3);
+  dom_.append(body, f3);
+  Node f4 = dom_.create("div", "field", "");
+  Node l4 = dom_.create("label", "", "自定义 Header");
+  dom_.append(f4, l4);
+  auto hdr = Signal<std::string>::make("");
+  own<TextInput>(dom_, hdr, "x-opencode-session: auto")->mount(f4);
+  dom_.append(body, f4);
   IUiBackend* be = backend_;
+  Node f5 = dom_.create("div", "field", "");
+  Node l5 = dom_.create("label", "", "");
+  dom_.append(f5, l5);
   own<Button>(dom_, "测试连接", [be](const std::string&) {
     if (be) be->call("provider.testConnection", Json::object());
-  })->mount(content);
-  own<Text>(dom_, "模型偏好", "")->mount(content);
-  auto sub = Signal<bool>::make(false);
-  own<Checkbox>(dom_, "子代理继承会话模型", sub)->mount(content);
-  own<Text>(dom_, "插件入口灰色禁用。", "dim")->mount(content);
-  dom_.append(wrap, content);
+  })->mount(f5);
+  own<Button>(dom_, "一键获取模型列表", [be](const std::string&) {
+    if (be) be->call("provider.listModels", Json::object());
+  })->mount(f5);
+  dom_.append(body, f5);
+  dom_.append(wrap, body);
   dom_.append(parent, wrap);
 }
 

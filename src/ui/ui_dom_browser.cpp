@@ -6,7 +6,6 @@ namespace ui {
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-#include <emscripten/bind.h>
 
 namespace {
 // 事件回调表：JS 侧按 id 回调回来（见 web/glue.js FsUi.fire）

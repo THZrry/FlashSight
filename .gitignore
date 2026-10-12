@@ -6,12 +6,19 @@ build/
 *.exe
 *.a
 *.lib
+*.log
 
-# vendored third-party (per rules: not committed into git; see scripts/fetch_3rdparty)
+# vendored third-party (per rules: not committed; see scripts/fetch_3rdparty)
 3rdparty/
 
-# temp workspace (per rules; temp is for throwaway data, not committed)
+# temp workspace (per rules; temp/ is for throwaway data)
 temp/
+
+# generated wasm bundle + embedded-asset header (regenerate via scripts/build_ui.bat)
+web/fs_ui.js
+web/fs_ui.wasm
+web/fs_ui.html
+src/ui/ui_assets_gen.hpp
 
 # editor
 .vscode/

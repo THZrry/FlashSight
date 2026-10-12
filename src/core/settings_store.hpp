@@ -63,6 +63,10 @@ constexpr char kKeyOverfitEnabled[] = "session.overfitEnabled";
 // 子代理上限（agent-loop.md 6；默认并行 4/深度 3）
 constexpr char kKeySubagentMaxParallel[] = "subagents.maxParallel";
 constexpr char kKeySubagentMaxDepth[] = "subagents.maxDepth";
+// 思考语言（addon2：工具 skill 中英双语，切换输出语言；"auto|zh|en"）
+constexpr char kKeyThinkingLang[] = "model.thinkingLang";
+// LSP 服务器表（addon2 依赖特定环境）：{lang: {command, args[]}}；可自动在 PATH 搜索
+constexpr char kKeyLspServers[] = "lsp.servers";
 
 // 返回时带来源标注
 struct SettingValue {

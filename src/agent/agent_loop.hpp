@@ -49,12 +49,18 @@ class AgentLoop {
     std::string sid;
     std::string pid;
     std::string model;
+    std::string permission = "permissive";  // 文件权限档（工具上下文注入用）
+    std::string thinking_lang = "";         // 思考语言（中英双语 skill）
   };
 
   explicit AgentLoop(Options opts);
 
   // 状态查询
   LoopState state() const { return state_; }
+
+  // 会话级属性更新（FsApi 读 sessionSettings 后传入）
+  void set_permission(const std::string& perm) { opts_.permission = perm; }
+  void set_thinking_lang(const std::string& lang) { opts_.thinking_lang = lang; }
 
   // send：用户输入（含引导队列合并），进入 planning
   FsResult send(const std::string& text);
@@ -73,6 +79,12 @@ class AgentLoop {
   void resume();
   void cancel_wake();
 
+  // addon2 任务健壮性：挂起-继续（打断后续接）。
+  // 中断（模型挂起/失败）后，给原任务发送特定引导即从保存点续跑，
+  // 无需用户重开会话。子代理同理（SubagentManager::steer）。
+  FsResult continue_task(const std::string& guidance);
+  bool has_saved_context() const { return saved_valid_; }
+
   // 子代理结果回调（自动模式唤醒父）
   FsResult on_subagent_done(const std::string& subagent_id, const std::string& summary);
 
@@ -84,6 +96,9 @@ class AgentLoop {
 
   // 模型调用抽象（测试可注入）
   std::function<FsResult(const ModelCallRequest&, ModelCallResult*)> call_model;
+
+  // 工具执行抽象（Host 注入；批准后真调工具）
+  std::function<FsResult(const ToolContext&, const std::string&, const Json&)> invoke_tool;
 
  private:
   Options opts_;
@@ -106,8 +121,15 @@ class AgentLoop {
   // 连续输出（防过拟合检测用）
   std::vector<std::string> recent_outputs_;
 
+  // 中断-继续保存点（addon2）：中断/失败时的 messages 上下文
+  Json saved_messages_ = Json::array();
+  bool saved_valid_ = false;
+
   FsResult run_turn(const std::string& user_text);
+  // 从给定 messages 继续跑（工具循环 + 回填），供 continue_task 复用
+  FsResult run_loop(Json messages, const std::string& model, const Json& tools);
   FsResult handle_tool_call(const Json& call);
+  FsResult execute_tool(const std::string& name, const Json& args);  // addon2：真调工具
   FsResult finish_turn(const Json& turn);
   void emit(const std::string& event, const Json& payload);
   bool is_high_risk(const std::string& tool) const;

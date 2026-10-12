@@ -177,3 +177,44 @@ The process of project: P0 环境搭建 + P1 AppCore
 
 - UI 层：原型 + 兼容层 + 响应式 + 21 控件 + 后端抽象 + wasm 桩全部完成。
 - 等：emscripten（用户准备中，到时编 wasm 验证）、WhaleUI 纯 C API（接 WhaleDom）。
+
+<17>(SOLVED): addon2 后端增强全部落地（68 用例 516 断言全过；UI 零改动）。
+  - A 工具：A1 工具真执行（execute_tool + run_loop 循环回填，修了原占位 "(tool executed by host)"）；
+    A2 dir.check；A3 file.regex（QuickJS 引擎移植，见 <15>）；A4 权限门（full 才可项目外）；
+    A5 噪声检测（罕见 script 短串+引号佐证）；A6 file.ls 基础/详细双模式。
+  - B 健壮性：B1 中断-继续（saved_messages_ 断点 + session.continue；子代理 steer）；
+    B2 进程 todo（TodoStore，owner=sid/子代理 id，独立进程树）；B3 计划评审 revise（评价注入引导）。
+  - C 工作流：WorkflowStore（步骤状态机 + graph_json 给侧栏图/嵌套列表）；
+    workflow_start/retry/skip/steer；子代理完成经 subagent.done 事件推进步。
+  - D 环境：lsp 工具 + ctx.lsp_call 回调 + lsp.servers 键；browser-control skill + browser_load 加载口。
+  - skill：SkillRegistry 中英双语，model.thinkingLang（auto/zh/en）切换；工具 description 全双语。
+  - 关键坑：libregexp capture 数组下标为 0..capture_count-1（原来 <= 越界导致
+    basic_string::_M_create 崩溃）；lre_exec 返回 1=匹配/0=不匹配/<0=错误。
+  - 3rdparty/qjs-regex 不入 git；scripts/fetch_3rdparty.* 已补拉取步骤；
+    doc-internal/thirdparty.md 记出处/许可；doc-internal/addon2-backend.md 记实现。
+
+## 当前状态（更新 2026-10-12）
+
+- P0-P3 + 缺口补齐 + UI 原型/Widget 库 + addon2 后端增强全部完成。
+- 后端 addon2：A/B/C/D 四阶段全落地，68 用例 516 断言通过。
+- 等：emscripten（编 wasm 验证）、WhaleUI 纯 C API（接 WhaleDom）。
+
+<18>(SOLVED): UI 跑通（web 原型 + C++ Widget + wasm 内嵌 + 本地 HTTP 服务）。
+  - 教训：上一轮把标签页模式与侧边栏模式杂糅、样式做成 Material 风（药丸/大圆角），
+    用户明确讨厌 Material Design。重做：顶部标签栏单一导航模式；桌面原生风格
+    （直角、1px 边框、标准控件）；prefers-color-scheme 深浅色。
+  - web/：index.html（wasm 启动壳：#fs-root + 加载 fs_ui.js）+ style.css（桌面风）+ glue.js
+    （DOM 适配层，经 --post-js 打进 fs_ui.js）。
+  - src/ui：IDom 兼容层（NullDom/BrowserDom）、Signal/Effect 响应式、21 控件 Widget 库、
+    IUiBackend 抽象（桌面 NativeBackend 进程内直调预留）、UiApp（顶部标签页模式）、
+    ui_server（httplib 从内存提供内嵌资产）、ui_main_wasm（wasm 入口）。
+  - 构建流程（scripts/build_ui.bat，无硬编码路径，只依赖 PATH 里的 emcc/xmake/python）：
+    xmake -p wasm 编 fs_ui_wasm -> web/fs_ui.{js,wasm} -> scripts/gen_assets.py 打包成
+    src/ui/ui_assets_gen.hpp（C 字节数组）-> xmake -p windows 编 flashsight.exe（内嵌资产，
+    运行时起本地 HTTP 服务并开浏览器）。WhaleUI 就位后换 UI 后端即可，逻辑不变。
+  - 关键 bug：BrowserDom 的 next_id_ 从 1 起，与 glue.js 保留的 root id=1 冲突，
+    首个 create 覆盖 root 映射导致 appendChild 自己 append 自己（HierarchyRequestError，
+    页面全空）。改从 2 起 + glue.js 加自环/祖先环防护。
+  - emcc 6.0.12 在 C:\Program Files\emscripten（xmake 的 emcc 工具链可用；
+    默认 -fvisibility=hidden 会隐藏 extern "C" 入口，需 -fvisibility=default）。
+  - 已知：响应式框架较粗糙，后续大概率大规模重构（用户明确）。

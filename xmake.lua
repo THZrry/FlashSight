@@ -1,5 +1,6 @@
 -- FlashSight build script
--- targets: fs_core (static) / fs_ui (static) / flashsight (bin) / fs_tests (bin)
+-- native: fs_core / fs_ui / flashsight / fs_tests
+-- wasm  : fs_ui_wasm (src/ui + minimal common, via xmake emcc toolchain)
 
 set_project("FlashSight")
 set_version("0.1.0")
@@ -8,7 +9,7 @@ set_xmakever("2.8.0")
 add_rules("mode.debug", "mode.release")
 set_languages("c++14")
 
--- common include dirs
+-- include dirs (shared)
 includedirs = {
     "src",
     "src/common",
@@ -23,22 +24,20 @@ includedirs = {
     "3rdparty/md4c-master/src",
     "3rdparty/httplib",
     "3rdparty/mbedtls-3.6.4/include",
+    "3rdparty/qjs-regex",
+}
+
+-- wasm needs a smaller include set (no mbedtls/httplib/md4c)
+wasm_includedirs = {
+    "src",
+    "src/common",
+    "3rdparty/filesystem-1.5.14/include",
+    "3rdparty/json",
 }
 
 if is_plat("windows") then
     add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN")
 end
-
--- httplib 走 mbedTLS 后端（真网络实现；单测走 FakeNet 不受影响）
-add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
-
--- mbedtls 静态库（fs_core 的 fs_net_http.cpp 引用其符号；用 linkgroups 解决顺序）
-MBEDTLS_LINKDIRS = {
-    "3rdparty/mbedtls-3.6.4/build/library",
-    "3rdparty/mbedtls-3.6.4/build/3rdparty/everest",
-    "3rdparty/mbedtls-3.6.4/build/3rdparty/p256-m",
-}
-MBEDTLS_LINKS = { "mbedtls", "mbedx509", "mbedcrypto", "everest", "p256m" }
 
 -- collect cpp files of dirs that exist (empty dirs are not errors)
 function dir_files(...)
@@ -53,6 +52,22 @@ function dir_files(...)
     return files
 end
 
+-- ============================ native ============================
+if not is_plat("wasm") then
+
+add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
+
+-- mbedtls 静态库（fs_core 的 fs_net_http.cpp 引用其符号）
+function mbedtls_link()
+    local libdir = os.projectdir() .. "/3rdparty/mbedtls-3.6.4/build"
+    add_ldflags(libdir .. "/library/libmbedtls.a")
+    add_ldflags(libdir .. "/library/libmbedx509.a")
+    add_ldflags(libdir .. "/library/libmbedcrypto.a")
+    add_ldflags(libdir .. "/3rdparty/everest/libeverest.a")
+    add_ldflags(libdir .. "/3rdparty/p256-m/libp256m.a")
+    add_ldflags("-lbcrypt", "-lcrypt32")
+end
+
 target("fs_core")
     set_kind("static")
     set_languages("c++14")
@@ -62,6 +77,7 @@ target("fs_core")
     add_files("3rdparty/md4c-master/src/md4c.c",
               "3rdparty/md4c-master/src/md4c-html.c",
               "3rdparty/md4c-master/src/entity.c")
+    add_files("3rdparty/qjs-regex/libregexp.c", "3rdparty/qjs-regex/libunicode.c")
     add_cflags("-Wall")
     add_cxxflags("-Wall")
     if is_plat("windows") then
@@ -74,19 +90,6 @@ target("fs_ui")
     add_includedirs(includedirs)
     add_files(dir_files("src/ui"))
     add_cxxflags("-Wall")
-
--- mbedtls 静态库（fs_core 的 fs_net_http.cpp 引用其符号）
--- add_ldflags 追加在链接命令末尾（deps 库之后），顺序正确；路径用 projectdir 拼接
-function mbedtls_link()
-    local libdir = os.projectdir() .. "/3rdparty/mbedtls-3.6.4/build"
-    add_ldflags(libdir .. "/library/libmbedtls.a")
-    add_ldflags(libdir .. "/library/libmbedx509.a")
-    add_ldflags(libdir .. "/library/libmbedcrypto.a")
-    add_ldflags(libdir .. "/3rdparty/everest/libeverest.a")
-    add_ldflags(libdir .. "/3rdparty/p256-m/libp256m.a")
-    -- mbedcrypto 的 entropy_poll 引用 BCryptGenRandom（Windows）；放 mbedtls 之后
-    add_ldflags("-lbcrypt", "-lcrypt32")
-end
 
 target("flashsight")
     set_kind("binary")
@@ -112,27 +115,36 @@ target("fs_tests")
     end
     mbedtls_link()
 
--- wasm 分支：浏览器里跑 UI 逻辑（C++ -> wasm，经 web/glue.js 操作 DOM）。
--- 本机无 llvm/emscripten：默认关闭。有环境后 `xmake f --wasm=y` 开启。
--- 注意：仅 src/ui + src/common 进 wasm（fs_core 的进程/网络部分暂不进；远程版以后再拆）。
-option("wasm")
-    set_default(false)
-    set_showmenu(true)
-    set_description("Build wasm UI variant (needs emscripten/llvm)")
-option_end()
+end  -- not wasm
 
-if has_config("wasm") then
-    target("fs_ui_wasm")
-        set_kind("binary")
-        set_languages("c++14")
-        add_includedirs(includedirs)
-        add_files("src/ui/**.cpp")
-        add_files("src/common/fs_json.cpp", "src/common/fs_log.cpp")
-        add_cxxflags("-Wall", "-Os")
-        add_defines("__EMSCRIPTEN__")
-        -- emcc 链由 emscripten 工具链提供；无环境时此 target 不会被配置
-        after_build(function (target)
-            print("wasm target built: " .. target:targetfile())
-            print("serve web/ + load glue.js, then instantiate the wasm module")
-        end)
-end
+-- ============================ wasm ============================
+if is_plat("wasm") then
+
+target("fs_ui_wasm")
+    set_kind("binary")
+    set_languages("c++14")
+    set_toolchains("emcc")
+    add_includedirs(wasm_includedirs)
+    add_files("src/ui/ui_dom_null.cpp", "src/ui/ui_dom_browser.cpp",
+              "src/ui/ui_backend.cpp", "src/ui/ui_widgets.cpp",
+              "src/ui/ui_app.cpp", "src/ui/ui_main_wasm.cpp")
+    add_files("src/common/fs_json.cpp", "src/common/fs_log.cpp")
+    -- xmake 默认注入 -fvisibility=hidden，会隐藏 extern "C" 入口；改回 default
+    add_cxflags("-fvisibility=default")
+    add_cxxflags("-Wall", "-Os")
+    set_targetdir("web")
+    set_basename("fs_ui")
+    add_ldflags("-sALLOW_MEMORY_GROWTH=1", "-sDISABLE_EXCEPTION_CATCHING=0",
+                "--no-entry", {force = true})
+    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_malloc,_free",
+                {force = true})
+    add_ldflags("-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8",
+                {force = true})
+    -- 把 DOM 适配层打进 fs_ui.js（wasm 运行时自带 glue）
+    add_ldflags("--post-js", os.projectdir() .. "/web/glue.js", {force = true})
+    after_build(function (target)
+        print("wasm built: " .. target:targetfile())
+        print("next: python scripts/gen_assets.py  (embed web/ into src/ui/ui_assets_gen.hpp)")
+    end)
+
+end  -- wasm

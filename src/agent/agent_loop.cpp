@@ -109,7 +109,7 @@ bool AgentLoop::should_deferred(const std::string& tool) const {
   return is_high_risk(tool);
 }
 
-// approve：权限门（approve 档）
+// approve：权限门（approve 档）；批准后从断点续跑（addon2：打断后续接）
 FsResult AgentLoop::approve(bool yes) {
   if (state_ != LoopState::kWaiting) {
     return FsResult::error(ErrCode::kBusy, "not waiting for permission");
@@ -119,17 +119,40 @@ FsResult AgentLoop::approve(bool yes) {
     return FsResult::success();
   }
   if (!yes) {
-    // 拒绝：回填错误结果，继续
+    // 拒绝：回填错误结果给模型，如实告知（不静默）
     Json result = Json::object();
     result["ok"] = false;
     result["error"] = "user denied permission";
+    result["errCode"] = "permission-denied";
     pending_tool_results_.push_back(
         Json{{"name", pending_tool_}, {"args", pending_args_}, {"result", result}});
-    pending_tool_.clear();
+  } else {
+    // 批准：真调工具，结果回填
     state_ = LoopState::kToolCalling;
-    return FsResult::success();
+    FsResult tr = execute_tool(pending_tool_, pending_args_);
+    if (!tr.ok()) return tr;
   }
-  // 批准：执行工具（P3 实际执行由 FsApi 层驱动；v1 这里记录等待）
+  pending_tool_.clear();
+  pending_args_ = Json::object();
+  // 从断点续跑：把本次 tool 结果追加到保存的 messages 再喂模型
+  if (saved_valid_) {
+    Json msgs = saved_messages_;
+    Json tool_msg = Json::object();
+    tool_msg["role"] = "user";
+    Json content = Json::array();
+    for (auto& tr2 : pending_tool_results_) {
+      content.push_back(Json{{"type", "tool_result"},
+                             {"tool_call_id", jsonutil::get<std::string>(tr2, "id", "")},
+                             {"name", tr2["name"]},
+                             {"content", tr2["result"].dump()}});
+    }
+    tool_msg["content"] = content;
+    msgs.push_back(tool_msg);
+    pending_tool_results_.clear();
+    saved_valid_ = false;
+    state_ = LoopState::kPlanning;
+    return run_loop(msgs, opts_.model, opts_.history.tools);
+  }
   state_ = LoopState::kToolCalling;
   return FsResult::success();
 }
@@ -183,17 +206,42 @@ FsResult AgentLoop::handle_tool_call(const Json& call) {
     emit("permission.prompt", Json{{"tool", name}, {"args", args}});
     return FsResult::success();
   }
-  // 非高风险：直接执行（通过 call_model 或 call_model）
-  // P3 v1：通过 ModelCallRequest 的 tool 执行由上层驱动；这里记录结果回填
+  // 非高风险：直接执行（通过 invoke_tool 真调工具）
+  return execute_tool(name, args);
+}
+
+// 真调工具并把结果回填 pending_tool_results_（addon2：工具必须真正执行）
+FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
+  ToolContext ctx;
+  ctx.sid = opts_.sid;
+  ctx.pid = opts_.pid;
+  ctx.cwd = opts_.cwd;
+  ctx.auto_mode = jsonutil::get<bool>(opts_.history.env, "autoMode", false);
+  ctx.permission = opts_.permission;
+  ctx.thinking_lang = opts_.thinking_lang;
+  ctx.emit = [this](const std::string& e, const Json& p) { emit(e, p); };
+  // 进程（todo）/invoke_tool 由 Host 注入的 invoke_tool 转发时补齐
   Json result = Json::object();
-  result["ok"] = true;
-  result["summary"] = "(tool executed by host)";
+  FsResult r = invoke_tool ? invoke_tool(ctx, name, args)
+                           : FsResult::error(ErrCode::kNotSupported,
+                                             "tool execution not wired: " + name);
+  if (r.ok()) {
+    result = r.data;
+  } else {
+    // 错误结果回填给模型（拒绝/失败都如实给，不静默）
+    result["ok"] = false;
+    result["error"] = r.message.empty() ? err_code_name(r.code) : r.message;
+    result["errCode"] = err_code_name(r.code);
+    if (r.denied()) result["denial"] = r.denial.reason;
+  }
   pending_tool_results_.push_back(
       Json{{"name", name}, {"args", args}, {"result", result}});
+  emit("tool.update", Json{{"name", name}, {"ok", r.ok()}});
   return FsResult::success();
 }
 
 // 执行一轮（planning -> toolCalling -> ... -> turnDone）
+// addon2：工具结果回填后再喂模型，循环直到模型不再要工具（完整 agent 循环）
 FsResult AgentLoop::run_turn(const std::string& user_text) {
   // 构造 history（HistoryBuilder）
   HistoryBuilder::Options hopts = opts_.history;
@@ -207,18 +255,27 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   Json messages = Json::array();
   messages.push_back(system_msg);
   messages.push_back(user_msg);
+  saved_valid_ = false;  // 新一轮开始：清掉旧保存点
+  return run_loop(messages, opts_.model, hopts.tools);
+}
 
+// 从给定 messages 续跑（工具循环 + 回填）；中断/失败时保存 messages 供继续
+FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json& tools) {
   ModelCallRequest req;
-  req.model = opts_.model;
+  req.model = model;
   req.messages = messages;
-  req.tools = hopts.tools;
-  req.auto_mode = jsonutil::get<bool>(hopts.env, "autoMode", false);
+  req.tools = tools;
+  req.auto_mode = jsonutil::get<bool>(opts_.history.env, "autoMode", false);
 
-  // 挂起中：发完当前调用后不再发新调用（v1：run_turn 结束后检查）
+  // 挂起中：发完当前调用后不再发新调用（v1：run_loop 结束后检查）
   ModelCallResult result;
   FsResult r = call_model ? call_model(req, &result) : FsResult::error(ErrCode::kInternal, "no model");
   if (!r.ok() || !result.error.empty()) {
-    // 失败：连续失败计数（由 FsApi 层管理）；v1 落一条 turn
+    // 失败：保存断点，允许"打断后续接"（addon2）
+    saved_messages_ = req.messages;
+    saved_valid_ = true;
+    emit("loop.interrupted", Json{{"resumable", true},
+                                  {"error", result.error.empty() ? r.message : result.error}});
     Json turn = Json::object();
     turn["role"] = "assistant";
     turn["error"] = result.error.empty() ? r.message : result.error;
@@ -229,19 +286,63 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   if (!result.text.empty()) {
     emit("stream.delta", Json{{"text", result.text}});
   }
-  // 工具调用
-  if (!result.tool_calls.empty()) {
+  // 工具调用：执行 + 回填结果 + 再喂模型，直到无 tool_calls
+  int max_iters = 20;  // 防止死循环
+  while (!result.tool_calls.empty() && max_iters-- > 0) {
     state_ = LoopState::kToolCalling;
+    // 记录 assistant 的 tool_calls 消息（[OI] 协议要求回填前有对应 assistant 消息）
+    Json asst = Json::object();
+    asst["role"] = "assistant";
+    asst["content"] = result.text;
+    asst["tool_calls"] = result.tool_calls;
+    req.messages.push_back(asst);
     for (auto& c : result.tool_calls) {
       FsResult tr = handle_tool_call(c);
       if (!tr.ok()) return tr;
-      if (state_ == LoopState::kWaiting) return FsResult::success();  // 等批准
+      if (state_ == LoopState::kWaiting) {
+        // 等批准：保存断点，批准后由 continue_task 续跑
+        saved_messages_ = req.messages;
+        saved_valid_ = true;
+        return FsResult::success();
+      }
       if (suspend_requested_) {
         suspend_requested_ = false;
+        saved_messages_ = req.messages;
+        saved_valid_ = true;
         state_ = LoopState::kIdle;
         emit("loop.state", Json{{"state", "suspended"}});
         return FsResult::success();
       }
+    }
+    // 把工具结果喂回模型（tool result 作为 user 角色消息，标准 tool 回填格式）
+    Json tool_msg = Json::object();
+    tool_msg["role"] = "user";
+    Json content = Json::array();
+    for (auto& tr : pending_tool_results_) {
+      content.push_back(Json{{"type", "tool_result"},
+                             {"tool_call_id", jsonutil::get<std::string>(tr, "id", "")},
+                             {"name", tr["name"]},
+                             {"content", tr["result"].dump()}});
+    }
+    tool_msg["content"] = content;
+    req.messages.push_back(tool_msg);
+    pending_tool_results_.clear();
+    ModelCallResult r2;
+    FsResult r2r = call_model ? call_model(req, &r2) : FsResult::error(ErrCode::kInternal, "no model");
+    if (!r2r.ok() || !r2.error.empty()) {
+      saved_messages_ = req.messages;
+      saved_valid_ = true;
+      emit("loop.interrupted", Json{{"resumable", true},
+                                    {"error", r2.error.empty() ? r2r.message : r2.error}});
+      Json turn = Json::object();
+      turn["role"] = "assistant";
+      turn["error"] = r2.error.empty() ? r2r.message : r2.error;
+      state_ = LoopState::kTurnDone;
+      return r2r;
+    }
+    result = r2;
+    if (!result.text.empty()) {
+      emit("stream.delta", Json{{"text", result.text}});
     }
   }
   // 落库（v1：由 FsApi 层负责持久化；这里发 turn.done）
@@ -252,6 +353,27 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   emit("turn.done", Json{{"summary", result.text}});
   state_ = LoopState::kTurnDone;
   return FsResult::success();
+}
+
+// addon2 任务健壮性：打断后续接。从保存点追加引导文本并续跑。
+FsResult AgentLoop::continue_task(const std::string& guidance) {
+  if (!saved_valid_) {
+    // 无保存点：把引导当普通新输入处理（不静默失败）
+    return send(guidance);
+  }
+  if (state_ == LoopState::kWaiting) {
+    // 等待批准中：先按批准语义继续，再把引导追加到断点
+    state_ = LoopState::kPlanning;
+  }
+  Json msgs = saved_messages_;
+  Json g = Json::object();
+  g["role"] = "user";
+  g["content"] = guidance;
+  msgs.push_back(g);
+  saved_valid_ = false;
+  state_ = LoopState::kPlanning;
+  emit("loop.resumed", Json{{"guidance", guidance}});
+  return run_loop(msgs, opts_.model, opts_.history.tools);
 }
 
 

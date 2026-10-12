@@ -114,6 +114,8 @@ FS_TEST(uiapp_mount_and_pages) {
   }
   EXPECT_TRUE(has_clear);
   app.show(Page::kSettings);
-  app.show(Page::kUsage);
   app.show(Page::kHome);
+  // 主页子 tab 切换（用量统计现在是主页子页）
+  st.home_tab->set(HomeTab::kUsage);
+  st.home_tab->set(HomeTab::kProject);
 }

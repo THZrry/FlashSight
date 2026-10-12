@@ -102,6 +102,8 @@ SettingValue SettingsStore::get(const std::string& key) const {
   else if (key == kKeyOverfitEnabled) sv.value = false;
   else if (key == kKeySubagentMaxParallel) sv.value = 4;
   else if (key == kKeySubagentMaxDepth) sv.value = 3;
+  else if (key == kKeyThinkingLang) sv.value = "auto";
+  else if (key == kKeyLspServers) sv.value = nlohmann::json::object();
   else sv.value = nlohmann::json();
   return sv;
 }

@@ -31,7 +31,9 @@ class BrowserDom : public IDom {
   Node root() override;
 
  private:
-  uint64_t next_id_ = 1;
+  // 从 2 开始：id=1 是 glue.js 里 root 的保留 id（从 1 开始会覆盖 root 映射，
+  // 导致 append(root, child) 变成自己 append 自己 -> HierarchyRequestError）
+  uint64_t next_id_ = 2;
 };
 #else
 // 非 emscripten 构建：BrowserDom 不可用（编译期阻断误用）

@@ -1,7 +1,7 @@
 /* web/glue.js - wasm 版极薄胶水（C++ 经 EM_ASM 调用这里，全是 POD 参数）
  * 职责只有五件事：create / append / remove(+clear) / setText+attr+visible / on。
  * 事件回调用 Module._fs_ui_fire(handlerId, valuePtr) 回到 C++。
- * 用法（有 emscripten 后）：emcc ... --bind --post-js web/glue.js
+ * 本文件是静态原型与 wasm 版共用的 DOM 适配层。
  */
 (function () {
   var nodes = {};   // id -> Element
@@ -28,7 +28,14 @@
     },
     append: function (parent, child) {
       var p = el(parent), c = el(child);
-      if (p && c) p.appendChild(c);
+      if (!p || !c || p === c) return;
+      // 自环/祖先环防护：child 不能是 parent 自身或其祖先
+      var n = p;
+      while (n) {
+        if (n === c) return;
+        n = n.parentNode;
+      }
+      p.appendChild(c);
     },
     remove: function (id) {
       var e = el(id);
@@ -45,7 +52,16 @@
     },
     setAttr: function (id, key, value) {
       var e = el(id);
-      if (e) e.setAttribute(key, value);
+      if (!e) return;
+      if (key === 'value' && (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA' || e.tagName === 'SELECT')) {
+        e.value = value;
+      } else if (key === 'checked') {
+        e.checked = !!value;
+      } else if (key === 'disabled') {
+        e.disabled = !!value;
+      } else {
+        e.setAttribute(key, value);
+      }
     },
     setVisible: function (id, visible) {
       var e = el(id);
@@ -62,6 +78,10 @@
         if (ev === 'keydown') {
           if (evt.key !== 'Enter') return;
           v = e.value || '';
+        } else if (ev === 'change' && e.tagName === 'INPUT' && e.type === 'checkbox') {
+          v = e.checked ? '1' : '0';
+        } else if (ev === 'change' && e.tagName === 'SELECT') {
+          v = e.value;
         } else {
           v = e.value !== undefined ? e.value : (e.textContent || '');
         }

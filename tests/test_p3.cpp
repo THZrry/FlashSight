@@ -82,25 +82,34 @@ FS_TEST(loop_send_while_busy_queues) {
   EXPECT_TRUE(r2.ok());
 }
 
-// ---------- Loop：approve 拒绝后继续 ----------
+// ---------- Loop：approve 拒绝后继续（addon2：拒绝结果回填并续跑）----------
 FS_TEST(loop_approve_deny) {
   AgentLoop::Options opts;
   opts.sid = "s_1";
   opts.event = [](const std::string&, const Json&) {};
   AgentLoop loop(std::move(opts));
-  loop.call_model = [](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
-    out->text = "";
-    Json call = Json::object();
-    call["name"] = "file.rm";
-    call["args"] = Json{{"path", "b.txt"}};
-    out->tool_calls = Json::array({call});
+  int calls = 0;
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+    ++calls;
+    if (calls == 1) {
+      Json call = Json::object();
+      call["name"] = "file.rm";
+      call["args"] = Json{{"path", "b.txt"}};
+      out->tool_calls = Json::array({call});
+    } else {
+      // 拒绝回填后：模型改用文字收尾（不再要高风险工具）
+      out->text = "ok, skipped";
+      out->tool_calls = Json::array();
+    }
     out->error = "";
     return FsResult::success();
   };
   EXPECT_TRUE(loop.send("delete").ok());
   EXPECT_TRUE(loop.state() == LoopState::kWaiting);
   EXPECT_TRUE(loop.approve(false).ok());
-  EXPECT_TRUE(loop.state() == LoopState::kToolCalling);
+  // 拒绝 → 结果回填 → 续跑至本轮结束（不再停在 kToolCalling）
+  EXPECT_TRUE(loop.state() == LoopState::kTurnDone);
+  EXPECT_EQ(calls, 2);
 }
 
 // ---------- Loop：挂起后不再发新调用 ----------
