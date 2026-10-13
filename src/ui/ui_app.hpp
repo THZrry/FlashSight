@@ -107,19 +107,40 @@ struct AppState {
 
   // ---- settings ----
   std::string settings_nav = "general";  // section key; nav and body always agree
-  int provider_index = 0;
-  std::string provider_endpoint = "https://opencode.ai/zen/v1";
-  std::string provider_key;
-  std::string provider_header = "x-opencode-session: auto";
   std::string thinking_lang = "auto";
+  // ---- settings / 供应商（多提供商管理）----
   struct ProviderRow {
     std::string id;
+    std::string name;
     std::string kind;
     std::string endpoint;
     bool enabled = true;
+    bool has_key = false;
   };
   std::vector<ProviderRow> providers;
   bool providers_loaded = false;
+  struct ProviderTemplate {
+    std::string id;
+    std::string name;
+    std::string kind;
+    std::string base_url;
+    std::string description;
+  };
+  std::vector<ProviderTemplate> provider_templates;
+  bool provider_templates_loaded = false;
+  std::string provider_selected;   // id being edited ("" = none selected)
+  bool provider_creating = false;  // new-provider wizard open
+  // draft fields for the create/edit form
+  std::string pv_name;
+  std::string pv_kind = "openai-chat";
+  std::string pv_base_url;
+  std::string pv_key;
+  std::vector<std::pair<std::string, std::string> > pv_headers;  // custom headers
+  std::string pv_new_header_k;
+  std::string pv_new_header_v;
+  std::vector<std::string> provider_models;  // listModels result
+  std::string provider_models_level;          // "api" | "preset"
+  std::string provider_status;                // test/connect result line
   std::vector<std::string> shells;  // settings.detectShells result
   int shell_index = 0;
   std::string history_recent = "20";
@@ -137,11 +158,29 @@ struct AppState {
   };
   std::vector<PresetRow> preset_agents;
   bool presets_loaded = false;
-  std::vector<std::string> skills;         // skill.list result
+  struct SkillRow {
+    std::string name;
+    std::string title;
+    std::string description;
+    bool loadable = true;
+  };
+  std::vector<SkillRow> skills;            // skill.list result
   bool skills_loaded = false;
+  // ---- settings / MCP 与外部工具 ----
+  struct McpRow {
+    std::string name;
+    std::string dir;
+    bool enabled = true;
+  };
+  std::vector<McpRow> mcp_tools;
+  bool mcp_loaded = false;
+  std::string mcp_new_name;
+  std::string mcp_new_dir;
   std::vector<std::pair<std::string, std::string> > long_memory;  // 长期记忆
   std::vector<std::pair<std::string, std::string> > env_vars;     // 环境变量
   std::vector<std::pair<std::string, std::string> > cli_tools;    // CLI 工具
+  std::string file_blacklist_text;  // 文件黑名单（多行编辑草稿）
+  std::string file_whitelist_text;  // 文件白名单（多行编辑草稿）
   std::string about_version = "0.1.0";
 
   // ---- overlays ----
@@ -151,6 +190,7 @@ struct AppState {
   bool plan_open = false;
   std::vector<std::string> plan_steps;
   std::string toast;
+  int64_t toast_deadline_ms = 0;  // pump() clears the toast after this
 
   static AppState make();
 };
@@ -196,6 +236,8 @@ class UiApp {
   // Loaders for the settings sections.
   void load_preset_agents();
   void load_skills();
+  void load_provider_templates();
+  void load_mcp_tools();
   void load_settings_section(const std::string& section);
   // Save a settings key (global) and reflect it locally.
   void set_setting(const std::string& key, const Json& value);
@@ -217,6 +259,18 @@ class UiApp {
   void close_side_tab(const std::string& id);
   // activate the existing tab of `kind`, or create one (never defaults)
   void open_or_focus_side_tab(const std::string& kind);
+  // ---- settings / 供应商 actions ----
+  void select_provider(const std::string& id);   // load into the edit form
+  void begin_new_provider(const std::string& template_id);
+  void save_provider();                          // upsert the draft
+  void delete_provider(const std::string& id);
+  void test_provider(const std::string& id);
+  void fetch_provider_models(const std::string& id);
+  // ---- settings / MCP actions ----
+  void detect_mcp();
+  void add_mcp();
+  void remove_mcp(const std::string& name);
+  void toggle_mcp(const std::string& name, bool enabled);
   // test hook: apply a backend event as the sink would
   void on_backend_event_for_test(const std::string& event, const Json& payload) {
     on_backend_event(event, payload);

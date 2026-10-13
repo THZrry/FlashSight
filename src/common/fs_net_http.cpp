@@ -66,6 +66,9 @@ FsResult HttplibNetClient::request(const HttpRequest& req, HttpResponse* out) co
   if (!parse_url(req.url, &scheme, &host, &port, &path)) {
     return FsResult::error(ErrCode::kInvalidArg, "bad url: " + req.url);
   }
+  // 请求级代理优先；否则用设置的默认代理（permissions.network.proxy*）
+  std::string ph = req.proxy_host.empty() ? proxy_host_ : req.proxy_host;
+  int pp = req.proxy_host.empty() ? proxy_port_ : req.proxy_port;
   bool tls = (scheme == "https");
   if (tls) {
     httplib::SSLClient cli(host, port);
@@ -73,18 +76,14 @@ FsResult HttplibNetClient::request(const HttpRequest& req, HttpResponse* out) co
     cli.set_connection_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
-    if (!req.proxy_host.empty() && req.proxy_port > 0) {
-      cli.set_proxy(req.proxy_host, req.proxy_port);
-    }
+    if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
     return execute(cli, req, path, out);
   } else {
     httplib::Client cli(host, port);
     cli.set_connection_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
-    if (!req.proxy_host.empty() && req.proxy_port > 0) {
-      cli.set_proxy(req.proxy_host, req.proxy_port);
-    }
+    if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
     return execute(cli, req, path, out);
   }
 }

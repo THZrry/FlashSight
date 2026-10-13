@@ -79,6 +79,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     creq.messages = req.messages;
     creq.tools = req.tools;
     creq.stream = false;
+    creq.session_id = req.session_id;  // kPlan: x-opencode-session 亲和 id
     ProviderRuntime runtime(conn, net, us, clk);
     ChatResponse cresp;
     FsResult r = runtime.call(creq, &cresp, nullptr);
@@ -98,6 +99,16 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
       if (!sub_id.empty()) workflow_on_subagent_done(sub_id);
     }
     emit_event(e, p);
+  };
+  // 黑白名单判定（permissions.files.blacklist/whitelist；黑 > 白 > 默认档）
+  DenyList* dl = deny_list_.get();
+  deps.deny_check = [dl](const std::string& abs_path, std::string* reason) -> bool {
+    PathMatch m = dl->match(ghc::filesystem::path(abs_path));
+    if (m.denied) {
+      if (reason) *reason = "denied by blacklist: " + m.matched;
+      return false;
+    }
+    return true;  // 白名单命中或未命中：由权限档决定（此处不额外拒绝）
   };
   // 终端回调（reproc 经 TerminalManager；工具层只调回调）
   TerminalManager* tm = terminal_mgr_.get();
@@ -147,8 +158,35 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   // addon2：思考语言设置（工具 skill 中英双语）注入宿主
   Json tl = settings_->get_value(kKeyThinkingLang, Json("auto"));
   agent_host_->set_thinking_lang(tl.is_string() ? tl.get<std::string>() : "auto");
+  // MCP/外部工具注册表：从设置恢复（重启后保留）
+  Json mcp = settings_->get_value(kKeyMcpEntries, Json::array());
+  if (mcp.is_array()) mcp_registry_->load(mcp);
+  apply_proxy_settings();  // 代理设置立即生效
+  // 文件黑白名单：从设置装载（黑 > 白 > 三档默认）
+  {
+    Json bl = settings_->get_value(kKeyPermFileBlacklist, Json::array());
+    Json wl = settings_->get_value(kKeyPermFileWhitelist, Json::array());
+    std::vector<std::string> b, w;
+    for (size_t i = 0; bl.is_array() && i < bl.size(); ++i) {
+      if (bl[i].is_string()) b.push_back(bl[i].get<std::string>());
+    }
+    for (size_t i = 0; wl.is_array() && i < wl.size(); ++i) {
+      if (wl[i].is_string()) w.push_back(wl[i].get<std::string>());
+    }
+    deny_list_->set_blacklist(b);
+    deny_list_->set_whitelist(w);
+  }
   // addon2：内置示例工作流
   for (auto& d : builtin_workflows()) workflows_->define(d.to_json());
+}
+
+void FsApi::apply_proxy_settings() {
+  std::string host = settings_->get_value(kKeyNetworkProxyHost, Json("")).is_string()
+                         ? settings_->get_value(kKeyNetworkProxyHost, Json("")).get<std::string>()
+                         : "";
+  Json pv = settings_->get_value(kKeyNetworkProxyPort, Json(0));
+  int port = pv.is_number() ? static_cast<int>(pv.get<int64_t>()) : 0;
+  if (net_) net_->set_default_proxy(host, port);
 }
 
 // 事件扇出：给所有监听者（本地 UI + HTTP API 服务）；无监听者则丢弃（后端不依赖 UI）
@@ -382,6 +420,83 @@ FsResult FsApi::skill_load(const std::string& name) {
 // 浏览器控制 skill 的加载口（addon2：/browser-load 按需加载，不直接提供）
 FsResult FsApi::browser_load() { return skill_load("browser-control"); }
 
+// ----- mcp.*（外部工具/技能包；注册表持久化到设置 mcp.entries）-----
+namespace {
+// 常见外部工具目录（claude code / opencode / 用户配置）
+std::vector<std::string> mcp_probe_dirs() {
+  std::vector<std::string> dirs;
+  const char* home = std::getenv("USERPROFILE");
+  if (!home) home = std::getenv("HOME");
+  std::string h = home ? home : "";
+  if (!h.empty()) {
+    dirs.push_back(h + "/.claude/skills");
+    dirs.push_back(h + "/.claude/commands");
+    dirs.push_back(h + "/.config/opencode/skills");
+    dirs.push_back(h + "/.opencode/skills");
+    dirs.push_back(h + "/.config/flashsight/skills");
+    dirs.push_back(h + "/.flashsight/skills");
+  }
+  return dirs;
+}
+}  // namespace
+
+FsResult FsApi::mcp_list() {
+  return FsResult::success(Json{{"tools", mcp_registry_->list_json()}});
+}
+
+FsResult FsApi::mcp_import(const std::string& dir) {
+  FsResult r = mcp_registry_->import_dir(dir);
+  if (!r.ok()) return r;
+  return mcp_set_enabled("", true);  // 触发持久化（保存当前整表）
+}
+
+FsResult FsApi::mcp_add(const std::string& name, const std::string& dir, bool enabled) {
+  if (name.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty name");
+  mcp_registry_->upsert(name, dir, enabled);
+  return mcp_set_enabled("", true);
+}
+
+FsResult FsApi::mcp_set_enabled(const std::string& name, bool enabled) {
+  // name 为空 = 只做一次持久化（整表落盘），不改启用态
+  if (!name.empty() && !mcp_registry_->set_enabled(name, enabled)) {
+    return FsResult::error(ErrCode::kNotFound, "mcp tool not found: " + name);
+  }
+  settings_->set_global(kKeyMcpEntries, mcp_registry_->dump());
+  settings_->save_global();
+  return FsResult::success(Json{{"tools", mcp_registry_->list_json()}});
+}
+
+FsResult FsApi::mcp_remove(const std::string& name) {
+  if (!mcp_registry_->remove(name)) {
+    return FsResult::error(ErrCode::kNotFound, "mcp tool not found: " + name);
+  }
+  settings_->set_global(kKeyMcpEntries, mcp_registry_->dump());
+  settings_->save_global();
+  return FsResult::success(Json{{"tools", mcp_registry_->list_json()}});
+}
+
+FsResult FsApi::mcp_detect() {
+  // 探测常见目录：存在的导入，并把结果返回（不改已有条目）
+  Json found = Json::array();
+  std::vector<std::string> dirs = mcp_probe_dirs();
+  for (size_t i = 0; i < dirs.size(); ++i) {
+    std::error_code ec;
+    if (!ghc::filesystem::exists(dirs[i], ec) ||
+        !ghc::filesystem::is_directory(dirs[i], ec)) {
+      continue;
+    }
+    mcp_registry_->import_dir(dirs[i]);
+    Json o = Json::object();
+    o["dir"] = dirs[i];
+    found.push_back(o);
+  }
+  if (!found.empty()) {
+    settings_->set_global(kKeyMcpEntries, mcp_registry_->dump());
+    settings_->save_global();
+  }
+  return FsResult::success(Json{{"scanned", found}, {"tools", mcp_registry_->list_json()}});
+}
+
 FsResult FsApi::set_thinking_lang(const std::string& lang) {
   agent_host_->set_thinking_lang(lang);
   settings_->set_global(kKeyThinkingLang, lang);
@@ -496,9 +611,30 @@ FsResult FsApi::settings_get(const std::string& key, const std::string& pid) {
   return FsResult::success(out);
 }
 FsResult FsApi::settings_set(const std::string& key, const Json& value, const std::string& pid) {
-  if (pid.empty()) return settings_->set_global(key, value);
-  if (path_for(pid).empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
-  return store_for(pid).set_project(key, value);
+  FsResult r = pid.empty() ? settings_->set_global(key, value)
+                           : (path_for(pid).empty()
+                                  ? FsResult::error(ErrCode::kNotFound, "project not found: " + pid)
+                                  : store_for(pid).set_project(key, value));
+  if (!r.ok()) return r;
+  // 代理设置变化立即生效到网络客户端（无需重启）
+  if (key == kKeyNetworkProxyHost || key == kKeyNetworkProxyPort) {
+    apply_proxy_settings();
+  }
+  // 文件黑白名单变化立即生效
+  if (key == kKeyPermFileBlacklist || key == kKeyPermFileWhitelist) {
+    std::vector<std::string> b, w;
+    Json bl = settings_->get_value(kKeyPermFileBlacklist, Json::array());
+    Json wl = settings_->get_value(kKeyPermFileWhitelist, Json::array());
+    for (size_t i = 0; bl.is_array() && i < bl.size(); ++i) {
+      if (bl[i].is_string()) b.push_back(bl[i].get<std::string>());
+    }
+    for (size_t i = 0; wl.is_array() && i < wl.size(); ++i) {
+      if (wl[i].is_string()) w.push_back(wl[i].get<std::string>());
+    }
+    deny_list_->set_blacklist(b);
+    deny_list_->set_whitelist(w);
+  }
+  return r;
 }
 FsResult FsApi::settings_unset(const std::string& key, const std::string& pid) {
   if (pid.empty()) return settings_->unset_global(key);
@@ -750,6 +886,7 @@ FsResult FsApi::provider_list_providers() {
   for (auto& c : providers_->list()) {
     Json j = c.to_json();
     j["apiKey"] = mask_secret(c.api_key);  // 脱敏回传，避免密钥泄漏到 UI
+    j["hasKey"] = !c.api_key.empty();
     arr.push_back(j);
   }
   return FsResult::success(arr);
@@ -760,12 +897,67 @@ FsResult FsApi::provider_add_provider(const Json& conn) {
   if (c.base_url.empty()) {
     return FsResult::error(ErrCode::kInvalidArg, "baseUrl required");
   }
+  // 编辑已存在的连接时，UI 回传的是脱敏 key（"sk-1****abcd"）或空串：保留原 key，
+  // 否则保存会把真密钥覆盖成掩码串。
+  std::string incoming = jsonutil::get<std::string>(conn, "apiKey", "");
+  if (!c.id.empty() && (incoming.empty() || incoming.find("****") != std::string::npos)) {
+    ProviderConn old = providers_->get(c.id);
+    if (!old.id.empty()) c.api_key = old.api_key;
+  }
   std::string id = providers_->upsert(c);
   std::string err;
   if (!providers_->save(&err)) {
     return FsResult::error(ErrCode::kIo, err);
   }
   return FsResult::success(Json{{"id", id}});
+}
+
+FsResult FsApi::provider_get_provider(const std::string& providerId) {
+  ProviderConn c = providers_->get(providerId);
+  if (c.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  Json j = c.to_json();
+  j["apiKey"] = mask_secret(c.api_key);  // 脱敏；编辑时留空/不改即保留原值
+  j["hasKey"] = !c.api_key.empty();
+  return FsResult::success(j);
+}
+
+FsResult FsApi::provider_templates() {
+  // 新建向导模板：kind + baseUrl + 默认 header + 说明。用户选择后填写并保存。
+  Json arr = Json::array();
+  auto add = [&arr](const char* id, const char* name, const char* kind,
+                    const char* base, const char* desc, const Json& headers) {
+    Json t = Json::object();
+    t["id"] = id;
+    t["name"] = name;
+    t["kind"] = kind;
+    t["baseUrl"] = base;
+    t["description"] = desc;
+    t["headers"] = headers;
+    arr.push_back(t);
+  };
+  add("opencode-zen", "opencode zen（套餐）", "plan",
+      "https://opencode.ai/zen/v1",
+      "套餐连接：自动携带 x-opencode-session 会话亲和头，按额度计费。",
+      Json::object());
+  add("openai-chat", "OpenAI 兼容（Chat Completions）", "openai-chat",
+      "https://api.openai.com/v1",
+      "标准 /chat/completions，Bearer 鉴权。多数第三方兼容端点选这个。",
+      Json::object());
+  add("openai-response", "OpenAI Response API", "openai-response",
+      "https://api.openai.com/v1",
+      "使用 /responses 与 input 数组；输出在 output[].content[].text。",
+      Json::object());
+  add("anthropic", "Anthropic Messages", "anthropic",
+      "https://api.anthropic.com/v1",
+      "使用 /messages、x-api-key 与 anthropic-version 头。",
+      Json::object());
+  add("custom", "自定义（endpoint + header）", "custom",
+      "https://",
+      "复用 Chat 形态，仅 endpoint 与自定义 header 不同。",
+      Json::object());
+  return FsResult::success(arr);
 }
 
 FsResult FsApi::provider_remove_provider(const std::string& providerId) {

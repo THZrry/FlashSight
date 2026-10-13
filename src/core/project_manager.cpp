@@ -65,7 +65,29 @@ FsResult ProjectManager::get_project(const std::string& pid) const {
 }
 
 FsResult ProjectManager::list_projects() const {
-  return FsResult::success(registry_.list());
+  nlohmann::json arr = registry_.list();
+  // annotate sessionCount so the UI can show it without an extra round-trip
+  if (arr.is_array()) {
+    for (auto& e : arr) {
+      if (!e.is_object()) continue;
+      std::string path = jsonutil::get<std::string>(e, "path", "");
+      if (path.empty()) continue;
+      int64_t n = 0;
+      ghc::filesystem::path sessions =
+          ProjectStore::of(ghc::filesystem::path(path)).sessions_dir;
+      std::error_code ec;
+      if (ghc::filesystem::exists(sessions, ec)) {
+        for (auto& d : ghc::filesystem::directory_iterator(sessions, ec)) {
+          if (ghc::filesystem::is_directory(d.path(), ec) &&
+              ghc::filesystem::exists(d.path() / "full.json", ec)) {
+            ++n;
+          }
+        }
+      }
+      e["sessionCount"] = n;
+    }
+  }
+  return FsResult::success(arr);
 }
 
 std::string ProjectManager::pid_by_path(const std::string& path) const {

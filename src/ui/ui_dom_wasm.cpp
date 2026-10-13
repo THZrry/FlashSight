@@ -142,7 +142,9 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node), {
     var startX = down.clientX;
     var startW = side.getBoundingClientRect().width;
     function move(ev) {
-      var w = startW + (ev.clientX - startX);
+      // The divider sits on the side panel's LEFT edge: dragging left must
+      // widen the panel, so the delta is subtracted (not added).
+      var w = startW - (ev.clientX - startX);
       if (w < 220) w = 220;
       if (w > 720) w = 720;
       side.style.width = w + 'px';

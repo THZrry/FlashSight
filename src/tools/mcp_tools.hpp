@@ -13,10 +13,17 @@ class McpRegistry {
  public:
   // 从外部文件夹导入（claude code、open code 等路径预置由宿主提供）
   FsResult import_dir(const std::string& dir);
+  // 新增一条（名称 + 目录；同名更新目录）
+  void upsert(const std::string& name, const std::string& dir, bool enabled = true);
   bool enable(const std::string& name);
   bool disable(const std::string& name);
+  bool set_enabled(const std::string& name, bool enabled);
+  bool remove(const std::string& name);
   std::vector<std::string> list() const;  // 名称列表
   Json list_json() const;                  // 详情（含启用态）
+  // 整表读写（宿主持久化到设置；重启后恢复）
+  Json dump() const;
+  void load(const Json& arr);
 
   // 启用态变化（HistoryBuilder 前缀用）
   std::vector<std::string> changed_since(const Json& snapshot) const;

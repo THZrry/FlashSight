@@ -266,6 +266,7 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
   req.messages = messages;
   req.tools = tools;
   req.auto_mode = jsonutil::get<bool>(opts_.history.env, "autoMode", false);
+  req.session_id = opts_.sid;  // x-opencode-session 透传（套餐连接）
 
   // 挂起中：发完当前调用后不再发新调用（v1：run_loop 结束后检查）
   ModelCallResult result;

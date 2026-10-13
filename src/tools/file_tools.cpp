@@ -74,8 +74,15 @@ ghc::filesystem::path resolve_by_perm(const ToolContext& ctx, const std::string&
 
 // 写权限门（addon2 A4 + permissions.md）：approve 档需人工批准（由 Loop 权限门拦），
 // 这里做兜底：非 full 权限时拒绝绝对路径/项目外路径；full 允许项目外。
+// 另外所有档位都过黑白名单（黑名单 > 白名单 > 三档默认）。
 FsResult check_write_perm(const ToolContext& ctx, const ghc::filesystem::path& p,
                           const std::string& rel) {
+  if (ctx.deny_check) {
+    std::string reason;
+    if (!ctx.deny_check(p.string(), &reason)) {
+      return FsResult::deny("deny-list", reason.empty() ? "blocked by deny list" : reason);
+    }
+  }
   if (ctx.permission == "full") return FsResult::success();
   ghc::filesystem::path raw(rel);
   if (raw.is_absolute()) {
@@ -118,6 +125,13 @@ void register_file_tools(ToolRegistry* registry) {
         int limit = static_cast<int>(jsonutil::get_int(args, "limit", 2000));
         ghc::filesystem::path p = resolve_in(ctx.cwd, rel);
         if (p.empty()) return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
+        if (ctx.deny_check) {
+          std::string reason;
+          if (!ctx.deny_check(p.string(), &reason)) {
+            return FsResult::deny("deny-list",
+                                  reason.empty() ? "blocked by deny list" : reason);
+          }
+        }
         std::string content;
         if (!read_text_file(p, &content)) {
           return FsResult::error(ErrCode::kNotFound, "file not found: " + rel);

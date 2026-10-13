@@ -308,3 +308,29 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 验证：99 用例 642 断言通过；浏览器回归：项目卡片会话区、真实键盘 Enter 发送+清空、
     侧栏拖拽 320→220px、侧栏“+”菜单选择与复用、拖放文件夹 resolveDrop 命中、
     设置 12 节全部渲染、旧会话打开（session.get 修复后）。
+
+
+<24>(SOLVED): 用户反馈第二批（布局/方向/设置做实）。
+  - 项目卡片改双布局：宽屏 grid 左 1/3 信息 + 右 2/3 会话（默认），
+    窄屏（@media max-width:900px）自动堆叠为上行信息 + 下全会话区。
+  - 侧栏拖拽方向修正：分隔条在侧栏左缘，往左应加宽 -> 位移取负号（原来写反）。
+  - 提示（toast）自动消失：AppState 加 toast_deadline_ms，pump()（250ms 定时器）
+    过期清除；wasm 下 now_ms 用 emscripten_get_now()（std::chrono::steady_clock
+    在 emscripten 上取值不可靠，导致 deadline 永不到期）。
+  - 供应商管理做实：FsApi provider.templates/getProvider；provider_add_provider
+    编辑时若 apiKey 为空或含 **** 则保留原密钥（否则掩码会覆盖真密钥）；
+    UI 左列表 + 右详情，新建先选模板再填表；自定义 header 可增删；格式可选
+    （openai-chat/openai-response/anthropic/plan/custom）；测试连接/获取模型列表/删除。
+  - x-opencode-session 透传：ModelCallRequest.session_id -> ChatRequest.session_id
+    （agent_loop 用 opts_.sid 填充），plan 形态自动作为亲和头发送。
+  - MCP/Skill 做实：McpRegistry upsert/set_enabled/remove/dump/load；FsApi mcp.list/
+    import/add/setEnabled/remove/detect（探测 ~/.claude/skills、~/.config/opencode/skills 等）；
+    注册表持久化到设置 mcp.entries（重启恢复）；UI 列出、启停、新增（含目录浏览）、移除。
+  - 设置补齐：新增「会话默认」「浏览器控制」「电脑控制」分区；外观加字体族/字号/等宽字体；
+    网络加代理主机/端口（HttplibNetClient::set_default_proxy，设置变更立即生效）；
+    文件加黑/白名单多行编辑（DenyList 装载 + 工具层 deny_check 拦截）；
+    快捷键改为可编辑输入框。
+  - 项目列表带 sessionCount（ProjectManager::list_projects 统计会话目录数）。
+  - 验证：102 用例 658 断言通过；浏览器回归：卡片双布局切换、侧栏左拖加宽、
+    提示 3.2s 消失、供应商模板向导/编辑/密钥保留、MCP 探测 72 个工具包并持久化启停、
+    新设置分区逐项渲染。

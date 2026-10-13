@@ -240,20 +240,98 @@ FS_TEST(uiapp_settings_page) {
   EXPECT_TRUE(dump_has(dom, "常规"));
   EXPECT_TRUE(dump_has(dom, "供应商"));
   app.update([](AppState& s) { s.settings_nav = "providers"; });
+  // providers is a list + detail page; with none selected it prompts to pick one
+  EXPECT_TRUE(dump_has(dom, "新建"));
+  // selecting a provider (seeded) shows the edit form with Endpoint + headers
+  app.update([](AppState& s) {
+    AppState::ProviderRow r;
+    r.id = "p1";
+    r.name = "zen";
+    r.kind = "plan";
+    r.endpoint = "https://opencode.ai/zen/v1";
+    s.providers.push_back(r);
+    s.provider_selected = "p1";
+    s.pv_kind = "plan";
+    s.pv_base_url = "https://opencode.ai/zen/v1";
+  });
   EXPECT_TRUE(dump_has(dom, "Endpoint"));
   EXPECT_TRUE(dump_has(dom, "x-opencode-session"));
   // every nav entry must render its own body (nav key == body branch)
-  const char* sec_keys[] = {"general", "appearance", "providers", "subagents",
-                            "skills", "memory", "network", "terminal",
-                            "files", "environment", "shortcuts", "about"};
-  const char* sec_text[] = {"思考语言", "主题", "Endpoint", "并行上限",
-                            "内置 Skill", "随设置持久化", "网络总开关", "默认 shell",
-                            "自动 git init", "CLI 工具路径", "发送消息", "C++ VNode 框架"};
+  const char* sec_keys[] = {"general", "appearance", "providers", "session_defaults",
+                            "subagents", "skills", "memory", "network", "terminal",
+                            "files", "environment", "browser", "computer",
+                            "shortcuts", "about"};
+  const char* sec_text[] = {"思考语言", "主题", "Endpoint", "会话默认",
+                            "并行上限", "外部工具包", "长期记忆", "网络总开关", "默认 shell",
+                            "自动 git init", "CLI 工具路径", "浏览器控制", "电脑控制",
+                            "发送消息", "C++ VNode 框架"};
   for (size_t i = 0; i < sizeof(sec_keys) / sizeof(sec_keys[0]); ++i) {
     std::string key = sec_keys[i];
     app.update([&](AppState& s) { s.settings_nav = key; });
     EXPECT_TRUE(dump_has(dom, sec_text[i]));
   }
+}
+
+FS_TEST(uiapp_provider_create_wizard) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) { s.settings_nav = "providers"; });
+  // templates drive the new-provider wizard
+  app.update([](AppState& s) {
+    AppState::ProviderTemplate t;
+    t.id = "anthropic";
+    t.name = "Anthropic Messages";
+    t.kind = "anthropic";
+    t.base_url = "https://api.anthropic.com/v1";
+    t.description = "x-api-key + anthropic-version";
+    s.provider_templates.push_back(t);
+    s.provider_creating = true;
+  });
+  EXPECT_TRUE(dump_has(dom, "新建供应商"));
+  EXPECT_TRUE(dump_has(dom, "Anthropic Messages"));
+  // choosing a template fills the draft form (kind + endpoint)
+  app.update([](AppState& s) {
+    s.pv_name = "Anthropic Messages";
+    s.pv_kind = "anthropic";
+    s.pv_base_url = "https://api.anthropic.com/v1";
+  });
+  EXPECT_TRUE(dump_has(dom, "填写连接"));
+  EXPECT_TRUE(dump_has(dom, "https://api.anthropic.com/v1"));
+}
+
+FS_TEST(uiapp_mcp_section_lists_and_adds) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "skills";
+    s.mcp_tools.push_back(AppState::McpRow{"my-tools", "C:/tools/skills", true});
+    s.mcp_tools.push_back(AppState::McpRow{"other", "C:/other", false});
+  });
+  EXPECT_TRUE(dump_has(dom, "外部工具包"));
+  EXPECT_TRUE(dump_has(dom, "my-tools"));
+  EXPECT_TRUE(dump_has(dom, "自动探测"));
+  EXPECT_TRUE(dump_has(dom, "移除"));
+}
+
+FS_TEST(uiapp_toast_has_deadline) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.toast("hello");
+  EXPECT_TRUE(dump_has(dom, "hello"));
+  EXPECT_TRUE(app.state().toast_deadline_ms > 0);
+  // pump() clears an expired toast (deadline forced into the past)
+  app.state().toast_deadline_ms = 0;
+  app.pump();
+  EXPECT_TRUE(app.state().toast.empty());
+  EXPECT_FALSE(dump_has(dom, "hello"));
 }
 
 FS_TEST(uiapp_plan_toggle) {

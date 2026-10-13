@@ -27,20 +27,35 @@ FsResult McpRegistry::import_dir(const std::string& dir) {
   return FsResult::success();
 }
 
-bool McpRegistry::enable(const std::string& name) {
+void McpRegistry::upsert(const std::string& name, const std::string& dir, bool enabled) {
+  if (name.empty()) return;
   for (auto& en : entries_) {
     if (en.name == name) {
-      en.enabled = true;
+      en.dir = dir;
+      en.enabled = enabled;
+      return;
+    }
+  }
+  entries_.push_back(Entry{name, dir, enabled});
+}
+
+bool McpRegistry::enable(const std::string& name) { return set_enabled(name, true); }
+bool McpRegistry::disable(const std::string& name) { return set_enabled(name, false); }
+
+bool McpRegistry::set_enabled(const std::string& name, bool enabled) {
+  for (auto& en : entries_) {
+    if (en.name == name) {
+      en.enabled = enabled;
       return true;
     }
   }
   return false;
 }
 
-bool McpRegistry::disable(const std::string& name) {
-  for (auto& en : entries_) {
-    if (en.name == name) {
-      en.enabled = false;
+bool McpRegistry::remove(const std::string& name) {
+  for (std::vector<Entry>::iterator it = entries_.begin(); it != entries_.end(); ++it) {
+    if (it->name == name) {
+      entries_.erase(it);
       return true;
     }
   }
@@ -63,6 +78,21 @@ Json McpRegistry::list_json() const {
     arr.push_back(j);
   }
   return arr;
+}
+
+Json McpRegistry::dump() const { return list_json(); }
+
+void McpRegistry::load(const Json& arr) {
+  if (!arr.is_array()) return;
+  entries_.clear();
+  for (size_t i = 0; i < arr.size(); ++i) {
+    const Json& e = arr[i];
+    Entry en;
+    en.name = jsonutil::get<std::string>(e, "name", "");
+    en.dir = jsonutil::get<std::string>(e, "dir", "");
+    en.enabled = jsonutil::get<bool>(e, "enabled", true);
+    if (!en.name.empty()) entries_.push_back(en);
+  }
 }
 
 std::vector<std::string> McpRegistry::changed_since(const Json& snapshot) const {

@@ -67,6 +67,11 @@ constexpr char kKeySubagentMaxDepth[] = "subagents.maxDepth";
 constexpr char kKeyThinkingLang[] = "model.thinkingLang";
 // LSP 服务器表（addon2 依赖特定环境）：{lang: {command, args[]}}；可自动在 PATH 搜索
 constexpr char kKeyLspServers[] = "lsp.servers";
+// MCP / 外部工具注册表（[{name, dir, enabled}]；重启后恢复）
+constexpr char kKeyMcpEntries[] = "mcp.entries";
+// 网络代理（httplib 不读系统代理；在此显式设置）
+constexpr char kKeyNetworkProxyHost[] = "permissions.network.proxyHost";
+constexpr char kKeyNetworkProxyPort[] = "permissions.network.proxyPort";
 
 // 返回时带来源标注
 struct SettingValue {

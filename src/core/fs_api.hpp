@@ -155,6 +155,9 @@ class FsApi {
   FsResult provider_list_providers();
   FsResult provider_add_provider(const Json& conn);
   FsResult provider_remove_provider(const std::string& providerId);
+  FsResult provider_get_provider(const std::string& providerId);
+  // 新建向导用的预置模板（kind/baseUrl/默认 header/说明）
+  FsResult provider_templates();
   FsResult provider_list_models(const std::string& providerId);
   FsResult provider_test_connection(const std::string& providerId);
   // ----- skill.*（addon2：中英双语 skill，按需加载）-----
@@ -162,11 +165,16 @@ class FsApi {
   FsResult skill_load(const std::string& name);
   // 浏览器控制 skill 的加载口（addon2：不直接提供，用 /browser-load 按需加载）
   FsResult browser_load();
+  // ----- mcp.*（外部工具/技能包管理；注册表持久化到设置 mcp.entries）-----
+  FsResult mcp_list();
+  FsResult mcp_import(const std::string& dir);
+  FsResult mcp_add(const std::string& name, const std::string& dir, bool enabled);
+  FsResult mcp_set_enabled(const std::string& name, bool enabled);
+  FsResult mcp_remove(const std::string& name);
+  // 常见外部工具目录探测（claude code / opencode / 用户 .config 等）
+  FsResult mcp_detect();
   // 思考语言（"auto|zh|en"）
   FsResult set_thinking_lang(const std::string& lang);
-  FsResult mcp_stub() {
-    return FsResult::error(ErrCode::kNotSupported, "mcp: P3");
-  }
 
   // 内部组件访问（测试/上层组合用）
   ProjectManager& projects() { return *proj_; }
@@ -204,6 +212,8 @@ class FsApi {
   void workflow_on_subagent_done(const std::string& subagentId);
   // 工作流：启动下一个 pending 步骤（顺序流水线）
   void start_next_pending_step(WorkflowRun* run);
+  // 把设置里的代理套到网络客户端（启动时 + 设置变更时）
+  void apply_proxy_settings();
   // 事件扇出（UI 订阅；未订阅则丢弃）
   void emit_event(const std::string& event, const Json& payload);
 

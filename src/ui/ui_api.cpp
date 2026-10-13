@@ -199,12 +199,28 @@ UiApi::UiApi(FsApi* api) {
   reg("provider.removeProvider", [api](const Json& a) {
     return api->provider_remove_provider(s(a, "providerId"));
   });
+  reg("provider.getProvider", [api](const Json& a) {
+    return api->provider_get_provider(s(a, "providerId"));
+  });
+  reg("provider.templates", [api](const Json&) { return api->provider_templates(); });
   reg("provider.listModels", [api](const Json& a) {
     return api->provider_list_models(s(a, "providerId"));
   });
   reg("provider.testConnection", [api](const Json& a) {
     return api->provider_test_connection(s(a, "providerId"));
   });
+
+  // ---- mcp.*（外部工具/技能包管理）----
+  reg("mcp.list", [api](const Json&) { return api->mcp_list(); });
+  reg("mcp.import", [api](const Json& a) { return api->mcp_import(s(a, "dir")); });
+  reg("mcp.add", [api](const Json& a) {
+    return api->mcp_add(s(a, "name"), s(a, "dir"), b(a, "enabled", true));
+  });
+  reg("mcp.setEnabled", [api](const Json& a) {
+    return api->mcp_set_enabled(s(a, "name"), b(a, "enabled", true));
+  });
+  reg("mcp.remove", [api](const Json& a) { return api->mcp_remove(s(a, "name")); });
+  reg("mcp.detect", [api](const Json&) { return api->mcp_detect(); });
 
   // ---- skill / misc ----
   reg("skill.list", [api](const Json&) { return api->skill_list(); });

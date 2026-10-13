@@ -10,7 +10,12 @@
 //   * settings: roomy two-column page
 #include "ui_app.hpp"
 
+#include <chrono>
 #include <cstdio>
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#endif
 
 namespace fs {
 namespace ui {
@@ -45,6 +50,39 @@ std::string folder_basename(const std::string& path) {
   size_t cut = end;
   while (cut > 0 && path[cut - 1] != '\\' && path[cut - 1] != '/') --cut;
   return path.substr(cut, end - cut);
+}
+
+// wall clock in ms (toast deadlines). On wasm, std::chrono::steady_clock can
+// be non-monotonic/constant depending on the libc++ ABI, so use
+// emscripten_get_now() (performance.now()) there; std::chrono on native.
+int64_t now_ms() {
+#if defined(__EMSCRIPTEN__)
+  return static_cast<int64_t>(emscripten_get_now());
+#else
+  return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count());
+#endif
+}
+
+const int64_t kToastMs = 3200;  // how long a toast stays on screen
+
+// split a textarea's lines into a JSON string array (blanks/whitespace dropped)
+Json split_lines(const std::string& text) {
+  Json arr = Json::array();
+  size_t i = 0;
+  while (i <= text.size()) {
+    size_t e = text.find('\n', i);
+    if (e == std::string::npos) e = text.size();
+    std::string line = text.substr(i, e - i);
+    size_t a = 0, b = line.size();
+    while (a < b && (line[a] == ' ' || line[a] == '\t' || line[a] == '\r')) ++a;
+    while (b > a && (line[b - 1] == ' ' || line[b - 1] == '\t' || line[b - 1] == '\r')) --b;
+    if (b > a) arr.push_back(line.substr(a, b - a));
+    if (e == text.size()) break;
+    i = e + 1;
+  }
+  return arr;
 }
 
 }  // namespace
@@ -108,6 +146,7 @@ void UiApp::call_async(const std::string& method, const Json& args,
     if (!r.ok && !r.message.empty()) {
       // surface backend failures instead of failing silently
       st_.toast = r.code.empty() ? r.message : (r.code + ": " + r.message);
+      st_.toast_deadline_ms = now_ms() + kToastMs;
     }
     if (done) done(r);
     render();
@@ -116,6 +155,12 @@ void UiApp::call_async(const std::string& method, const Json& args,
 
 void UiApp::pump() {
   if (backend_) backend_->poll();
+  // toasts carry a deadline: clear them here so they cannot linger forever
+  // (pump runs on the browser's 250ms timer; the native build calls it too)
+  if (!st_.toast.empty() && now_ms() >= st_.toast_deadline_ms) {
+    st_.toast.clear();
+    render();
+  }
 }
 
 std::string UiApp::active_sid() const {
@@ -252,9 +297,11 @@ void UiApp::load_providers() {
         const Json& p = arr[i];
         AppState::ProviderRow row;
         row.id = jsonutil::get<std::string>(p, "id", "");
+        row.name = jsonutil::get<std::string>(p, "name", "");
         row.kind = jsonutil::get<std::string>(p, "kind", "");
-        row.endpoint = jsonutil::get<std::string>(p, "endpoint", "");
+        row.endpoint = jsonutil::get<std::string>(p, "baseUrl", "");
         row.enabled = jsonutil::get<bool>(p, "enabled", true);
+        row.has_key = jsonutil::get<bool>(p, "hasKey", false);
         rows.push_back(row);
       }
     }
@@ -262,7 +309,49 @@ void UiApp::load_providers() {
       s.providers = rows;
       // set even on failure: the load is render-driven, a retry loop would hang
       s.providers_loaded = true;
-      if (!rows.empty() && s.provider_endpoint.empty()) s.provider_endpoint = rows[0].endpoint;
+    });
+  });
+}
+
+void UiApp::load_provider_templates() {
+  call_async("provider.templates", Json::object(), [this](const BackendResult& r) {
+    std::vector<AppState::ProviderTemplate> rows;
+    if (r.ok && r.data.is_array()) {
+      for (size_t i = 0; i < r.data.size(); ++i) {
+        const Json& t = r.data[i];
+        AppState::ProviderTemplate row;
+        row.id = jsonutil::get<std::string>(t, "id", "");
+        row.name = jsonutil::get<std::string>(t, "name", "");
+        row.kind = jsonutil::get<std::string>(t, "kind", "");
+        row.base_url = jsonutil::get<std::string>(t, "baseUrl", "");
+        row.description = jsonutil::get<std::string>(t, "description", "");
+        rows.push_back(row);
+      }
+    }
+    update([&](AppState& s) {
+      s.provider_templates = rows;
+      s.provider_templates_loaded = true;
+    });
+  });
+}
+
+void UiApp::load_mcp_tools() {
+  call_async("mcp.list", Json::object(), [this](const BackendResult& r) {
+    std::vector<AppState::McpRow> rows;
+    const Json& arr = r.ok && r.data.contains("tools") ? r.data["tools"] : Json::array();
+    if (arr.is_array()) {
+      for (size_t i = 0; i < arr.size(); ++i) {
+        const Json& t = arr[i];
+        AppState::McpRow row;
+        row.name = jsonutil::get<std::string>(t, "name", "");
+        row.dir = jsonutil::get<std::string>(t, "dir", "");
+        row.enabled = jsonutil::get<bool>(t, "enabled", true);
+        rows.push_back(row);
+      }
+    }
+    update([&](AppState& s) {
+      s.mcp_tools = rows;
+      s.mcp_loaded = true;  // render-driven load: stop retrying either way
     });
   });
 }
@@ -341,8 +430,10 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     }
   } else if (event == "subagent.steered") {
     st_.toast = "子代理已收到引导";
+    st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "todo.updated") {
     st_.toast = "任务清单已更新";
+    st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "terminal.exit") {
     std::string tid = jsonutil::get<std::string>(payload, "tid", "");
     for (size_t i = 0; i < st_.terminals.size(); ++i) {
@@ -350,6 +441,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     }
   } else if (event == "loop.interrupted") {
     st_.toast = "已中断（可继续）";
+    st_.toast_deadline_ms = now_ms() + kToastMs;
   }
   render();
 }
@@ -371,6 +463,7 @@ void UiApp::update(const std::function<void(AppState&)>& f) {
 
 void UiApp::toast(const std::string& text) {
   st_.toast = text;
+  st_.toast_deadline_ms = now_ms() + kToastMs;
   render();
 }
 
@@ -558,6 +651,13 @@ VNodePtr UiApp::build_home_projects() {
     H left = el("div", "proj-left");
     left.add(el("div", "proj-name").text(p.name));
     left.add(el("div", "proj-path").text(p.path));
+    H meta = el("div", "proj-meta");
+    meta.add(el("span", "dim").text(itos(p.session_count) + " 个会话"));
+    if (!p.updated.empty()) {
+      meta.add(el("span", "dot-sep").text("·"));
+      meta.add(el("span", "dim").text(p.updated));
+    }
+    left.add(meta);
     top.add(left);
     H actions = el("div", "proj-actions");
     std::string pid = p.pid;
@@ -1083,6 +1183,7 @@ const SettingsItem kSettingsNav[] = {
     {"通用", "general", "常规"},
     {"通用", "appearance", "外观"},
     {"模型", "providers", "供应商"},
+    {"模型", "session_defaults", "会话默认"},
     {"模型", "subagents", "子代理"},
     {"模型", "skills", "MCP 与 Skill"},
     {"模型", "memory", "长期记忆"},
@@ -1090,6 +1191,8 @@ const SettingsItem kSettingsNav[] = {
     {"权限", "terminal", "终端"},
     {"权限", "files", "文件"},
     {"权限", "environment", "环境"},
+    {"权限", "browser", "浏览器控制"},
+    {"权限", "computer", "电脑控制"},
     {"其他", "shortcuts", "快捷键"},
     {"其他", "about", "关于"},
 };
@@ -1128,6 +1231,22 @@ std::string sv_str(const Json& vals, const std::string& key,
   return def;
 }
 
+// read a string[] setting as one-newline-per-item text (textarea draft)
+std::string join_lines(const Json& vals, const std::string& key) {
+  if (!vals.is_object() || !vals.contains(key)) return "";
+  const Json& v = vals[key];
+  const Json* arr = &v;
+  if (v.is_object() && v.contains("value")) arr = &v["value"];
+  if (!arr->is_array()) return "";
+  std::string out;
+  for (size_t i = 0; i < arr->size(); ++i) {
+    if (!(*arr)[i].is_string()) continue;
+    if (!out.empty()) out += "\n";
+    out += (*arr)[i].get<std::string>();
+  }
+  return out;
+}
+
 }  // namespace
 
 void UiApp::set_setting(const std::string& key, const Json& value) {
@@ -1156,6 +1275,9 @@ void UiApp::apply_settings(const Json& values) {
       std::to_string(sv_int(st_.settings_values, "history.recentTurns", 20));
   st_.history_budget =
       std::to_string(sv_int(st_.settings_values, "history.tokenBudget", 8000));
+  // file black/white lists: stored as arrays; join for the textarea draft
+  st_.file_blacklist_text = join_lines(st_.settings_values, "permissions.files.blacklist");
+  st_.file_whitelist_text = join_lines(st_.settings_values, "permissions.files.whitelist");
   // long memory / env / cli maps
   if (st_.settings_values.contains("model.longMemory") &&
       st_.settings_values["model.longMemory"].is_object()) {
@@ -1214,11 +1336,17 @@ void UiApp::load_settings_section(const std::string& section) {
   if (section == "providers" && !st_.providers_loaded) {
     load_providers();
   }
+  if (section == "providers" && !st_.provider_templates_loaded) {
+    load_provider_templates();
+  }
   if (section == "subagents" && !st_.presets_loaded) {
     load_preset_agents();
   }
   if (section == "skills" && !st_.skills_loaded) {
     load_skills();
+  }
+  if (section == "skills" && !st_.mcp_loaded) {
+    load_mcp_tools();
   }
   if (section == "terminal" && st_.shells.empty()) {
     load_shells();
@@ -1249,19 +1377,27 @@ void UiApp::load_preset_agents() {
 
 void UiApp::load_skills() {
   call_async("skill.list", Json::object(), [this](const BackendResult& r) {
-    std::vector<std::string> names;
+    std::vector<AppState::SkillRow> rows;
     if (r.ok) {
       const Json& arr = r.data.contains("skills") ? r.data["skills"] : r.data;
       if (arr.is_array()) {
         for (size_t i = 0; i < arr.size(); ++i) {
-          std::string n = arr[i].is_string() ? arr[i].get<std::string>()
-                                             : jsonutil::get<std::string>(arr[i], "name", "");
-          if (!n.empty()) names.push_back(n);
+          const Json& s = arr[i];
+          AppState::SkillRow row;
+          if (s.is_string()) {
+            row.name = s.get<std::string>();
+          } else {
+            row.name = jsonutil::get<std::string>(s, "name", "");
+            row.title = jsonutil::get<std::string>(s, "title", "");
+            row.description = jsonutil::get<std::string>(s, "description", "");
+            row.loadable = jsonutil::get<bool>(s, "loadable", true);
+          }
+          if (!row.name.empty()) rows.push_back(row);
         }
       }
     }
     update([&](AppState& s) {
-      s.skills = names;
+      s.skills = rows;
       s.skills_loaded = true;  // render-driven load: stop retrying either way
     });
   });
@@ -1293,89 +1429,169 @@ VNodePtr UiApp::build_settings() {
   if (backend_) load_settings_section(sec);
 
   if (sec == "providers") {
-    // --- 供应商 ---
-    body.add(comp::section_title("供应商"));
+    // --- 供应商：左列表（选择/新建），右侧编辑或模板向导 ---
+    H two = el("div", "pv-two");
+    H list = el("div", "pv-list");
+    H lhead = el("div", "pv-list-head");
+    lhead.add(el("span", "pv-list-title").text("供应商"));
+    lhead.add(comp::button("新建", [this](const std::string&) {
+      update([&](AppState& s) {
+        s.provider_creating = true;
+        s.provider_selected.clear();
+      });
+    }, "primary"));
+    list.add(lhead);
+    if (st_.providers.empty()) {
+      list.add(el("div", "pv-empty").text("还没有供应商。点「新建」选择模板。"));
+    }
     for (size_t i = 0; i < st_.providers.size(); ++i) {
       const AppState::ProviderRow& p = st_.providers[i];
-      H row = el("div", "settings-row");
-      row.add(el("span", "sr-name").text(p.kind.empty() ? p.id : p.kind));
-      row.add(el("span", "dim grow").text(p.endpoint));
-      row.add(comp::badge(p.enabled ? "启用" : "停用"));
+      bool sel = (!st_.provider_creating && st_.provider_selected == p.id);
+      H it = el("div", sel ? "pv-item active" : "pv-item");
       std::string id = p.id;
-      row.add(comp::button("删除", [this, id](const std::string&) {
-        call_async("provider.removeProvider", Json{{"providerId", id}},
-                   [this](const BackendResult&) { load_providers(); });
-      }, "ghost"));
-      body.add(row);
+      it.on(EventKind::kClick, [this, id](const std::string&) { select_provider(id); });
+      H top = el("div", "pv-item-top");
+      top.add(el("span", "pv-item-name").text(p.name.empty() ? p.id : p.name));
+      if (!p.enabled) top.add(comp::badge("停用"));
+      if (!p.has_key) top.add(comp::badge("无密钥"));
+      it.add(top);
+      it.add(el("div", "pv-item-kind").text(p.kind));
+      it.add(el("div", "pv-item-url").text(p.endpoint));
+      list.add(it);
     }
-    std::vector<std::string> provs;
-    provs.push_back("opencode-zen（套餐）");
-    provs.push_back("[OI] 兼容");
-    provs.push_back("Anthropic");
-    provs.push_back("自定义");
-    body.add(comp::field("类型", comp::select(provs, st_.provider_index,
-                                              [this](const std::string& v) {
-      update([&](AppState& s) { s.provider_index = std::atoi(v.c_str()); });
-    })));
-    body.add(comp::field("Endpoint", comp::text_input(st_.provider_endpoint, "",
-                                                      [this](const std::string& v) {
-      st_.provider_endpoint = v;
-    })));
-    body.add(comp::field("API Key", comp::text_input(st_.provider_key, "sk-…",
-                                                     [this](const std::string& v) {
-      st_.provider_key = v;
-    })));
-    body.add(comp::field("自定义 Header", comp::text_input(st_.provider_header, "",
+    two.add(list);
+
+    H detail = el("div", "pv-detail");
+    if (st_.provider_creating) {
+      // 新建向导：先选模板，再填表
+      detail.add(comp::section_title("新建供应商"));
+      detail.add(comp::hint("先选一个模板，填写后保存。"));
+      H tpls = el("div", "pv-templates");
+      for (size_t i = 0; i < st_.provider_templates.size(); ++i) {
+        const AppState::ProviderTemplate& t = st_.provider_templates[i];
+        H c = el("div", "pv-tpl");
+        std::string tid = t.id;
+        c.on(EventKind::kClick, [this, tid](const std::string&) {
+          begin_new_provider(tid);
+        });
+        c.add(el("div", "pv-tpl-name").text(t.name));
+        c.add(el("div", "pv-tpl-desc").text(t.description));
+        c.add(el("div", "pv-tpl-url").text(t.base_url));
+        tpls.add(c);
+      }
+      detail.add(tpls);
+      if (!st_.pv_kind.empty() && !st_.pv_base_url.empty()) {
+        detail.add(comp::section_title("填写连接"));
+        detail.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
+                                                        [this](const std::string& v) {
+          st_.pv_name = v;
+        })));
+        detail.add(comp::field("格式", comp::text_input(st_.pv_kind, "", [](const std::string&) {}),
+                               "由模板决定；如 openai-chat / openai-response / anthropic / plan"));
+        detail.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
+                                                            [this](const std::string& v) {
+          st_.pv_base_url = v;
+        })));
+        detail.add(comp::field("API Key", comp::text_input(st_.pv_key, "sk-…",
                                                            [this](const std::string& v) {
-      st_.provider_header = v;
-    }), "opencode go 需要 x-opencode-session（自动生成）"));
-    H acts = el("div", "settings-actions");
-    acts.add(comp::button("保存供应商", [this](const std::string&) {
-      Json conn = Json::object();
-      const char* kinds[4] = {"plan", "openai-compatible", "anthropic", "custom"};
-      int ki = st_.provider_index;
-      conn["kind"] = kinds[ki < 0 || ki > 3 ? 0 : ki];
-      conn["endpoint"] = st_.provider_endpoint;
-      if (!st_.provider_key.empty()) conn["apiKey"] = st_.provider_key;
-      conn["enabled"] = true;
-      call_async("provider.addProvider", Json{{"conn", conn}},
-                 [this](const BackendResult&) { load_providers(); });
-    }, "primary"));
-    acts.add(comp::button("测试连接", [this](const std::string&) {
-      std::string pid = st_.providers.empty() ? "" : st_.providers[0].id;
-      if (pid.empty()) {
-        toast("请先保存一个供应商");
-        return;
+          st_.pv_key = v;
+        }), st_.pv_kind == "plan" ? "套餐连接可不填；会话 id 自动作为 x-opencode-session 发送"
+                                  : ""));
+        H acts = el("div", "settings-actions");
+        acts.add(comp::button("保存", [this](const std::string&) { save_provider(); }, "primary"));
+        acts.add(comp::button("取消", [this](const std::string&) {
+          update([&](AppState& s) {
+            s.provider_creating = false;
+            s.pv_name.clear();
+            s.pv_kind.clear();
+            s.pv_base_url.clear();
+            s.pv_key.clear();
+            s.pv_headers.clear();
+          });
+        }, "ghost"));
+        detail.add(acts);
       }
-      call_async("provider.testConnection", Json{{"providerId", pid}},
-                 [this](const BackendResult& r) {
-        if (r.ok) {
-          toast("连接成功（" +
-                std::to_string(jsonutil::get_int(r.data, "latencyMs", 0)) + "ms）");
-        } else {
-          toast("连接失败：" + r.message);
-        }
-      });
-    }));
-    acts.add(comp::button("一键获取模型列表", [this](const std::string&) {
-      std::string pid = st_.providers.empty() ? "" : st_.providers[0].id;
-      if (pid.empty()) {
-        toast("请先保存一个供应商");
-        return;
+    } else if (st_.provider_selected.empty()) {
+      detail.add(comp::empty_state("从左侧选择一个供应商，或点「新建」。", "", nullptr));
+    } else {
+      // 编辑已选供应商
+      detail.add(comp::section_title("编辑供应商"));
+      detail.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
+                                                      [this](const std::string& v) {
+        st_.pv_name = v;
+      })));
+      detail.add(comp::field("格式", comp::text_input(st_.pv_kind, "", [](const std::string&) {}),
+                             "openai-chat / openai-response / anthropic / plan / custom"));
+      detail.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
+                                                          [this](const std::string& v) {
+        st_.pv_base_url = v;
+      })));
+      detail.add(comp::field("API Key", comp::text_input(st_.pv_key, "留空 = 不修改",
+                                                         [this](const std::string& v) {
+        st_.pv_key = v;
+      }), "回显为脱敏值；不改动则留空"));
+      // 自定义 header 表（仅 custom 形态需要；plan 的 x-opencode-session 自动）
+      detail.add(comp::section_title("自定义 Header"));
+      if (st_.pv_kind == "plan") {
+        detail.add(comp::hint("套餐连接自动携带 x-opencode-session（会话 id），无需手动配置。"));
       }
-      call_async("provider.listModels", Json{{"providerId", pid}},
-                 [this](const BackendResult& r) {
-        if (r.ok) {
-          size_t n = r.data.contains("models") && r.data["models"].is_array()
-                         ? r.data["models"].size() : 0;
-          toast("获取到 " + std::to_string(n) + " 个模型（级别：" +
-                jsonutil::get<std::string>(r.data, "level", "") + "）");
-        } else {
-          toast("获取失败：" + r.message);
+      for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
+        H row = el("div", "settings-row");
+        row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
+        row.add(el("span", "dim grow").text(st_.pv_headers[i].second));
+        size_t idx = i;
+        row.add(comp::button("删除", [this, idx](const std::string&) {
+          update([&](AppState& s) {
+            if (idx < s.pv_headers.size()) s.pv_headers.erase(s.pv_headers.begin() + idx);
+          });
+        }, "ghost"));
+        detail.add(row);
+      }
+      H addh = el("div", "pv-header-add");
+      addh.add(comp::text_input(st_.pv_new_header_k, "Header 名",
+                                [this](const std::string& v) { st_.pv_new_header_k = v; }));
+      addh.add(comp::text_input(st_.pv_new_header_v, "值",
+                                [this](const std::string& v) { st_.pv_new_header_v = v; }));
+      addh.add(comp::button("添加", [this](const std::string&) {
+        if (st_.pv_new_header_k.empty()) return;
+        update([&](AppState& s) {
+          s.pv_headers.push_back(std::make_pair(s.pv_new_header_k, s.pv_new_header_v));
+          s.pv_new_header_k.clear();
+          s.pv_new_header_v.clear();
+        });
+      }, "ghost"));
+      detail.add(addh);
+      if (!st_.provider_status.empty()) {
+        detail.add(el("div", "pv-status").text(st_.provider_status));
+      }
+      if (!st_.provider_models.empty()) {
+        H mh = el("div", "pv-models-head");
+        mh.add(el("span", "pv-models-title").text(
+            "模型（" + std::to_string(st_.provider_models.size()) + "，级别：" +
+            st_.provider_models_level + "）"));
+        detail.add(mh);
+        H ml = el("div", "pv-models");
+        for (size_t i = 0; i < st_.provider_models.size(); ++i) {
+          ml.add(el("span", "pv-model").text(st_.provider_models[i]));
         }
-      });
-    }, "primary"));
-    body.add(acts);
+        detail.add(ml);
+      }
+      H acts = el("div", "settings-actions");
+      std::string sel = st_.provider_selected;
+      acts.add(comp::button("保存", [this](const std::string&) { save_provider(); }, "primary"));
+      acts.add(comp::button("测试连接", [this, sel](const std::string&) {
+        test_provider(sel);
+      }));
+      acts.add(comp::button("获取模型列表", [this, sel](const std::string&) {
+        fetch_provider_models(sel);
+      }));
+      acts.add(comp::button("删除", [this, sel](const std::string&) {
+        delete_provider(sel);
+      }, "danger"));
+      detail.add(acts);
+    }
+    two.add(detail);
+    body.add(two);
   } else if (sec == "subagents") {
     // --- 子代理 ---
     body.add(comp::section_title("子代理"));
@@ -1433,8 +1649,11 @@ VNodePtr UiApp::build_settings() {
     }
     for (size_t i = 0; i < st_.skills.size(); ++i) {
       H row = el("div", "settings-row");
-      row.add(el("span", "sr-name").text(st_.skills[i]));
-      std::string name = st_.skills[i];
+      row.add(el("span", "sr-name").text(
+          st_.skills[i].title.empty() ? st_.skills[i].name : st_.skills[i].title));
+      row.add(el("span", "dim grow").text(st_.skills[i].description));
+      if (!st_.skills[i].loadable) row.add(comp::badge("常驻"));
+      std::string name = st_.skills[i].name;
       row.add(comp::button("查看", [this, name](const std::string&) {
         call_async("skill.load", Json{{"name", name}},
                    [this, name](const BackendResult& r) {
@@ -1443,7 +1662,47 @@ VNodePtr UiApp::build_settings() {
       }, "ghost"));
       body.add(row);
     }
-    body.add(comp::hint("MCP：连接、工具发现与调用尚未接线（mcp.* 为 P3 后置项）。"));
+
+    // ---- 外部工具包（MCP/Skill 文件夹导入）----
+    body.add(comp::section_title("外部工具包"));
+    body.add(comp::hint("从外部文件夹导入工具包（claude code / opencode / 自定义目录），"
+                        "可启用或停用；启用态随设置持久化。"));
+    H macts = el("div", "settings-actions");
+    macts.add(comp::button("自动探测", [this](const std::string&) { detect_mcp(); }, "primary"));
+    body.add(macts);
+    if (st_.mcp_tools.empty()) {
+      body.add(comp::empty_state("暂无外部工具包。点「自动探测」或在下方新增。", "", nullptr));
+    }
+    for (size_t i = 0; i < st_.mcp_tools.size(); ++i) {
+      const AppState::McpRow& m = st_.mcp_tools[i];
+      H row = el("div", "settings-row");
+      row.add(el("span", "sr-name").text(m.name));
+      row.add(el("span", "dim grow").text(m.dir));
+      std::string name = m.name;
+      bool en = m.enabled;
+      row.add(comp::toggle(en, "", [this, name, en](const std::string&) {
+        toggle_mcp(name, !en);
+      }));
+      row.add(comp::button("移除", [this, name](const std::string&) {
+        remove_mcp(name);
+      }, "ghost"));
+      body.add(row);
+    }
+    H addm = el("div", "pv-header-add");
+    addm.add(comp::text_input(st_.mcp_new_name, "名称",
+                              [this](const std::string& v) { st_.mcp_new_name = v; }));
+    addm.add(comp::text_input(st_.mcp_new_dir, "目录路径",
+                              [this](const std::string& v) { st_.mcp_new_dir = v; }));
+    addm.add(comp::button("新增", [this](const std::string&) { add_mcp(); }, "ghost"));
+    addm.add(comp::button("浏览目录…", [this](const std::string&) {
+      call_async("project.pickFolder", Json::object(), [this](const BackendResult& r) {
+        if (!r.ok) return;
+        std::string path = jsonutil::get<std::string>(r.data, "path", "");
+        if (path.empty()) return;
+        update([&](AppState& s) { s.mcp_new_dir = path; });
+      });
+    }, "ghost"));
+    body.add(addm);
   } else if (sec == "memory") {
     // --- 长期记忆 ---
     body.add(comp::section_title("长期记忆"));
@@ -1480,6 +1739,62 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "ui.codeHighlight", true);
       set_setting("ui.codeHighlight", !cur);
     })));
+    body.add(comp::section_title("字体"));
+    body.add(comp::field("界面字体", comp::text_input(
+        sv_str(st_.settings_values, "ui.font.family", ""), "系统默认",
+        [this](const std::string& v) { set_setting("ui.font.family", v); }),
+        "ui.font.family（空 = 系统默认）"));
+    body.add(comp::field("字号", comp::text_input(
+        std::to_string(sv_int(st_.settings_values, "ui.font.size", 13)), "",
+        [this](const std::string& v) {
+      int n = std::atoi(v.c_str());
+      set_setting("ui.font.size", n > 0 ? n : 13);
+    }), "ui.font.size（px）"));
+    body.add(comp::field("等宽字体", comp::text_input(
+        sv_str(st_.settings_values, "ui.font.monoFamily", ""), "系统默认",
+        [this](const std::string& v) { set_setting("ui.font.monoFamily", v); }),
+        "ui.font.monoFamily（代码块）"));
+  } else if (sec == "session_defaults") {
+    body.add(comp::section_title("会话默认"));
+    body.add(comp::hint("新会话创建时的默认值（session.default.*）；已有会话不受影响。"));
+    body.add(comp::field("默认模型", comp::text_input(
+        sv_str(st_.settings_values, "session.default.model", ""), "继承全局",
+        [this](const std::string& v) { set_setting("session.default.model", v); })));
+    body.add(comp::field("默认思考档", comp::select(
+        std::vector<std::string>{"继承", "关", "低", "中", "高"},
+        [&]() {
+          std::string t = sv_str(st_.settings_values, "session.default.thinking", "");
+          return t == "off" ? 1 : t == "low" ? 2 : t == "medium" ? 3
+                 : t == "high" ? 4 : 0;
+        }(),
+        [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      const char* vals[5] = {"", "off", "low", "medium", "high"};
+      set_setting("session.default.thinking", vals[idx < 0 || idx > 4 ? 0 : idx]);
+    })));
+    body.add(comp::field("默认文件权限", comp::select(
+        std::vector<std::string>{"approve", "permissive", "full"},
+        [&]() {
+          std::string p = sv_str(st_.settings_values, "session.default.filePerm", "permissive");
+          return p == "approve" ? 0 : p == "full" ? 2 : 1;
+        }(),
+        [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      const char* vals[3] = {"approve", "permissive", "full"};
+      set_setting("session.default.filePerm", vals[idx < 0 || idx > 2 ? 1 : idx]);
+    })));
+    body.add(comp::field("默认自动模式", comp::toggle(
+        sv_bool(st_.settings_values, "session.default.autoMode", false), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "session.default.autoMode", false);
+      set_setting("session.default.autoMode", !cur);
+    }), "自动模式下移除 ask 工具、高风险降级"));
+    body.add(comp::field("Enter 行为", comp::select(
+        std::vector<std::string>{"Enter 发送", "Enter 换行"},
+        sv_str(st_.settings_values, "session.default.enterSend", "enter") == "newline" ? 1 : 0,
+        [this](const std::string& v) {
+      set_setting("session.default.enterSend", std::atoi(v.c_str()) == 1 ? "newline" : "enter");
+    })));
   } else if (sec == "network") {
     body.add(comp::section_title("网络"));
     body.add(comp::field("网络总开关", comp::toggle(
@@ -1494,7 +1809,19 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "permissions.network.verifyCert", true);
       set_setting("permissions.network.verifyCert", !cur);
     })));
-    body.add(comp::hint("注意：httplib 不读系统代理环境变量；需要代理时在应用层设置。"));
+    body.add(comp::section_title("代理"));
+    body.add(comp::hint("httplib 不读系统代理环境变量；需要代理时在此显式设置（留空 = 直连）。"));
+    body.add(comp::field("代理主机", comp::text_input(
+        sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
+        [this](const std::string& v) {
+      set_setting("permissions.network.proxyHost", v);
+    }), "如 127.0.0.1"));
+    body.add(comp::field("代理端口", comp::text_input(
+        std::to_string(sv_int(st_.settings_values, "permissions.network.proxyPort", 0)), "",
+        [this](const std::string& v) {
+      int p = std::atoi(v.c_str());
+      set_setting("permissions.network.proxyPort", p > 0 ? p : 0);
+    }), "如 7890（0 = 不用代理）"));
   } else if (sec == "terminal") {
     body.add(comp::section_title("终端"));
     std::vector<std::string> shell_opts = st_.shells;
@@ -1526,7 +1853,27 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "permissions.files.autoGitInit", false);
       set_setting("permissions.files.autoGitInit", !cur);
     })));
-    body.add(comp::hint("黑/白名单编辑在 P4 提供；优先级：黑名单 > 白名单 > 三档默认。"));
+    body.add(comp::section_title("黑名单（拒绝访问）"));
+    body.add(comp::hint("优先级：黑名单 > 白名单 > 三档默认。一行一个路径前缀。"));
+    std::string bl = sv_str(st_.settings_values, "permissions.files.blacklist", "");
+    body.add(comp::textarea(bl, "每行一个路径…", [this](const std::string& v) {
+      // 多行 -> 数组（提交时拆分）
+      st_.file_blacklist_text = v;
+    }, nullptr));
+    body.add(comp::section_title("白名单（放行）"));
+    std::string wl = sv_str(st_.settings_values, "permissions.files.whitelist", "");
+    body.add(comp::textarea(wl, "每行一个路径…", [this](const std::string& v) {
+      st_.file_whitelist_text = v;
+    }, nullptr));
+    H fsave = el("div", "settings-actions");
+    fsave.add(comp::button("保存名单", [this](const std::string&) {
+      Json blist = split_lines(st_.file_blacklist_text);
+      Json wlist = split_lines(st_.file_whitelist_text);
+      call_async("settings.set", Json{{"key", "permissions.files.blacklist"}, {"value", blist}});
+      call_async("settings.set", Json{{"key", "permissions.files.whitelist"}, {"value", wlist}},
+                 [this](const BackendResult& r) { toast(r.ok ? "已保存名单" : "保存失败"); });
+    }, "primary"));
+    body.add(fsave);
   } else if (sec == "environment") {
     body.add(comp::section_title("环境"));
     body.add(comp::hint("全局环境变量 + 项目 project.json 覆盖（可 ignoreGlobal）；"
@@ -1553,17 +1900,72 @@ VNodePtr UiApp::build_settings() {
     }
   } else if (sec == "shortcuts") {
     body.add(comp::section_title("快捷键"));
-    body.add(comp::hint("v1 仅做可配表（shortcuts 设置键）；键位绑定待桌面端接入。"));
+    body.add(comp::hint("键位绑定（shortcuts 设置键）；桌面端接入后生效。"));
     const char* keys[][2] = {
         {"发送消息", "Enter"},    {"换行", "Shift+Enter"},
         {"关闭标签页", "Ctrl+W"}, {"新建标签页", "Ctrl+T"},
     };
     for (int i = 0; i < 4; ++i) {
       H row = el("div", "settings-row");
-      row.add(el("span", "sr-name").text(keys[i][0]));
-      row.add(el("span", "dim grow").text(keys[i][1]));
+      std::string action = keys[i][0];
+      row.add(el("span", "sr-name").text(action));
+      row.add(comp::text_input(sv_str(st_.settings_values, "shortcuts." + action,
+                                      keys[i][1]),
+                               "", [this, action](const std::string& v) {
+        set_setting("shortcuts." + action, v);
+      }));
       body.add(row);
     }
+  } else if (sec == "browser") {
+    body.add(comp::section_title("浏览器控制"));
+    body.add(comp::hint("模型通过 browser-control skill 驱动外部浏览器；"
+                        "skill 由模型按需加载（/browser-load）。"));
+    body.add(comp::field("启用浏览器控制", comp::toggle(
+        sv_bool(st_.settings_values, "browser.enabled", true), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "browser.enabled", true);
+      set_setting("browser.enabled", !cur);
+    })));
+    body.add(comp::field("驱动路径", comp::text_input(
+        sv_str(st_.settings_values, "browser.driver", ""), "自动（Playwright/内置）",
+        [this](const std::string& v) { set_setting("browser.driver", v); }),
+        "browser.driver（空 = 自动探测）"));
+    body.add(comp::field("允许联网", comp::toggle(
+        sv_bool(st_.settings_values, "browser.permissions.net", true), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "browser.permissions.net", true);
+      set_setting("browser.permissions.net", !cur);
+    })));
+    body.add(comp::field("允许操作证书", comp::toggle(
+        sv_bool(st_.settings_values, "browser.permissions.certs", false), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "browser.permissions.certs", false);
+      set_setting("browser.permissions.certs", !cur);
+    })));
+    H bacts = el("div", "settings-actions");
+    bacts.add(comp::button("加载 skill 说明", [this](const std::string&) {
+      call_async("skill.load", Json{{"name", "browser-control"}},
+                 [this](const BackendResult& r) {
+        toast(r.ok ? "已加载 browser-control skill" : ("加载失败：" + r.message));
+      });
+    }, "primary"));
+    body.add(bacts);
+  } else if (sec == "computer") {
+    body.add(comp::section_title("电脑控制"));
+    body.add(comp::hint("截图 / 鼠标键盘控制需要平台后端；当前为配置预留。"));
+    body.add(comp::field("启用电脑控制", comp::toggle(
+        sv_bool(st_.settings_values, "computer.enabled", false), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "computer.enabled", false);
+      set_setting("computer.enabled", !cur);
+    })));
+    body.add(comp::field("允许截图", comp::toggle(
+        sv_bool(st_.settings_values, "computer.screenshot", false), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "computer.screenshot", false);
+      set_setting("computer.screenshot", !cur);
+    })));
+    body.add(comp::hint("截图/图像解码后端未接线，相关工具调用返回 not-supported。"));
   } else if (sec == "about") {
     body.add(comp::section_title("关于"));
     body.add(comp::key_value("FlashSight", st_.about_version));
@@ -1761,6 +2163,190 @@ void UiApp::pick_and_open_folder() {
       if (r2.ok) toast("已打开项目");
       load_projects();
     });
+  });
+}
+
+// ===========================================================================
+// Settings actions: 供应商
+// ===========================================================================
+void UiApp::select_provider(const std::string& id) {
+  if (id.empty()) return;
+  call_async("provider.getProvider", Json{{"providerId", id}}, [this, id](const BackendResult& r) {
+    if (!r.ok) return;
+    update([&](AppState& s) {
+      s.provider_creating = false;
+      s.provider_selected = id;
+      s.pv_name = jsonutil::get<std::string>(r.data, "name", "");
+      s.pv_kind = jsonutil::get<std::string>(r.data, "kind", "openai-chat");
+      s.pv_base_url = jsonutil::get<std::string>(r.data, "baseUrl", "");
+      s.pv_key.clear();  // 留空 = 不修改（后端保留原密钥）
+      s.pv_headers.clear();
+      s.pv_new_header_k.clear();
+      s.pv_new_header_v.clear();
+      s.provider_models.clear();
+      s.provider_models_level.clear();
+      s.provider_status.clear();
+      if (r.data.contains("customHeaders") && r.data["customHeaders"].is_object()) {
+        const Json& h = r.data["customHeaders"];
+        for (Json::const_iterator it = h.begin(); it != h.end(); ++it) {
+          if (it.value().is_string()) {
+            s.pv_headers.push_back(std::make_pair(it.key(), it.value().get<std::string>()));
+          }
+        }
+      }
+    });
+  });
+}
+
+void UiApp::begin_new_provider(const std::string& template_id) {
+  // 模板已选：把 kind/baseUrl/名称填进草稿，进入填写表单
+  for (size_t i = 0; i < st_.provider_templates.size(); ++i) {
+    const AppState::ProviderTemplate& t = st_.provider_templates[i];
+    if (t.id != template_id) continue;
+    update([&](AppState& s) {
+      s.provider_creating = true;
+      s.provider_selected.clear();
+      s.pv_name = t.name;
+      s.pv_kind = t.kind;
+      s.pv_base_url = t.base_url;
+      s.pv_key.clear();
+      s.pv_headers.clear();
+      s.provider_status.clear();
+      s.provider_models.clear();
+    });
+    return;
+  }
+}
+
+void UiApp::save_provider() {
+  if (st_.pv_base_url.empty()) {
+    toast("请填写 Endpoint");
+    return;
+  }
+  Json conn = Json::object();
+  if (!st_.provider_selected.empty()) conn["id"] = st_.provider_selected;
+  conn["name"] = st_.pv_name;
+  conn["kind"] = st_.pv_kind.empty() ? "openai-chat" : st_.pv_kind;
+  conn["baseUrl"] = st_.pv_base_url;
+  conn["enabled"] = true;
+  if (!st_.pv_key.empty()) conn["apiKey"] = st_.pv_key;  // 空 = 后端保留原值
+  Json h = Json::object();
+  for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
+    h[st_.pv_headers[i].first] = st_.pv_headers[i].second;
+  }
+  conn["customHeaders"] = h;
+  call_async("provider.addProvider", Json{{"conn", conn}}, [this](const BackendResult& r) {
+    if (!r.ok) return;
+    toast("已保存供应商");
+    update([&](AppState& s) {
+      s.provider_creating = false;
+      s.pv_key.clear();
+    });
+    load_providers();
+  });
+}
+
+void UiApp::delete_provider(const std::string& id) {
+  if (id.empty()) return;
+  call_async("provider.removeProvider", Json{{"providerId", id}},
+             [this](const BackendResult&) {
+    update([&](AppState& s) {
+      s.provider_selected.clear();
+      s.pv_name.clear();
+      s.pv_base_url.clear();
+      s.pv_key.clear();
+      s.pv_headers.clear();
+    });
+    load_providers();
+  });
+}
+
+void UiApp::test_provider(const std::string& id) {
+  if (id.empty()) return;
+  update([&](AppState& s) { s.provider_status = "测试中…"; });
+  call_async("provider.testConnection", Json{{"providerId", id}},
+             [this](const BackendResult& r) {
+    update([&](AppState& s) {
+      if (r.ok) {
+        s.provider_status = "连接成功（" +
+            std::to_string(jsonutil::get_int(r.data, "latencyMs", 0)) + "ms）";
+      } else {
+        s.provider_status = "连接失败：" + r.message;
+      }
+    });
+  });
+}
+
+void UiApp::fetch_provider_models(const std::string& id) {
+  if (id.empty()) return;
+  call_async("provider.listModels", Json{{"providerId", id}},
+             [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast("获取失败：" + r.message);
+      return;
+    }
+    std::vector<std::string> models;
+    if (r.data.contains("models") && r.data["models"].is_array()) {
+      const Json& arr = r.data["models"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        std::string mid = jsonutil::get<std::string>(arr[i], "id", "");
+        if (!mid.empty()) models.push_back(mid);
+      }
+    }
+    std::string level = jsonutil::get<std::string>(r.data, "level", "");
+    std::string message = jsonutil::get<std::string>(r.data, "message", "");
+    update([&](AppState& s) {
+      s.provider_models = models;
+      s.provider_models_level = level;
+      s.provider_status = "获取到 " + std::to_string(models.size()) + " 个模型（级别：" +
+                          level + "）" + (message.empty() ? "" : ("，" + message));
+    });
+  });
+}
+
+// ===========================================================================
+// Settings actions: MCP / 外部工具
+// ===========================================================================
+void UiApp::detect_mcp() {
+  call_async("mcp.detect", Json::object(), [this](const BackendResult& r) {
+    if (!r.ok) return;
+    size_t n = r.data.contains("scanned") && r.data["scanned"].is_array()
+                   ? r.data["scanned"].size() : 0;
+    toast(n > 0 ? ("探测到 " + std::to_string(n) + " 个目录") : "未发现常见工具目录");
+    load_mcp_tools();
+  });
+}
+
+void UiApp::add_mcp() {
+  if (st_.mcp_new_name.empty() || st_.mcp_new_dir.empty()) {
+    toast("请填写名称与目录");
+    return;
+  }
+  std::string name = st_.mcp_new_name;
+  std::string dir = st_.mcp_new_dir;
+  call_async("mcp.add", Json{{"name", name}, {"dir", dir}, {"enabled", true}},
+             [this](const BackendResult& r) {
+    if (!r.ok) return;
+    update([&](AppState& s) {
+      s.mcp_new_name.clear();
+      s.mcp_new_dir.clear();
+    });
+    load_mcp_tools();
+  });
+}
+
+void UiApp::remove_mcp(const std::string& name) {
+  if (name.empty()) return;
+  call_async("mcp.remove", Json{{"name", name}}, [this](const BackendResult&) {
+    load_mcp_tools();
+  });
+}
+
+void UiApp::toggle_mcp(const std::string& name, bool enabled) {
+  if (name.empty()) return;
+  call_async("mcp.setEnabled", Json{{"name", name}, {"enabled", enabled}},
+             [this](const BackendResult&) {
+    load_mcp_tools();
   });
 }
 

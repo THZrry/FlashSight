@@ -33,6 +33,8 @@ struct ModelCallRequest {
   Json messages = Json::array();
   Json tools = Json::array();
   bool auto_mode = false;
+  // 会话亲和 id（kPlan 套餐连接透传为 x-opencode-session，provider.md §5）
+  std::string session_id;
 };
 struct ModelCallResult {
   std::string text;

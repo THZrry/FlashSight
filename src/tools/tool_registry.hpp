@@ -37,6 +37,9 @@ struct ToolContext {
   std::function<FsResult(const Json&, Json*)> todo_op;
   // LSP 回调（addon2 依赖特定环境）：{lang, cmd, args} -> 结果
   std::function<FsResult(const Json&, Json*)> lsp_call;
+  // 黑白名单判定（permissions.md §3）：给定规范化绝对路径，返回是否放行；
+  // 拒绝时 reason 带原因。未接线（空）时视为全部放行。
+  std::function<bool(const std::string& abs_path, std::string* reason)> deny_check;
 };
 
 // 工具定义（给模型的 JSON schema）

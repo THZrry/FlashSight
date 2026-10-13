@@ -38,6 +38,8 @@ struct AgentHostDeps {
   std::function<FsResult(const Json&, Json*)> terminal_kill;
   // 网络回调（fetch/search；FsApi 的 NetClient）
   std::function<FsResult(const Json&, Json*)> net_fetch;
+  // 黑白名单判定（FsApi 的 DenyList；空 = 全部放行）
+  std::function<bool(const std::string& abs_path, std::string* reason)> deny_check;
   const Clock* clock = nullptr;
 };
 

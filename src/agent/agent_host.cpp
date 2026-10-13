@@ -129,6 +129,7 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
   ctx.terminal_poll = deps_.terminal_poll;
   ctx.terminal_kill = deps_.terminal_kill;
   ctx.net_fetch = deps_.net_fetch;
+  ctx.deny_check = deps_.deny_check;
   return ctx;
 }
 
