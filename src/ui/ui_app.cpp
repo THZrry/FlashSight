@@ -1231,6 +1231,15 @@ std::string sv_str(const Json& vals, const std::string& key,
   return def;
 }
 
+// settings values arrive either bare or wrapped as {value, source}; return the
+// inner value object for map-typed settings (empty object when absent).
+Json sv_obj(const Json& vals, const std::string& key) {
+  if (!vals.is_object() || !vals.contains(key)) return Json::object();
+  const Json& v = vals[key];
+  if (v.is_object() && v.contains("value") && v["value"].is_object()) return v["value"];
+  return v.is_object() ? v : Json::object();
+}
+
 // read a string[] setting as one-newline-per-item text (textarea draft)
 std::string join_lines(const Json& vals, const std::string& key) {
   if (!vals.is_object() || !vals.contains(key)) return "";
@@ -1257,6 +1266,10 @@ void UiApp::set_setting(const std::string& key, const Json& value) {
     entry["source"] = "global";
     s.settings_values[key] = entry;
   });
+  // re-derive the cached views (long_memory / env_vars / cli_tools / history)
+  // so a settings write reflects immediately without a full dump round-trip
+  apply_settings(st_.settings_values);
+  render();
   call_async("settings.set", Json{{"key", key}, {"value", value}});
 }
 
@@ -1278,11 +1291,10 @@ void UiApp::apply_settings(const Json& values) {
   // file black/white lists: stored as arrays; join for the textarea draft
   st_.file_blacklist_text = join_lines(st_.settings_values, "permissions.files.blacklist");
   st_.file_whitelist_text = join_lines(st_.settings_values, "permissions.files.whitelist");
-  // long memory / env / cli maps
-  if (st_.settings_values.contains("model.longMemory") &&
-      st_.settings_values["model.longMemory"].is_object()) {
-    st_.long_memory.clear();
-    const Json& m = st_.settings_values["model.longMemory"];
+  // long memory / env / cli maps (values may be wrapped as {value,source})
+  st_.long_memory.clear();
+  {
+    Json m = sv_obj(st_.settings_values, "model.longMemory");
     for (Json::const_iterator it = m.begin(); it != m.end(); ++it) {
       if (it.value().is_string()) {
         st_.long_memory.push_back(
@@ -1291,9 +1303,8 @@ void UiApp::apply_settings(const Json& values) {
     }
   }
   st_.env_vars.clear();
-  if (st_.settings_values.contains("environment.vars") &&
-      st_.settings_values["environment.vars"].is_object()) {
-    const Json& m = st_.settings_values["environment.vars"];
+  {
+    Json m = sv_obj(st_.settings_values, "environment.vars");
     for (Json::const_iterator it = m.begin(); it != m.end(); ++it) {
       std::string v = it.value().is_string()
                           ? it.value().get<std::string>()
@@ -1304,9 +1315,8 @@ void UiApp::apply_settings(const Json& values) {
     }
   }
   st_.cli_tools.clear();
-  if (st_.settings_values.contains("environment.cliTools") &&
-      st_.settings_values["environment.cliTools"].is_object()) {
-    const Json& m = st_.settings_values["environment.cliTools"];
+  {
+    Json m = sv_obj(st_.settings_values, "environment.cliTools");
     for (Json::const_iterator it = m.begin(); it != m.end(); ++it) {
       std::string v = it.value().is_string()
                           ? it.value().get<std::string>()
@@ -1712,11 +1722,24 @@ VNodePtr UiApp::build_settings() {
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(st_.long_memory[i].first));
       row.add(el("span", "dim grow").text(st_.long_memory[i].second));
+      std::string k = st_.long_memory[i].first;
+      row.add(comp::button("删除", [this, k](const std::string&) {
+        remove_kv("model.longMemory", k);
+      }, "ghost"));
       body.add(row);
     }
     if (st_.long_memory.empty()) {
       body.add(comp::empty_state("暂无长期记忆条目。", "", nullptr));
     }
+    H madd = el("div", "pv-header-add");
+    madd.add(comp::text_input(st_.mem_new_key, "键",
+                              [this](const std::string& v) { st_.mem_new_key = v; }));
+    madd.add(comp::text_input(st_.mem_new_value, "值",
+                              [this](const std::string& v) { st_.mem_new_value = v; }));
+    madd.add(comp::button("添加", [this](const std::string&) {
+      add_kv("model.longMemory", st_.mem_new_key, st_.mem_new_value);
+    }, "ghost"));
+    body.add(madd);
   } else if (sec == "appearance") {
     body.add(comp::section_title("外观"));
     body.add(comp::field("主题", comp::select(
@@ -1855,14 +1878,13 @@ VNodePtr UiApp::build_settings() {
     })));
     body.add(comp::section_title("黑名单（拒绝访问）"));
     body.add(comp::hint("优先级：黑名单 > 白名单 > 三档默认。一行一个路径前缀。"));
-    std::string bl = sv_str(st_.settings_values, "permissions.files.blacklist", "");
-    body.add(comp::textarea(bl, "每行一个路径…", [this](const std::string& v) {
-      // 多行 -> 数组（提交时拆分）
-      st_.file_blacklist_text = v;
+    body.add(comp::textarea(st_.file_blacklist_text, "每行一个路径…",
+                            [this](const std::string& v) {
+      st_.file_blacklist_text = v;  // 提交时拆分成数组
     }, nullptr));
     body.add(comp::section_title("白名单（放行）"));
-    std::string wl = sv_str(st_.settings_values, "permissions.files.whitelist", "");
-    body.add(comp::textarea(wl, "每行一个路径…", [this](const std::string& v) {
+    body.add(comp::textarea(st_.file_whitelist_text, "每行一个路径…",
+                            [this](const std::string& v) {
       st_.file_whitelist_text = v;
     }, nullptr));
     H fsave = el("div", "settings-actions");
@@ -1882,22 +1904,48 @@ VNodePtr UiApp::build_settings() {
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(st_.env_vars[i].first));
       row.add(el("span", "dim grow").text(st_.env_vars[i].second));
+      std::string k = st_.env_vars[i].first;
+      row.add(comp::button("删除", [this, k](const std::string&) {
+        remove_kv("environment.vars", k);
+      }, "ghost"));
       body.add(row);
     }
     if (st_.env_vars.empty()) {
       body.add(comp::empty_state("暂无环境变量。", "", nullptr));
     }
+    H eadd = el("div", "pv-header-add");
+    eadd.add(comp::text_input(st_.env_new_key, "名称（如 PATH）",
+                              [this](const std::string& v) { st_.env_new_key = v; }));
+    eadd.add(comp::text_input(st_.env_new_value, "值",
+                              [this](const std::string& v) { st_.env_new_value = v; }));
+    eadd.add(comp::button("添加", [this](const std::string&) {
+      add_kv("environment.vars", st_.env_new_key, st_.env_new_value);
+    }, "ghost"));
+    body.add(eadd);
     body.add(comp::section_title("CLI 工具路径"));
     body.add(comp::hint("key-value 表；运行时把 key 告诉模型，模型按 key 调用。"));
     for (size_t i = 0; i < st_.cli_tools.size(); ++i) {
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(st_.cli_tools[i].first));
       row.add(el("span", "dim grow").text(st_.cli_tools[i].second));
+      std::string k = st_.cli_tools[i].first;
+      row.add(comp::button("删除", [this, k](const std::string&) {
+        remove_kv("environment.cliTools", k);
+      }, "ghost"));
       body.add(row);
     }
     if (st_.cli_tools.empty()) {
       body.add(comp::empty_state("暂无 CLI 工具条目。", "", nullptr));
     }
+    H cadd = el("div", "pv-header-add");
+    cadd.add(comp::text_input(st_.cli_new_key, "key",
+                              [this](const std::string& v) { st_.cli_new_key = v; }));
+    cadd.add(comp::text_input(st_.cli_new_value, "路径",
+                              [this](const std::string& v) { st_.cli_new_value = v; }));
+    cadd.add(comp::button("添加", [this](const std::string&) {
+      add_kv("environment.cliTools", st_.cli_new_key, st_.cli_new_value);
+    }, "ghost"));
+    body.add(cadd);
   } else if (sec == "shortcuts") {
     body.add(comp::section_title("快捷键"));
     body.add(comp::hint("键位绑定（shortcuts 设置键）；桌面端接入后生效。"));
@@ -2348,6 +2396,33 @@ void UiApp::toggle_mcp(const std::string& name, bool enabled) {
              [this](const BackendResult&) {
     load_mcp_tools();
   });
+}
+
+void UiApp::add_kv(const std::string& key_setting, const std::string& k,
+                   const std::string& v) {
+  if (k.empty()) {
+    toast("请填写键");
+    return;
+  }
+  // merge into the existing map so a single entry is added, not the whole table
+  Json cur = sv_obj(st_.settings_values, key_setting);
+  cur[k] = v;
+  update([&](AppState& s) {
+    s.mem_new_key.clear();
+    s.mem_new_value.clear();
+    s.env_new_key.clear();
+    s.env_new_value.clear();
+    s.cli_new_key.clear();
+    s.cli_new_value.clear();
+  });
+  set_setting(key_setting, cur);
+}
+
+void UiApp::remove_kv(const std::string& key_setting, const std::string& k) {
+  if (k.empty()) return;
+  Json cur = sv_obj(st_.settings_values, key_setting);
+  cur.erase(k);
+  set_setting(key_setting, cur);
 }
 
 void UiApp::handle_dropped_folder(const std::string& name) {

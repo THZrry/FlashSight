@@ -179,6 +179,13 @@ struct AppState {
   std::vector<std::pair<std::string, std::string> > long_memory;  // 长期记忆
   std::vector<std::pair<std::string, std::string> > env_vars;     // 环境变量
   std::vector<std::pair<std::string, std::string> > cli_tools;    // CLI 工具
+  // add-row drafts for the editable key/value tables
+  std::string mem_new_key;
+  std::string mem_new_value;
+  std::string env_new_key;
+  std::string env_new_value;
+  std::string cli_new_key;
+  std::string cli_new_value;
   std::string file_blacklist_text;  // 文件黑名单（多行编辑草稿）
   std::string file_whitelist_text;  // 文件白名单（多行编辑草稿）
   std::string about_version = "0.1.0";
@@ -271,6 +278,9 @@ class UiApp {
   void add_mcp();
   void remove_mcp(const std::string& name);
   void toggle_mcp(const std::string& name, bool enabled);
+  // ---- settings / key-value tables (长期记忆 / 环境变量 / CLI 工具) ----
+  void add_kv(const std::string& key_setting, const std::string& k, const std::string& v);
+  void remove_kv(const std::string& key_setting, const std::string& k);
   // test hook: apply a backend event as the sink would
   void on_backend_event_for_test(const std::string& event, const Json& payload) {
     on_backend_event(event, payload);
