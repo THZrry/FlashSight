@@ -536,6 +536,17 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
 }
 
+/* side panel: system ops / tool call rows */
+.op-row, .call-row {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 8px; border-bottom: 1px solid var(--border);
+}
+.op-name, .call-name { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.op-detail, .call-args {
+  font-family: var(--mono); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .kv { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; }
 .kv-k { color: var(--text-dim); }
 .kv-v { font-family: var(--mono); }
@@ -590,6 +601,20 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .composer-tools { display: flex; align-items: center; gap: 8px; }
 .composer-hint { color: var(--text-faint); font-size: 11.5px; }
+
+/* "/" skill picker under the composer */
+.skill-menu {
+  border-top: 1px solid var(--border);
+  margin-top: 4px; padding-top: 4px;
+  display: flex; flex-direction: column;
+  max-height: 200px; overflow: auto;
+}
+.skill-menu-item {
+  padding: 5px 8px; border-radius: var(--radius);
+  cursor: pointer; font-size: 12.5px;
+}
+.skill-menu-item:hover { background: var(--hover); }
+.skill-menu-name { font-family: var(--mono); }
 
 /* ============================ terminal drawer ============================ */
 .terminal-drawer {

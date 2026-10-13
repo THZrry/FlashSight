@@ -253,8 +253,32 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
     std::string pid = r.data.contains("meta")
                           ? jsonutil::get<std::string>(r.data["meta"], "pid", "")
                           : "";
+    // 操作记录（systemOps）与工具调用记录（各 turn 的 toolCalls）
+    std::vector<AppState::OpRow> ops;
+    if (r.data.contains("systemOps") && r.data["systemOps"].is_array()) {
+      const Json& so = r.data["systemOps"];
+      for (size_t i = 0; i < so.size(); ++i) {
+        AppState::OpRow o;
+        o.op = jsonutil::get<std::string>(so[i], "op", "");
+        o.detail = so[i].dump();
+        ops.push_back(o);
+      }
+    }
+    std::vector<AppState::CallRow> calls;
+    for (size_t i = 0; i < turns.size(); ++i) {
+      if (!turns[i].contains("toolCalls") || !turns[i]["toolCalls"].is_array()) continue;
+      const Json& tc = turns[i]["toolCalls"];
+      for (size_t k = 0; k < tc.size(); ++k) {
+        AppState::CallRow c;
+        c.name = jsonutil::get<std::string>(tc[k], "name", "");
+        c.args = tc[k].contains("args") ? tc[k]["args"].dump() : "";
+        calls.push_back(c);
+      }
+    }
     update([&](AppState& s) {
       s.messages = msgs;
+      s.session_ops = ops;
+      s.session_calls = calls;
       if (!pid.empty()) {
         s.active_pid = pid;
         s.files_path.clear();  // reset the tree to the project root
@@ -936,8 +960,30 @@ VNodePtr UiApp::build_session() {
   comp_box.add(ta);
   H tools = el("div", "composer-tools");
   // left: session functions, compact buttons
-  tools.add(comp::button("+ 文件", [this](const std::string&) { toast("加入文件（待接后端）"); }, "ghost"));
-  tools.add(comp::button("/ 命令", [this](const std::string&) { toast("skill 命令（待接后端）"); }, "ghost"));
+  tools.add(comp::button("+ 文件", [this](const std::string&) {
+    // open the file tree; picking a file inserts its path into the input
+    open_or_focus_side_tab("files");
+  }, "ghost"));
+  tools.add(comp::button("/ 命令", [this](const std::string&) {
+    // list skills; picking one inserts "/<name>" into the composer
+    call_async("skill.list", Json::object(), [this](const BackendResult& r) {
+      if (!r.ok) return;
+      std::vector<std::string> names;
+      const Json& arr = r.data.contains("skills") ? r.data["skills"] : r.data;
+      if (arr.is_array()) {
+        for (size_t i = 0; i < arr.size(); ++i) {
+          std::string n = arr[i].is_string()
+                              ? arr[i].get<std::string>()
+                              : jsonutil::get<std::string>(arr[i], "name", "");
+          if (!n.empty()) names.push_back(n);
+        }
+      }
+      update([&](AppState& s) {
+        s.skill_menu = names;
+        s.skill_menu_open = true;
+      });
+    });
+  }, "ghost"));
   tools.add(comp::button("子代理", [this](const std::string&) {
     if (active_sid().empty()) {
       toast("请先打开一个会话");
@@ -1027,6 +1073,36 @@ VNodePtr UiApp::build_session() {
   }, "ghost"));
   tools.add(comp::button("发送", [this](const std::string&) { send_message(); }, "primary"));
   comp_box.add(tools);
+  // "/" skill picker: a floating list under the composer
+  if (st_.skill_menu_open) {
+    H pop = el("div", "skill-menu");
+    if (st_.skill_menu.empty()) {
+      pop.add(el("div", "skill-menu-item dim").text("（暂无 skill）"));
+    }
+    for (size_t i = 0; i < st_.skill_menu.size(); ++i) {
+      std::string name = st_.skill_menu[i];
+      H it = el("div", "skill-menu-item");
+      it.on(EventKind::kClick, [this, name](const std::string&) {
+        update([&](AppState& s) {
+          s.skill_menu_open = false;
+          if (!s.session_input.empty() && s.session_input.back() != ' ') s.session_input += " ";
+          s.session_input += "/" + name;
+        });
+        // write the new value straight to the textarea (no render while typing)
+        VNodePtr ta = find_by_key(tree_, "session-input");
+        if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
+      });
+      it.add(el("span", "skill-menu-name").text("/" + name));
+      pop.add(it);
+    }
+    H close = el("div", "skill-menu-item dim");
+    close.on(EventKind::kClick, [this](const std::string&) {
+      update([&](AppState& s) { s.skill_menu_open = false; });
+    });
+    close.add(el("span").text("取消"));
+    pop.add(close);
+    comp_box.add(pop);
+  }
   wrap.add(comp_box);
 
   // ---- terminal drawer ----
@@ -1208,11 +1284,28 @@ VNodePtr UiApp::build_side_panel() {
       }
     }
   } else if (kind == "git") {
-    body.add(comp::empty_state("Git 状态（待接后端）", "", nullptr));
+    body.add(comp::empty_state("Git 状态（需要项目为 git 仓库；git 工具尚未接线）",
+                               "", nullptr));
   } else if (kind == "ops") {
-    body.add(comp::empty_state("操作记录（待接后端）", "", nullptr));
+    if (st_.session_ops.empty()) {
+      body.add(comp::empty_state("暂无操作记录（systemOps）。", "", nullptr));
+    }
+    for (size_t i = 0; i < st_.session_ops.size(); ++i) {
+      H row = el("div", "op-row");
+      row.add(el("span", "op-name").text(st_.session_ops[i].op));
+      row.add(el("span", "op-detail dim").text(st_.session_ops[i].detail));
+      body.add(row);
+    }
   } else if (kind == "calls") {
-    body.add(comp::empty_state("工具调用记录（待接后端）", "", nullptr));
+    if (st_.session_calls.empty()) {
+      body.add(comp::empty_state("暂无工具调用记录。", "", nullptr));
+    }
+    for (size_t i = 0; i < st_.session_calls.size(); ++i) {
+      H row = el("div", "call-row");
+      row.add(el("span", "call-name").text(st_.session_calls[i].name));
+      row.add(el("span", "call-args dim").text(st_.session_calls[i].args));
+      body.add(row);
+    }
   } else {
     body.add(comp::empty_state("面板内容", "", nullptr));
   }

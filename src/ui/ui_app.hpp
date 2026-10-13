@@ -101,6 +101,21 @@ struct AppState {
   bool files_loaded = false;
   std::string file_preview_path;          // file whose content is shown
   std::string file_preview;               // preview content
+  // ---- side panel / 操作记录 + 工具调用记录 ----
+  struct OpRow {
+    std::string op;
+    std::string detail;
+  };
+  std::vector<OpRow> session_ops;         // systemOps from session.get
+  struct CallRow {
+    std::string name;
+    std::string args;
+    bool ok = true;
+  };
+  std::vector<CallRow> session_calls;     // toolCalls flattened from turns
+  // ---- composer / skill picker ----
+  bool skill_menu_open = false;
+  std::vector<std::string> skill_menu;    // skill names for the "/" picker
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
