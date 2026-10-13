@@ -81,13 +81,28 @@ class IDom {
 
   // --- splitter (drag to resize `side`; browser-only nicety) ---
   // Backends that cannot drag (NullDom) keep the default width.
-  virtual void bind_splitter(Node splitter, Node side) { (void)splitter; (void)side; }
+  // on_resize (optional) reports the new width so the app can persist it in
+  // state; without it the width would be lost when the node is re-created.
+  virtual void bind_splitter(Node splitter, Node side,
+                            std::function<void(int)> on_resize) {
+    (void)splitter;
+    (void)side;
+    (void)on_resize;
+  }
 
   // --- drop zone (drag & drop a folder onto `node`) ---
   // The callback receives the dropped folder's *name* (browsers never expose
   // absolute paths). Backends without DnD keep the default no-op.
   virtual void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) {
     (void)node;
+    (void)cb;
+  }
+
+  // --- global key (document-level) ---
+  // Escape etc. must work regardless of focus, so this listens on the document
+  // rather than a node (a keydown on <body> never reaches the app's root div).
+  // The callback receives the key name ("Escape", "ArrowDown", ...).
+  virtual void bind_global_key(std::function<void(const std::string&)> cb) {
     (void)cb;
   }
 
@@ -119,11 +134,21 @@ class NullDom : public IDom {
   std::string get_value(Node node) override;
   void on(Node node, EventKind kind, int handler_id) override;
   void off(Node node, EventKind kind) override;
-  void bind_splitter(Node splitter, Node side) override;
+  void bind_splitter(Node splitter, Node side,
+                     std::function<void(int)> on_resize) override;
   void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) override;
+  void bind_global_key(std::function<void(const std::string&)> cb) override;
   // test hook: simulate a folder drop on the bound zone
   void fire_drop_for_test(const std::string& name) {
     if (drop_cb_) drop_cb_(name);
+  }
+  // test hook: simulate the end of a splitter drag
+  void fire_split_for_test(int width) {
+    if (split_cb_) split_cb_(width);
+  }
+  // test hook: simulate a global key press
+  void fire_key_for_test(const std::string& key) {
+    if (key_cb_) key_cb_(key);
   }
   Node root() override { return Node{1}; }
   const char* backend_name() const override { return "null"; }
@@ -147,6 +172,8 @@ class NullDom : public IDom {
   uint64_t next_id_ = 2;  // id 1 is the root
   std::vector<Call> calls_;
   std::function<void(const std::string&)> drop_cb_;
+  std::function<void(int)> split_cb_;
+  std::function<void(const std::string&)> key_cb_;
 };
 
 }  // namespace ui

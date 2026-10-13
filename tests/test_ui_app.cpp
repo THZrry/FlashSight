@@ -176,8 +176,95 @@ FS_TEST(uiapp_side_add_shows_kind_menu) {
   EXPECT_EQ(app.state().side_tabs.size(), before + 1);
 }
 
-FS_TEST(uiapp_drop_zone_bound) {
+// Each session tab keeps its own messages / input / side panel. Switching
+// away and back must restore them (this was broken before per-tab views).
+FS_TEST(uiapp_session_tabs_keep_their_own_state) {
   NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  // open session A and give it a message + a widened side panel
+  app.open_session("sess_a", "会话A");
+  app.update([](AppState& s) {
+    comp::ChatMsg m;
+    m.role = "user";
+    m.text = "AAA";
+    s.messages.push_back(m);
+    s.side_width = 500;
+  });
+  // open session B: its own (empty) view, its own default panel width
+  app.open_session("sess_b", "会话B");
+  EXPECT_EQ(app.state().messages.size(), size_t(0));
+  EXPECT_EQ(app.state().side_width, 320);
+  app.update([](AppState& s) {
+    comp::ChatMsg m;
+    m.role = "user";
+    m.text = "BBB";
+    s.messages.push_back(m);
+  });
+
+  app.show("sess_a");
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  EXPECT_EQ(app.state().messages[0].text, std::string("AAA"));
+  EXPECT_EQ(app.state().side_width, 500);  // panel width survived the switch
+
+  app.show("sess_b");
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  EXPECT_EQ(app.state().messages[0].text, std::string("BBB"));
+  EXPECT_EQ(app.state().side_width, 320);  // B keeps its own default
+}
+
+// The side-panel divider reports the final width, which must land in state.
+FS_TEST(uiapp_splitter_width_persists) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  EXPECT_TRUE(dom.count_of("bind_splitter") >= 1);
+  dom.fire_split_for_test(430);
+  EXPECT_EQ(app.state().side_width, 430);
+}
+
+// Escape (document-level key) dismisses the "/" skill picker.
+FS_TEST(uiapp_escape_dismisses_skill_menu) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.update([](AppState& s) {
+    s.skill_menu_open = true;
+    s.skill_menu.push_back("browser-control");
+  });
+  EXPECT_TRUE(dump_has(dom, "/browser-control"));
+  dom.fire_key_for_test("Escape");
+  EXPECT_FALSE(app.state().skill_menu_open);
+  dom.fire_key_for_test("a");  // other keys must not close it
+  app.update([](AppState& s) { s.skill_menu_open = true; });
+  dom.fire_key_for_test("Enter");
+  EXPECT_TRUE(app.state().skill_menu_open);
+}
+
+// A background session's stream events land in that session's view, not on
+// whatever tab the user is currently looking at.
+FS_TEST(uiapp_background_session_events_are_isolated) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.on_backend_event_for_test(
+      "stream.delta", Json{{"sid", "sess_b"}, {"text", "from B"}});
+  // the visible session must be untouched
+  EXPECT_EQ(app.state().messages.size(), size_t(0));
+  // switching to B shows the streamed text
+  app.show("sess_b");
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  EXPECT_EQ(app.state().messages[0].text, std::string("from B"));
+}
+
+FS_TEST(uiapp_drop_zone_bound) {  NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();

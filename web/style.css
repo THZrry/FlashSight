@@ -67,6 +67,43 @@
 
 * { box-sizing: border-box; }
 
+/* ============================ animations ============================
+   Mount-time animations only: a node animates when the diff creates it
+   (first mount, or key/tag change). Plain re-renders reuse the node, so
+   nothing re-animates on every state change - which would be noise.
+   Keep the subtle ones at ~0.05s and reserve the longer ones for
+   whole-page switches and popovers. */
+@keyframes anim-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes anim-page {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes anim-pop {
+  from { opacity: 0; transform: translateY(4px) scale(.99); }
+  to   { opacity: 1; transform: none; }
+}
+.anim-page { animation: anim-page .16s ease-out; }
+.anim-fade { animation: anim-fade .05s ease-out; }
+.anim-pop  { animation: anim-pop .12s ease-out; }
+
+/* text appearing (streamed assistant text, new rows) fades in softly */
+.msg.assistant .article,
+.msg.user .bubble,
+.proj-session,
+.file-row,
+.settings-row,
+.subagent-card,
+.op-row,
+.call-row { animation: anim-fade .05s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-page, .anim-fade, .anim-pop { animation: none; }
+  .msg.assistant .article, .msg.user .bubble, .proj-session,
+  .file-row, .settings-row, .subagent-card, .op-row, .call-row {
+    animation: none;
+  }
+}
+
 html, body {
   margin: 0;
   height: 100%;
@@ -584,6 +621,7 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 /* ============================ composer ============================ */
 .composer {
   flex: none;
+  position: relative;   /* anchor for the "/" picker overlay */
   margin: 0 14px 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -602,15 +640,25 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .composer-tools { display: flex; align-items: center; gap: 8px; }
 .composer-hint { color: var(--text-faint); font-size: 11.5px; }
 
-/* "/" skill picker under the composer */
+/* "/" skill picker: overlay ABOVE the composer (never reflows the input) */
+.skill-menu-backdrop {
+  position: fixed; inset: 0; z-index: 40;
+}
 .skill-menu {
-  border-top: 1px solid var(--border);
-  margin-top: 4px; padding-top: 4px;
+  position: absolute;
+  left: 0; right: 0; bottom: calc(100% + 6px);
+  z-index: 41;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--pop);
   display: flex; flex-direction: column;
-  max-height: 200px; overflow: auto;
+  max-height: 240px; overflow: auto;
+  padding: 4px;
+  animation: anim-pop .12s ease-out;
 }
 .skill-menu-item {
-  padding: 5px 8px; border-radius: var(--radius);
+  padding: 6px 10px; border-radius: var(--radius);
   cursor: pointer; font-size: 12.5px;
 }
 .skill-menu-item:hover { background: var(--hover); }

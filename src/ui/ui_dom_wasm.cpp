@@ -66,7 +66,11 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
     var v = "";
     try {
       var t = el.tagName;
-      if (t === 'INPUT' && el.type === 'checkbox') {
+      if (name === 'keydown') {
+        // keydown carries the key name (not the element value) so handlers can
+        // react to Escape / arrow keys; kKeyEnter handles Enter separately.
+        v = evt.key === undefined ? "" : String(evt.key);
+      } else if (t === 'INPUT' && el.type === 'checkbox') {
         v = el.checked ? '1' : '0';
       } else if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') {
         v = el.value === undefined ? "" : String(el.value);
@@ -128,12 +132,15 @@ EM_JS(void, fs_dom_drop_zone, (int node_id, int cb_id), {
 });
 
 // Drag the divider to resize `side` horizontally. Clamped to [minW, maxW].
-// The new width is applied inline; patch() never touches this element's
-// inline size, so it survives re-renders.
-EM_JS(void, fs_dom_splitter, (int split_node, int side_node), {
+// The new width is applied inline during the drag; on release the width is
+// reported to C++ (fs_ui_split) so the app can persist it in state - otherwise
+// the width would be lost as soon as the node is re-created.
+EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
   var bar = globalThis.__fsNodes[split_node];
   var side = globalThis.__fsNodes[side_node];
   if (!bar || !side) return;
+  // rebinding just swaps the callback id; listeners install once
+  bar.__fsSplitCb = cb_id;
   if (bar.__fsSplitInit) return;
   bar.__fsSplitInit = true;
   bar.style.cursor = 'col-resize';
@@ -153,6 +160,8 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node), {
     function up() {
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
+      var w = parseInt(side.style.width, 10);
+      if (isFinite(w) && Module._fs_ui_split) Module._fs_ui_split(bar.__fsSplitCb, w);
     }
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
@@ -181,6 +190,44 @@ int& drop_seq() {
   static int s = 0;
   return s;
 }
+
+// splitter resize callbacks (one app-wide divider; replaced on each bind)
+std::map<int, std::function<void(int)> >& split_cbs() {
+  static std::map<int, std::function<void(int)> > m;
+  return m;
+}
+int& split_seq() {
+  static int s = 0;
+  return s;
+}
+
+// global key callback (document-level Escape etc.)
+std::map<int, std::function<void(const std::string&)> >& key_cbs() {
+  static std::map<int, std::function<void(const std::string&)> > m;
+  return m;
+}
+int& key_seq() {
+  static int s = 0;
+  return s;
+}
+
+// Listen on the document so Escape works whatever has focus. Installed once.
+EM_JS(void, fs_dom_global_key, (int cb_id), {
+  if (globalThis.__fsGlobalKey) {
+    globalThis.__fsGlobalKeyCb = cb_id;
+    return;
+  }
+  globalThis.__fsGlobalKey = true;
+  globalThis.__fsGlobalKeyCb = cb_id;
+  document.addEventListener('keydown', function (ev) {
+    if (!Module._fs_ui_key) return;
+    var len = Module.lengthBytesUTF8(ev.key) + 1;
+    var ptr = Module._malloc(len);
+    Module.stringToUTF8(ev.key, ptr, len);
+    Module._fs_ui_key(globalThis.__fsGlobalKeyCb, ptr);
+    Module._free(ptr);
+  }, false);
+});
 
 // ---- WasmDom --------------------------------------------------------------
 namespace {
@@ -310,8 +357,15 @@ class WasmDom : public IDom {
     fs_dom_off(static_cast<int>(node.id), static_cast<int>(kind));
   }
 
-  void bind_splitter(Node splitter, Node side) override {
-    fs_dom_splitter(static_cast<int>(splitter.id), static_cast<int>(side.id));
+  void bind_splitter(Node splitter, Node side,
+                     std::function<void(int)> on_resize) override {
+    int cb_id = 0;
+    if (on_resize) {
+      cb_id = ++split_seq();
+      split_cbs().clear();
+      split_cbs()[cb_id] = std::move(on_resize);
+    }
+    fs_dom_splitter(static_cast<int>(splitter.id), static_cast<int>(side.id), cb_id);
   }
 
   void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) override {
@@ -321,6 +375,13 @@ class WasmDom : public IDom {
     drop_cbs().clear();
     drop_cbs()[cb_id] = std::move(cb);
     fs_dom_drop_zone(static_cast<int>(node.id), cb_id);
+  }
+
+  void bind_global_key(std::function<void(const std::string&)> cb) override {
+    int cb_id = ++key_seq();
+    key_cbs().clear();
+    key_cbs()[cb_id] = std::move(cb);
+    fs_dom_global_key(cb_id);
   }
 
  private:
@@ -356,6 +417,20 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_drop(int cb_id, const char* name) {
   std::map<int, std::function<void(const std::string&)> >::iterator it = drop_cbs().find(cb_id);
   if (it == drop_cbs().end() || !it->second) return;
   it->second(std::string(name ? name : ""));
+}
+
+// Called from JS (fs_dom_splitter) when a drag ends, with the final width.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_split(int cb_id, int width) {
+  std::map<int, std::function<void(int)> >::iterator it = split_cbs().find(cb_id);
+  if (it == split_cbs().end() || !it->second) return;
+  it->second(width);
+}
+
+// Called from JS (fs_dom_global_key) for document-level key presses.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_key(int cb_id, const char* key) {
+  std::map<int, std::function<void(const std::string&)> >::iterator it = key_cbs().find(cb_id);
+  if (it == key_cbs().end() || !it->second) return;
+  it->second(std::string(key ? key : ""));
 }
 
 }  // namespace ui

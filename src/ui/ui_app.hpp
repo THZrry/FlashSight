@@ -13,6 +13,7 @@
 //   * settings: two-column settings page
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -89,6 +90,7 @@ struct AppState {
   std::string active_side = "usage";
   int side_seq = 0;
   bool side_menu_open = false;  // "+" popup with side tab kinds
+  int side_width = 320;         // side panel width (px); persisted in state
   // ---- side panel / 文件树 ----
   std::string active_pid;                 // project of the active session
   std::string files_path;                 // dir being listed ("" = project root)
@@ -229,6 +231,53 @@ struct AppState {
   static AppState make();
 };
 
+// Everything that belongs to ONE session tab. The app keeps the active view
+// spread flat over AppState (so builders read plain fields) and stashes it
+// here when the user switches tabs, restoring it on the way back. Without this
+// a tab switch shows the previous tab's messages/panels - or nothing at all.
+struct SessionView {
+  bool loaded = false;  // history/panels fetched from the backend yet?
+  std::vector<comp::ChatMsg> messages;
+  std::string session_input;
+  std::string model = "gpt-4o-mini";
+  int model_index = 0;
+  std::string permission = "permissive";
+  int perm_index = 1;
+  bool auto_mode = true;
+  bool suspended = false;
+  int context_pct = 42;
+  std::string session_cost = "¥0.21";
+
+  std::vector<SideTab> side_tabs;
+  std::string active_side = "usage";
+  int side_seq = 0;
+  bool side_menu_open = false;
+  int side_width = 320;  // side panel width (px); persisted across switches
+
+  std::string active_pid;
+  std::string files_path;
+  std::vector<AppState::FileEntry> file_entries;
+  bool files_loaded = false;
+  std::string file_preview_path;
+  std::string file_preview;
+
+  std::vector<AppState::OpRow> session_ops;
+  std::vector<AppState::CallRow> session_calls;
+
+  bool skill_menu_open = false;
+  std::vector<std::string> skill_menu;
+
+  std::vector<TermItem> terminals;
+  std::string active_term;
+  bool terminal_open = false;
+  std::string terminal_output;
+
+  std::vector<AppState::SubagentRow> subagents;
+
+  bool plan_open = false;
+  std::vector<std::string> plan_steps;
+};
+
 // UiApp: owns the render loop. backend_ is the transport to the core
 // (NullBackend today; NativeBackend/WhaleBackend later).
 class UiApp {
@@ -334,13 +383,29 @@ class UiApp {
   int render_count_ = 0;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
   bool render_pending_ = false;
+  // per-session-tab state, keyed by sid (the flat fields hold the active one)
+  std::map<std::string, SessionView> views_;
+  std::string last_session_key_;  // sid whose view the flat fields currently hold
 
   // backend event handler (bound in mount)
   void on_backend_event(const std::string& event, const Json& payload);
+  // route a session-scoped event into that session's view (active or stashed)
+  void apply_session_event(const std::string& sid, const std::string& event,
+                           const Json& payload);
   // append streamed text to the last assistant message (creating it if needed)
   void append_stream_delta(const std::string& text);
   // find the active session id ("" if the active tab is not a session)
   std::string active_sid() const;
+
+  // ---- per-tab state isolation ----
+  // stash the flat session fields into views_[sid]
+  void save_session_view(const std::string& sid);
+  // load views_[sid] into the flat session fields (fresh defaults when absent)
+  void load_session_view(const std::string& sid);
+  // switch to `id`, saving the current tab's view and restoring the target's
+  void switch_tab(const std::string& id);
+  // pull history + system ops + tool calls for a session into its view
+  void load_session(const std::string& sid);
 
   // ---- page builders (return the page body for the active tab) ----
   VNodePtr build_shell();

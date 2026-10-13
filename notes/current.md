@@ -346,3 +346,30 @@ The process of project: P0 环境搭建 + P1 AppCore
   - git 面板给出明确未接线说明（git 工具尚未实现）。
   - 注：model_table 的预置表里 Anthropic 三条模型 id 为空（历史遗留），本轮未动。
   - 验证：102 用例 658 断言通过；浏览器实测文件树进出、/ 命令选择、两个新面板。
+
+
+<26>(SOLVED): 框架层修复（用户反馈第三批）。
+  - 会话状态按标签隔离：新增 SessionView + save/load_session_view + switch_tab。
+    此前所有会话共用一组扁平字段（messages/side_tabs/文件树/侧栏宽度…），
+    开新会话会清空旧会话、切回变空。现在每个会话标签有自己的完整视图，
+    切换时把当前视图存回 views_[sid]、恢复目标视图；首次进入才拉历史。
+    show()/open_session() 统一走 switch_tab；load_session 回包只写回它自己的
+    视图（避免慢响应覆盖别的标签）。
+  - 后台会话事件隔离：payload.sid 非当前标签时写进该会话的视图（子代理/终端/
+    流式都按 sid 归属），不再污染当前页。
+  - 侧栏宽度持久化：bind_splitter 加 on_resize 回调（EM_JS mouseup ->
+    fs_ui_split -> C++），拖动结束把宽度写进 state 与当前视图；侧栏宽度由
+    状态驱动（inline style），节点重建/切标签都不丢。
+  - 动画：H::anim(cls)/add_class + CSS 关键帧。页面切换 anim-page（0.16s
+    淡入+微上移），文字/行出现 anim-fade（0.05s 淡入），弹层 anim-pop
+    （0.12s）。只挂载时触发（diff 复用节点不会重播），并尊重
+    prefers-reduced-motion。
+  - skill 选择器：从"输入框下方撑开"改为绝对定位浮层，弹在输入框上方，
+    不挤压输入框；新增透明遮罩 + Esc（document 级 keydown，经 fs_ui_key 导出）
+    可收回；pump 定时器不再依赖。
+  - 框架通用性：IDom 新增 bind_splitter(on_resize) / bind_global_key；
+    NullDom 记录并支持 fire_split_for_test/fire_key_for_test，wasm 侧 EM_JS
+    实现，两边接口一致（WhaleDom 接入时按同一签名实现即可）。
+  - 验证：106 用例 674 断言通过；浏览器实测 A/B 两会话各自的消息与侧栏宽度
+    互不干扰、切回 A 保留 history-marker 与 460px 侧栏、Escape/遮罩收回选择器、
+    anim-page 生效。

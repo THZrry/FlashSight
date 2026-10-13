@@ -126,6 +126,13 @@ class H {
  public:
   explicit H(VNodePtr n) : n_(n) {}
   H cls(const std::string& c) {
+    for (size_t i = 0; i < n_->attrs.size(); ++i) {
+      if (n_->attrs[i].key == "class") {  // merge so anim() can append
+        if (!n_->attrs[i].value.empty()) n_->attrs[i].value += " ";
+        n_->attrs[i].value += c;
+        return *this;
+      }
+    }
     n_->attrs.push_back(VAttr{"class", c});
     return *this;
   }
@@ -143,6 +150,13 @@ class H {
   }
   H key(const std::string& k) {
     n_->key = k;
+    return *this;
+  }
+  // Mount animation: adds class "anim-<name>" (CSS defines the keyframes).
+  // Fires when the element is created, i.e. on first mount and whenever the
+  // diff has to replace the node (key/tag change). See web/style.css.
+  H anim(const std::string& name) {
+    n_->attrs.push_back(VAttr{"class", "anim-" + name});
     return *this;
   }
   H on(EventKind k, EventFn fn) {

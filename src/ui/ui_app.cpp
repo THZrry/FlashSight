@@ -52,6 +52,23 @@ std::string folder_basename(const std::string& path) {
   return path.substr(cut, end - cut);
 }
 
+// append a class to an already-built VNode (used for mount animations on
+// subtrees returned by the page builders)
+void add_class(const VNodePtr& v, const std::string& cls) {
+  if (!v) return;
+  for (size_t i = 0; i < v->attrs.size(); ++i) {
+    if (v->attrs[i].key == "class") {
+      if (!v->attrs[i].value.empty()) v->attrs[i].value += " ";
+      v->attrs[i].value += cls;
+      return;
+    }
+  }
+  VAttr a;
+  a.key = "class";
+  a.value = cls;
+  v->attrs.push_back(a);
+}
+
 // wall clock in ms (toast deadlines). On wasm, std::chrono::steady_clock can
 // be non-monotonic/constant depending on the libc++ ABI, so use
 // emscripten_get_now() (performance.now()) there; std::chrono on native.
@@ -66,6 +83,16 @@ int64_t now_ms() {
 }
 
 const int64_t kToastMs = 3200;  // how long a toast stays on screen
+
+// a session that has never been opened starts from these defaults
+SessionView default_session_view() {
+  SessionView v;
+  v.side_tabs.push_back(SideTab{"usage", "用量", "usage"});
+  v.side_tabs.push_back(SideTab{"subagents", "子代理", "subagents"});
+  v.side_tabs.push_back(SideTab{"terminal", "终端", "terminal"});
+  v.side_seq = 3;
+  return v;
+}
 
 // split a textarea's lines into a JSON string array (blanks/whitespace dropped)
 Json split_lines(const std::string& text) {
@@ -210,6 +237,105 @@ void UiApp::load_terminals(const std::string& sid) {
   });
 }
 
+void UiApp::save_session_view(const std::string& sid) {
+  if (sid.empty()) return;
+  SessionView& v = views_[sid];
+  v.messages = st_.messages;
+  v.session_input = st_.session_input;
+  v.model = st_.model;
+  v.model_index = st_.model_index;
+  v.permission = st_.permission;
+  v.perm_index = st_.perm_index;
+  v.auto_mode = st_.auto_mode;
+  v.suspended = st_.suspended;
+  v.context_pct = st_.context_pct;
+  v.session_cost = st_.session_cost;
+  v.side_tabs = st_.side_tabs;
+  v.active_side = st_.active_side;
+  v.side_seq = st_.side_seq;
+  v.side_menu_open = st_.side_menu_open;
+  v.side_width = st_.side_width;
+  v.active_pid = st_.active_pid;
+  v.files_path = st_.files_path;
+  v.file_entries = st_.file_entries;
+  v.files_loaded = st_.files_loaded;
+  v.file_preview_path = st_.file_preview_path;
+  v.file_preview = st_.file_preview;
+  v.session_ops = st_.session_ops;
+  v.session_calls = st_.session_calls;
+  v.skill_menu_open = st_.skill_menu_open;
+  v.skill_menu = st_.skill_menu;
+  v.terminals = st_.terminals;
+  v.active_term = st_.active_term;
+  v.terminal_open = st_.terminal_open;
+  v.terminal_output = st_.terminal_output;
+  v.subagents = st_.subagents;
+  v.plan_open = st_.plan_open;
+  v.plan_steps = st_.plan_steps;
+}
+
+void UiApp::load_session_view(const std::string& sid) {
+  std::map<std::string, SessionView>::iterator it = views_.find(sid);
+  SessionView v = it == views_.end() ? default_session_view() : it->second;
+  st_.messages = v.messages;
+  st_.session_input = v.session_input;
+  st_.model = v.model;
+  st_.model_index = v.model_index;
+  st_.permission = v.permission;
+  st_.perm_index = v.perm_index;
+  st_.auto_mode = v.auto_mode;
+  st_.suspended = v.suspended;
+  st_.context_pct = v.context_pct;
+  st_.session_cost = v.session_cost;
+  st_.side_tabs = v.side_tabs;
+  st_.active_side = v.active_side;
+  st_.side_seq = v.side_seq;
+  st_.side_menu_open = false;  // transient popovers never survive a switch
+  st_.side_width = v.side_width;
+  st_.active_pid = v.active_pid;
+  st_.files_path = v.files_path;
+  st_.file_entries = v.file_entries;
+  st_.files_loaded = v.files_loaded;
+  st_.file_preview_path = v.file_preview_path;
+  st_.file_preview = v.file_preview;
+  st_.session_ops = v.session_ops;
+  st_.session_calls = v.session_calls;
+  st_.skill_menu_open = false;
+  st_.skill_menu = v.skill_menu;
+  st_.terminals = v.terminals;
+  st_.active_term = v.active_term;
+  st_.terminal_open = v.terminal_open;
+  st_.terminal_output = v.terminal_output;
+  st_.subagents = v.subagents;
+  st_.plan_open = v.plan_open;
+  st_.plan_steps = v.plan_steps;
+}
+
+void UiApp::switch_tab(const std::string& id) {
+  // The flat session fields belong to the tab we are leaving. Prefer the
+  // tracked key, but fall back to active_tab: if something set active_tab
+  // directly, the fields still have to be stashed under the right session or
+  // its history would be lost on the way back.
+  std::string leaving = last_session_key_;
+  if (leaving.empty() && st_.active_tab != "home" && st_.active_tab != "settings") {
+    leaving = st_.active_tab;
+  }
+  if (id == st_.active_tab && last_session_key_ == leaving && leaving == id) return;
+  if (!leaving.empty()) save_session_view(leaving);
+  st_.active_tab = id;
+  std::string sid = (id == "home" || id == "settings") ? "" : id;
+  if (sid.empty()) {
+    last_session_key_.clear();
+    render();
+    return;
+  }
+  bool had_view = views_.find(sid) != views_.end();
+  load_session_view(sid);
+  last_session_key_ = sid;
+  render();
+  if (!had_view) load_session(sid);  // first visit: pull history + panels
+}
+
 void UiApp::open_session(const std::string& sid, const std::string& title) {
   if (sid.empty()) return;
   // add the tab if missing
@@ -225,11 +351,14 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
       st.title = title.empty() ? ("会话" + sid) : title;
       s.sessions.push_back(st);
     }
-    s.active_tab = sid;
-    s.messages.clear();
   });
-  // load history
-  call_async("session.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
+  switch_tab(sid);  // restores an existing view, or fetches on first visit
+}
+
+// fetch history + system ops + tool calls for a session into its view
+void UiApp::load_session(const std::string& sid) {
+  if (sid.empty()) return;
+  call_async("session.get", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
     if (!r.ok) return;
     const Json& turns = r.data.contains("turns") ? r.data["turns"] : Json::array();
     std::vector<comp::ChatMsg> msgs;
@@ -249,11 +378,9 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
       }
       msgs.push_back(m);
     }
-    // the session's meta carries its project pid: keep it for the file tree
     std::string pid = r.data.contains("meta")
                           ? jsonutil::get<std::string>(r.data["meta"], "pid", "")
                           : "";
-    // 操作记录（systemOps）与工具调用记录（各 turn 的 toolCalls）
     std::vector<AppState::OpRow> ops;
     if (r.data.contains("systemOps") && r.data["systemOps"].is_array()) {
       const Json& so = r.data["systemOps"];
@@ -275,16 +402,22 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
         calls.push_back(c);
       }
     }
-    update([&](AppState& s) {
-      s.messages = msgs;
-      s.session_ops = ops;
-      s.session_calls = calls;
-      if (!pid.empty()) {
-        s.active_pid = pid;
-        s.files_path.clear();  // reset the tree to the project root
-      }
-    });
-    load_terminals(st_.active_tab);
+    // write into the session's view; mirror to the flat fields only when the
+    // user is still looking at it (a slow reply must not clobber another tab)
+    SessionView& v = views_[sid];
+    v.loaded = true;
+    v.messages = msgs;
+    v.session_ops = ops;
+    v.session_calls = calls;
+    if (!pid.empty()) v.active_pid = pid;
+    if (st_.active_tab == sid) {
+      st_.messages = msgs;
+      st_.session_ops = ops;
+      st_.session_calls = calls;
+      if (!pid.empty()) st_.active_pid = pid;
+      render();
+    }
+    load_terminals(sid);
     if (!pid.empty()) load_files(pid, "");
   });
 }
@@ -475,43 +608,81 @@ void UiApp::append_stream_delta(const std::string& text) {
   st_.messages.back().streaming = true;
 }
 
-void UiApp::on_backend_event(const std::string& event, const Json& payload) {
-  ++event_count_;
+// Backend events are per-session (payload.sid). They must land in that
+// session's view, not blindly on whatever tab happens to be active - a
+// background session can stream while the user is elsewhere.
+void UiApp::apply_session_event(const std::string& sid, const std::string& event,
+                                const Json& payload) {
+  bool is_active = sid.empty() || sid == st_.active_tab;
+  // only touch views_ for a background session; a fresh one gets the default
+  // panels seeded so opening it later does not look empty
+  SessionView* vp = nullptr;
+  if (!is_active) {
+    std::map<std::string, SessionView>::iterator it = views_.find(sid);
+    if (it == views_.end()) it = views_.insert(std::make_pair(sid, default_session_view())).first;
+    vp = &it->second;
+  }
   if (event == "stream.delta") {
-    append_stream_delta(jsonutil::get<std::string>(payload, "text", ""));
-  } else if (event == "turn.done") {
-    if (!st_.messages.empty() && st_.messages.back().role == "assistant") {
-      st_.messages.back().streaming = false;
+    std::string text = jsonutil::get<std::string>(payload, "text", "");
+    std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
+    if (m.empty() || m.back().role != "assistant") {
+      comp::ChatMsg a;
+      a.role = "assistant";
+      a.streaming = true;
+      m.push_back(a);
     }
+    m.back().text += text;
+    m.back().streaming = true;
+  } else if (event == "turn.done") {
+    std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
+    if (!m.empty() && m.back().role == "assistant") m.back().streaming = false;
   } else if (event == "tool.update") {
     std::string name = jsonutil::get<std::string>(payload, "name", "");
     bool ok = jsonutil::get<bool>(payload, "ok", true);
-    if (!st_.messages.empty() && st_.messages.back().role == "assistant") {
+    std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
+    if (!m.empty() && m.back().role == "assistant") {
       comp::ToolBlock tb;
       tb.name = name;
       tb.summary = ok ? "ok" : "failed";
       tb.ok = ok;
-      st_.messages.back().tools.push_back(tb);
+      m.back().tools.push_back(tb);
     }
+  } else if (event == "subagent.done") {
+    std::string id = jsonutil::get<std::string>(payload, "id", "");
+    std::vector<AppState::SubagentRow>& subs = is_active ? st_.subagents : vp->subagents;
+    for (size_t i = 0; i < subs.size(); ++i) {
+      if (subs[i].id == id) subs[i].status = "done";
+    }
+  } else if (event == "terminal.exit") {
+    std::string tid = jsonutil::get<std::string>(payload, "tid", "");
+    std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
+    for (size_t i = 0; i < terms.size(); ++i) {
+      if (terms[i].tid == tid) terms[i].status = "exited";
+    }
+  }
+}
+
+void UiApp::on_backend_event(const std::string& event, const Json& payload) {
+  ++event_count_;
+  std::string sid = jsonutil::get<std::string>(payload, "sid", "");
+  // session-scoped events go to their own view (may be a background tab)
+  if (!sid.empty() && sid != st_.active_tab) {
+    apply_session_event(sid, event, payload);
+    render();
+    return;
+  }
+  if (event == "stream.delta" || event == "turn.done" || event == "tool.update" ||
+      event == "subagent.done" || event == "terminal.exit") {
+    apply_session_event(sid, event, payload);
   } else if (event == "permission.prompt") {
     st_.ask_modal = true;
     st_.ask_text = "允许执行 " + jsonutil::get<std::string>(payload, "tool", "") + "？";
-  } else if (event == "subagent.done") {
-    std::string id = jsonutil::get<std::string>(payload, "id", "");
-    for (size_t i = 0; i < st_.subagents.size(); ++i) {
-      if (st_.subagents[i].id == id) st_.subagents[i].status = "done";
-    }
   } else if (event == "subagent.steered") {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "todo.updated") {
     st_.toast = "任务清单已更新";
     st_.toast_deadline_ms = now_ms() + kToastMs;
-  } else if (event == "terminal.exit") {
-    std::string tid = jsonutil::get<std::string>(payload, "tid", "");
-    for (size_t i = 0; i < st_.terminals.size(); ++i) {
-      if (st_.terminals[i].tid == tid) st_.terminals[i].status = "exited";
-    }
   } else if (event == "loop.interrupted") {
     st_.toast = "已中断（可继续）";
     st_.toast_deadline_ms = now_ms() + kToastMs;
@@ -520,13 +691,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
 }
 
 void UiApp::show(const std::string& tab_id) {
-  st_.active_tab = tab_id;
-  render();
-  // opening a session tab pulls its history + terminals
-  std::string sid = active_sid();
-  if (!sid.empty() && st_.messages.empty()) {
-    open_session(sid, "");
-  }
+  switch_tab(tab_id);
 }
 
 void UiApp::update(const std::function<void(AppState&)>& f) {
@@ -566,7 +731,14 @@ void UiApp::render() {
     VNodePtr bar = find_by_key(tree_, "side-splitter");
     VNodePtr side = find_by_key(tree_, "side-panel");
     if (bar && side && bar->dom.valid() && side->dom.valid()) {
-      dom_.bind_splitter(bar->dom, side->dom);
+      // persist the dragged width into state so it survives tab switches and
+      // node re-creation (the inline width alone is lost with the node)
+      dom_.bind_splitter(bar->dom, side->dom, [this](int w) {
+        if (w > 0) {
+          st_.side_width = w;
+          if (!last_session_key_.empty()) views_[last_session_key_].side_width = w;
+        }
+      });
     }
     // (re)wire the window-wide drop zone (folder drag & drop)
     VNodePtr dz = find_by_key(tree_, "drop-zone");
@@ -575,6 +747,16 @@ void UiApp::render() {
         handle_dropped_folder(name);
       });
     }
+    // document-level keys (Escape dismisses transient overlays)
+    dom_.bind_global_key([this](const std::string& key) {
+      if (key != "Escape") return;
+      if (st_.skill_menu_open || st_.side_menu_open) {
+        update([&](AppState& s) {
+          s.skill_menu_open = false;
+          s.side_menu_open = false;
+        });
+      }
+    });
   } while (render_pending_);
   render_in_progress_ = false;
 }
@@ -628,6 +810,9 @@ VNodePtr UiApp::build_shell() {
     page = build_session();
   }
   page->key = "page:" + st_.active_tab;
+  // page switch: the key changes, so the node is re-created -> the mount
+  // animation fires (fade + a small slide); see web/style.css
+  add_class(page, "anim-page");
   win.add(page);
   win.add(build_overlays());
   return win.get();
@@ -1073,9 +1258,16 @@ VNodePtr UiApp::build_session() {
   }, "ghost"));
   tools.add(comp::button("发送", [this](const std::string&) { send_message(); }, "primary"));
   comp_box.add(tools);
-  // "/" skill picker: a floating list under the composer
+  // "/" skill picker: an overlay floating ABOVE the composer (it must not
+  // push the input around), dismissed by picking / clicking outside / Esc
   if (st_.skill_menu_open) {
+    H dismiss = el("div", "skill-menu-backdrop");
+    dismiss.on(EventKind::kClick, [this](const std::string&) {
+      update([&](AppState& s) { s.skill_menu_open = false; });
+    });
+    comp_box.add(dismiss);
     H pop = el("div", "skill-menu");
+    pop.key("skill-menu");
     if (st_.skill_menu.empty()) {
       pop.add(el("div", "skill-menu-item dim").text("（暂无 skill）"));
     }
@@ -1099,7 +1291,7 @@ VNodePtr UiApp::build_session() {
     close.on(EventKind::kClick, [this](const std::string&) {
       update([&](AppState& s) { s.skill_menu_open = false; });
     });
-    close.add(el("span").text("取消"));
+    close.add(el("span").text("取消（Esc）"));
     pop.add(close);
     comp_box.add(pop);
   }
@@ -1114,6 +1306,9 @@ VNodePtr UiApp::build_session() {
 VNodePtr UiApp::build_side_panel() {
   H side = el("div", "side-panel");
   side.key("side-panel");  // find_by_key: splitter drag target
+  // width lives in state so it survives tab switches and node re-creation
+  side.style("width", itos(st_.side_width) + "px");
+  side.style("flex", "0 0 auto");
   std::vector<TabSpec> tabs;
   for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
     TabSpec t;

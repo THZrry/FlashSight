@@ -117,8 +117,13 @@ The process of project: P0 环境搭建
 <25>(SOLVED): 反馈第二批续 —— 侧栏文件树/操作记录/调用记录接线、key-value 表可增删、
   / 命令选择器；sv_obj 修正设置项读取。详见 current.md <25>。
 
+<26>(SOLVED): 框架层修复 —— 会话状态按标签隔离（SessionView/switch_tab，切回不丢）、
+  后台会话事件按 sid 归属、侧栏宽度持久化、挂载动画（页面切换/文字淡入/弹层）、
+  skill 选择器改浮层+Esc/遮罩收回；IDom 加 bind_splitter(on_resize)/bind_global_key
+  保证两边后端接口一致。详见 current.md <26>。
+
 ## 当前状态（更新 2026-10-13）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；102 用例 658 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；106 用例 674 断言通过。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。
