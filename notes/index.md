@@ -114,6 +114,9 @@ The process of project: P0 环境搭建
   x-opencode-session 透传）、MCP 与 Skill 做实（探测/导入/启停/持久化）、
   设置补齐（会话默认/外观字体/网络代理/文件黑白名单/浏览器与电脑控制/快捷键可编辑）。详见 current.md <24>。
 
+<25>(SOLVED): 反馈第二批续 —— 侧栏文件树/操作记录/调用记录接线、key-value 表可增删、
+  / 命令选择器；sv_obj 修正设置项读取。详见 current.md <25>。
+
 ## 当前状态（更新 2026-10-13）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。

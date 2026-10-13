@@ -334,3 +334,15 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 验证：102 用例 658 断言通过；浏览器回归：卡片双布局切换、侧栏左拖加宽、
     提示 3.2s 消失、供应商模板向导/编辑/密钥保留、MCP 探测 72 个工具包并持久化启停、
     新设置分区逐项渲染。
+
+
+<25>(SOLVED): 反馈第二批续 —— 侧栏做实（文件树/操作/调用）、key-value 表可编辑、/ 命令。
+  - 长期记忆/环境变量/CLI 工具三张表加「添加/删除」行；sv_obj 读取 {value,source}
+    包装形态（此前设置项读不到值、写入后不刷新）；set_setting 后重派生缓存并重渲染。
+  - 侧栏文件树接线：FsApi project_files/project_read_file（safe_project_path 拒绝越界，
+    >512KB 拒绝预览）；UI 面包屑/上级/刷新、目录进入、文件预览；会话打开记录 active_pid。
+  - 操作记录面板读 session.get 的 systemOps；调用记录面板读各 turn 的 toolCalls。
+  - 输入框「+ 文件」打开文件树；「/ 命令」弹 skill 列表，选择写入 /<name>。
+  - git 面板给出明确未接线说明（git 工具尚未实现）。
+  - 注：model_table 的预置表里 Anthropic 三条模型 id 为空（历史遗留），本轮未动。
+  - 验证：102 用例 658 断言通过；浏览器实测文件树进出、/ 命令选择、两个新面板。
