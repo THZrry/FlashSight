@@ -36,6 +36,13 @@ UiApi::UiApi(FsApi* api) {
   });
   // open the project folder in the OS file manager
   reg("project.reveal", [api](const Json& a) { return api->project_reveal(s(a, "pid")); });
+  // side-panel file tree: list a dir / read a file inside the project
+  reg("project.files", [api](const Json& a) {
+    return api->project_files(s(a, "pid"), s(a, "path"));
+  });
+  reg("project.readFile", [api](const Json& a) {
+    return api->project_read_file(s(a, "pid"), s(a, "path"));
+  });
 
   // ---- session.* ----
   reg("session.new", [api](const Json& a) {

@@ -249,8 +249,19 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
       }
       msgs.push_back(m);
     }
-    update([&](AppState& s) { s.messages = msgs; });
+    // the session's meta carries its project pid: keep it for the file tree
+    std::string pid = r.data.contains("meta")
+                          ? jsonutil::get<std::string>(r.data["meta"], "pid", "")
+                          : "";
+    update([&](AppState& s) {
+      s.messages = msgs;
+      if (!pid.empty()) {
+        s.active_pid = pid;
+        s.files_path.clear();  // reset the tree to the project root
+      }
+    });
     load_terminals(st_.active_tab);
+    if (!pid.empty()) load_files(pid, "");
   });
 }
 
@@ -388,6 +399,44 @@ void UiApp::load_subagents(const std::string& sid) {
       rows.push_back(row);
     }
     update([&](AppState& s) { s.subagents = rows; });
+  });
+}
+
+void UiApp::load_files(const std::string& pid, const std::string& rel) {
+  if (pid.empty()) return;
+  call_async("project.files", Json{{"pid", pid}, {"path", rel}},
+             [this, rel](const BackendResult& r) {
+    std::vector<AppState::FileEntry> rows;
+    const Json& arr = r.ok && r.data.contains("entries") ? r.data["entries"] : Json::array();
+    if (arr.is_array()) {
+      for (size_t i = 0; i < arr.size(); ++i) {
+        AppState::FileEntry e;
+        e.name = jsonutil::get<std::string>(arr[i], "name", "");
+        e.is_dir = jsonutil::get<bool>(arr[i], "isDir", false);
+        e.size = jsonutil::get_int(arr[i], "size", 0);
+        if (!e.name.empty()) rows.push_back(e);
+      }
+    }
+    update([&](AppState& s) {
+      s.file_entries = rows;
+      s.files_path = rel;
+      s.files_loaded = true;
+      s.file_preview_path.clear();
+      s.file_preview.clear();
+    });
+  });
+}
+
+void UiApp::preview_file(const std::string& rel) {
+  if (st_.active_pid.empty() || rel.empty()) return;
+  std::string pid = st_.active_pid;
+  call_async("project.readFile", Json{{"pid", pid}, {"path", rel}},
+             [this, rel](const BackendResult& r) {
+    update([&](AppState& s) {
+      s.file_preview_path = rel;
+      s.file_preview = r.ok ? jsonutil::get<std::string>(r.data, "content", "")
+                            : ("（无法预览：" + r.message + "）");
+    });
   });
 }
 
@@ -1010,6 +1059,9 @@ VNodePtr UiApp::build_side_panel() {
     }
     if (kind == "subagents") load_subagents(active_sid());
     if (kind == "terminal") load_terminals(active_sid());
+    if (kind == "files" && !st_.active_pid.empty()) {
+      load_files(st_.active_pid, st_.files_path);
+    }
   },
                             [this](const std::string& k) { close_side_tab(k); },
                             [this](const std::string&) {
@@ -1102,7 +1154,59 @@ VNodePtr UiApp::build_side_panel() {
         "交互式用户终端需要 PTY（ConPTY/POSIX pty），reproc 不提供；"
         "模型通过 terminal.spawn/exec 起的终端会出现在此列表。"));
   } else if (kind == "files") {
-    body.add(comp::empty_state("文件树（待接后端 project.files）", "", nullptr));
+    if (st_.active_pid.empty()) {
+      body.add(comp::empty_state("先打开一个会话，文件树会显示该项目的文件。", "", nullptr));
+    } else {
+      // breadcrumb / up row
+      H nav = el("div", "files-nav");
+      if (!st_.files_path.empty()) {
+        nav.add(comp::button("↑ 上级", [this](const std::string&) {
+          std::string p = st_.files_path;
+          size_t cut = p.find_last_of("/\\");
+          std::string parent = cut == std::string::npos ? "" : p.substr(0, cut);
+          load_files(st_.active_pid, parent);
+        }, "ghost"));
+      }
+      nav.add(el("span", "files-cwd dim").text(
+          st_.files_path.empty() ? "/" : ("/" + st_.files_path)));
+      nav.add(comp::button("刷新", [this](const std::string&) {
+        load_files(st_.active_pid, st_.files_path);
+      }, "ghost"));
+      body.add(nav);
+      if (st_.file_entries.empty()) {
+        body.add(comp::empty_state("（空目录）", "", nullptr));
+      }
+      for (size_t i = 0; i < st_.file_entries.size(); ++i) {
+        const AppState::FileEntry& e = st_.file_entries[i];
+        H row = el("div", "file-row");
+        std::string name = e.name;
+        bool isdir = e.is_dir;
+        row.on(EventKind::kClick, [this, name, isdir](const std::string&) {
+          std::string rel = st_.files_path.empty() ? name : (st_.files_path + "/" + name);
+          if (isdir) {
+            load_files(st_.active_pid, rel);
+          } else {
+            preview_file(rel);
+          }
+        });
+        row.add(el("span", "file-ico").text(e.is_dir ? "▸" : "·"));
+        row.add(el("span", "file-name").text(e.name));
+        if (!e.is_dir) {
+          row.add(el("span", "file-size dim").text(
+              e.size > 1024 ? (itos(static_cast<int>(e.size / 1024)) + "K")
+                            : (itos(static_cast<int>(e.size)) + "B")));
+        }
+        body.add(row);
+      }
+      if (!st_.file_preview_path.empty()) {
+        H pv = el("div", "file-preview");
+        pv.add(el("div", "file-preview-head").text(st_.file_preview_path));
+        H pre = el("pre", "file-preview-body");
+        pre.text(st_.file_preview.empty() ? "（空文件）" : st_.file_preview);
+        pv.add(pre);
+        body.add(pv);
+      }
+    }
   } else if (kind == "git") {
     body.add(comp::empty_state("Git 状态（待接后端）", "", nullptr));
   } else if (kind == "ops") {
@@ -2483,12 +2587,18 @@ void UiApp::open_or_focus_side_tab(const std::string& kind) {
       update([&](AppState& s) { s.active_side = key; });
       if (kind == "subagents") load_subagents(active_sid());
       if (kind == "terminal") load_terminals(active_sid());
+      if (kind == "files" && !st_.active_pid.empty()) {
+        load_files(st_.active_pid, st_.files_path);
+      }
       return;
     }
   }
   open_side_tab(kind);
   if (kind == "subagents") load_subagents(active_sid());
   if (kind == "terminal") load_terminals(active_sid());
+  if (kind == "files" && !st_.active_pid.empty()) {
+    load_files(st_.active_pid, st_.files_path);
+  }
 }
 
 void UiApp::close_side_tab(const std::string& id) {

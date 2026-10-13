@@ -1,7 +1,11 @@
 // fs_api.cpp - FsApi unified entry implementation (P1 scope)
 #include "fs_api.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 #include "core/folder_picker.hpp"
 #include "fs_path.hpp"
@@ -251,6 +255,85 @@ FsResult FsApi::project_reveal(const std::string& pid) {
     return FsResult::error(ErrCode::kIo, "cannot open file manager");
   }
   return FsResult::success();
+}
+
+namespace {
+// resolve a project-relative path, refusing anything that escapes the root
+bool safe_project_path(const std::string& root, const std::string& rel,
+                       ghc::filesystem::path* out) {
+  if (root.empty()) return false;
+  ghc::filesystem::path base = pathutil::normalize(root);
+  ghc::filesystem::path p = rel.empty() || rel == "."
+                                ? base
+                                : pathutil::normalize(base / rel);
+  std::string bs = base.string(), ps = p.string();
+  if (ps.size() < bs.size()) return false;
+  for (size_t i = 0; i < bs.size(); ++i) {
+    char a = bs[i], b = ps[i];
+    if (a == '\\') a = '/';
+    if (b == '\\') b = '/';
+    if (a != b) return false;
+  }
+  // require the next char to be a separator or end (no ".."-style prefix hits)
+  if (ps.size() > bs.size() && ps[bs.size()] != '/' && ps[bs.size()] != '\\') return false;
+  if (out) *out = p;
+  return true;
+}
+}  // namespace
+
+FsResult FsApi::project_files(const std::string& pid, const std::string& rel) {
+  std::string root = path_for(pid);
+  ghc::filesystem::path dir;
+  if (!safe_project_path(root, rel, &dir)) {
+    return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
+  }
+  std::error_code ec;
+  if (!ghc::filesystem::is_directory(dir, ec)) {
+    return FsResult::error(ErrCode::kNotFound, "dir not found: " + rel);
+  }
+  Json arr = Json::array();
+  for (auto& e : ghc::filesystem::directory_iterator(dir, ec)) {
+    std::string name = e.path().filename().string();
+    bool isdir = ghc::filesystem::is_directory(e.path(), ec);
+    std::error_code ec2;
+    int64_t size = isdir ? 0
+                         : static_cast<int64_t>(ghc::filesystem::file_size(e.path(), ec2));
+    Json j = Json::object();
+    j["name"] = name;
+    j["isDir"] = isdir;
+    j["size"] = size;
+    arr.push_back(j);
+  }
+  // directories first, then files, each alphabetical
+  std::sort(arr.begin(), arr.end(), [](const Json& a, const Json& b) {
+    bool ad = jsonutil::get<bool>(a, "isDir", false);
+    bool bd = jsonutil::get<bool>(b, "isDir", false);
+    if (ad != bd) return ad;
+    return jsonutil::get<std::string>(a, "name", "") <
+           jsonutil::get<std::string>(b, "name", "");
+  });
+  return FsResult::success(Json{{"entries", arr}, {"path", rel}});
+}
+
+FsResult FsApi::project_read_file(const std::string& pid, const std::string& rel) {
+  std::string root = path_for(pid);
+  ghc::filesystem::path file;
+  if (!safe_project_path(root, rel, &file)) {
+    return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
+  }
+  std::error_code ec;
+  if (!ghc::filesystem::is_regular_file(file, ec)) {
+    return FsResult::error(ErrCode::kNotFound, "file not found: " + rel);
+  }
+  auto sz = ghc::filesystem::file_size(file, ec);
+  if (!ec && sz > 512 * 1024) {
+    return FsResult::error(ErrCode::kInvalidArg, "file too large to preview (>512KB)");
+  }
+  std::ifstream ifs(file.string(), std::ios::binary);
+  if (!ifs) return FsResult::error(ErrCode::kIo, "cannot open file: " + rel);
+  std::stringstream ss;
+  ss << ifs.rdbuf();
+  return FsResult::success(Json{{"content", ss.str()}});
 }
 
 // ----- session.* -----

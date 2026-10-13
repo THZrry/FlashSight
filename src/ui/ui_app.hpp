@@ -89,6 +89,18 @@ struct AppState {
   std::string active_side = "usage";
   int side_seq = 0;
   bool side_menu_open = false;  // "+" popup with side tab kinds
+  // ---- side panel / 文件树 ----
+  std::string active_pid;                 // project of the active session
+  std::string files_path;                 // dir being listed ("" = project root)
+  struct FileEntry {
+    std::string name;
+    bool is_dir = false;
+    int64_t size = 0;
+  };
+  std::vector<FileEntry> file_entries;
+  bool files_loaded = false;
+  std::string file_preview_path;          // file whose content is shown
+  std::string file_preview;               // preview content
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
@@ -240,6 +252,10 @@ class UiApp {
   void load_shells();
   // Load subagents for a session.
   void load_subagents(const std::string& sid);
+  // Load the side-panel file tree (project-relative dir) into AppState.
+  void load_files(const std::string& pid, const std::string& rel);
+  // Read one file for the side-panel preview.
+  void preview_file(const std::string& rel);
   // Loaders for the settings sections.
   void load_preset_agents();
   void load_skills();

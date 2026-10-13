@@ -56,6 +56,10 @@ class FsApi {
   FsResult project_resolve_drop(const std::string& name);
   // 在资源管理器中打开项目文件夹：{pid} -> {}
   FsResult project_reveal(const std::string& pid);
+  // 侧栏文件树：列出一个目录（相对 pid 的项目根）-> {entries:[{name,isDir,size,mtime}]}
+  FsResult project_files(const std::string& pid, const std::string& rel);
+  // 读取项目内文件（侧栏预览）-> {content}
+  FsResult project_read_file(const std::string& pid, const std::string& rel);
 
   // ----- session.* -----
   FsResult session_new(const std::string& pid, const std::string& cwd);
