@@ -59,6 +59,8 @@ H progress(int pct);
 H empty_state(const std::string& hint, const std::string& action_label, EventFn on_action);
 H card(const std::string& cls, const std::vector<H>& children);
 H section_title(const std::string& text);
+// small dim explanation line under a section title
+H hint(const std::string& text);
 H key_value(const std::string& k, const std::string& v);
 
 // ---------- chat ----------

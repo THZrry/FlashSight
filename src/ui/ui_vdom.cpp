@@ -29,6 +29,16 @@ void collect_handler_ids(const VNodePtr& v, std::vector<int>* out) {
   for (size_t i = 0; i < v->children.size(); ++i) collect_handler_ids(v->children[i], out);
 }
 
+VNodePtr find_by_key(const VNodePtr& v, const std::string& key) {
+  if (!v) return VNodePtr();
+  if (v->key == key) return v;
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    VNodePtr hit = find_by_key(v->children[i], key);
+    if (hit) return hit;
+  }
+  return VNodePtr();
+}
+
 VNodePtr make_vnode(const std::string& tag) {
   VNodePtr n(new VNode());
   n->tag = tag;

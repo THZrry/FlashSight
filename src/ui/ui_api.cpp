@@ -1,0 +1,262 @@
+// ui_api.cpp - method dispatch from UI to FsApi.
+#include "ui_api.hpp"
+
+#include "fs_path.hpp"
+#include "core/fs_api.hpp"
+
+namespace fs {
+namespace ui {
+
+namespace {
+
+std::string s(const Json& j, const char* k, const std::string& def = "") {
+  return jsonutil::get<std::string>(j, k, def);
+}
+int64_t i(const Json& j, const char* k, int64_t def = 0) {
+  return jsonutil::get_int(j, k, def);
+}
+bool b(const Json& j, const char* k, bool def = false) {
+  return jsonutil::get<bool>(j, k, def);
+}
+
+}  // namespace
+
+UiApi::UiApi(FsApi* api) {
+  // ---- project.* ----
+  reg("project.list", [api](const Json&) { return api->project_list(); });
+  reg("project.open", [api](const Json& a) { return api->project_open(s(a, "path")); });
+  reg("project.create", [api](const Json& a) { return api->project_create(s(a, "path")); });
+  reg("project.remove", [api](const Json& a) { return api->project_remove(s(a, "pid")); });
+  reg("project.get", [api](const Json& a) { return api->project_get(s(a, "pid")); });
+  // native folder dialog (the browser cannot hand out OS paths)
+  reg("project.pickFolder", [api](const Json&) { return api->project_pick_folder(); });
+  // resolve a dropped folder name to a path (browsers hide absolute paths)
+  reg("project.resolveDrop", [api](const Json& a) {
+    return api->project_resolve_drop(s(a, "name"));
+  });
+  // open the project folder in the OS file manager
+  reg("project.reveal", [api](const Json& a) { return api->project_reveal(s(a, "pid")); });
+
+  // ---- session.* ----
+  reg("session.new", [api](const Json& a) {
+    return api->session_new(s(a, "pid"), s(a, "cwd"));
+  });
+  reg("session.open", [api](const Json& a) { return api->session_open(s(a, "sid")); });
+  reg("session.close", [api](const Json& a) { return api->session_close(s(a, "sid")); });
+  reg("session.list", [api](const Json& a) { return api->session_list(s(a, "pid")); });
+  reg("session.get", [api](const Json& a) { return api->session_get(s(a, "sid")); });
+  reg("session.fork", [api](const Json& a) {
+    return api->session_fork(s(a, "sid"), s(a, "turnId"));
+  });
+  reg("session.rollback", [api](const Json& a) {
+    return api->session_rollback(s(a, "sid"), s(a, "turnId"));
+  });
+  reg("session.forget", [api](const Json& a) {
+    return api->session_forget(s(a, "sid"), s(a, "scope"));
+  });
+  reg("session.send", [api](const Json& a) {
+    return api->session_send(s(a, "sid"), s(a, "text"),
+                             a.contains("attachments") ? a["attachments"] : Json::array());
+  });
+  reg("session.append", [api](const Json& a) {
+    return api->session_append(s(a, "sid"), s(a, "text"));
+  });
+  reg("session.suspend", [api](const Json& a) { return api->session_suspend(s(a, "sid")); });
+  reg("session.resume", [api](const Json& a) { return api->session_resume(s(a, "sid")); });
+  reg("session.cancelWake", [api](const Json& a) {
+    return api->session_cancel_wake(s(a, "sid"));
+  });
+  reg("session.continue", [api](const Json& a) {
+    return api->session_continue(s(a, "sid"), s(a, "guidance"));
+  });
+  reg("session.approve", [api](const Json& a) {
+    return api->session_approve(s(a, "sid"), b(a, "yes", true));
+  });
+  reg("session.setModel", [api](const Json& a) {
+    return api->session_set_model(s(a, "sid"), s(a, "model"));
+  });
+  reg("session.setThinking", [api](const Json& a) {
+    return api->session_set_thinking(s(a, "sid"), s(a, "thinking"));
+  });
+  reg("session.setPermission", [api](const Json& a) {
+    return api->session_set_permission(s(a, "sid"), s(a, "permission"));
+  });
+  reg("session.setPermissionConfirm", [api](const Json& a) {
+    return api->session_set_permission_confirm(s(a, "sid"), s(a, "permission"),
+                                               s(a, "token"));
+  });
+  reg("session.requestPermissionToken", [api](const Json& a) {
+    return api->session_request_permission_token(s(a, "sid"), s(a, "newPermission"));
+  });
+  reg("session.setAutoMode", [api](const Json& a) {
+    return api->session_set_auto_mode(s(a, "sid"), b(a, "autoMode"));
+  });
+  reg("session.setEnterSend", [api](const Json& a) {
+    return api->session_set_enter_send(s(a, "sid"), s(a, "enterSend"));
+  });
+  reg("session.refreshConfig", [api](const Json& a) {
+    return api->session_refresh_config(s(a, "sid"));
+  });
+
+  // ---- terminal.* ----
+  reg("terminal.list", [api](const Json& a) { return api->terminal_list(s(a, "sid")); });
+  reg("terminal.show", [api](const Json& a) { return api->terminal_show(s(a, "tid")); });
+  reg("terminal.kill", [api](const Json& a) { return api->terminal_kill(s(a, "tid")); });
+  reg("terminal.setEncoding", [api](const Json& a) {
+    return api->terminal_set_encoding(s(a, "tid"), s(a, "encoding"));
+  });
+
+  // ---- usage.* ----
+  reg("usage.query", [api](const Json& a) {
+    return api->usage_query(a.contains("filter") ? a["filter"] : Json::object());
+  });
+  reg("usage.exportCsv", [api](const Json& a) {
+    return api->usage_export_csv(a.contains("filter") ? a["filter"] : Json::object(),
+                                 s(a, "path"));
+  });
+
+  // ---- settings.* ----
+  reg("settings.get", [api](const Json& a) {
+    return api->settings_get(s(a, "key"), s(a, "pid"));
+  });
+  reg("settings.set", [api](const Json& a) {
+    return api->settings_set(s(a, "key"), a.contains("value") ? a["value"] : Json(),
+                             s(a, "pid"));
+  });
+  reg("settings.unset", [api](const Json& a) {
+    return api->settings_unset(s(a, "key"), s(a, "pid"));
+  });
+  reg("settings.dump", [api](const Json& a) { return api->settings_dump(s(a, "pid")); });
+  reg("settings.detectShells", [api](const Json&) { return api->settings_detect_shells(); });
+  reg("settings.setShell", [api](const Json& a) {
+    return api->settings_set_shell(s(a, "name"));
+  });
+  reg("settings.setIgnoreGlobal", [api](const Json& a) {
+    return api->settings_set_ignore_global(s(a, "pid"), b(a, "ignore"));
+  });
+
+  // ---- plan.* ----
+  reg("plan.get", [api](const Json& a) { return api->plan_get(s(a, "sid")); });
+  reg("plan.update", [api](const Json& a) {
+    return api->plan_update(s(a, "sid"),
+                            a.contains("plan") ? a["plan"] : Json::object());
+  });
+  reg("plan.review", [api](const Json& a) {
+    return api->plan_review(s(a, "sid"), s(a, "verdict"), s(a, "comment"));
+  });
+
+  // ---- workflow.* ----
+  reg("workflow.define", [api](const Json& a) {
+    return api->workflow_define(a.contains("def") ? a["def"] : Json::object());
+  });
+  reg("workflow.list", [api](const Json&) { return api->workflow_list(); });
+  reg("workflow.start", [api](const Json& a) {
+    return api->workflow_start(s(a, "sid"), s(a, "name"));
+  });
+  reg("workflow.get", [api](const Json& a) { return api->workflow_get(s(a, "runId")); });
+  reg("workflow.retryStep", [api](const Json& a) {
+    return api->workflow_retry_step(s(a, "runId"), s(a, "stepId"));
+  });
+  reg("workflow.skipStep", [api](const Json& a) {
+    return api->workflow_skip_step(s(a, "runId"), s(a, "stepId"));
+  });
+  reg("workflow.steer", [api](const Json& a) {
+    return api->workflow_steer(s(a, "runId"), s(a, "stepId"), s(a, "text"));
+  });
+
+  // ---- lock.* ----
+  reg("lock.acquire", [api](const Json& a) { return api->lock_acquire(s(a, "sid")); });
+  reg("lock.release", [api](const Json& a) { return api->lock_release(s(a, "sid")); });
+  reg("lock.holder", [api](const Json& a) { return api->lock_holder(s(a, "pid")); });
+
+  // ---- tool.* / ask / subagent / steering ----
+  reg("tool.invoke", [api](const Json& a) {
+    return api->tool_invoke(s(a, "sid"), s(a, "name"),
+                            a.contains("args") ? a["args"] : Json::object());
+  });
+  reg("tool.askAnswer", [api](const Json& a) {
+    return api->ask_answer(s(a, "sid"), static_cast<int>(i(a, "askId")), s(a, "selection"));
+  });
+  reg("subagent.spawn", [api](const Json& a) {
+    return api->subagent_spawn(s(a, "sid"), s(a, "kind"), s(a, "task"), s(a, "model"),
+                               static_cast<int>(i(a, "depth", 0)), i(a, "timeoutMs", 0));
+  });
+  reg("subagent.cancel", [api](const Json& a) { return api->subagent_cancel(s(a, "id")); });
+  reg("subagent.list", [api](const Json& a) { return api->subagent_list(s(a, "sid")); });
+  reg("subagent.steer", [api](const Json& a) {
+    return api->subagent_steer(s(a, "id"), s(a, "text"));
+  });
+  reg("steering.push", [api](const Json& a) {
+    return api->steering_push(s(a, "sid"), s(a, "kind"), s(a, "text"));
+  });
+  reg("steering.list", [api](const Json& a) { return api->steering_list(s(a, "sid")); });
+
+  // ---- provider.* ----
+  reg("provider.listProviders", [api](const Json&) { return api->provider_list_providers(); });
+  reg("provider.addProvider", [api](const Json& a) {
+    return api->provider_add_provider(a.contains("conn") ? a["conn"] : Json::object());
+  });
+  reg("provider.removeProvider", [api](const Json& a) {
+    return api->provider_remove_provider(s(a, "providerId"));
+  });
+  reg("provider.listModels", [api](const Json& a) {
+    return api->provider_list_models(s(a, "providerId"));
+  });
+  reg("provider.testConnection", [api](const Json& a) {
+    return api->provider_test_connection(s(a, "providerId"));
+  });
+
+  // ---- skill / misc ----
+  reg("skill.list", [api](const Json&) { return api->skill_list(); });
+  reg("skill.load", [api](const Json& a) { return api->skill_load(s(a, "name")); });
+  reg("browser.load", [api](const Json&) { return api->browser_load(); });
+  reg("thinking.setLang", [api](const Json& a) {
+    return api->set_thinking_lang(s(a, "lang", "auto"));
+  });
+  // available subagent presets (settings > subagents)
+  reg("subagent.presets", [](const Json&) {
+    Json arr = Json::array();
+    std::vector<PresetAgent> presets = builtin_preset_agents();
+    for (size_t i = 0; i < presets.size(); ++i) {
+      Json j = Json::object();
+      j["name"] = presets[i].name;
+      j["description"] = presets[i].description;
+      j["parallel"] = presets[i].parallel;
+      j["blocking"] = presets[i].blocking;
+      j["readOnly"] = presets[i].read_only;
+      j["enabled"] = presets[i].enabled;
+      arr.push_back(j);
+    }
+    return FsResult::success(arr);
+  });
+}
+
+void UiApi::reg(const std::string& name, std::function<FsResult(const Json&)> fn) {
+  methods_[name] = std::move(fn);
+}
+
+bool UiApi::has(const std::string& method) const {
+  return methods_.find(method) != methods_.end();
+}
+
+std::vector<std::string> UiApi::methods() const {
+  std::vector<std::string> out;
+  for (std::map<std::string, std::function<FsResult(const Json&)> >::const_iterator it =
+           methods_.begin();
+       it != methods_.end(); ++it) {
+    out.push_back(it->first);
+  }
+  return out;
+}
+
+FsResult UiApi::call(const std::string& method, const Json& args) {
+  std::map<std::string, std::function<FsResult(const Json&)> >::iterator it =
+      methods_.find(method);
+  if (it == methods_.end()) {
+    return FsResult::error(ErrCode::kNotFound, "unknown method: " + method);
+  }
+  return it->second(args);
+}
+
+}  // namespace ui
+}  // namespace fs

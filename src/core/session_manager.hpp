@@ -72,8 +72,8 @@ class SessionManager {
   const Clock* clock_;
   Random* rng_;
   LockArbiter locks_;
-  // 会话 → 项目 pid 缓存
-  std::map<std::string, std::string> sid_pid_;
+  // 会话 → 项目 pid 缓存（未命中时会回查项目注册表并在此登记）
+  mutable std::map<std::string, std::string> sid_pid_;
   // 权限升级确认令牌
   std::map<std::string, std::string> upgrade_tokens_;
 

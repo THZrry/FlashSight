@@ -57,7 +57,12 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
-    if (name === 'keyenter' && evt.key !== 'Enter') return;
+    // Enter in a textarea sends unless Shift is held; other keydowns are not
+    // forwarded at all (so plain Enter-to-send still allows newlines).
+    if (name === 'keyenter') {
+      if (evt.key !== 'Enter' || evt.shiftKey) return;
+      evt.preventDefault();
+    }
     var v = "";
     try {
       var t = el.tagName;
@@ -81,6 +86,77 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   el.addEventListener(evName, listener, false);
 });
 
+// Bind a drag&drop zone. Browsers only expose the dropped folder/file *name*,
+// never the absolute path, so the callback receives that name; the backend
+// resolves it (project.resolveDrop).
+EM_JS(void, fs_dom_drop_zone, (int node_id, int cb_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  // Rebinding (new render generation) just swaps the callback id; the
+  // listeners are installed once and read the id at drop time.
+  el.__fsDropCb = cb_id;
+  if (el.__fsDropInit) return;
+  el.__fsDropInit = true;
+  el.addEventListener('dragover', function (ev) {
+    ev.preventDefault();
+    el.classList.add('drop-hover');
+  });
+  el.addEventListener('dragleave', function () {
+    el.classList.remove('drop-hover');
+  });
+  el.addEventListener('drop', function (ev) {
+    ev.preventDefault();
+    el.classList.remove('drop-hover');
+    var name = "";
+    try {
+      var items = ev.dataTransfer.items;
+      if (items && items.length && items[0].webkitGetAsEntry) {
+        var entry = items[0].webkitGetAsEntry();
+        if (entry) name = entry.name;
+      }
+      if (!name && ev.dataTransfer.files.length) {
+        name = ev.dataTransfer.files[0].name;
+      }
+    } catch (e) { name = ""; }
+    if (!name) return;
+    var len = Module.lengthBytesUTF8(name) + 1;
+    var ptr = Module._malloc(len);
+    Module.stringToUTF8(name, ptr, len);
+    Module._fs_ui_drop(el.__fsDropCb, ptr);
+    Module._free(ptr);
+  });
+});
+
+// Drag the divider to resize `side` horizontally. Clamped to [minW, maxW].
+// The new width is applied inline; patch() never touches this element's
+// inline size, so it survives re-renders.
+EM_JS(void, fs_dom_splitter, (int split_node, int side_node), {
+  var bar = globalThis.__fsNodes[split_node];
+  var side = globalThis.__fsNodes[side_node];
+  if (!bar || !side) return;
+  if (bar.__fsSplitInit) return;
+  bar.__fsSplitInit = true;
+  bar.style.cursor = 'col-resize';
+  bar.addEventListener('mousedown', function (down) {
+    down.preventDefault();
+    var startX = down.clientX;
+    var startW = side.getBoundingClientRect().width;
+    function move(ev) {
+      var w = startW + (ev.clientX - startX);
+      if (w < 220) w = 220;
+      if (w > 720) w = 720;
+      side.style.width = w + 'px';
+      side.style.flex = '0 0 auto';
+    }
+    function up() {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+    }
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+});
+
 EM_JS(int, fs_dom_root, (), {
   var r = document.getElementById('fs-root');
   if (!r) {
@@ -90,6 +166,19 @@ EM_JS(int, fs_dom_root, (), {
   }
   return 1;
 });
+
+// ---- drop-zone callbacks --------------------------------------------------
+// Written by WasmDom::bind_drop_zone, invoked from JS via fs_ui_drop below.
+// File-level (not class members) because the EM_JS-exported entry point is a
+// free function and needs to reach the same table.
+std::map<int, std::function<void(const std::string&)> >& drop_cbs() {
+  static std::map<int, std::function<void(const std::string&)> > m;
+  return m;
+}
+int& drop_seq() {
+  static int s = 0;
+  return s;
+}
 
 // ---- WasmDom --------------------------------------------------------------
 namespace {
@@ -219,6 +308,20 @@ class WasmDom : public IDom {
     fs_dom_off(static_cast<int>(node.id), static_cast<int>(kind));
   }
 
+  void bind_splitter(Node splitter, Node side) override {
+    fs_dom_splitter(static_cast<int>(splitter.id), static_cast<int>(side.id));
+  }
+
+  void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) override {
+    int cb_id = ++drop_seq();
+    // One app-wide drop zone (the window); replace the table so a long run of
+    // re-renders cannot grow it without bound.
+    drop_cbs().clear();
+    drop_cbs()[cb_id] = std::move(cb);
+    fs_dom_drop_zone(static_cast<int>(node.id), cb_id);
+  }
+
+ private:
   Node root() override { return Node{1}; }
 
   const char* backend_name() const override { return "wasm"; }
@@ -245,6 +348,13 @@ class WasmDom : public IDom {
 
 // Factory used by the wasm entry point.
 IDom* make_platform_dom() { return new WasmDom(); }
+
+// Called from JS (fs_dom_drop_zone) with the dropped folder/file name.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_drop(int cb_id, const char* name) {
+  std::map<int, std::function<void(const std::string&)> >::iterator it = drop_cbs().find(cb_id);
+  if (it == drop_cbs().end() || !it->second) return;
+  it->second(std::string(name ? name : ""));
+}
 
 }  // namespace ui
 }  // namespace fs

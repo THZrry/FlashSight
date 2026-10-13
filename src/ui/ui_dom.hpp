@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -78,6 +79,18 @@ class IDom {
   virtual void on(Node node, EventKind kind, int handler_id) = 0;
   virtual void off(Node node, EventKind kind) = 0;
 
+  // --- splitter (drag to resize `side`; browser-only nicety) ---
+  // Backends that cannot drag (NullDom) keep the default width.
+  virtual void bind_splitter(Node splitter, Node side) { (void)splitter; (void)side; }
+
+  // --- drop zone (drag & drop a folder onto `node`) ---
+  // The callback receives the dropped folder's *name* (browsers never expose
+  // absolute paths). Backends without DnD keep the default no-op.
+  virtual void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) {
+    (void)node;
+    (void)cb;
+  }
+
   // --- root container the app renders into ---
   virtual Node root() = 0;
 
@@ -106,6 +119,12 @@ class NullDom : public IDom {
   std::string get_value(Node node) override;
   void on(Node node, EventKind kind, int handler_id) override;
   void off(Node node, EventKind kind) override;
+  void bind_splitter(Node splitter, Node side) override;
+  void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) override;
+  // test hook: simulate a folder drop on the bound zone
+  void fire_drop_for_test(const std::string& name) {
+    if (drop_cb_) drop_cb_(name);
+  }
   Node root() override { return Node{1}; }
   const char* backend_name() const override { return "null"; }
 
@@ -127,6 +146,7 @@ class NullDom : public IDom {
   std::unique_ptr<Impl> impl_;
   uint64_t next_id_ = 2;  // id 1 is the root
   std::vector<Call> calls_;
+  std::function<void(const std::string&)> drop_cb_;
 };
 
 }  // namespace ui

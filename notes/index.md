@@ -26,6 +26,7 @@ The process of project: P0 环境搭建
 <6>(SOLVED): repo 曾误提交 3rdparty_tmp（mbedtls 4.x 解压残留）与诊断 scratch 文件，
   已 git rm --cached 清理并补干净提交。3rdparty/ 不入 git（rules 要求），fetch 脚本可重放。
 
+
 ## 当前状态
 
 - P0 骨架完成：git 仓库、xmake targets（fs_core/fs_ui/flashsight/fs_tests）构建通过，
@@ -104,8 +105,12 @@ The process of project: P0 环境搭建
   需 set_policy("build.across_targets_in_parallel", false) 串行化；wasm target 需
   set_extension(".js") 才产独立 js/wasm。详见 current.md <22>。
 
+<23>(SOLVED): 用户反馈第一批（设置导航对齐/项目卡片会话区/原生目录选择+拖拽/Enter清空/
+  挂起与去switch栏/侧栏拖宽/“+”菜单）+ 两个底层 bug（EventBus::fire 自毁闭包、
+  session 解析只靠内存 sid->pid 映射导致重启后丢会话）。详见 current.md <23>。
+
 ## 当前状态（更新 2026-10-13）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；86 用例 578 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；99 用例 642 断言通过。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

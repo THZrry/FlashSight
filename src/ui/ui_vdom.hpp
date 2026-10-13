@@ -43,7 +43,12 @@ class EventBus {
   }
   void fire(int id, const std::string& value) {
     std::map<int, EventFn>::iterator it = handlers_.find(id);
-    if (it != handlers_.end() && it->second) it->second(value);
+    if (it == handlers_.end() || !it->second) return;
+    // Copy first: the handler usually calls update() -> render() -> retain(),
+    // which erases this very entry. Invoking the map slot directly would
+    // destroy the running closure (and its captures) mid-call.
+    EventFn fn = it->second;
+    fn(value);
   }
   // keep only the given ids; drop all others
   void retain(const std::vector<int>& keep);
@@ -176,6 +181,9 @@ void mount(IDom& dom, const VNodePtr& v, Node parent);
 
 // Collect every event handler id referenced by the tree (used by EventBus::retain).
 void collect_handler_ids(const VNodePtr& v, std::vector<int>* out);
+
+// Find a node by key (depth-first). Returns null when absent.
+VNodePtr find_by_key(const VNodePtr& v, const std::string& key);
 
 }  // namespace ui
 }  // namespace fs

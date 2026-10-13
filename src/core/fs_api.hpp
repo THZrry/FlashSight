@@ -3,6 +3,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -47,6 +48,14 @@ class FsApi {
   FsResult project_create(const std::string& path);
   FsResult project_remove(const std::string& pid);
   FsResult project_get(const std::string& pid);
+  // 打开系统"选择文件夹"对话框（浏览器无法提供本机路径，由本进程弹窗）
+  // 返回 {path} 或 cancelled=true
+  FsResult project_pick_folder();
+  // 解析浏览器拖放拿到的文件夹名（浏览器不给绝对路径）：在常见根目录中搜索
+  // {name} -> {path} 或 {notFound:true}
+  FsResult project_resolve_drop(const std::string& name);
+  // 在资源管理器中打开项目文件夹：{pid} -> {}
+  FsResult project_reveal(const std::string& pid);
 
   // ----- session.* -----
   FsResult session_new(const std::string& pid, const std::string& cwd);
@@ -172,8 +181,16 @@ class FsApi {
   WorkflowStore& workflows() { return *workflows_; }
 
   // 事件订阅（P4 UI 接入；addon2 工作流推进也经此驱动）
+  // 支持多个监听者（本地 UI + HTTP API 服务各一个）；返回 id 供退订
+  int add_event_listener(std::function<void(const std::string&, const Json&)> fn) {
+    int id = next_listener_id_++;
+    event_listeners_[id] = std::move(fn);
+    return id;
+  }
+  void remove_event_listener(int id) { event_listeners_.erase(id); }
+  // 兼容旧用法：追加一个监听者
   void set_event_sink(std::function<void(const std::string&, const Json&)> sink) {
-    event_sink_ = std::move(sink);
+    if (sink) add_event_listener(std::move(sink));
   }
 
  private:
@@ -208,7 +225,8 @@ class FsApi {
   std::unique_ptr<DenyList> deny_list_;
   std::unique_ptr<PlanStore> plans_;
   std::unique_ptr<WorkflowStore> workflows_;
-  std::function<void(const std::string&, const Json&)> event_sink_;
+  std::map<int, std::function<void(const std::string&, const Json&)> > event_listeners_;
+  int next_listener_id_ = 1;
   // P2: provider 层
   std::unique_ptr<ProviderStore> providers_;
   std::unique_ptr<ModelTable> model_table_;

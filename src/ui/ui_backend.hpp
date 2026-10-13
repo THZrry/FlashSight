@@ -1,6 +1,13 @@
-// ui_backend.hpp - UI 后端抽象（桌面原生 vs 浏览器 wasm 跑同一套 C++ 逻辑）
-// 桌面原生：进程内函数调用（NativeBackend 直接调 FsApi，不走 HTTP）。
-// 浏览器：wasm 里的逻辑经 BrowserDom + glue.js 操作 DOM；以后需要远端时再加 HttpBackend。
+// ui_backend.hpp - UI backend abstraction: how the UI reaches the core.
+//
+//   * NativeBackend : in-process FsApi calls (WhaleUI desktop build; no HTTP)
+//   * HttpBackend   : POST /api/call to the local server (browser/wasm build)
+//   * NullBackend   : no-op (unit tests, prototype)
+//
+// call() is synchronous and is what the desktop build uses. The browser build
+// cannot block on a request, so it implements call_async() instead; the default
+// call_async just runs call() and reports immediately, which keeps synchronous
+// backends a single-method implementation.
 #pragma once
 
 #include <functional>
@@ -10,31 +17,63 @@
 
 #include "fs_error.hpp"
 #include "fs_json.hpp"
-#include "ui_dom.hpp"
 
 namespace fs {
 namespace ui {
 
-// 后端调用：方法名 + 参数 -> 结果（同步；流式经事件回调）
-using BackendCall = std::function<FsResult(const std::string& method, const Json& args)>;
-// 事件订阅：后端推事件（stream.delta / turn.done / wake.fired ...）
+// Result of a backend call (JSON payload + error info for the UI to display).
+struct BackendResult {
+  bool ok = true;
+  Json data = Json::object();
+  std::string code;     // machine-readable err code ("not-found", ...)
+  std::string message;  // human-readable
+};
+
+inline BackendResult to_backend_result(const FsResult& r) {
+  BackendResult b;
+  b.ok = r.ok();
+  b.data = r.data;
+  if (!r.ok()) {
+    b.code = err_code_name(r.code);
+    b.message = r.message;
+    if (r.denied()) {
+      if (b.code.empty()) b.code = r.denial.reason;
+      if (b.message.empty()) b.message = r.denial.reason;
+      b.data = Json::object();
+      b.data["allowed"] = false;
+      b.data["reason"] = r.denial.reason;
+      b.data["lockedBy"] = r.denial.lockedBy;
+      b.data["howToProceed"] = r.denial.howToProceed;
+    }
+  }
+  return b;
+}
+
 using BackendEvent = std::function<void(const std::string& event, const Json& payload)>;
+using BackendDone = std::function<void(const BackendResult&)>;
 
 class IUiBackend {
  public:
   virtual ~IUiBackend() = default;
-  // 同步调用后端方法（如 session.send / provider.listModels）
-  virtual FsResult call(const std::string& method, const Json& args) = 0;
-  // 订阅后端事件；返回退订函数
+
+  // Synchronous call (desktop/in-process).
+  virtual BackendResult call(const std::string& method, const Json& args) = 0;
+  // Asynchronous call (browser). Default: run sync and report at once.
+  virtual void call_async(const std::string& method, const Json& args, BackendDone done) {
+    BackendResult r = call(method, args);
+    if (done) done(r);
+  }
+  // Subscribe to backend events; returns an unsubscribe function.
   virtual std::function<void()> subscribe(BackendEvent fn) = 0;
+  // Pump events (browser polls on a timer; desktop is a no-op).
+  virtual void poll() {}
 };
 
-// 空后端（UI 单测 / 原型演示用：call 返回空成功，事件可手动触发）
+// Null backend: succeeds with an empty payload, events fired manually.
 class NullBackend : public IUiBackend {
  public:
-  FsResult call(const std::string& method, const Json& args) override;
+  BackendResult call(const std::string& method, const Json& args) override;
   std::function<void()> subscribe(BackendEvent fn) override;
-  // 测试手动推事件
   void fire(const std::string& event, const Json& payload);
 
  private:

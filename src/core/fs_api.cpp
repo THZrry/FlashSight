@@ -1,6 +1,9 @@
 // fs_api.cpp - FsApi unified entry implementation (P1 scope)
 #include "fs_api.hpp"
 
+#include <cctype>
+
+#include "core/folder_picker.hpp"
 #include "fs_path.hpp"
 #include "tools/skill_registry.hpp"
 
@@ -148,9 +151,13 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   for (auto& d : builtin_workflows()) workflows_->define(d.to_json());
 }
 
-// 事件扇出：优先给 UI 订阅者；未订阅则丢弃（后端不依赖 UI）
+// 事件扇出：给所有监听者（本地 UI + HTTP API 服务）；无监听者则丢弃（后端不依赖 UI）
 void FsApi::emit_event(const std::string& event, const Json& payload) {
-  if (event_sink_) event_sink_(event, payload);
+  for (std::map<int, std::function<void(const std::string&, const Json&)> >::iterator it =
+           event_listeners_.begin();
+       it != event_listeners_.end(); ++it) {
+    if (it->second) it->second(event, payload);
+  }
 }
 
 FsApi::~FsApi() {}
@@ -163,6 +170,50 @@ FsResult FsApi::project_create(const std::string& path) {
 }
 FsResult FsApi::project_remove(const std::string& pid) { return proj_->remove_project(pid); }
 FsResult FsApi::project_get(const std::string& pid) { return proj_->get_project(pid); }
+FsResult FsApi::project_pick_folder() {
+  std::string path;
+  if (pick_folder_dialog(&path)) {
+    return FsResult::success(Json{{"path", path}});
+  }
+  return FsResult::success(Json{{"cancelled", true}});
+}
+FsResult FsApi::project_resolve_drop(const std::string& name) {
+  if (name.empty()) {
+    return FsResult::error(ErrCode::kInvalidArg, "empty folder name");
+  }
+  // already registered? reuse the path
+  nlohmann::json all = proj_->list_projects().data;
+  std::string lower = name;
+  for (size_t i = 0; i < lower.size(); ++i) {
+    lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(lower[i])));
+  }
+  if (all.is_array()) {
+    for (size_t i = 0; i < all.size(); ++i) {
+      std::string path = jsonutil::get<std::string>(all[i], "path", "");
+      ghc::filesystem::path p(path);
+      std::string fname = p.filename().string();
+      for (size_t k = 0; k < fname.size(); ++k) {
+        fname[k] = static_cast<char>(std::tolower(static_cast<unsigned char>(fname[k])));
+      }
+      if (fname == lower) return FsResult::success(Json{{"path", path}});
+    }
+  }
+  std::string found = find_folder_by_name(default_search_roots(), name, 6);
+  if (found.empty()) {
+    return FsResult::success(Json{{"notFound", true}, {"name", name}});
+  }
+  return FsResult::success(Json{{"path", found}});
+}
+FsResult FsApi::project_reveal(const std::string& pid) {
+  std::string path = path_for(pid);
+  if (path.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  }
+  if (!reveal_in_file_manager(path)) {
+    return FsResult::error(ErrCode::kIo, "cannot open file manager");
+  }
+  return FsResult::success();
+}
 
 // ----- session.* -----
 FsResult FsApi::session_new(const std::string& pid, const std::string& cwd) {

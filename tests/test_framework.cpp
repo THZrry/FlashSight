@@ -52,6 +52,8 @@ TempDir::~TempDir() {
 }
 
 int run_all() {
+  // unbuffered: a crashing case must still leave its name in the log
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
   int case_fail = 0;
   for (auto& c : registry()) {
     int before = g_failures;

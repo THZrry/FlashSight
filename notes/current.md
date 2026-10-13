@@ -276,3 +276,35 @@ The process of project: P0 环境搭建 + P1 AppCore
     86 用例 578 断言通过，浏览器渲染正常。
 
 
+
+
+<23>(SOLVED): 用户反馈第一批（可用性）修复 + 两个底层真 bug。
+  反馈项：① 设置项与左侧导航不对应且不全；② 项目卡片给会话的位置太小、两个按钮语义混乱；
+  ③ 打开文件夹不该手输路径（要系统选择框/拖拽）；④ 会话 Enter 发送后输入框不清空；
+  ⑤ 挂起改普通按钮且挨着发送；⑥ 去掉 switch 工具栏，功能移到输入框下；
+  ⑦ 侧栏不能拖拽调宽；⑧ 侧栏“+”不该默认文件页。
+  - 设置：导航改为字符串键（kSettingsNav 12 项，nav 与 body 用同一 key，不可能错位）；
+    settings.dump 一次拉全量（带来源），sv_bool/sv_int/sv_str 读缓存；子代理/MCP 与 Skill/
+    长期记忆/网络/终端/文件/环境/快捷键/关于全部有实体内容。
+  - 项目卡片：改为“上信息行 + 下宽会话区”，会话列表占卡片主体；按钮改为
+    「在资源管理器中打开」（project.reveal）与「移出列表」；删掉手输路径行。
+  - 打开文件夹：新增 core/folder_picker（Windows IFileDialog FOS_PICKFOLDERS；POSIX stub），
+    FsApi project.pickFolder/project.resolveDrop/project.reveal；浏览器拖入文件夹只能拿到
+    名字（webkitGetAsEntry().name），后端在 USERPROFILE+固定盘 BFS 查找（跳噪音目录，深度6）。
+  - 输入框：textarea 的 value 必须用 attr("value")（活属性），发送后对 DOM 节点直接写
+    value=""（打字期间不重渲染，状态清空不会反映到真实字段）。
+  - 侧栏：新增 .side-splitter 拖拽条（EM_JS mousedown/move/up，220–720px，内联宽度，
+    patch 不碰 inline 尺寸所以重渲染不丢）；“+”改为弹出种类菜单（open_or_focus_side_tab
+    同类复用，不再默认 files）。
+  - 真 bug 1（EventBus::fire 自毁）：handler 里 update()->render()->retain() 会 erase 正在
+    执行的 map 条目（闭包捕获随之下析构）→ 后续语句读到悬空捕获，表现为“点了没反应/半执行”。
+    修复：fire() 先拷贝 EventFn 再调用。
+  - 真 bug 2（session 解析依赖内存映射）：SessionManager::project_store_of 只查 sid_pid_
+    内存表，服务重启后（或本进程没开过的会话）一律解析失败 → session.list 静默丢会话、
+    session.get 报 not-found。修复：未命中时遍历项目注册表找含该 sid 的项目并回填缓存；
+    list_sessions 直接走项目 store，不再 make_store(sid)。
+  - 构建：folder_picker.cpp 的注释行尾是反斜杠（`// drive roots C:\..Z:\`）→ 续行把下一行
+    的 DWORD drives 声明吞进注释；ole32/uuid 需加入 add_syslinks。
+  - 验证：99 用例 642 断言通过；浏览器回归：项目卡片会话区、真实键盘 Enter 发送+清空、
+    侧栏拖拽 320→220px、侧栏“+”菜单选择与复用、拖放文件夹 resolveDrop 命中、
+    设置 12 节全部渲染、旧会话打开（session.get 修复后）。

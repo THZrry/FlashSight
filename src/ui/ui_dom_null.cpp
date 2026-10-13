@@ -204,6 +204,15 @@ void NullDom::off(Node node, EventKind kind) {
   calls_.push_back(Call{"off", node.id, event_kind_name(kind)});
 }
 
+void NullDom::bind_splitter(Node splitter, Node side) {
+  calls_.push_back(Call{"bind_splitter", splitter.id, std::to_string(side.id)});
+}
+
+void NullDom::bind_drop_zone(Node node, std::function<void(const std::string&)> cb) {
+  drop_cb_ = cb;
+  calls_.push_back(Call{"bind_drop_zone", node.id, ""});
+}
+
 std::string NullDom::dump() const {
   std::ostringstream os;
   impl_->dump_rec(os, 1, 0);

@@ -7,7 +7,7 @@
 // Navigation (per user feedback, single mode):
 //   * top tab strip: 主页 / 会话N / 设置 - tabs can be added and closed
 //   * home: centered title buttons 探索/项目/用量统计 (no background, only
-//     color + underline); 项目 renders project cards whose right half is an
+//     color + underline); 项目 renders project cards whose body is a wide
 //     expandable session list
 //   * session: chat article layout + composer + free side-panel tabs
 //   * settings: two-column settings page
@@ -39,7 +39,7 @@ struct ProjectCard {
   std::string path;
   std::string updated;              // "2 分钟前"
   int session_count = 0;
-  bool expanded = false;            // right half: session list open?
+  bool expanded = false;            // session list loaded?
   std::vector<std::pair<std::string, std::string> > sessions;  // sid, title
 };
 
@@ -69,6 +69,8 @@ struct AppState {
   int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计
   std::vector<ProjectCard> projects;
   std::string explore_query;
+  Json usage;              // usage.query result (empty => show placeholders)
+  bool usage_loaded = false;
 
   // ---- session (active one) ----
   std::string session_input;
@@ -86,11 +88,13 @@ struct AppState {
   std::vector<SideTab> side_tabs;
   std::string active_side = "usage";
   int side_seq = 0;
+  bool side_menu_open = false;  // "+" popup with side tab kinds
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
   std::string active_term;
   bool terminal_open = false;
+  std::string terminal_output;  // last poll output for the active terminal
 
   // ---- subagents ----
   struct SubagentRow {
@@ -102,16 +106,48 @@ struct AppState {
   std::vector<SubagentRow> subagents;
 
   // ---- settings ----
-  int settings_nav = 0;
+  std::string settings_nav = "general";  // section key; nav and body always agree
   int provider_index = 0;
   std::string provider_endpoint = "https://opencode.ai/zen/v1";
   std::string provider_key;
   std::string provider_header = "x-opencode-session: auto";
   std::string thinking_lang = "auto";
+  struct ProviderRow {
+    std::string id;
+    std::string kind;
+    std::string endpoint;
+    bool enabled = true;
+  };
+  std::vector<ProviderRow> providers;
+  bool providers_loaded = false;
+  std::vector<std::string> shells;  // settings.detectShells result
+  int shell_index = 0;
+  std::string history_recent = "20";
+  std::string history_budget = "8000";
+  // section payloads (settings.get replies, cached per section)
+  Json settings_values = Json::object();   // key -> {value, source}
+  bool settings_dump_loaded = false;
+  bool settings_dump_inflight = false;
+  std::string settings_loaded_for;  // nav section whose loads were triggered
+  struct PresetRow {
+    std::string name;
+    std::string description;
+    bool enabled = true;
+    bool read_only = false;
+  };
+  std::vector<PresetRow> preset_agents;
+  bool presets_loaded = false;
+  std::vector<std::string> skills;         // skill.list result
+  bool skills_loaded = false;
+  std::vector<std::pair<std::string, std::string> > long_memory;  // 长期记忆
+  std::vector<std::pair<std::string, std::string> > env_vars;     // 环境变量
+  std::vector<std::pair<std::string, std::string> > cli_tools;    // CLI 工具
+  std::string about_version = "0.1.0";
 
   // ---- overlays ----
   bool ask_modal = false;
   std::string ask_text;
+  int ask_id = 0;           // ask tool id (0 = permission prompt, not ask tool)
   bool plan_open = false;
   std::vector<std::string> plan_steps;
   std::string toast;
@@ -135,13 +171,60 @@ class UiApp {
   // mutate + render in one call (the common path)
   void update(const std::function<void(AppState&)>& f);
 
+  // Drive backend events (browser polls; desktop is a no-op). Call from a
+  // timer/loop; applies stream.delta/turn.done/permission.prompt/etc.
+  void pump();
+  // Async backend call with a completion handler (browser-safe). The sync
+  // call() is unavailable in the wasm build, so all UI actions go through here.
+  void call_async(const std::string& method, const Json& args,
+                  std::function<void(const BackendResult&)> done = nullptr);
+  // Pull project.list / session.list from the backend into AppState.
+  void load_projects();
+  // Pull terminal.list for the active session.
+  void load_terminals(const std::string& sid);
+  // Open (or focus) a session tab and load its history from the backend.
+  void open_session(const std::string& sid, const std::string& title = "");
+  // Load a project's session list into its card.
+  void load_sessions(size_t project_index);
+  // Load usage summary into the usage page.
+  void load_usage();
+  // Load provider list + detected shells into settings.
+  void load_providers();
+  void load_shells();
+  // Load subagents for a session.
+  void load_subagents(const std::string& sid);
+  // Loaders for the settings sections.
+  void load_preset_agents();
+  void load_skills();
+  void load_settings_section(const std::string& section);
+  // Save a settings key (global) and reflect it locally.
+  void set_setting(const std::string& key, const Json& value);
+  // Parse a settings value map ({key:{value,...}}) into local caches.
+  void apply_settings(const Json& values);
+
   // actions (public: also callable from tests and future menu bindings)
   void toast(const std::string& text);
   void send_message();
   void open_new_session();
+  // native folder dialog -> register as project (opened project list refresh)
+  void pick_and_open_folder();
+  // create a session under a specific project (from its card)
+  void new_session_in_project(const std::string& pid);
+  // handle a dropped folder name: resolve to a path, then open as project
+  void handle_dropped_folder(const std::string& name);
   void close_tab(const std::string& id);
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);
+  // activate the existing tab of `kind`, or create one (never defaults)
+  void open_or_focus_side_tab(const std::string& kind);
+  // test hook: apply a backend event as the sink would
+  void on_backend_event_for_test(const std::string& event, const Json& payload) {
+    on_backend_event(event, payload);
+  }
+  // diagnostics
+  int event_count() const { return event_count_; }
+  int render_count() const { return render_count_; }
+  size_t message_count() const { return st_.messages.size(); }
 
  private:
   IDom& dom_;
@@ -150,6 +233,19 @@ class UiApp {
   VNodePtr tree_;
   Node root_{0};
   std::string last_rendered_tab_;
+  std::function<void()> unsubscribe_events_;
+  int64_t last_stream_turn_ = -1;
+  int event_count_ = 0;
+  int render_count_ = 0;
+  bool render_in_progress_ = false;  // nested render deferral (sync backends)
+  bool render_pending_ = false;
+
+  // backend event handler (bound in mount)
+  void on_backend_event(const std::string& event, const Json& payload);
+  // append streamed text to the last assistant message (creating it if needed)
+  void append_stream_delta(const std::string& text);
+  // find the active session id ("" if the active tab is not a session)
+  std::string active_sid() const;
 
   // ---- page builders (return the page body for the active tab) ----
   VNodePtr build_shell();

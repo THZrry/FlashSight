@@ -198,8 +198,10 @@ H textarea(const std::string& value, const std::string& placeholder,
   if (!placeholder.empty()) t.attr("placeholder", placeholder);
   t.on(EventKind::kInput, on_input);
   t.on(EventKind::kKeyEnter, on_enter);
-  // value via text child so patching updates it
-  t.text(value);
+  // value via the `value` attribute (glue.js maps it to the live property).
+  // A text child would only set the defaultValue, so clearing after send
+  // would not clear what the user sees.
+  t.attr("value", value);
   return t;
 }
 
@@ -292,6 +294,8 @@ H card(const std::string& cls, const std::vector<H>& children) {
 H section_title(const std::string& text) {
   return el("h3", "section-title").text(text);
 }
+
+H hint(const std::string& text) { return el("div", "hint").text(text); }
 
 H key_value(const std::string& k, const std::string& v) {
   H r = el("div", "kv");

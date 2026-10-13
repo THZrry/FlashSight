@@ -47,6 +47,22 @@ ProjectStore SessionManager::project_store_of(const std::string& sid) const {
       return ProjectStore::of(std::string(j["path"].get<std::string>()));
     }
   }
+  // Not in the in-memory map (server restart, or a session this process never
+  // opened): search the project registry for the one holding this sid. Without
+  // this, session.get/send on an older session fails with "not found".
+  nlohmann::json all = proj_->registry().list();
+  if (all.is_array()) {
+    for (size_t i = 0; i < all.size(); ++i) {
+      std::string path = jsonutil::get<std::string>(all[i], "path", "");
+      if (path.empty()) continue;
+      ProjectStore ps = ProjectStore::of(ghc::filesystem::path(path));
+      SessionFileStore store(ps);
+      if (store.full_exists(sid)) {
+        sid_pid_[sid] = jsonutil::get<std::string>(all[i], "pid", "");
+        return ps;
+      }
+    }
+  }
   // 兜底：未知 → 空 store（调用方已校验存在）
   return ProjectStore::of(ghc::filesystem::path());
 }
@@ -138,11 +154,16 @@ FsResult SessionManager::list_sessions(const std::string& pid) const {
     }
   }
   std::sort(sids.begin(), sids.end());
+  // Read through the project store directly: make_store(sid) resolves via the
+  // in-memory sid->pid map, which is empty after a restart (and for sessions
+  // this process never opened), so those sessions would silently disappear.
+  SessionFileStore store(
+      ProjectStore::of(ghc::filesystem::path(p["path"].get<std::string>())));
   Json arr = Json::array();
   for (auto& sid : sids) {
     Json j;
     Json meta;
-    FsResult rr = make_store(sid).load_full(sid, &j);
+    FsResult rr = store.load_full(sid, &j);
     if (!rr.ok()) continue;
     if (j.contains("meta")) meta = j["meta"];
     arr.push_back(meta);

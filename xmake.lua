@@ -105,7 +105,8 @@ target("fs_ui_wasm")
     set_languages("c++17")
     add_includedirs(wasm_includedirs)
     add_files(ui_shared)
-    add_files("src/ui/ui_dom_wasm.cpp", "src/ui/ui_main_wasm.cpp")
+    add_files("src/ui/ui_dom_wasm.cpp", "src/ui/ui_main_wasm.cpp",
+              "src/ui/ui_http_backend.cpp")
     -- xmake injects -fvisibility=hidden by default, which hides the extern "C" entries
     add_cxflags("-fvisibility=default")
     add_cxxflags("-Wall", "-Os")
@@ -116,7 +117,7 @@ target("fs_ui_wasm")
     set_extension(".js")
     add_ldflags("-lembind", "-sALLOW_MEMORY_GROWTH=1", "-sDISABLE_EXCEPTION_CATCHING=0",
                 "--no-entry", {force = true})
-    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_malloc,_free",
+    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
                 {force = true})
     add_ldflags("-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8",
                 {force = true})
@@ -271,7 +272,7 @@ target("fs_core")
     add_cflags("-Wall")
     add_cxxflags("-Wall")
     if is_plat("windows") then
-        add_syslinks("ws2_32", "user32", "shell32", "crypt32", "bcrypt")
+        add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
     end
 
 target("fs_ui")
@@ -294,7 +295,7 @@ target("flashsight")
     add_deps("fs_core", "fs_ui")
     add_cxxflags("-Wall")
     if is_plat("windows") then
-        add_syslinks("ws2_32", "user32", "shell32", "crypt32", "bcrypt")
+        add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
     end
     mbedtls_link()
 
@@ -306,7 +307,7 @@ target("fs_tests")
     add_deps("fs_core", "fs_ui")
     add_cxxflags("-Wall")
     if is_plat("windows") then
-        add_syslinks("ws2_32", "user32", "shell32", "crypt32", "bcrypt")
+        add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
     end
     mbedtls_link()
 
