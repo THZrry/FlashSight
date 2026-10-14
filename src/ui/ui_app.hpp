@@ -91,6 +91,7 @@ struct AppState {
   int side_seq = 0;
   bool side_menu_open = false;  // "+" popup with side tab kinds
   int side_width = 320;         // side panel width (px); persisted in state
+  bool side_collapsed = false;  // side panel hidden (toggle in the divider)
   // ---- side panel / 文件树 ----
   std::string active_pid;                 // project of the active session
   std::string files_path;                 // dir being listed ("" = project root)
@@ -154,11 +155,13 @@ struct AppState {
     std::string kind;
     std::string base_url;
     std::string description;
+    std::vector<std::pair<std::string, std::string> > headers;
   };
   std::vector<ProviderTemplate> provider_templates;
   bool provider_templates_loaded = false;
   std::string provider_selected;   // id being edited ("" = none selected)
   bool provider_creating = false;  // new-provider wizard open
+  bool pv_template_picked = false; // template chosen -> show the form
   // draft fields for the create/edit form
   std::string pv_name;
   std::string pv_kind = "openai-chat";
@@ -167,7 +170,8 @@ struct AppState {
   std::vector<std::pair<std::string, std::string> > pv_headers;  // custom headers
   std::string pv_new_header_k;
   std::string pv_new_header_v;
-  std::vector<std::string> provider_models;  // listModels result
+  bool pv_advanced = false;                   // "高级" section expanded
+  std::vector<std::string> provider_models;   // listModels result
   std::string provider_models_level;          // "api" | "preset"
   std::string provider_status;                // test/connect result line
   std::vector<std::string> shells;  // settings.detectShells result
@@ -234,7 +238,10 @@ struct AppState {
 // Everything that belongs to ONE session tab. The app keeps the active view
 // spread flat over AppState (so builders read plain fields) and stashes it
 // here when the user switches tabs, restoring it on the way back. Without this
-// a tab switch shows the previous tab's messages/panels - or nothing at all.
+// The app's per-scope UI state. The framework keeps ONE live copy (the flat
+// fields on AppState) and stashes the rest in a KeyedStore<SessionView>; the
+// scoping mechanism itself is generic (ui_vdom.hpp KeyedStore), this struct is
+// just the payload for "a session tab" scopes.
 struct SessionView {
   bool loaded = false;  // history/panels fetched from the backend yet?
   std::vector<comp::ChatMsg> messages;
@@ -252,7 +259,8 @@ struct SessionView {
   std::string active_side = "usage";
   int side_seq = 0;
   bool side_menu_open = false;
-  int side_width = 320;  // side panel width (px); persisted across switches
+  int side_width = 320;      // side panel width (px); persisted across switches
+  bool side_collapsed = false;  // side panel hidden
 
   std::string active_pid;
   std::string files_path;
@@ -383,8 +391,9 @@ class UiApp {
   int render_count_ = 0;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
   bool render_pending_ = false;
-  // per-session-tab state, keyed by sid (the flat fields hold the active one)
-  std::map<std::string, SessionView> views_;
+  // per-scope UI state: framework KeyedStore keyed by tab id. The flat fields
+  // on AppState are the live copy of whichever scope is active.
+  KeyedStore<SessionView> views_;
   std::string last_session_key_;  // sid whose view the flat fields currently hold
 
   // backend event handler (bound in mount)

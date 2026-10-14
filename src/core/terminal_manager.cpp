@@ -12,7 +12,9 @@ namespace fs {
 struct TerminalManager::Proc {
   reproc_t* h = nullptr;
   std::string tid;
+  std::string sid;
   std::string out;        // 累积的 stdout+stderr（UTF-8 尽力）
+  size_t reported = 0;    // out 中已上报给 UI 的字节数（tick 只发新增）
   bool exited = false;
   int exit_code = 0;
 };
@@ -121,6 +123,7 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
   std::unique_ptr<Proc> p(new Proc());
   p->h = h;
   p->tid = e.tid;
+  p->sid = sid;
   std::string tid = e.tid;
   procs_[tid] = std::move(p);
 
@@ -210,6 +213,43 @@ FsResult TerminalManager::kill(const Json& args, Json* out) {
   o["exitCode"] = p.exit_code;
   if (out) *out = o;
   return FsResult::success(o);
+}
+
+// 后台线程非阻塞轮询：把新增输出/退出状态汇总成事件列表交给宿主推送。
+// UI 不再需要手动"轮询"按钮——桌面端宿主按回调、浏览器端经 /api/events 推送。
+std::vector<Json> TerminalManager::tick() {
+  std::vector<Json> out;
+  for (std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.begin();
+       it != procs_.end(); ++it) {
+    Proc& p = *it->second;
+    if (!p.h) continue;
+    bool was_exited = p.exited;
+    size_t before = p.out.size();
+    drain(p);
+    bool new_out = p.out.size() > before;
+    if (!p.exited) {
+      int w = reproc_wait(p.h, 0);  // 非阻塞检查
+      if (w != REPROC_ETIMEDOUT) {
+        p.exited = true;
+        p.exit_code = w;
+        reg_->mark_exited(p.tid, w, clock_->now_ms());
+      }
+    }
+    if (!new_out && p.exited == was_exited) continue;  // 无变化
+    Json e = Json::object();
+    e["tid"] = p.tid;
+    e["sid"] = p.sid;
+    // 只发新增字节；累积内容仍可由 terminal.show 全量取
+    if (new_out) {
+      e["output"] = p.out.substr(p.reported);
+    }
+    p.reported = p.out.size();
+    e["status"] = p.exited ? "exited" : "running";
+    e["exitCode"] = p.exit_code;
+    e["justExited"] = (p.exited && !was_exited);
+    out.push_back(e);
+  }
+  return out;
 }
 
 }  // namespace fs

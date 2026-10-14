@@ -366,7 +366,7 @@ FS_TEST(uiapp_provider_create_wizard) {
   app.mount();
   app.show("settings");
   app.update([](AppState& s) { s.settings_nav = "providers"; });
-  // templates drive the new-provider wizard
+  // step 1: templates drive the wizard
   app.update([](AppState& s) {
     AppState::ProviderTemplate t;
     t.id = "anthropic";
@@ -376,17 +376,26 @@ FS_TEST(uiapp_provider_create_wizard) {
     t.description = "x-api-key + anthropic-version";
     s.provider_templates.push_back(t);
     s.provider_creating = true;
+    s.pv_template_picked = false;
   });
   EXPECT_TRUE(dump_has(dom, "新建供应商"));
   EXPECT_TRUE(dump_has(dom, "Anthropic Messages"));
-  // choosing a template fills the draft form (kind + endpoint)
+  // step 2: picking a template shows the form; 格式 is a dropdown, 高级 folds
   app.update([](AppState& s) {
+    s.pv_template_picked = true;
     s.pv_name = "Anthropic Messages";
     s.pv_kind = "anthropic";
     s.pv_base_url = "https://api.anthropic.com/v1";
   });
-  EXPECT_TRUE(dump_has(dom, "填写连接"));
+  EXPECT_TRUE(dump_has(dom, "Endpoint"));
+  EXPECT_TRUE(dump_has(dom, "格式"));
+  EXPECT_TRUE(dump_has(dom, "Anthropic"));
   EXPECT_TRUE(dump_has(dom, "https://api.anthropic.com/v1"));
+  EXPECT_TRUE(dump_has(dom, "高级"));
+  // advanced section holds headers + models
+  app.update([](AppState& s) { s.pv_advanced = true; });
+  EXPECT_TRUE(dump_has(dom, "模型"));
+  EXPECT_TRUE(dump_has(dom, "Header"));
 }
 
 FS_TEST(uiapp_mcp_section_lists_and_adds) {

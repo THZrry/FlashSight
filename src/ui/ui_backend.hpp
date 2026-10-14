@@ -67,6 +67,10 @@ class IUiBackend {
   virtual std::function<void()> subscribe(BackendEvent fn) = 0;
   // Pump events (browser polls on a timer; desktop is a no-op).
   virtual void poll() {}
+  // True when the backend already drives its own background work (the desktop
+  // build runs the terminal poller on a thread). The UI then skips its own
+  // timer-driven tick, which would otherwise run the same code twice.
+  virtual bool polls_server_side() const { return false; }
 };
 
 // Null backend: succeeds with an empty payload, events fired manually.

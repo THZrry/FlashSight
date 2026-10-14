@@ -110,7 +110,12 @@ UiApi::UiApi(FsApi* api) {
   reg("terminal.show", [api](const Json& a) { return api->terminal_show(s(a, "tid")); });
   reg("terminal.kill", [api](const Json& a) { return api->terminal_kill(s(a, "tid")); });
   reg("terminal.setEncoding", [api](const Json& a) {
-    return api->terminal_set_encoding(s(a, "tid"), s(a, "encoding"));
+    return api->terminal_set_encoding(s(a, "tid"), s(a, "enc"));
+  });
+  // 浏览器端：UI 定时器驱动一次非阻塞轮询（桌面端有后台线程，此调用无害）
+  reg("terminal.tick", [api](const Json&) {
+    api->terminal_tick();
+    return FsResult::success();
   });
 
   // ---- usage.* ----

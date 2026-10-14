@@ -62,6 +62,35 @@ class EventBus {
 
 EventBus& bus();
 
+// ---------------- KeyedStore ----------------
+// Framework-level scoped state. A scope is anything the user switches between
+// (tabs, sessions, pages, panels): the app keeps ONE live copy of T (the
+// active scope) and this store keeps the stashed copies keyed by scope id.
+// Switching = stash(live) then restore(other). Nothing here is UI-specific, so
+// any screen with switchable scopes reuses it.
+template <typename T>
+class KeyedStore {
+ public:
+  // stash the live scope under `key`
+  void stash(const std::string& key, const T& live) { map_[key] = live; }
+  // restore `key` into `live`; false when the key was never stashed
+  bool restore(const std::string& key, T* live) const {
+    typename std::map<std::string, T>::const_iterator it = map_.find(key);
+    if (it == map_.end()) return false;
+    if (live) *live = it->second;
+    return true;
+  }
+  // reference to `key`'s stashed value, creating a default when absent
+  T& get_or_create(const std::string& key) { return map_[key]; }
+  bool has(const std::string& key) const { return map_.find(key) != map_.end(); }
+  void erase(const std::string& key) { map_.erase(key); }
+  void clear() { map_.clear(); }
+  size_t size() const { return map_.size(); }
+
+ private:
+  std::map<std::string, T> map_;
+};
+
 // ---------------- Container ----------------
 // Observable value. set() always notifies (the app coalesces re-renders).
 template <typename T>
@@ -155,10 +184,9 @@ class H {
   // Mount animation: adds class "anim-<name>" (CSS defines the keyframes).
   // Fires when the element is created, i.e. on first mount and whenever the
   // diff has to replace the node (key/tag change). See web/style.css.
-  H anim(const std::string& name) {
-    n_->attrs.push_back(VAttr{"class", "anim-" + name});
-    return *this;
-  }
+  // Merges into the existing class attribute - a second class attr would be
+  // ignored by the browser and silently drop the element's real styling.
+  H anim(const std::string& name) { return cls("anim-" + name); }
   H on(EventKind k, EventFn fn) {
     n_->events.push_back(VEvent{k, bus().add(fn)});
     return *this;

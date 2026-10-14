@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #include "core/folder_picker.hpp"
 #include "fs_path.hpp"
@@ -182,6 +184,8 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   }
   // addon2：内置示例工作流
   for (auto& d : builtin_workflows()) workflows_->define(d.to_json());
+  // 终端后台轮询：新增输出/退出直接推事件，UI 不再手动"轮询"
+  start_terminal_poller();
 }
 
 void FsApi::apply_proxy_settings() {
@@ -202,7 +206,9 @@ void FsApi::emit_event(const std::string& event, const Json& payload) {
   }
 }
 
-FsApi::~FsApi() {}
+FsApi::~FsApi() {
+  stop_terminal_poller();
+}
 
 // ----- project.* -----
 FsResult FsApi::project_list() { return proj_->list_projects(); }
@@ -613,6 +619,43 @@ FsResult FsApi::terminal_kill(const std::string& tid) {
 }
 FsResult FsApi::terminal_set_encoding(const std::string& tid, const std::string& enc) {
   return terminals_->set_encoding(tid, enc);
+}
+
+// 非阻塞轮询：把新增输出/退出推成事件。桌面端由后台线程定时调用，
+// 浏览器端由 UI 定时器经 ui.terminalTick 触发（同一实现，两种传输）。
+void FsApi::terminal_tick() {
+  std::vector<Json> changes = terminal_mgr_->tick();
+  for (size_t i = 0; i < changes.size(); ++i) {
+    const Json& c = changes[i];
+    std::string sid = jsonutil::get<std::string>(c, "sid", "");
+    if (c.contains("output") && c["output"].is_string()) {
+      emit_event("terminal.output", Json{{"sid", sid},
+                                         {"tid", jsonutil::get<std::string>(c, "tid", "")},
+                                         {"text", c["output"]}});
+    }
+    if (jsonutil::get<bool>(c, "justExited", false)) {
+      emit_event("terminal.exit", Json{{"sid", sid},
+                                       {"tid", jsonutil::get<std::string>(c, "tid", "")},
+                                       {"exitCode", jsonutil::get_int(c, "exitCode", 0)}});
+    }
+  }
+}
+
+void FsApi::start_terminal_poller() {
+  if (poller_) return;
+  poller_stop_.store(false);
+  poller_.reset(new std::thread([this]() {
+    while (!poller_stop_.load()) {
+      terminal_tick();
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
+  }));
+}
+
+void FsApi::stop_terminal_poller() {
+  poller_stop_.store(true);
+  if (poller_ && poller_->joinable()) poller_->join();
+  poller_.reset();
 }
 
 // ----- usage.* -----

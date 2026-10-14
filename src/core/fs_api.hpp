@@ -2,10 +2,12 @@
 // 同进程函数调用；以后整体换 HTTP（UI 与后端不耦合）。
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "fs_clock.hpp"
 #include "fs_error.hpp"
@@ -98,6 +100,9 @@ class FsApi {
   FsResult terminal_show(const std::string& tid);
   FsResult terminal_kill(const std::string& tid);
   FsResult terminal_set_encoding(const std::string& tid, const std::string& enc);
+  // 非阻塞轮询所有终端，把新增输出/退出推成 terminal.output / terminal.exit
+  // 事件（UI 不再手动轮询）。宿主定时调用（桌面线程 / 浏览器定时器）。
+  void terminal_tick();
 
   // ----- usage.* -----
   FsResult usage_query(const Json& filter);
@@ -218,6 +223,9 @@ class FsApi {
   void start_next_pending_step(WorkflowRun* run);
   // 把设置里的代理套到网络客户端（启动时 + 设置变更时）
   void apply_proxy_settings();
+  // 终端后台轮询线程（桌面端；浏览器端由 UI 定时器调用 terminal_tick）
+  void start_terminal_poller();
+  void stop_terminal_poller();
   // 事件扇出（UI 订阅；未订阅则丢弃）
   void emit_event(const std::string& event, const Json& payload);
 
@@ -248,6 +256,9 @@ class FsApi {
   // P3: agent 宿主（Loop/工具/子代理/唤醒/引导队列）
   std::unique_ptr<AgentHost> agent_host_;
   std::unique_ptr<McpRegistry> mcp_registry_;
+  // 终端后台轮询线程（桌面端；~FsApi 时停止）
+  std::atomic<bool> poller_stop_{false};
+  std::unique_ptr<std::thread> poller_;
 };
 
 }  // namespace fs

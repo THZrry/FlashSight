@@ -135,6 +135,10 @@ EM_JS(void, fs_dom_drop_zone, (int node_id, int cb_id), {
 // The new width is applied inline during the drag; on release the width is
 // reported to C++ (fs_ui_split) so the app can persist it in state - otherwise
 // the width would be lost as soon as the node is re-created.
+//
+// The collapse handle rides ON the divider, so a press there must not start a
+// drag, and a drag must not be mistaken for a handle click (otherwise the
+// panel would collapse the moment you let go).
 EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
   var bar = globalThis.__fsNodes[split_node];
   var side = globalThis.__fsNodes[side_node];
@@ -145,13 +149,20 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
   bar.__fsSplitInit = true;
   bar.style.cursor = 'col-resize';
   bar.addEventListener('mousedown', function (down) {
+    // a press on the handle is a click, not a drag
+    var t = down.target;
+    if (t && t.classList && t.classList.contains('splitter-handle')) return;
     down.preventDefault();
     var startX = down.clientX;
     var startW = side.getBoundingClientRect().width;
+    var moved = false;
     function move(ev) {
+      var dx = ev.clientX - startX;
+      if (!moved && Math.abs(dx) > 3) moved = true;
+      if (!moved) return;
       // The divider sits on the side panel's LEFT edge: dragging left must
       // widen the panel, so the delta is subtracted (not added).
-      var w = startW - (ev.clientX - startX);
+      var w = startW - dx;
       if (w < 220) w = 220;
       if (w > 720) w = 720;
       side.style.width = w + 'px';
@@ -160,6 +171,11 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
     function up() {
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
+      if (!moved) return;  // a plain click on the divider: nothing to persist
+      // swallow the click that follows a drag so it cannot toggle the panel
+      var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); };
+      document.addEventListener('click', swallow, true);
+      setTimeout(function () { document.removeEventListener('click', swallow, true); }, 0);
       var w = parseInt(side.style.width, 10);
       if (isFinite(w) && Module._fs_ui_split) Module._fs_ui_split(bar.__fsSplitCb, w);
     }

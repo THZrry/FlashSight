@@ -373,3 +373,31 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 验证：106 用例 674 断言通过；浏览器实测 A/B 两会话各自的消息与侧栏宽度
     互不干扰、切回 A 保留 history-marker 与 460px 侧栏、Escape/遮罩收回选择器、
     anim-page 生效。
+
+
+<27>(SOLVED): 反馈第四批 —— 框架作用域通用化、会话页重排、供应商格式、终端后台推送。
+  - 框架：新增 KeyedStore<T>（ui_vdom.hpp）——"作用域状态"通用原语：应用只保留
+    一份 live 状态（AppState 的扁平字段），其余按 scope key 暂存在 KeyedStore。
+    会话标签是第一个使用者（SessionView），后续任何可切换作用域（面板/工作区）
+    复用同一机制，不再为每个场景写特判的 save/restore。
+  - 会话页重排（按用户要求）：上栏 = [计划浮窗] + [中间历史+输入框] + [分隔条] +
+    [右侧栏]，下栏 = 终端。历史区居中 50% 宽（.history-inner），输入框与之对齐；
+    计划面板改为绝对定位浮窗贴左上，不再把对话往下推；侧栏可由分隔条上的把手
+    收起/展开（side_collapsed 入状态，跨会话保留）。
+  - 输入框：内嵌 textarea 去掉自身边框/聚焦环（此前与 composer 的 :focus-within
+    双重激活，边框重复）；工具栏按钮 white-space:nowrap 防止文字竖排换行。
+  - 供应商：格式改为固定下拉（OpenAI Chat / OpenAI Response / Anthropic / 套餐 /
+    自定义）；模板只作 endpoint + 特殊 header 预设，选中后直接跳到表单；
+    新增"高级"折叠区（自定义 header + 模型获取，user>api>preset>保守缺省）；
+    新建/编辑共用同一表单构建。
+  - 终端：后端非阻塞轮询（TerminalManager::tick 只发新增字节 + 退出标记），
+    桌面端 FsApi 起后台线程，浏览器端 UI 定时器调 ui.terminal.tick；结果推成
+    terminal.output / terminal.exit 事件，UI 不再有"轮询"按钮，输出自动追加。
+    两端的差异只在"谁驱动 tick"，推送路径一致（同一 emit_event）。
+  - 动画：分三档并只挂载时触发——view 切换 anim-view(.18s)、组件出现
+    anim-enter(.14s，消息/卡片/行)、流式文本 anim-fade(.05s)；侧栏展开
+    anim-slide-left。H::anim 并入 class 属性（此前会推重复 class 属性，
+    浏览器只认第一个，导致元素真实样式被丢——计划浮窗曾因此错位）。
+  - 验证：106 用例 679 断言通过；浏览器实测新布局、计划浮窗贴左上、侧栏拖拽
+    不再误收起、供应商模板->表单+格式下拉+高级、终端输出自动推送（events 里
+    可见 terminal.output/terminal.exit）。

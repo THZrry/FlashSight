@@ -182,6 +182,12 @@ void UiApp::call_async(const std::string& method, const Json& args,
 
 void UiApp::pump() {
   if (backend_) backend_->poll();
+  // Drive the backend's non-blocking terminal poller. On desktop FsApi runs it
+  // on a thread already, so only the browser needs this tick; any output still
+  // arrives as a terminal.output event (no render from the tick itself).
+  if (backend_ && !backend_->polls_server_side()) {
+    backend_->call_async("terminal.tick", Json::object(), nullptr);
+  }
   // toasts carry a deadline: clear them here so they cannot linger forever
   // (pump runs on the browser's 250ms timer; the native build calls it too)
   if (!st_.toast.empty() && now_ms() >= st_.toast_deadline_ms) {
@@ -239,7 +245,7 @@ void UiApp::load_terminals(const std::string& sid) {
 
 void UiApp::save_session_view(const std::string& sid) {
   if (sid.empty()) return;
-  SessionView& v = views_[sid];
+  SessionView& v = views_.get_or_create(sid);
   v.messages = st_.messages;
   v.session_input = st_.session_input;
   v.model = st_.model;
@@ -275,8 +281,8 @@ void UiApp::save_session_view(const std::string& sid) {
 }
 
 void UiApp::load_session_view(const std::string& sid) {
-  std::map<std::string, SessionView>::iterator it = views_.find(sid);
-  SessionView v = it == views_.end() ? default_session_view() : it->second;
+  SessionView v = default_session_view();
+  views_.restore(sid, &v);  // keeps the defaults when the key is new
   st_.messages = v.messages;
   st_.session_input = v.session_input;
   st_.model = v.model;
@@ -329,7 +335,7 @@ void UiApp::switch_tab(const std::string& id) {
     render();
     return;
   }
-  bool had_view = views_.find(sid) != views_.end();
+  bool had_view = views_.has(sid);
   load_session_view(sid);
   last_session_key_ = sid;
   render();
@@ -404,7 +410,7 @@ void UiApp::load_session(const std::string& sid) {
     }
     // write into the session's view; mirror to the flat fields only when the
     // user is still looking at it (a slow reply must not clobber another tab)
-    SessionView& v = views_[sid];
+    SessionView& v = views_.get_or_create(sid);
     v.loaded = true;
     v.messages = msgs;
     v.session_ops = ops;
@@ -493,6 +499,15 @@ void UiApp::load_provider_templates() {
         row.kind = jsonutil::get<std::string>(t, "kind", "");
         row.base_url = jsonutil::get<std::string>(t, "baseUrl", "");
         row.description = jsonutil::get<std::string>(t, "description", "");
+        if (t.contains("headers") && t["headers"].is_object()) {
+          const Json& h = t["headers"];
+          for (Json::const_iterator it = h.begin(); it != h.end(); ++it) {
+            if (it.value().is_string()) {
+              row.headers.push_back(
+                  std::make_pair(it.key(), it.value().get<std::string>()));
+            }
+          }
+        }
         rows.push_back(row);
       }
     }
@@ -617,11 +632,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   // only touch views_ for a background session; a fresh one gets the default
   // panels seeded so opening it later does not look empty
   SessionView* vp = nullptr;
-  if (!is_active) {
-    std::map<std::string, SessionView>::iterator it = views_.find(sid);
-    if (it == views_.end()) it = views_.insert(std::make_pair(sid, default_session_view())).first;
-    vp = &it->second;
-  }
+  if (!is_active) vp = &views_.get_or_create(sid);
   if (event == "stream.delta") {
     std::string text = jsonutil::get<std::string>(payload, "text", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
@@ -659,6 +670,17 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     for (size_t i = 0; i < terms.size(); ++i) {
       if (terms[i].tid == tid) terms[i].status = "exited";
     }
+  } else if (event == "terminal.output") {
+    // pushed by the backend's non-blocking poller (no manual refresh)
+    std::string tid = jsonutil::get<std::string>(payload, "tid", "");
+    std::string text = jsonutil::get<std::string>(payload, "text", "");
+    std::string& out = is_active ? st_.terminal_output : vp->terminal_output;
+    std::string& cur = is_active ? st_.active_term : vp->active_term;
+    if (cur.empty()) cur = tid;
+    if (tid == cur) {
+      out += text;
+      if (out.size() > (1u << 20)) out.erase(0, out.size() - (1u << 20));
+    }
   }
 }
 
@@ -672,7 +694,8 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     return;
   }
   if (event == "stream.delta" || event == "turn.done" || event == "tool.update" ||
-      event == "subagent.done" || event == "terminal.exit") {
+      event == "subagent.done" || event == "terminal.exit" ||
+      event == "terminal.output") {
     apply_session_event(sid, event, payload);
   } else if (event == "permission.prompt") {
     st_.ask_modal = true;
@@ -736,7 +759,9 @@ void UiApp::render() {
       dom_.bind_splitter(bar->dom, side->dom, [this](int w) {
         if (w > 0) {
           st_.side_width = w;
-          if (!last_session_key_.empty()) views_[last_session_key_].side_width = w;
+          if (!last_session_key_.empty()) {
+            views_.get_or_create(last_session_key_).side_width = w;
+          }
         }
       });
     }
@@ -810,9 +835,9 @@ VNodePtr UiApp::build_shell() {
     page = build_session();
   }
   page->key = "page:" + st_.active_tab;
-  // page switch: the key changes, so the node is re-created -> the mount
-  // animation fires (fade + a small slide); see web/style.css
-  add_class(page, "anim-page");
+  // page switch: the key changes, so the node is re-created -> the view
+  // animation fires (fade + slide); see web/style.css
+  add_class(page, "anim-view");
   win.add(page);
   win.add(build_overlays());
   return win.get();
@@ -1092,32 +1117,25 @@ VNodePtr UiApp::build_home_usage() {
 VNodePtr UiApp::build_session() {
   H wrap = el("div", "page session-page");
 
-  // There is no separate switch/toolbar strip: everything lives in or under
-  // the composer (per user feedback).
-
-  // ---- plan panel (collapsible, toggled from the composer bar) ----
-  if (st_.plan_open) {
-    H plan = el("div", "plan-panel");
-    plan.add(el("div", "plan-title").text("任务规划"));
-    for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
-      H step = el("div", "plan-step");
-      step.add(el("span", "plan-no").text(itos(static_cast<int>(i + 1))));
-      step.add(el("span", "plan-text").text(st_.plan_steps[i]));
-      plan.add(step);
-    }
-    wrap.add(plan);
-  }
-
-  // ---- main: history + side panel ----
+  // Layout:
+  //   top row : [ plan float ] [ history + composer ] [splitter] [ side panel ]
+  //   bottom  : terminal bar (collapsible; hidden by default)
+  // The plan panel floats over the history instead of pushing it down, and the
+  // side panel collapses from the handle on the divider.
+  H top = el("div", "session-top");
   H mid = el("div", "session-mid");
+
+  // ---- center column: history (centered column) + composer ----
+  H center = el("div", "session-center");
   H hist = el("div", "history");
+  H hist_inner = el("div", "history-inner");
   if (st_.messages.empty()) {
-    hist.add(comp::empty_state("开始新的对话。输入消息后 Enter 发送。", "", nullptr));
+    hist_inner.add(comp::empty_state("开始新的对话。输入消息后 Enter 发送。", "", nullptr));
   }
   for (size_t i = 0; i < st_.messages.size(); ++i) {
     comp::ChatMsg m = st_.messages[i];
-    hist.add(comp::chat_message(m, [this](const std::string&) { toast("已复制"); },
-                                [this, i](const std::string&) {
+    hist_inner.add(comp::chat_message(m, [this](const std::string&) { toast("已复制"); },
+                                      [this, i](const std::string&) {
       update([&](AppState& s) {
         if (i < s.messages.size() && !s.messages[i].tools.empty()) {
           // toggle the first block (prototype: single block toggling)
@@ -1126,15 +1144,10 @@ VNodePtr UiApp::build_session() {
       });
     }));
   }
-  mid.add(hist);
-  // drag divider between history and the side panel
-  H split = el("div", "side-splitter");
-  split.key("side-splitter");
-  mid.add(split);
-  mid.add(build_side_panel());
-  wrap.add(mid);
+  hist.add(hist_inner);
+  center.add(hist);
 
-  // ---- composer ----
+  // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");
   H ta = comp::textarea(st_.session_input, "输入消息…（Enter 发送，Shift+Enter 换行）",
                         [this](const std::string& v) {
@@ -1196,13 +1209,16 @@ VNodePtr UiApp::build_session() {
       });
     }
   }, "ghost"));
+  tools.add(comp::button("终端", [this](const std::string&) {
+    update([&](AppState& s) { s.terminal_open = !s.terminal_open; });
+  }, "ghost"));
   // middle: session settings (selects styled compactly)
   H grow = el("span", "grow");
   tools.add(grow);
   H model_sel = el("div", "bar-group");
   std::vector<std::string> models;
   models.push_back("gpt-4o-mini");
-  models.push_back("claude-sonnet");
+  models.push_back("");
   models.push_back("deepseek-v4");
   model_sel.add(comp::select(models, st_.model_index, [this](const std::string& v) {
     int idx = std::atoi(v.c_str());
@@ -1281,8 +1297,8 @@ VNodePtr UiApp::build_session() {
           s.session_input += "/" + name;
         });
         // write the new value straight to the textarea (no render while typing)
-        VNodePtr ta = find_by_key(tree_, "session-input");
-        if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
+        VNodePtr ta2 = find_by_key(tree_, "session-input");
+        if (ta2 && ta2->dom.valid()) dom_.set_attr(ta2->dom, "value", st_.session_input);
       });
       it.add(el("span", "skill-menu-name").text("/" + name));
       pop.add(it);
@@ -1295,9 +1311,48 @@ VNodePtr UiApp::build_session() {
     pop.add(close);
     comp_box.add(pop);
   }
-  wrap.add(comp_box);
+  center.add(comp_box);
 
-  // ---- terminal drawer ----
+  // plan panel floats over the history's left edge (absolute, inside center)
+  if (st_.plan_open) {
+    H plan = el("div", "plan-float");
+    plan.anim("pop");
+    H phead = el("div", "plan-head");
+    phead.add(el("span", "plan-title").text("任务规划"));
+    phead.add(comp::icon_button("\u2715", "收起", [this](const std::string&) {
+      update([&](AppState& s) { s.plan_open = false; });
+    }));
+    plan.add(phead);
+    if (st_.plan_steps.empty()) {
+      plan.add(el("div", "plan-empty dim").text("暂无规划步骤"));
+    }
+    for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
+      H step = el("div", "plan-step");
+      step.add(el("span", "plan-no").text(itos(static_cast<int>(i + 1))));
+      step.add(el("span", "plan-text").text(st_.plan_steps[i]));
+      plan.add(step);
+    }
+    center.add(plan);
+  }
+
+  mid.add(center);
+
+  // ---- divider + collapsible side panel ----
+  H split = el("div", st_.side_collapsed ? "side-splitter collapsed" : "side-splitter");
+  split.key("side-splitter");
+  H handle = el("div", "splitter-handle");
+  handle.attr("title", st_.side_collapsed ? "展开侧栏" : "收起侧栏");
+  handle.text(st_.side_collapsed ? "\u2039" : "\u203a");
+  handle.on(EventKind::kClick, [this](const std::string&) {
+    update([&](AppState& s) { s.side_collapsed = !s.side_collapsed; });
+  });
+  split.add(handle);
+  mid.add(split);
+  if (!st_.side_collapsed) mid.add(build_side_panel());
+  top.add(mid);
+  wrap.add(top);
+
+  // ---- bottom row: terminal (collapsible bar) ----
   wrap.add(build_terminal_drawer());
   return wrap.get();
 }
@@ -1508,9 +1563,20 @@ VNodePtr UiApp::build_side_panel() {
   return side.get();
 }
 
+// Bottom bar: terminal. Collapsed it is just a one-line header; expanding it
+// reveals the output pane. Kept out of the top row so the chat area never has
+// to share vertical space with it.
 VNodePtr UiApp::build_terminal_drawer() {
-  H drawer = el("div", st_.terminal_open ? "terminal-drawer open" : "terminal-drawer");
+  H drawer = el("div", st_.terminal_open ? "terminal-bar open" : "terminal-bar");
   H head = el("div", "td-head");
+  // expand/collapse toggle on the left, so the whole bar is clickable
+  H caret = el("span", "td-caret");
+  caret.text(st_.terminal_open ? "\u25be" : "\u25b8");
+  caret.on(EventKind::kClick, [this](const std::string&) {
+    update([&](AppState& s) { s.terminal_open = !s.terminal_open; });
+  });
+  head.add(caret);
+  head.add(el("span", "td-title").text("终端"));
   // terminal selector
   H sel = el("div", "term-selector");
   for (size_t i = 0; i < st_.terminals.size(); ++i) {
@@ -1523,19 +1589,12 @@ VNodePtr UiApp::build_terminal_drawer() {
     chip.text("#" + t.tid + " " + t.shell);
     sel.add(chip);
   }
+  if (st_.terminals.empty()) {
+    sel.add(el("span", "term-chip dim").text("无终端"));
+  }
   head.add(sel);
   H g = el("span", "grow");
   head.add(g);
-  head.add(comp::button("轮询", [this](const std::string&) {
-    std::string tid = st_.active_term;
-    if (tid.empty()) return;
-    call_async("terminal.show", Json{{"tid", tid}}, [this](const BackendResult& r) {
-      if (!r.ok) return;
-      update([&](AppState& s) {
-        s.terminal_output = jsonutil::get<std::string>(r.data, "output", "");
-      });
-    });
-  }, "ghost"));
   head.add(comp::button("停止", [this](const std::string&) {
     std::string tid = st_.active_term;
     if (tid.empty()) return;
@@ -1547,13 +1606,12 @@ VNodePtr UiApp::build_terminal_drawer() {
       });
     });
   }, "ghost"));
-  head.add(comp::icon_button("\u2715", "收起", [this](const std::string&) {
-    update([&](AppState& s) { s.terminal_open = false; });
-  }));
   drawer.add(head);
-  H out = el("pre", "td-out");
-  out.text(st_.terminal_output.empty() ? "（无输出；点“轮询”获取）" : st_.terminal_output);
-  drawer.add(out);
+  if (st_.terminal_open) {
+    H out = el("pre", "td-out");
+    out.text(st_.terminal_output.empty() ? "（等待输出…）" : st_.terminal_output);
+    drawer.add(out);
+  }
   return drawer.get();
 }
 
@@ -1864,10 +1922,151 @@ VNodePtr UiApp::build_settings() {
     two.add(list);
 
     H detail = el("div", "pv-detail");
-    if (st_.provider_creating) {
-      // 新建向导：先选模板，再填表
+
+    // The form is shared by "new" and "edit": 格式 is a fixed dropdown, the
+    // template only pre-fills endpoint + headers, and 高级 holds headers/models.
+    auto build_form = [this, &detail](bool creating) {
+      detail.add(comp::section_title(creating ? "新建供应商" : "编辑供应商"));
+      if (creating) {
+        detail.add(comp::hint("模板只是预填 Endpoint 与特殊 Header；格式可随时改。"));
+      }
+      detail.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
+                                                      [this](const std::string& v) {
+        st_.pv_name = v;
+      })));
+      // 格式：固定下拉（OpenAI / Response / Anthropic / 套餐）
+      std::vector<std::string> kinds;
+      kinds.push_back("OpenAI Chat");
+      kinds.push_back("OpenAI Response");
+      kinds.push_back("Anthropic");
+      kinds.push_back("套餐（opencode zen）");
+      kinds.push_back("自定义");
+      const char* kind_ids[5] = {"openai-chat", "openai-response", "anthropic",
+                                 "plan", "custom"};
+      int kind_idx = 0;
+      for (int k = 0; k < 5; ++k) {
+        if (st_.pv_kind == kind_ids[k]) kind_idx = k;
+      }
+      detail.add(comp::field("格式", comp::select(kinds, kind_idx,
+                                                  [this](const std::string& v) {
+        int i = std::atoi(v.c_str());
+        const char* ids[5] = {"openai-chat", "openai-response", "anthropic",
+                              "plan", "custom"};
+        st_.pv_kind = ids[i < 0 || i > 4 ? 0 : i];
+      }), "决定请求路径与鉴权方式"));
+      detail.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
+                                                          [this](const std::string& v) {
+        st_.pv_base_url = v;
+      }), "如 https://api.openai.com/v1"));
+      detail.add(comp::field("API Key", comp::text_input(st_.pv_key,
+                                                         creating ? "sk-…" : "留空 = 不修改",
+                                                         [this](const std::string& v) {
+        st_.pv_key = v;
+      }), st_.pv_kind == "plan"
+              ? "套餐连接可不填；会话 id 自动作为 x-opencode-session 发送"
+              : (creating ? "" : "回显为脱敏值；不改动则留空")));
+
+      // ---- 高级（折叠）----
+      H adv = el("div", "pv-advanced");
+      H ahead = el("div", "pv-adv-head");
+      ahead.on(EventKind::kClick, [this](const std::string&) {
+        update([&](AppState& s) { s.pv_advanced = !s.pv_advanced; });
+      });
+      ahead.add(el("span", "pv-adv-caret").text(st_.pv_advanced ? "\u25be" : "\u25b8"));
+      ahead.add(el("span").text("高级（自定义 Header / 模型）"));
+      adv.add(ahead);
+      if (st_.pv_advanced) {
+        H abody = el("div", "pv-adv-body");
+        abody.add(comp::hint(st_.pv_kind == "plan"
+                                 ? "套餐连接自动携带 x-opencode-session，无需手动配置。"
+                                 : "仅在端点需要额外请求头时添加。"));
+        for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
+          H row = el("div", "settings-row");
+          row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
+          row.add(el("span", "dim grow").text(st_.pv_headers[i].second));
+          size_t idx = i;
+          row.add(comp::button("删除", [this, idx](const std::string&) {
+            update([&](AppState& s) {
+              if (idx < s.pv_headers.size()) s.pv_headers.erase(s.pv_headers.begin() + idx);
+            });
+          }, "ghost"));
+          abody.add(row);
+        }
+        H addh = el("div", "pv-header-add");
+        addh.add(comp::text_input(st_.pv_new_header_k, "Header 名",
+                                  [this](const std::string& v) { st_.pv_new_header_k = v; }));
+        addh.add(comp::text_input(st_.pv_new_header_v, "值",
+                                  [this](const std::string& v) { st_.pv_new_header_v = v; }));
+        addh.add(comp::button("添加", [this](const std::string&) {
+          if (st_.pv_new_header_k.empty()) return;
+          update([&](AppState& s) {
+            s.pv_headers.push_back(std::make_pair(s.pv_new_header_k, s.pv_new_header_v));
+            s.pv_new_header_k.clear();
+            s.pv_new_header_v.clear();
+          });
+        }, "ghost"));
+        abody.add(addh);
+
+        // 模型：获取列表（预置/API 两级回退）
+        abody.add(comp::section_title("模型"));
+        H macts = el("div", "settings-actions");
+        std::string sel = st_.provider_selected;
+        if (!sel.empty()) {
+          macts.add(comp::button("获取模型列表", [this, sel](const std::string&) {
+            fetch_provider_models(sel);
+          }));
+        } else {
+          macts.add(comp::hint("保存后可获取模型列表。"));
+        }
+        abody.add(macts);
+        if (!st_.provider_models.empty()) {
+          H ml = el("div", "pv-models");
+          for (size_t i = 0; i < st_.provider_models.size(); ++i) {
+            ml.add(el("span", "pv-model").text(st_.provider_models[i]));
+          }
+          abody.add(ml);
+          abody.add(el("div", "hint").text(
+              "级别：" + st_.provider_models_level + "（user > api > preset > 保守缺省）"));
+        }
+        adv.add(abody);
+      }
+      detail.add(adv);
+
+      if (!st_.provider_status.empty()) {
+        detail.add(el("div", "pv-status").text(st_.provider_status));
+      }
+      H acts = el("div", "settings-actions");
+      std::string sel = st_.provider_selected;
+      acts.add(comp::button("保存", [this](const std::string&) { save_provider(); }, "primary"));
+      if (!creating) {
+        acts.add(comp::button("测试连接", [this, sel](const std::string&) {
+          test_provider(sel);
+        }));
+        acts.add(comp::button("删除", [this, sel](const std::string&) {
+          delete_provider(sel);
+        }, "danger"));
+      }
+      acts.add(comp::button("取消", [this](const std::string&) {
+        update([&](AppState& s) {
+          s.provider_creating = false;
+          s.pv_template_picked = false;
+          s.pv_advanced = false;
+          s.pv_name.clear();
+          s.pv_kind = "openai-chat";
+          s.pv_base_url.clear();
+          s.pv_key.clear();
+          s.pv_headers.clear();
+          s.provider_status.clear();
+          s.provider_models.clear();
+        });
+      }, "ghost"));
+      detail.add(acts);
+    };
+
+    if (st_.provider_creating && !st_.pv_template_picked) {
+      // step 1: pick a template (it only pre-fills endpoint + headers)
       detail.add(comp::section_title("新建供应商"));
-      detail.add(comp::hint("先选一个模板，填写后保存。"));
+      detail.add(comp::hint("选择一个模板作为起点（只预填 Endpoint 与特殊 Header）。"));
       H tpls = el("div", "pv-templates");
       for (size_t i = 0; i < st_.provider_templates.size(); ++i) {
         const AppState::ProviderTemplate& t = st_.provider_templates[i];
@@ -1882,115 +2081,18 @@ VNodePtr UiApp::build_settings() {
         tpls.add(c);
       }
       detail.add(tpls);
-      if (!st_.pv_kind.empty() && !st_.pv_base_url.empty()) {
-        detail.add(comp::section_title("填写连接"));
-        detail.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
-                                                        [this](const std::string& v) {
-          st_.pv_name = v;
-        })));
-        detail.add(comp::field("格式", comp::text_input(st_.pv_kind, "", [](const std::string&) {}),
-                               "由模板决定；如 openai-chat / openai-response / anthropic / plan"));
-        detail.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
-                                                            [this](const std::string& v) {
-          st_.pv_base_url = v;
-        })));
-        detail.add(comp::field("API Key", comp::text_input(st_.pv_key, "sk-…",
-                                                           [this](const std::string& v) {
-          st_.pv_key = v;
-        }), st_.pv_kind == "plan" ? "套餐连接可不填；会话 id 自动作为 x-opencode-session 发送"
-                                  : ""));
-        H acts = el("div", "settings-actions");
-        acts.add(comp::button("保存", [this](const std::string&) { save_provider(); }, "primary"));
-        acts.add(comp::button("取消", [this](const std::string&) {
-          update([&](AppState& s) {
-            s.provider_creating = false;
-            s.pv_name.clear();
-            s.pv_kind.clear();
-            s.pv_base_url.clear();
-            s.pv_key.clear();
-            s.pv_headers.clear();
-          });
-        }, "ghost"));
-        detail.add(acts);
-      }
+    } else if (st_.provider_creating) {
+      // step 2: the form (template already applied)
+      H back = el("div", "pv-back");
+      back.add(comp::button("\u2190 重新选择模板", [this](const std::string&) {
+        update([&](AppState& s) { s.pv_template_picked = false; });
+      }, "ghost"));
+      detail.add(back);
+      build_form(true);
     } else if (st_.provider_selected.empty()) {
       detail.add(comp::empty_state("从左侧选择一个供应商，或点「新建」。", "", nullptr));
     } else {
-      // 编辑已选供应商
-      detail.add(comp::section_title("编辑供应商"));
-      detail.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
-                                                      [this](const std::string& v) {
-        st_.pv_name = v;
-      })));
-      detail.add(comp::field("格式", comp::text_input(st_.pv_kind, "", [](const std::string&) {}),
-                             "openai-chat / openai-response / anthropic / plan / custom"));
-      detail.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
-                                                          [this](const std::string& v) {
-        st_.pv_base_url = v;
-      })));
-      detail.add(comp::field("API Key", comp::text_input(st_.pv_key, "留空 = 不修改",
-                                                         [this](const std::string& v) {
-        st_.pv_key = v;
-      }), "回显为脱敏值；不改动则留空"));
-      // 自定义 header 表（仅 custom 形态需要；plan 的 x-opencode-session 自动）
-      detail.add(comp::section_title("自定义 Header"));
-      if (st_.pv_kind == "plan") {
-        detail.add(comp::hint("套餐连接自动携带 x-opencode-session（会话 id），无需手动配置。"));
-      }
-      for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
-        H row = el("div", "settings-row");
-        row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
-        row.add(el("span", "dim grow").text(st_.pv_headers[i].second));
-        size_t idx = i;
-        row.add(comp::button("删除", [this, idx](const std::string&) {
-          update([&](AppState& s) {
-            if (idx < s.pv_headers.size()) s.pv_headers.erase(s.pv_headers.begin() + idx);
-          });
-        }, "ghost"));
-        detail.add(row);
-      }
-      H addh = el("div", "pv-header-add");
-      addh.add(comp::text_input(st_.pv_new_header_k, "Header 名",
-                                [this](const std::string& v) { st_.pv_new_header_k = v; }));
-      addh.add(comp::text_input(st_.pv_new_header_v, "值",
-                                [this](const std::string& v) { st_.pv_new_header_v = v; }));
-      addh.add(comp::button("添加", [this](const std::string&) {
-        if (st_.pv_new_header_k.empty()) return;
-        update([&](AppState& s) {
-          s.pv_headers.push_back(std::make_pair(s.pv_new_header_k, s.pv_new_header_v));
-          s.pv_new_header_k.clear();
-          s.pv_new_header_v.clear();
-        });
-      }, "ghost"));
-      detail.add(addh);
-      if (!st_.provider_status.empty()) {
-        detail.add(el("div", "pv-status").text(st_.provider_status));
-      }
-      if (!st_.provider_models.empty()) {
-        H mh = el("div", "pv-models-head");
-        mh.add(el("span", "pv-models-title").text(
-            "模型（" + std::to_string(st_.provider_models.size()) + "，级别：" +
-            st_.provider_models_level + "）"));
-        detail.add(mh);
-        H ml = el("div", "pv-models");
-        for (size_t i = 0; i < st_.provider_models.size(); ++i) {
-          ml.add(el("span", "pv-model").text(st_.provider_models[i]));
-        }
-        detail.add(ml);
-      }
-      H acts = el("div", "settings-actions");
-      std::string sel = st_.provider_selected;
-      acts.add(comp::button("保存", [this](const std::string&) { save_provider(); }, "primary"));
-      acts.add(comp::button("测试连接", [this, sel](const std::string&) {
-        test_provider(sel);
-      }));
-      acts.add(comp::button("获取模型列表", [this, sel](const std::string&) {
-        fetch_provider_models(sel);
-      }));
-      acts.add(comp::button("删除", [this, sel](const std::string&) {
-        delete_provider(sel);
-      }, "danger"));
-      detail.add(acts);
+      build_form(false);
     }
     two.add(detail);
     body.add(two);
@@ -2639,18 +2741,21 @@ void UiApp::select_provider(const std::string& id) {
 }
 
 void UiApp::begin_new_provider(const std::string& template_id) {
-  // 模板已选：把 kind/baseUrl/名称填进草稿，进入填写表单
+  // template picked: pre-fill endpoint + headers, then show the form. The
+  // template only seeds values; 格式 stays user-editable in the dropdown.
   for (size_t i = 0; i < st_.provider_templates.size(); ++i) {
     const AppState::ProviderTemplate& t = st_.provider_templates[i];
     if (t.id != template_id) continue;
     update([&](AppState& s) {
       s.provider_creating = true;
+      s.pv_template_picked = true;
       s.provider_selected.clear();
       s.pv_name = t.name;
       s.pv_kind = t.kind;
       s.pv_base_url = t.base_url;
       s.pv_key.clear();
-      s.pv_headers.clear();
+      s.pv_headers = t.headers;  // template's special headers
+      s.pv_advanced = false;
       s.provider_status.clear();
       s.provider_models.clear();
     });
@@ -2680,6 +2785,7 @@ void UiApp::save_provider() {
     toast("已保存供应商");
     update([&](AppState& s) {
       s.provider_creating = false;
+      s.pv_template_picked = false;
       s.pv_key.clear();
     });
     load_providers();

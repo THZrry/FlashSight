@@ -30,6 +30,12 @@ class TerminalManager {
   // args: {tid} -> {}
   FsResult kill(const Json& args, Json* out);
 
+  // One non-blocking pass over every live terminal: drain output and detect
+  // exits. Returns one entry per terminal with NEW output or that just exited,
+  // so the host can push it (events/SSE) instead of the UI polling by hand.
+  // Entry: {tid, sid, output (new bytes), status, exitCode, started}
+  std::vector<Json> tick();
+
  private:
   struct Proc;
   TerminalRegistry* reg_;

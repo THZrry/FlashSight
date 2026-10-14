@@ -122,8 +122,13 @@ The process of project: P0 环境搭建
   skill 选择器改浮层+Esc/遮罩收回；IDom 加 bind_splitter(on_resize)/bind_global_key
   保证两边后端接口一致。详见 current.md <26>。
 
+<27>(SOLVED): 反馈第四批 —— KeyedStore 框架作用域通用化、会话页重排（上栏
+  计划浮窗+中历史50%+输入框+可收起侧栏 / 下栏终端）、供应商格式下拉+模板跳表单+高级、
+  终端后端非阻塞轮询推事件（去掉手动轮询）、动画分三档（view/组件/文本）。
+  详见 current.md <27>。
+
 ## 当前状态（更新 2026-10-13）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；106 用例 674 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；106 用例 679 断言通过。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

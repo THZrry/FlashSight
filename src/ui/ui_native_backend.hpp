@@ -29,6 +29,8 @@ class NativeBackend : public IUiBackend {
   std::function<void()> subscribe(BackendEvent fn) override;
   // deliver queued events to subscribers (UI drives this on its own cadence)
   void poll() override;
+  // FsApi runs the terminal poller on its own thread here
+  bool polls_server_side() const override { return true; }
 
   UiApi& api() { return *api_; }
 
