@@ -198,12 +198,14 @@ H field(const std::string& label, const H& control, const std::string& hint) {
   return f;
 }
 
-H text_input(const std::string& value, const std::string& placeholder, EventFn on_input) {
+H text_input(const std::string& value, const std::string& placeholder,
+             EventFn on_input, EventFn on_enter) {
   H i = el("input", "text-input");
   i.attr("type", "text");
   i.attr("value", value);
   if (!placeholder.empty()) i.attr("placeholder", placeholder);
   i.on(EventKind::kInput, on_input);
+  if (on_enter) i.on(EventKind::kKeyEnter, on_enter);
   return i;
 }
 

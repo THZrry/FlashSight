@@ -309,13 +309,76 @@ FS_TEST(uiapp_terminal_selector) {
   app.mount();
   app.update([](AppState& s) {
     seed_session(s);
-    s.terminals.push_back(TermItem{"1", "pwsh", "running"});
-    s.terminals.push_back(TermItem{"2", "cmd", "exited"});
+    s.terminals.push_back(TermItem{"1", "pwsh", "", "running"});
+    s.terminals.push_back(TermItem{"2", "cmd", "构建", "exited"});
     s.active_term = "1";
     s.terminal_open = true;
   });
   EXPECT_TRUE(dump_has(dom, "#1 pwsh"));
-  EXPECT_TRUE(dump_has(dom, "#2 cmd"));
+  EXPECT_TRUE(dump_has(dom, "#2 构建"));  // a named terminal shows its name
+  // no status text on the right of the bar any more (per user feedback)
+  EXPECT_FALSE(dump_has(dom, "运行中 /"));
+}
+
+// The bottom drawer is resizable: the drag handle reports a height that must
+// land in state (and in the per-session view, so it survives tab switches).
+FS_TEST(uiapp_terminal_height_persists) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+  });
+  EXPECT_TRUE(dom.count_of("bind_vsplitter") >= 1);
+  dom.fire_vsplit_for_test(480);
+  EXPECT_EQ(app.state().term_height, 480);
+}
+
+// Dropping a folder opens it as a project; dropping a link/file goes to the
+// composer instead (the two cases must not be confused).
+FS_TEST(uiapp_drop_routes_by_kind) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+
+  dom.fire_drop_for_test("url", "https://example.com/doc");
+  EXPECT_TRUE(app.state().session_input.find("https://example.com/doc") !=
+              std::string::npos);
+  EXPECT_FALSE(app.state().toast.empty());
+
+  app.update([](AppState& s) { s.session_input.clear(); });
+  dom.fire_drop_for_test("file", "notes.md");
+  EXPECT_TRUE(app.state().session_input.find("@notes.md") != std::string::npos);
+
+  // a folder is not text: it is resolved+opened through the backend instead
+  app.update([](AppState& s) { s.session_input.clear(); });
+  dom.fire_drop_for_test("dir", "some-folder");
+  EXPECT_TRUE(app.state().session_input.empty());
+}
+
+// 新增 terminal = "the shell from settings", not a typed command: the form
+// offers the detected shells and an optional name.
+FS_TEST(uiapp_new_terminal_picks_a_shell) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.term_new_open = true;
+    s.shells.push_back("自动探测");
+    s.shells.push_back("pwsh");
+    s.term_shell_index = 2;
+  });
+  EXPECT_TRUE(dump_has(dom, "pwsh"));
+  EXPECT_TRUE(dump_has(dom, "名称（可选）"));
+  // there is no free-form command box any more
+  EXPECT_FALSE(dump_has(dom, "命令…"));
 }
 
 FS_TEST(uiapp_settings_page) {

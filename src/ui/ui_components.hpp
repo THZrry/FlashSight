@@ -49,7 +49,9 @@ H panel_tabs(const std::vector<TabSpec>& tabs, const std::string& active_key,
 
 // ---------- forms ----------
 H field(const std::string& label, const H& control, const std::string& hint = "");
-H text_input(const std::string& value, const std::string& placeholder, EventFn on_input);
+// `on_enter` (optional) fires on Enter; used by single-line prompt inputs.
+H text_input(const std::string& value, const std::string& placeholder,
+             EventFn on_input, EventFn on_enter = nullptr);
 H textarea(const std::string& value, const std::string& placeholder,
            EventFn on_input, EventFn on_enter);
 H select(const std::vector<std::string>& options, int selected, EventFn on_change);

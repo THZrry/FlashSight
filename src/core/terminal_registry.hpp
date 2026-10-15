@@ -18,6 +18,7 @@ struct TermEntry {
   std::string sid;
   TermKind kind = TermKind::kUser;
   std::string shell;          // 探测/指定的 shell 名
+  std::string label;          // 用户起的名字（可选；用户终端用，模型终端为空）
   std::string cwd;
   std::string encoding;       // 空=系统默认
   TermStatus status = TermStatus::kRunning;
@@ -39,7 +40,8 @@ class TerminalRegistry {
   // 创建：tid 自增（同项目内统一序列；用户与模型同一编号）
   TermEntry create(const std::string& sid, TermKind kind, const std::string& shell,
                    const std::string& cwd, const std::string& encoding,
-                   bool wake_on_exit, int64_t now_ms);
+                   bool wake_on_exit, int64_t now_ms,
+                   const std::string& label = std::string());
 
   // 状态更新
   FsResult mark_exited(const std::string& tid, int exit_code, int64_t now_ms);

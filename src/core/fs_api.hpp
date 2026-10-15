@@ -98,6 +98,12 @@ class FsApi {
   // ----- terminal.*（注册表部分 P1；spawn/exec 实际执行 P3 reproc）-----
   FsResult terminal_list(const std::string& sid);
   FsResult terminal_show(const std::string& tid);
+  // 用户终端：起一个"设置里的那个 shell"的交互式会话（不是让用户自己敲命令）
+  // {sid, shell, label, cwd} -> {tid, status, shell, label}
+  FsResult terminal_spawn(const std::string& sid, const std::string& shell,
+                          const std::string& label, const std::string& cwd);
+  // 把一行输入写进交互式终端的 stdin（UI 直接驱动，不走模型工具层）
+  FsResult terminal_write(const std::string& tid, const std::string& text);
   FsResult terminal_kill(const std::string& tid);
   FsResult terminal_set_encoding(const std::string& tid, const std::string& enc);
   // 非阻塞轮询所有终端，把新增输出/退出推成 terminal.output / terminal.exit

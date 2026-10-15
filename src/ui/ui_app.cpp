@@ -13,6 +13,8 @@
 #include <chrono>
 #include <cstdio>
 
+#include "fs_i18n.hpp"
+
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
 #endif
@@ -24,10 +26,19 @@ using comp::TabSpec;
 
 namespace {
 
+// i18n: 源码写中文，tr() 按当前语言查表（中文时原样返回）
+std::string tr(const std::string& zh) { return i18n::tr(zh); }
+
 std::string itos(int v) {
   char buf[32];
   std::snprintf(buf, sizeof(buf), "%d", v);
   return std::string(buf);
+}
+
+// what a terminal tab shows: the user's name when given, else the shell
+std::string term_display_name(const TermItem& t) {
+  if (!t.label.empty()) return t.label;
+  return t.shell.empty() ? std::string("shell") : t.shell;
 }
 
 const char* kSideTitles[][2] = {
@@ -232,6 +243,7 @@ void UiApp::load_terminals(const std::string& sid) {
       TermItem it;
       it.tid = jsonutil::get<std::string>(t, "tid", "");
       it.shell = jsonutil::get<std::string>(t, "shell", "");
+      it.label = jsonutil::get<std::string>(t, "label", "");
       it.status = jsonutil::get<std::string>(t, "status", "running");
       terms.push_back(it);
     }
@@ -274,10 +286,13 @@ void UiApp::save_session_view(const std::string& sid) {
   v.terminals = st_.terminals;
   v.active_term = st_.active_term;
   v.terminal_open = st_.terminal_open;
+  v.term_height = st_.term_height;
   v.term_outputs = st_.term_outputs;
   v.term_tab = st_.term_tab;
   v.term_new_open = st_.term_new_open;
-  v.term_new_cmd = st_.term_new_cmd;
+  v.term_shell_index = st_.term_shell_index;
+  v.term_new_label = st_.term_new_label;
+  v.term_input = st_.term_input;
   v.subagents = st_.subagents;
   v.plan_open = st_.plan_open;
   v.plan_steps = st_.plan_steps;
@@ -314,10 +329,13 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.terminals = v.terminals;
   st_.active_term = v.active_term;
   st_.terminal_open = v.terminal_open;
+  st_.term_height = v.term_height;
   st_.term_outputs = v.term_outputs;
   st_.term_tab = v.term_tab;
   st_.term_new_open = v.term_new_open;
-  st_.term_new_cmd = v.term_new_cmd;
+  st_.term_shell_index = v.term_shell_index;
+  st_.term_new_label = v.term_new_label;
+  st_.term_input = v.term_input;
   st_.subagents = v.subagents;
   st_.plan_open = v.plan_open;
   st_.plan_steps = v.plan_steps;
@@ -784,11 +802,25 @@ void UiApp::render() {
         }
       });
     }
-    // (re)wire the window-wide drop zone (folder drag & drop)
+    // (re)wire the bottom panel's top-edge drag handle (terminal height)
+    VNodePtr grip = find_by_key(tree_, "term-splitter");
+    VNodePtr panel = find_by_key(tree_, "term-panel");
+    if (grip && panel && grip->dom.valid() && panel->dom.valid()) {
+      dom_.bind_vsplitter(grip->dom, panel->dom, [this](int h) {
+        if (h > 0) {
+          st_.term_height = h;
+          if (!last_session_key_.empty()) {
+            views_.get_or_create(last_session_key_).term_height = h;
+          }
+        }
+      });
+    }
+    // (re)wire the window-wide drop zone (folder / file / url / text)
     VNodePtr dz = find_by_key(tree_, "drop-zone");
     if (dz && dz->dom.valid()) {
-      dom_.bind_drop_zone(dz->dom, [this](const std::string& name) {
-        handle_dropped_folder(name);
+      dom_.bind_drop_zone(dz->dom,
+                          [this](const std::string& kind, const std::string& value) {
+        handle_drop(kind, value);
       });
     }
     // document-level keys (Escape dismisses transient overlays)
@@ -1588,10 +1620,28 @@ VNodePtr UiApp::build_side_panel() {
 // Bottom bar: terminal. Left-right split: left is the output of the selected
 // tab ("所有终端" concatenates every stream), right is a vertical tab strip
 // whose first entry is always 所有终端, followed by one tab per terminal and
-// a 新增 entry. The whole title row toggles the bar, and its free space acts
-// as a status line.
+// a 新增 entry. The title row toggles the bar; the strip on the TOP edge drags
+// the height.
+//
+// Terminals here are "the shell from settings" (交互式 shell), not one-off
+// commands: 新增 picks a shell + optional name and starts an interactive
+// session, and the selected terminal gets an input line so it is actually
+// usable. Model-started terminals show up in the same strip.
 VNodePtr UiApp::build_terminal_drawer() {
   H drawer = el("div", st_.terminal_open ? "terminal-bar open" : "terminal-bar");
+  drawer.key("term-panel");
+  if (st_.terminal_open) drawer.style("height", itos(st_.term_height) + "px");
+
+  // top edge: drag handle (the whole bar is a flex column, so this is the very
+  // first child and sits above the title row). Only while open - a collapsed
+  // bar has no height to drag.
+  if (st_.terminal_open) {
+    H grip = el("div", "td-resize");
+    grip.key("term-splitter");
+    grip.attr("title", tr("拖拽调整终端高度"));
+    drawer.add(grip);
+  }
+
   H head = el("div", "td-head");
   head.on(EventKind::kClick, [this](const std::string&) {
     bool opening = !st_.terminal_open;
@@ -1600,25 +1650,23 @@ VNodePtr UiApp::build_terminal_drawer() {
     if (opening && !active_sid().empty()) load_terminals(active_sid());
   });
   head.add(el("span", "td-caret").text(st_.terminal_open ? "\u25be" : "\u25b8"));
-  head.add(el("span", "td-title").text("终端"));
-  int running = 0;
-  for (size_t i = 0; i < st_.terminals.size(); ++i) {
-    if (st_.terminals[i].status == "running") ++running;
+  head.add(el("span", "td-title").text(tr("终端")));
+  if (!st_.terminals.empty()) {
+    int running = 0;
+    for (size_t i = 0; i < st_.terminals.size(); ++i) {
+      if (st_.terminals[i].status == "running") ++running;
+    }
+    head.add(comp::badge(itos(running) + "/" +
+                         itos(static_cast<int>(st_.terminals.size()))));
   }
-  // free space doubles as a status line (per user feedback)
-  H status = el("span", "td-status");
-  status.text(st_.terminals.empty()
-                  ? "无终端 · 点右侧「新增」启动"
-                  : (itos(running) + " 运行中 / " +
-                     itos(static_cast<int>(st_.terminals.size())) + " 个终端"));
-  head.add(status);
   drawer.add(head);
 
   if (!st_.terminal_open) return drawer.get();
 
   H body = el("div", "td-body");
 
-  // ---- left: output of the selected tab ----
+  // ---- left: output of the selected tab (+ input when a terminal is selected)
+  H left = el("div", "td-left");
   H out = el("pre", "td-out");
   if (st_.term_tab == "all") {
     std::string all;
@@ -1626,18 +1674,44 @@ VNodePtr UiApp::build_terminal_drawer() {
       std::map<std::string, std::string>::const_iterator it =
           st_.term_outputs.find(st_.terminals[i].tid);
       if (it == st_.term_outputs.end() || it->second.empty()) continue;
-      all += "── #" + st_.terminals[i].tid + " " + st_.terminals[i].shell + " ──\n";
+      all += "── #" + st_.terminals[i].tid + " " +
+             term_display_name(st_.terminals[i]) + " ──\n";
       all += it->second;
       if (!all.empty() && all.back() != '\n') all += "\n";
     }
-    out.text(all.empty() ? "（暂无输出）" : all);
+    out.text(all.empty() ? tr("暂无输出") : all);
   } else {
     std::map<std::string, std::string>::const_iterator it =
         st_.term_outputs.find(st_.term_tab);
-    out.text(it == st_.term_outputs.end() || it->second.empty() ? "（暂无输出）"
+    out.text(it == st_.term_outputs.end() || it->second.empty() ? tr("暂无输出")
                                                                : it->second);
   }
-  body.add(out);
+  left.add(out);
+
+  // interactive input: only for one specific, still-running terminal (the
+  // aggregate view has no single stdin to write to)
+  bool term_running = false;
+  if (st_.term_tab != "all") {
+    for (size_t i = 0; i < st_.terminals.size(); ++i) {
+      if (st_.terminals[i].tid == st_.term_tab &&
+          st_.terminals[i].status == "running") {
+        term_running = true;
+        break;
+      }
+    }
+  }
+  if (st_.term_tab != "all") {
+    H in_row = el("div", "td-input");
+    H ti = comp::text_input(
+        st_.term_input, tr("终端输入…（Enter 发送给终端）"),
+        [this](const std::string& v) { st_.term_input = v; },
+        [this](const std::string&) { write_terminal(st_.term_input); });
+    ti.key("term-input");
+    if (!term_running) ti.attr("disabled", "1");
+    in_row.add(ti);
+    left.add(in_row);
+  }
+  body.add(left);
 
   // ---- right: vertical tab strip ----
   H side = el("div", "td-tabs");
@@ -1647,7 +1721,7 @@ VNodePtr UiApp::build_terminal_drawer() {
     update([&](AppState& s) { s.term_tab = "all"; });
   });
   all_tab.add(el("i", "fa fa-terminal"));
-  all_tab.add(el("span", "td-tab-name").text("所有终端"));
+  all_tab.add(el("span", "td-tab-name").text(tr("所有终端")));
   side.add(all_tab);
   for (size_t i = 0; i < st_.terminals.size(); ++i) {
     const TermItem& t = st_.terminals[i];
@@ -1657,9 +1731,9 @@ VNodePtr UiApp::build_terminal_drawer() {
       update([&](AppState& s) { s.term_tab = tid; });
     });
     tb.add(el("span", t.status == "running" ? "term-dot running" : "term-dot").text("●"));
-    tb.add(el("span", "td-tab-name").text("#" + t.tid + " " + t.shell));
+    tb.add(el("span", "td-tab-name").text("#" + t.tid + " " + term_display_name(t)));
     // 停止 lives on the tab itself (there is deliberately no "clear")
-    tb.add(comp::icon_button("\u25a0", "停止", [this, tid](const std::string&) {
+    tb.add(comp::icon_button("\u25a0", tr("停止"), [this, tid](const std::string&) {
       call_async("terminal.kill", Json{{"tid", tid}}, [this, tid](const BackendResult&) {
         update([&](AppState& s) {
           for (size_t k = 0; k < s.terminals.size(); ++k) {
@@ -1670,36 +1744,27 @@ VNodePtr UiApp::build_terminal_drawer() {
     }));
     side.add(tb);
   }
-  // 新增: inline form (never auto-clears existing terminals)
+  // 新增: pick the shell (from settings) + an optional name. There is no
+  // command box: a terminal IS the shell, you type into it afterwards.
   if (st_.term_new_open) {
+    std::vector<std::string> shell_opts = st_.shells;
+    if (shell_opts.empty()) shell_opts.push_back(tr("自动探测"));
     H form = el("div", "td-new");
-    form.add(comp::text_input(st_.term_new_cmd, "命令…",
-                              [this](const std::string& v) { st_.term_new_cmd = v; }));
+    form.add(el("div", "td-new-title").text(tr("新建终端")));
+    form.add(comp::select(shell_opts, st_.term_shell_index,
+                          [this](const std::string& v) {
+      st_.term_shell_index = std::atoi(v.c_str());
+    }));
+    form.add(comp::text_input(st_.term_new_label, tr("名称（可选）"),
+                              [this](const std::string& v) { st_.term_new_label = v; }));
     H acts = el("div", "td-new-acts");
-    acts.add(comp::button("运行", [this](const std::string&) {
-      if (st_.term_new_cmd.empty()) {
-        toast("请输入命令");
-        return;
-      }
-      std::string sid = active_sid();
-      std::string cmd = st_.term_new_cmd;
-      call_async("tool.invoke", Json{{"sid", sid},
-                                     {"name", "terminal.spawn"},
-                                     {"args", Json{{"command", cmd},
-                                                   {"background", true}}}},
-                 [this](const BackendResult& r) {
-        if (!r.ok) {
-          toast("启动失败：" + r.message);
-          return;
-        }
-        update([&](AppState& s) {
-          s.term_new_cmd.clear();
-          s.term_new_open = false;
-        });
-        load_terminals(active_sid());
-      });
+    acts.add(comp::button(tr("启动"), [this, shell_opts](const std::string&) {
+      int idx = st_.term_shell_index;
+      std::string shell =
+          (idx <= 0 || idx >= static_cast<int>(shell_opts.size())) ? "" : shell_opts[idx];
+      start_terminal(shell, st_.term_new_label);
     }, "primary"));
-    acts.add(comp::button("取消", [this](const std::string&) {
+    acts.add(comp::button(tr("取消"), [this](const std::string&) {
       update([&](AppState& s) { s.term_new_open = false; });
     }, "ghost"));
     form.add(acts);
@@ -1708,9 +1773,11 @@ VNodePtr UiApp::build_terminal_drawer() {
     H add = el("div", "td-tab td-tab-add");
     add.on(EventKind::kClick, [this](const std::string&) {
       update([&](AppState& s) { s.term_new_open = true; });
+      // the shell list comes from settings; load it on first use
+      if (st_.shells.empty()) load_shells();
     });
     add.add(el("i", "fa fa-plus"));
-    add.add(el("span", "td-tab-name").text("新增"));
+    add.add(el("span", "td-tab-name").text(tr("新增")));
     side.add(add);
   }
   body.add(side);
@@ -1819,6 +1886,10 @@ void UiApp::set_setting(const std::string& key, const Json& value) {
     entry["source"] = "global";
     s.settings_values[key] = entry;
   });
+  // 界面语言是 UI 进程内的状态：写盘的同时立即生效，不用等重启
+  if (key == "ui.language" && value.is_string()) {
+    i18n::set_lang(i18n::lang_from_setting(value.get<std::string>()));
+  }
   // re-derive the cached views (long_memory / env_vars / cli_tools / history)
   // so a settings write reflects immediately without a full dump round-trip
   apply_settings(st_.settings_values);
@@ -1837,6 +1908,15 @@ void UiApp::apply_settings(const Json& values) {
   // thinking language is host-side too
   std::string lang = sv_str(st_.settings_values, "model.thinkingLang", "");
   if (!lang.empty()) st_.thinking_lang = lang;
+  // ui.language drives this process's own i18n table (the backend persists it
+  // and pushes it back on every dump, so a reload keeps the choice)
+  {
+    std::string ui_lang = sv_str(st_.settings_values, "ui.language", "");
+    if (!ui_lang.empty()) {
+      st_.ui_lang = ui_lang;
+      i18n::set_lang(i18n::lang_from_setting(ui_lang));
+    }
+  }
   st_.history_recent =
       std::to_string(sv_int(st_.settings_values, "history.recentTurns", 20));
   st_.history_budget =
@@ -1973,7 +2053,7 @@ VNodePtr UiApp::build_settings() {
   for (size_t i = 0; i < kSettingsNavCount; ++i) {
     const SettingsItem& it = kSettingsNav[i];
     if (last_group != it.group) {
-      nav.add(el("div", "snav-grp").text(it.group));
+      nav.add(el("div", "snav-grp").text(tr(it.group)));
       last_group = it.group;
     }
     std::string key = it.key;
@@ -1982,7 +2062,7 @@ VNodePtr UiApp::build_settings() {
       update([&](AppState& s) { s.settings_nav = key; });
       if (backend_) load_settings_section(key);
     });
-    n.add(el("span").text(it.title));
+    n.add(el("span").text(tr(it.title)));
     nav.add(n);
   }
   wrap.add(nav);
@@ -2345,13 +2425,14 @@ VNodePtr UiApp::build_settings() {
       const char* themes[3] = {"default", "light", "dark"};
       set_setting("ui.theme", themes[idx < 0 || idx > 2 ? 0 : idx]);
     }), "网页端深浅色经 prefers-color-scheme 自动；桌面端接 WhaleUI 主题。"));
-    body.add(comp::field("界面语言", comp::select(
-        std::vector<std::string>{"跟随系统", "中文", "English"}, 0,
+    body.add(comp::field(tr("语言"), comp::select(
+        std::vector<std::string>{tr("跟随系统"), "中文", "English"},
+        st_.ui_lang == "zh" ? 1 : st_.ui_lang == "en" ? 2 : 0,
         [this](const std::string& v) {
       int idx = std::atoi(v.c_str());
       const char* langs[3] = {"auto", "zh", "en"};
       set_setting("ui.language", langs[idx < 0 || idx > 2 ? 0 : idx]);
-    })));
+    }), tr("界面语言；「跟随系统」按操作系统 locale 选择")));
     body.add(comp::field("代码高亮", comp::toggle(
         sv_bool(st_.settings_values, "ui.codeHighlight", true), "",
         [this](const std::string&) {
@@ -3037,6 +3118,85 @@ void UiApp::remove_kv(const std::string& key_setting, const std::string& k) {
   Json cur = sv_obj(st_.settings_values, key_setting);
   cur.erase(k);
   set_setting(key_setting, cur);
+}
+
+// One entry point for everything dropped on the window. The three cases are
+// genuinely different, so the adapter tells us which one it is:
+//   dir  -> open as a project (browsers only expose the name, so the backend
+//           searches the usual roots for it)
+//   file -> we only have the name; insert it as an attachment reference
+//   url  -> insert the link into the composer
+//   text -> insert the text into the composer
+// Start a terminal running the shell from settings (not a typed command): the
+// user picks the shell + an optional name, and the backend launches an
+// interactive session in the project root.
+void UiApp::start_terminal(const std::string& shell, const std::string& label) {
+  std::string sid = active_sid();
+  if (sid.empty()) {
+    toast(tr("请先打开一个会话"));
+    return;
+  }
+  Json args = Json::object();
+  args["sid"] = sid;
+  if (!shell.empty()) args["shell"] = shell;
+  if (!label.empty()) args["label"] = label;
+  call_async("terminal.spawn", args, [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("启动失败") + "：" + r.message);
+      return;
+    }
+    std::string tid = jsonutil::get<std::string>(r.data, "tid", "");
+    update([&](AppState& s) {
+      s.term_new_open = false;
+      s.term_new_label.clear();
+      if (!tid.empty()) s.term_tab = tid;  // jump to what we just started
+    });
+    load_terminals(active_sid());
+  });
+}
+
+// Write one line to the selected interactive terminal. The newline is part of
+// the write: the shell needs it to actually run the line.
+void UiApp::write_terminal(const std::string& text) {
+  if (st_.term_tab == "all") return;  // no single stdin in the aggregate view
+  std::string tid = st_.term_tab;
+  std::string line = text + "\n";
+  update([&](AppState& s) { s.term_input.clear(); });
+  VNodePtr ti = find_by_key(tree_, "term-input");
+  if (ti && ti->dom.valid()) dom_.set_attr(ti->dom, "value", "");
+  call_async("terminal.write", Json{{"tid", tid}, {"text", line}},
+             [this](const BackendResult& r) {
+    if (!r.ok) toast(tr("发送失败") + "：" + r.message);
+  });
+}
+
+void UiApp::handle_drop(const std::string& kind, const std::string& value) {
+  if (value.empty()) return;
+  if (kind == "dir") {
+    handle_dropped_folder(value);
+    return;
+  }
+  std::string insert;
+  if (kind == "url") {
+    insert = value;
+    toast(tr("已插入链接"));
+  } else {
+    // a bare file name: keep it as an attachment reference the model can read
+    insert = "@" + value;
+    toast(tr("已插入文件名"));
+  }
+  if (st_.active_tab == "home" || st_.active_tab == "settings") {
+    // nothing to insert into yet: say so instead of silently doing nothing
+    toast(st_.active_tab == "home" ? tr("请先打开一个会话") : tr("设置页无法插入"));
+    return;
+  }
+  update([&](AppState& s) {
+    if (!s.session_input.empty() && s.session_input.back() != ' ') s.session_input += ' ';
+    s.session_input += insert;
+  });
+  // keep the caret in the composer so the user can keep typing
+  VNodePtr ta = find_by_key(tree_, "session-input");
+  if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
 }
 
 void UiApp::handle_dropped_folder(const std::string& name) {

@@ -137,6 +137,9 @@ class SettingsStore {
   ghc::filesystem::path global_file() const;
   ghc::filesystem::path project_file() const;
 
+  // 把 ui.language 推给 i18n 层（load 之后与 set_global 时各调一次）
+  void sync_language();
+
   FsResult persist(Doc& d);
   void load_doc(Doc& d);
 };

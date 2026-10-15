@@ -90,10 +90,27 @@ class IDom {
     (void)on_resize;
   }
 
-  // --- drop zone (drag & drop a folder onto `node`) ---
-  // The callback receives the dropped folder's *name* (browsers never expose
-  // absolute paths). Backends without DnD keep the default no-op.
-  virtual void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) {
+  // --- vertical splitter (drag the top edge of a bottom panel to set height) ---
+  // Same contract as bind_splitter, on the vertical axis: `splitter` sits on
+  // `panel`'s TOP edge and dragging up must make the panel taller.
+  virtual void bind_vsplitter(Node splitter, Node panel,
+                              std::function<void(int)> on_resize) {
+    (void)splitter;
+    (void)panel;
+    (void)on_resize;
+  }
+
+  // --- drop zone (drag & drop onto `node`) ---
+  // `kind` tells the app what was dropped, because the three cases have
+  // completely different handling:
+  //   "dir"  - a folder; browsers expose only the *name*, never the absolute
+  //            path, so the backend resolves it (project.resolveDrop)
+  //   "file" - a file; only the name is available
+  //   "url"  - a link dragged from another app (text/uri-list)
+  //   "text" - arbitrary dragged text
+  virtual void bind_drop_zone(
+      Node node, std::function<void(const std::string& kind,
+                                    const std::string& value)> cb) {
     (void)node;
     (void)cb;
   }
@@ -136,15 +153,22 @@ class NullDom : public IDom {
   void off(Node node, EventKind kind) override;
   void bind_splitter(Node splitter, Node side,
                      std::function<void(int)> on_resize) override;
-  void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) override;
+  void bind_vsplitter(Node splitter, Node panel,
+                      std::function<void(int)> on_resize) override;
+  void bind_drop_zone(Node node,
+                      std::function<void(const std::string&, const std::string&)> cb) override;
   void bind_global_key(std::function<void(const std::string&)> cb) override;
-  // test hook: simulate a folder drop on the bound zone
-  void fire_drop_for_test(const std::string& name) {
-    if (drop_cb_) drop_cb_(name);
+  // test hook: simulate a drop on the bound zone
+  void fire_drop_for_test(const std::string& kind, const std::string& value) {
+    if (drop_cb_) drop_cb_(kind, value);
   }
   // test hook: simulate the end of a splitter drag
   void fire_split_for_test(int width) {
     if (split_cb_) split_cb_(width);
+  }
+  // test hook: simulate the end of a vertical splitter drag
+  void fire_vsplit_for_test(int height) {
+    if (vsplit_cb_) vsplit_cb_(height);
   }
   // test hook: simulate a global key press
   void fire_key_for_test(const std::string& key) {
@@ -171,8 +195,9 @@ class NullDom : public IDom {
   std::unique_ptr<Impl> impl_;
   uint64_t next_id_ = 2;  // id 1 is the root
   std::vector<Call> calls_;
-  std::function<void(const std::string&)> drop_cb_;
+  std::function<void(const std::string&, const std::string&)> drop_cb_;
   std::function<void(int)> split_cb_;
+  std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
 };
 

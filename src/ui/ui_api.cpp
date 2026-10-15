@@ -108,6 +108,14 @@ UiApi::UiApi(FsApi* api) {
   // ---- terminal.* ----
   reg("terminal.list", [api](const Json& a) { return api->terminal_list(s(a, "sid")); });
   reg("terminal.show", [api](const Json& a) { return api->terminal_show(s(a, "tid")); });
+  // 用户终端：起"设置里的那个 shell"，不需要用户输入命令
+  reg("terminal.spawn", [api](const Json& a) {
+    return api->terminal_spawn(s(a, "sid"), s(a, "shell"), s(a, "label"), s(a, "cwd"));
+  });
+  // 交互式终端的输入
+  reg("terminal.write", [api](const Json& a) {
+    return api->terminal_write(s(a, "tid"), s(a, "text"));
+  });
   reg("terminal.kill", [api](const Json& a) { return api->terminal_kill(s(a, "tid")); });
   reg("terminal.setEncoding", [api](const Json& a) {
     return api->terminal_set_encoding(s(a, "tid"), s(a, "enc"));

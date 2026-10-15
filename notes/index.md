@@ -127,8 +127,16 @@ The process of project: P0 环境搭建
   终端后端非阻塞轮询推事件（去掉手动轮询）、动画分三档（view/组件/文本）。
   详见 current.md <27>。
 
-## 当前状态（更新 2026-10-13）
+<28>(SOLVED): 反馈第五批 —— 终端栏加高+顶部拖拽（bind_vsplitter，高度入状态）、
+  新建终端=设置里的 shell（交互式会话 + 输入行走 stdin，terminal.write）、
+  拖拽识别分类（dir/file/url/text -> 开项目 / @文件名 / 插链接）、
+  i18n 预留做实（中文即 key 的 tr() + ui.language 即时生效 + 系统语言探测）、
+  终端栏右侧文字删除。真 bug：GBK 输出让 /api/events 500（fs_encoding 解码 +
+  dump 兜底）、tick 双驱动数据竞争（TerminalManager 加锁）、悬空 pid
+  （session_get/terminal_spawn 用 meta.cwd 自愈）。详见 current.md <28>。
+
+## 当前状态（更新 2026-10-15）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；106 用例 679 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；112 用例 702 断言通过。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

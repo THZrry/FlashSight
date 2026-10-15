@@ -74,6 +74,7 @@ ui_shared = {
     "src/ui/ui_backend.cpp",
     "src/common/fs_json.cpp",
     "src/common/fs_log.cpp",
+    "src/common/fs_i18n.cpp",
 }
 
 -- ==========================================================================
@@ -117,7 +118,7 @@ target("fs_ui_wasm")
     set_extension(".js")
     add_ldflags("-lembind", "-sALLOW_MEMORY_GROWTH=1", "-sDISABLE_EXCEPTION_CATCHING=0",
                 "--no-entry", {force = true})
-    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_key,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
+    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_vsplit,_fs_ui_key,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
                 {force = true})
     add_ldflags("-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8",
                 {force = true})

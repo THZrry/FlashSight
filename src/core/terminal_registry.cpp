@@ -13,6 +13,7 @@ Json TermEntry::to_json() const {
   j["sid"] = sid;
   j["kind"] = term_kind_str(kind);
   j["shell"] = shell;
+  if (!label.empty()) j["label"] = label;
   j["cwd"] = cwd;
   j["encoding"] = encoding;
   j["status"] = term_status_str(status);
@@ -34,6 +35,7 @@ TermEntry TermEntry::from_json(const Json& j) {
            : k == "model-bg" ? TermKind::kModelBg
                              : TermKind::kUser;
   e.shell = jsonutil::get<std::string>(j, "shell", "");
+  e.label = jsonutil::get<std::string>(j, "label", "");
   e.cwd = jsonutil::get<std::string>(j, "cwd", "");
   e.encoding = jsonutil::get<std::string>(j, "encoding", "");
   std::string s = jsonutil::get<std::string>(j, "status", "running");
@@ -57,7 +59,8 @@ TerminalRegistry::TerminalRegistry(const Clock* clock)
 TermEntry TerminalRegistry::create(const std::string& sid, TermKind kind,
                                    const std::string& shell, const std::string& cwd,
                                    const std::string& encoding,
-                                   bool wake_on_exit, int64_t now_ms) {
+                                   bool wake_on_exit, int64_t now_ms,
+                                   const std::string& label) {
   std::string tid;
   do {
     tid = std::to_string(next_tid_++);
@@ -67,6 +70,7 @@ TermEntry TerminalRegistry::create(const std::string& sid, TermKind kind,
   e.sid = sid;
   e.kind = kind;
   e.shell = shell;
+  e.label = label;
   e.cwd = cwd;
   e.encoding = encoding;
   e.status = TermStatus::kRunning;

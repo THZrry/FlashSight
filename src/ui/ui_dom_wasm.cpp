@@ -90,9 +90,13 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   el.addEventListener(evName, listener, false);
 });
 
-// Bind a drag&drop zone. Browsers only expose the dropped folder/file *name*,
-// never the absolute path, so the callback receives that name; the backend
-// resolves it (project.resolveDrop).
+// Bind a drag&drop zone. Three very different payloads arrive here:
+//   * a folder  -> only its *name* is exposed by the browser (never the path),
+//                  so the app asks the backend to resolve it
+//   * a file    -> same, name only
+//   * a link    -> text/uri-list (dragging a URL from another app)
+//   * plain text
+// `kind` tells C++ which one it got; the value is the name/url/text.
 EM_JS(void, fs_dom_drop_zone, (int node_id, int cb_id), {
   var el = globalThis.__fsNodes[node_id];
   if (!el) return;
@@ -103,31 +107,57 @@ EM_JS(void, fs_dom_drop_zone, (int node_id, int cb_id), {
   el.__fsDropInit = true;
   el.addEventListener('dragover', function (ev) {
     ev.preventDefault();
+    try { ev.dataTransfer.dropEffect = 'copy'; } catch (e) {}
     el.classList.add('drop-hover');
   });
-  el.addEventListener('dragleave', function () {
+  el.addEventListener('dragleave', function (ev) {
+    // dragleave also fires when moving between children; ignore those so the
+    // highlight does not flicker while dragging across the window
+    if (ev.relatedTarget && el.contains(ev.relatedTarget)) return;
     el.classList.remove('drop-hover');
   });
   el.addEventListener('drop', function (ev) {
     ev.preventDefault();
     el.classList.remove('drop-hover');
-    var name = "";
+    var kind = 'text', value = "";
     try {
-      var items = ev.dataTransfer.items;
+      var dt = ev.dataTransfer;
+      var items = dt.items;
       if (items && items.length && items[0].webkitGetAsEntry) {
         var entry = items[0].webkitGetAsEntry();
-        if (entry) name = entry.name;
+        if (entry) {
+          kind = entry.isDirectory ? 'dir' : 'file';
+          value = entry.name;
+        }
       }
-      if (!name && ev.dataTransfer.files.length) {
-        name = ev.dataTransfer.files[0].name;
+      if (!value && dt.files && dt.files.length) {
+        kind = 'file';
+        value = dt.files[0].name;
       }
-    } catch (e) { name = ""; }
-    if (!name) return;
-    var len = Module.lengthBytesUTF8(name) + 1;
-    var ptr = Module._malloc(len);
-    Module.stringToUTF8(name, ptr, len);
-    Module._fs_ui_drop(el.__fsDropCb, ptr);
-    Module._free(ptr);
+      if (!value && dt.getData) {
+        // a dragged link arrives as text/uri-list, one URI per line
+        var uri = dt.getData('text/uri-list');
+        if (uri) {
+          var nl = uri.indexOf(String.fromCharCode(10));
+          var first = (nl >= 0 ? uri.substring(0, nl) : uri).replace(
+              String.fromCharCode(13), "");
+          if (first && first.charAt(0) !== '#') { kind = 'url'; value = first; }
+        }
+      }
+      if (!value && dt.getData) {
+        value = dt.getData('text/plain') || "";
+        kind = 'text';
+      }
+    } catch (e) { value = value || ""; }
+    if (!value) return;
+    var klen = Module.lengthBytesUTF8(kind) + 1;
+    var vlen = Module.lengthBytesUTF8(value) + 1;
+    var kptr = Module._malloc(klen), vptr = Module._malloc(vlen);
+    Module.stringToUTF8(kind, kptr, klen);
+    Module.stringToUTF8(value, vptr, vlen);
+    Module._fs_ui_drop(el.__fsDropCb, kptr, vptr);
+    Module._free(kptr);
+    Module._free(vptr);
   });
 });
 
@@ -184,6 +214,47 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
   });
 });
 
+// Drag the top edge of a bottom panel to set its height. Same shape as
+// fs_dom_splitter but on the vertical axis: the handle sits on the panel's TOP
+// edge, so dragging UP (negative dy) must make the panel TALLER.
+EM_JS(void, fs_dom_vsplitter, (int split_node, int panel_node, int cb_id), {
+  var bar = globalThis.__fsNodes[split_node];
+  var panel = globalThis.__fsNodes[panel_node];
+  if (!bar || !panel) return;
+  bar.__fsVSplitCb = cb_id;
+  if (bar.__fsVSplitInit) return;
+  bar.__fsVSplitInit = true;
+  bar.style.cursor = 'row-resize';
+  bar.addEventListener('mousedown', function (down) {
+    down.preventDefault();
+    var startY = down.clientY;
+    var startH = panel.getBoundingClientRect().height;
+    var moved = false;
+    function move(ev) {
+      var dy = ev.clientY - startY;
+      if (!moved && Math.abs(dy) > 3) moved = true;
+      if (!moved) return;
+      var h = startH - dy;
+      if (h < 120) h = 120;
+      var maxH = Math.round(window.innerHeight * 0.85);
+      if (h > maxH) h = maxH;
+      panel.style.height = h + 'px';
+    }
+    function up() {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      if (!moved) return;
+      var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); };
+      document.addEventListener('click', swallow, true);
+      setTimeout(function () { document.removeEventListener('click', swallow, true); }, 0);
+      var h = parseInt(panel.style.height, 10);
+      if (isFinite(h) && Module._fs_ui_vsplit) Module._fs_ui_vsplit(bar.__fsVSplitCb, h);
+    }
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+});
+
 EM_JS(int, fs_dom_root, (), {
   var r = document.getElementById('fs-root');
   if (!r) {
@@ -198,8 +269,8 @@ EM_JS(int, fs_dom_root, (), {
 // Written by WasmDom::bind_drop_zone, invoked from JS via fs_ui_drop below.
 // File-level (not class members) because the EM_JS-exported entry point is a
 // free function and needs to reach the same table.
-std::map<int, std::function<void(const std::string&)> >& drop_cbs() {
-  static std::map<int, std::function<void(const std::string&)> > m;
+std::map<int, std::function<void(const std::string&, const std::string&)> >& drop_cbs() {
+  static std::map<int, std::function<void(const std::string&, const std::string&)> > m;
   return m;
 }
 int& drop_seq() {
@@ -213,6 +284,16 @@ std::map<int, std::function<void(int)> >& split_cbs() {
   return m;
 }
 int& split_seq() {
+  static int s = 0;
+  return s;
+}
+
+// vertical (bottom panel height) resize callbacks
+std::map<int, std::function<void(int)> >& vsplit_cbs() {
+  static std::map<int, std::function<void(int)> > m;
+  return m;
+}
+int& vsplit_seq() {
   static int s = 0;
   return s;
 }
@@ -384,7 +465,20 @@ class WasmDom : public IDom {
     fs_dom_splitter(static_cast<int>(splitter.id), static_cast<int>(side.id), cb_id);
   }
 
-  void bind_drop_zone(Node node, std::function<void(const std::string&)> cb) override {
+  void bind_vsplitter(Node splitter, Node panel,
+                      std::function<void(int)> on_resize) override {
+    int cb_id = 0;
+    if (on_resize) {
+      cb_id = ++vsplit_seq();
+      vsplit_cbs().clear();
+      vsplit_cbs()[cb_id] = std::move(on_resize);
+    }
+    fs_dom_vsplitter(static_cast<int>(splitter.id), static_cast<int>(panel.id), cb_id);
+  }
+
+  void bind_drop_zone(
+      Node node,
+      std::function<void(const std::string&, const std::string&)> cb) override {
     int cb_id = ++drop_seq();
     // One app-wide drop zone (the window); replace the table so a long run of
     // re-renders cannot grow it without bound.
@@ -428,11 +522,14 @@ class WasmDom : public IDom {
 // Factory used by the wasm entry point.
 IDom* make_platform_dom() { return new WasmDom(); }
 
-// Called from JS (fs_dom_drop_zone) with the dropped folder/file name.
-extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_drop(int cb_id, const char* name) {
-  std::map<int, std::function<void(const std::string&)> >::iterator it = drop_cbs().find(cb_id);
+// Called from JS (fs_dom_drop_zone) with what was dropped: kind is
+// "dir" | "file" | "url" | "text", value is the name / url / text.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_drop(int cb_id, const char* kind,
+                                                const char* value) {
+  std::map<int, std::function<void(const std::string&, const std::string&)> >::iterator it =
+      drop_cbs().find(cb_id);
   if (it == drop_cbs().end() || !it->second) return;
-  it->second(std::string(name ? name : ""));
+  it->second(std::string(kind ? kind : ""), std::string(value ? value : ""));
 }
 
 // Called from JS (fs_dom_splitter) when a drag ends, with the final width.
@@ -440,6 +537,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_split(int cb_id, int width) {
   std::map<int, std::function<void(int)> >::iterator it = split_cbs().find(cb_id);
   if (it == split_cbs().end() || !it->second) return;
   it->second(width);
+}
+
+// Called from JS (fs_dom_vsplitter) when a drag ends, with the final height.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_vsplit(int cb_id, int height) {
+  std::map<int, std::function<void(int)> >::iterator it = vsplit_cbs().find(cb_id);
+  if (it == vsplit_cbs().end() || !it->second) return;
+  it->second(height);
 }
 
 // Called from JS (fs_dom_global_key) for document-level key presses.

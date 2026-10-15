@@ -4,6 +4,7 @@
 #include "fs_json.hpp"
 #include "fs_path.hpp"
 
+#include "fs_i18n.hpp"
 #include "fs_log.hpp"
 #include "fs_path.hpp"
 #include "settings_store.hpp"
@@ -50,6 +51,16 @@ void SettingsStore::load_doc(Doc& d) {
 void SettingsStore::load() {
   load_doc(global_doc_);
   load_doc(project_doc_);
+  sync_language();
+}
+
+// ui.language 落盘后立即生效（重启也要生效，所以在 load 之后也调一次）
+void SettingsStore::sync_language() {
+  if (!allow_global_read_) return;  // 单测里不碰全局 i18n 状态
+  std::string lang = "auto";
+  auto it = global_->doc.find(kKeyUiLang);
+  if (it != global_->doc.end() && it->is_string()) lang = it->get<std::string>();
+  i18n::set_lang(i18n::lang_from_setting(lang));
 }
 
 FsResult SettingsStore::persist(Doc& d) {
@@ -156,8 +167,8 @@ std::map<std::string, std::string> SettingsStore::merged_cli_tools() const {
 FsResult SettingsStore::set_global(const std::string& key,
                                    const nlohmann::json& value) {
   global_->doc[key] = value;
-  if (key == "ui.language" && value.is_string() && allow_global_read_) {
-    // relay to i18n layer (P4)
+  if (key == kKeyUiLang && value.is_string()) {
+    i18n::set_lang(i18n::lang_from_setting(value.get<std::string>()));
   }
   return persist(*global_);
 }

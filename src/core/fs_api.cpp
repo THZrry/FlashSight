@@ -406,7 +406,21 @@ FsResult FsApi::session_refresh_config(const std::string& sid) {
 FsResult FsApi::session_append_turn(const std::string& sid, const Json& turn) {
   return sessions_->append_turn(sid, turn);
 }
-FsResult FsApi::session_get(const std::string& sid) { return sessions_->get_session(sid); }
+FsResult FsApi::session_get(const std::string& sid) {
+  FsResult r = sessions_->get_session(sid);
+  // 自愈：项目注册表被清掉/重建后，老会话 meta.pid 会悬空（文件面板、
+  // 终端 cwd 都要用它）。按 meta.cwd 找回当前注册的 pid 再返回。
+  if (r.ok() && r.data.is_object() && r.data.contains("meta") &&
+      r.data["meta"].is_object()) {
+    std::string pid = jsonutil::get<std::string>(r.data["meta"], "pid", "");
+    if (!pid.empty() && path_for(pid).empty()) {
+      std::string cwd = jsonutil::get<std::string>(r.data["meta"], "cwd", "");
+      std::string fresh = cwd.empty() ? "" : proj_->pid_by_path(cwd);
+      if (!fresh.empty()) r.data["meta"]["pid"] = fresh;
+    }
+  }
+  return r;
+}
 
 // ----- P3: send/append/suspend/resume/cancelWake -----
 FsResult FsApi::session_send(const std::string& sid, const std::string& text,
@@ -607,6 +621,44 @@ FsResult FsApi::terminal_show(const std::string& tid) {
   j["logExists"] = !e->log_path.empty() && ghc::filesystem::exists(e->log_path);
   return FsResult::success(j);
 }
+FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
+                               const std::string& label, const std::string& cwd) {
+  Json args = Json::object();
+  args["sid"] = sid;
+  args["interactive"] = true;   // 交互式 shell：没有"要执行的命令"
+  args["background"] = true;
+  args["label"] = label;
+  if (!shell.empty()) args["shell"] = shell;
+  std::string work = cwd;
+  if (work.empty()) {
+    // 默认在项目根起终端（模型与用户看到同一个工作目录）。项目注册表重建后
+    // 老会话的 pid 会悬空：从 meta.cwd 找回当前注册的 pid。
+    std::string pid = sessions_->pid_of(sid);
+    work = path_for(pid);
+    if (work.empty()) {
+      Json full;
+      if (sessions_->load_full(sid, &full).ok() && full.contains("meta")) {
+        std::string c = jsonutil::get<std::string>(full["meta"], "cwd", "");
+        if (!c.empty()) work = c;
+      }
+    }
+  }
+  if (!work.empty()) args["cwd"] = work;
+  Json enc = settings_->get_value(kKeyTerminalEncoding, Json(""));
+  if (enc.is_string() && !enc.get<std::string>().empty()) args["encoding"] = enc;
+  Json out;
+  FsResult r = terminal_mgr_->spawn(args, &out);
+  if (!r.ok()) return r;
+  // 立即把首个提示符推进事件流，用户不用等下一次 tick
+  terminal_tick();
+  return r;
+}
+
+FsResult FsApi::terminal_write(const std::string& tid, const std::string& text) {
+  Json out;
+  return terminal_mgr_->write(Json{{"tid", tid}, {"text", text}}, &out);
+}
+
 FsResult FsApi::terminal_kill(const std::string& tid) {
   Json out;
   FsResult r = terminal_mgr_->kill(Json{{"tid", tid}}, &out);

@@ -55,6 +55,7 @@ struct SideTab {
 struct TermItem {
   std::string tid;
   std::string shell;
+  std::string label;   // user-given name ("" for model-started terminals)
   std::string status;  // "running" | "exited"
 };
 
@@ -124,14 +125,19 @@ struct AppState {
   std::vector<TermItem> terminals;
   std::string active_term;   // terminal used for 停止 etc.
   bool terminal_open = false;
+  int term_height = 340;     // drawer height (px); dragged on the top edge
   // per-terminal accumulated output (tid -> text). "所有终端" concatenates
   // these; a specific tab shows just its own. Kept per terminal so switching
   // tabs never loses what another one printed.
   std::map<std::string, std::string> term_outputs;
   std::string term_tab = "all";  // selected tab: "all" | tid
-  // inline "new terminal" form (opened from the tab strip's "+")
+  // inline "new terminal" form (opened from the tab strip's "+"). A terminal is
+  // "the shell from settings", not a command the user types: the form picks a
+  // shell from the detected list and an optional name.
   bool term_new_open = false;
-  std::string term_new_cmd;
+  int term_shell_index = 0;  // index into `shells` (0 = 自动探测)
+  std::string term_new_label;
+  std::string term_input;    // interactive input line for the selected terminal
 
   // ---- subagents ----
   struct SubagentRow {
@@ -145,6 +151,7 @@ struct AppState {
   // ---- settings ----
   std::string settings_nav = "general";  // section key; nav and body always agree
   std::string thinking_lang = "auto";
+  std::string ui_lang = "auto";          // "auto|zh|en"; drives i18n in-process
   // ---- settings / 供应商（多提供商管理）----
   struct ProviderRow {
     std::string id;
@@ -286,10 +293,13 @@ struct SessionView {
   std::vector<TermItem> terminals;
   std::string active_term;
   bool terminal_open = false;
+  int term_height = 340;
   std::map<std::string, std::string> term_outputs;
   std::string term_tab = "all";
   bool term_new_open = false;
-  std::string term_new_cmd;
+  int term_shell_index = 0;
+  std::string term_new_label;
+  std::string term_input;
 
   std::vector<AppState::SubagentRow> subagents;
 
@@ -358,8 +368,16 @@ class UiApp {
   void pick_and_open_folder();
   // create a session under a specific project (from its card)
   void new_session_in_project(const std::string& pid);
+  // handle a drop anywhere on the window. kind: "dir" | "file" | "url" | "text"
+  // (a folder is opened as a project; a file name / url / text goes to the
+  // composer as an attachment reference)
+  void handle_drop(const std::string& kind, const std::string& value);
   // handle a dropped folder name: resolve to a path, then open as project
   void handle_dropped_folder(const std::string& name);
+  // start a terminal running the shell from settings (not a typed command)
+  void start_terminal(const std::string& shell, const std::string& label);
+  // write one line to the selected interactive terminal
+  void write_terminal(const std::string& text);
   void close_tab(const std::string& id);
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);

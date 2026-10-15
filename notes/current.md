@@ -401,3 +401,47 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 验证：106 用例 679 断言通过；浏览器实测新布局、计划浮窗贴左上、侧栏拖拽
     不再误收起、供应商模板->表单+格式下拉+高级、终端输出自动推送（events 里
     可见 terminal.output/terminal.exit）。
+
+
+<28>(SOLVED): 反馈第五批 —— 终端高度/交互式终端/拖拽识别/i18n 预留 + 两个真 bug。
+  - 终端栏加高 + 垂直拖拽：默认 340px（原来输出区上限 160-220px 太矮），
+    顶部新增 .td-resize 拖拽条（IDom::bind_vsplitter，EM_JS fs_dom_vsplitter，
+    120px..85% 视口，向上拖变高）；高度入 state/SessionView（term_height），
+    节点重建不丢。终端栏右侧状态文字删掉（用户反馈无意义），改成标题旁的小徽标
+    （运行数/总数），无终端时不显示。
+  - 新建终端 = “设置里的 shell”，不是手输命令：表单改为 shell 下拉
+    （settings.detectShells 结果）+ 可选名称，terminal.spawn（interactive=true）
+    起交互式会话（cmd /Q、pwsh -NoLogo -NoProfile、bash -i；stdin=pipe）；
+    新增 terminal.write 把输入行写进 stdin，输出区下方有输入行
+    （仅单终端视图且 running 时可用，Enter 发送、发完清空；聚合视图无单 stdin）。
+    TerminalRegistry 加 label 字段（用户命名，to_json 透出，UI 标签显示 #tid 名称）。
+  - 拖拽识别：bind_drop_zone 回调改为 (kind, value)。wasm 侧
+    webkitGetAsEntry().isDirectory 分目录/文件；text/uri-list 判 URL；
+    text/plain 兜底。dir -> 打开项目（resolveDrop）；file -> 输入框插 @名字；
+    url/text -> 插入输入框（home/settings 页给出提示不静默）。
+  - i18n 预留：fs_i18n 从空表改为可用实现 —— 源码中文即查表 key，
+    tr() 中文原样返回、英文查 en 表（缺条目回退中文，不泄漏 key）；
+    settings ui.language（auto/zh/en）经 SettingsStore::sync_language +
+    UI set_setting/apply_settings 双通道即时生效；系统语言探测
+    （Windows GetUserDefaultUILanguage / wasm navigator.language / POSIX LANG）。
+    UI 已接入：导航/分组、外观语言项、终端栏/表单、toast、拖拽提示等。
+  - 真 bug 3（终端输出非 UTF-8 让 /api/events 500）：cmd.exe 在中文 Windows 按
+    OEM 代码页（GBK）输出，字节直进 JSON dump() 抛 type_error.316 →
+    /api/events 返回 500，UI 事件流整个断掉。修复：新增 common/fs_encoding
+    （decode_output：合法 UTF-8 原样；否则按 OEM/GBK 转；跨 read 的半个多字节
+    序列留 pending 下轮补齐；sanitize_utf8 兜底替换符），drain 走它；
+    terminal.write 反向 encode_input（中文命令按代码页转回去）；
+    ui_server /api/events dump 加 try/catch 兜底（坏 payload 不再能卡死 UI）。
+  - 真 bug 4（tick 双驱动数据竞争）：桌面端后台 poller 线程与浏览器 UI 定时器
+    都调 terminal.tick → TerminalManager 无锁并发碰同一 reproc 句柄，出现
+    重复 terminal.exit、终端假退出。修复：TerminalManager 全部入口
+    （spawn/poll/kill/write/tick）加 mu_ 互斥。
+  - 真 bug 5（悬空 pid）：项目注册表重建后老会话 meta.pid 悬空 →
+    文件面板报 “path escapes project”。修复：session_get 自愈（meta.cwd 反查
+    当前 pid 返回）；terminal_spawn 的默认 cwd 同样回退 meta.cwd。
+  - 验证：112 用例 702 断言通过（新增交互式终端写读、GBK 解码/跨块、
+    输入反向编码、拖拽分派、终端高度持久化、shell 选择表单、栏右侧文字删除）；
+    浏览器实测：拖高 338→456px 持久、shell 下拉（自动探测/pwsh/powershell/cmd）
+    起终端、输入“echo 交互输出测试”回车出结果、URL 拖入插链接 + toast、
+    文件拖入插 @名字、■ 停止后输入禁用、语言切 English（导航/终端标题变英文）
+    再切回中文、/api/events 中文输出正常（“版本/交互输出测试”）。

@@ -120,7 +120,16 @@ FsResult UiServer::start(int port) {
     Json out = Json::object();
     out["events"] = events;
     out["next"] = next;
-    res.set_content(out.dump(), "application/json");
+    // A payload with invalid UTF-8 would make dump() throw and turn the whole
+    // event stream into a 500, stalling the UI forever. Encoding is fixed at
+    // the source (fs_encoding), but a bad payload must never be fatal here.
+    std::string body;
+    try {
+      body = out.dump();
+    } catch (...) {
+      body = "{\"events\":[],\"next\":" + std::to_string(next) + "}";
+    }
+    res.set_content(body, "application/json");
   });
 
   // ---- static assets (fallback; keep last so /api/* wins) ----

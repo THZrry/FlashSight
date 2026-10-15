@@ -210,7 +210,14 @@ void NullDom::bind_splitter(Node splitter, Node side,
   calls_.push_back(Call{"bind_splitter", splitter.id, std::to_string(side.id)});
 }
 
-void NullDom::bind_drop_zone(Node node, std::function<void(const std::string&)> cb) {
+void NullDom::bind_vsplitter(Node splitter, Node panel,
+                             std::function<void(int)> on_resize) {
+  vsplit_cb_ = on_resize;
+  calls_.push_back(Call{"bind_vsplitter", splitter.id, std::to_string(panel.id)});
+}
+
+void NullDom::bind_drop_zone(
+    Node node, std::function<void(const std::string&, const std::string&)> cb) {
   drop_cb_ = cb;
   calls_.push_back(Call{"bind_drop_zone", node.id, ""});
 }
