@@ -767,7 +767,7 @@ FS_TEST(summarize_and_compress_points) {
   EXPECT_TRUE(fold.find("point-beta") != std::string::npos);
 }
 
-// ---------- x-opencode-session：kPlan 自动带头 + cost 解析 + 402/429 ----------
+// ---------- x-opencode-session：会话头开关（原 kPlan 归一化） + cost 解析 ----------
 FS_TEST(plan_session_headers_and_cost) {
   // 用 FakeNet 捕获请求头
   FakeNet3 net;
@@ -778,7 +778,9 @@ FS_TEST(plan_session_headers_and_cost) {
   net.responses.push_back(ok);
   ProviderConn conn;
   conn.id = "plan1";
-  conn.kind = ApiKind::kPlan;
+  // opencode 系端点不再是独立的"形态"：普通 chat 形态 + 会话亲和头开关
+  conn.kind = ApiKind::kOpenAIChat;
+  conn.send_session = true;
   conn.base_url = "https://opencode.ai/zen/v1";
   conn.api_key = "zen-key";
   ProviderClient client(conn, &net);

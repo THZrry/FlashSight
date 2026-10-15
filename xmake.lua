@@ -133,6 +133,8 @@ target("fs_ui_wasm")
             {name = "style.css",  mime = "text/css; charset=utf-8"},
             {name = "fs_ui.js",   mime = "application/javascript; charset=utf-8"},
             {name = "fs_ui.wasm", mime = "application/wasm"},
+            {name = "icons/fa-subset.css", mime = "text/css; charset=utf-8"},
+            {name = "icons/fa-solid-900.woff2", mime = "font/woff2"},
         }
         local out_path = path.join(root, "src/ui/ui_assets_gen.hpp")
         local lines = {}

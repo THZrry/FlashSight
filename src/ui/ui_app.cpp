@@ -274,7 +274,10 @@ void UiApp::save_session_view(const std::string& sid) {
   v.terminals = st_.terminals;
   v.active_term = st_.active_term;
   v.terminal_open = st_.terminal_open;
-  v.terminal_output = st_.terminal_output;
+  v.term_outputs = st_.term_outputs;
+  v.term_tab = st_.term_tab;
+  v.term_new_open = st_.term_new_open;
+  v.term_new_cmd = st_.term_new_cmd;
   v.subagents = st_.subagents;
   v.plan_open = st_.plan_open;
   v.plan_steps = st_.plan_steps;
@@ -311,7 +314,10 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.terminals = v.terminals;
   st_.active_term = v.active_term;
   st_.terminal_open = v.terminal_open;
-  st_.terminal_output = v.terminal_output;
+  st_.term_outputs = v.term_outputs;
+  st_.term_tab = v.term_tab;
+  st_.term_new_open = v.term_new_open;
+  st_.term_new_cmd = v.term_new_cmd;
   st_.subagents = v.subagents;
   st_.plan_open = v.plan_open;
   st_.plan_steps = v.plan_steps;
@@ -671,15 +677,28 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       if (terms[i].tid == tid) terms[i].status = "exited";
     }
   } else if (event == "terminal.output") {
-    // pushed by the backend's non-blocking poller (no manual refresh)
+    // pushed by the backend's non-blocking poller (no manual refresh).
+    // Output accumulates per terminal, so "所有终端" can show every stream
+    // and switching tabs never loses what another one printed.
     std::string tid = jsonutil::get<std::string>(payload, "tid", "");
     std::string text = jsonutil::get<std::string>(payload, "text", "");
-    std::string& out = is_active ? st_.terminal_output : vp->terminal_output;
-    std::string& cur = is_active ? st_.active_term : vp->active_term;
-    if (cur.empty()) cur = tid;
-    if (tid == cur) {
-      out += text;
-      if (out.size() > (1u << 20)) out.erase(0, out.size() - (1u << 20));
+    std::map<std::string, std::string>& outs =
+        is_active ? st_.term_outputs : vp->term_outputs;
+    outs[tid] += text;
+    if (outs[tid].size() > (1u << 20)) outs[tid].erase(0, outs[tid].size() - (1u << 20));
+    // A terminal the model started shows up here first: register it so the tab
+    // strip lists it without waiting for a manual refresh.
+    std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
+    bool known = false;
+    for (size_t i = 0; i < terms.size(); ++i) {
+      if (terms[i].tid == tid) { known = true; break; }
+    }
+    if (!known && !tid.empty()) {
+      TermItem it;
+      it.tid = tid;
+      it.shell = "shell";
+      it.status = "running";
+      terms.push_back(it);
     }
   }
 }
@@ -1157,12 +1176,13 @@ VNodePtr UiApp::build_session() {
   ta.key("session-input");  // send_message() clears it directly after sending
   comp_box.add(ta);
   H tools = el("div", "composer-tools");
-  // left: session functions, compact buttons
-  tools.add(comp::button("+ 文件", [this](const std::string&) {
+  // left: session functions, compact buttons (icon + label; label collapses
+  // to icon-only when the toolbar is crowded, per user feedback)
+  tools.add(comp::icon_text_button("paperclip", "文件", [this](const std::string&) {
     // open the file tree; picking a file inserts its path into the input
     open_or_focus_side_tab("files");
   }, "ghost"));
-  tools.add(comp::button("/ 命令", [this](const std::string&) {
+  tools.add(comp::icon_text_button("wand-magic-sparkles", "命令", [this](const std::string&) {
     // list skills; picking one inserts "/<name>" into the composer
     call_async("skill.list", Json::object(), [this](const BackendResult& r) {
       if (!r.ok) return;
@@ -1182,14 +1202,14 @@ VNodePtr UiApp::build_session() {
       });
     });
   }, "ghost"));
-  tools.add(comp::button("子代理", [this](const std::string&) {
+  tools.add(comp::icon_text_button("robot", "子代理", [this](const std::string&) {
     if (active_sid().empty()) {
       toast("请先打开一个会话");
       return;
     }
     open_or_focus_side_tab("subagents");
   }, "ghost"));
-  tools.add(comp::button("规划", [this](const std::string&) {
+  tools.add(comp::icon_text_button("diagram-project", "规划", [this](const std::string&) {
     bool open = !st_.plan_open;
     std::string sid = active_sid();
     update([&](AppState& s) { s.plan_open = open; });
@@ -1209,8 +1229,10 @@ VNodePtr UiApp::build_session() {
       });
     }
   }, "ghost"));
-  tools.add(comp::button("终端", [this](const std::string&) {
-    update([&](AppState& s) { s.terminal_open = !s.terminal_open; });
+  tools.add(comp::icon_text_button("terminal", "终端", [this](const std::string&) {
+    bool opening = !st_.terminal_open;
+    update([&](AppState& s) { s.terminal_open = opening; });
+    if (opening && !active_sid().empty()) load_terminals(active_sid());
   }, "ghost"));
   // middle: session settings (selects styled compactly)
   H grow = el("span", "grow");
@@ -1563,55 +1585,136 @@ VNodePtr UiApp::build_side_panel() {
   return side.get();
 }
 
-// Bottom bar: terminal. Collapsed it is just a one-line header; expanding it
-// reveals the output pane. Kept out of the top row so the chat area never has
-// to share vertical space with it.
+// Bottom bar: terminal. Left-right split: left is the output of the selected
+// tab ("所有终端" concatenates every stream), right is a vertical tab strip
+// whose first entry is always 所有终端, followed by one tab per terminal and
+// a 新增 entry. The whole title row toggles the bar, and its free space acts
+// as a status line.
 VNodePtr UiApp::build_terminal_drawer() {
   H drawer = el("div", st_.terminal_open ? "terminal-bar open" : "terminal-bar");
   H head = el("div", "td-head");
-  // expand/collapse toggle on the left, so the whole bar is clickable
-  H caret = el("span", "td-caret");
-  caret.text(st_.terminal_open ? "\u25be" : "\u25b8");
-  caret.on(EventKind::kClick, [this](const std::string&) {
-    update([&](AppState& s) { s.terminal_open = !s.terminal_open; });
+  head.on(EventKind::kClick, [this](const std::string&) {
+    bool opening = !st_.terminal_open;
+    update([&](AppState& s) { s.terminal_open = opening; });
+    // refresh on open so terminals started while the bar was collapsed appear
+    if (opening && !active_sid().empty()) load_terminals(active_sid());
   });
-  head.add(caret);
+  head.add(el("span", "td-caret").text(st_.terminal_open ? "\u25be" : "\u25b8"));
   head.add(el("span", "td-title").text("终端"));
-  // terminal selector
-  H sel = el("div", "term-selector");
+  int running = 0;
+  for (size_t i = 0; i < st_.terminals.size(); ++i) {
+    if (st_.terminals[i].status == "running") ++running;
+  }
+  // free space doubles as a status line (per user feedback)
+  H status = el("span", "td-status");
+  status.text(st_.terminals.empty()
+                  ? "无终端 · 点右侧「新增」启动"
+                  : (itos(running) + " 运行中 / " +
+                     itos(static_cast<int>(st_.terminals.size())) + " 个终端"));
+  head.add(status);
+  drawer.add(head);
+
+  if (!st_.terminal_open) return drawer.get();
+
+  H body = el("div", "td-body");
+
+  // ---- left: output of the selected tab ----
+  H out = el("pre", "td-out");
+  if (st_.term_tab == "all") {
+    std::string all;
+    for (size_t i = 0; i < st_.terminals.size(); ++i) {
+      std::map<std::string, std::string>::const_iterator it =
+          st_.term_outputs.find(st_.terminals[i].tid);
+      if (it == st_.term_outputs.end() || it->second.empty()) continue;
+      all += "── #" + st_.terminals[i].tid + " " + st_.terminals[i].shell + " ──\n";
+      all += it->second;
+      if (!all.empty() && all.back() != '\n') all += "\n";
+    }
+    out.text(all.empty() ? "（暂无输出）" : all);
+  } else {
+    std::map<std::string, std::string>::const_iterator it =
+        st_.term_outputs.find(st_.term_tab);
+    out.text(it == st_.term_outputs.end() || it->second.empty() ? "（暂无输出）"
+                                                               : it->second);
+  }
+  body.add(out);
+
+  // ---- right: vertical tab strip ----
+  H side = el("div", "td-tabs");
+  // fixed first entry: aggregate view
+  H all_tab = el("div", st_.term_tab == "all" ? "td-tab active" : "td-tab");
+  all_tab.on(EventKind::kClick, [this](const std::string&) {
+    update([&](AppState& s) { s.term_tab = "all"; });
+  });
+  all_tab.add(el("i", "fa fa-terminal"));
+  all_tab.add(el("span", "td-tab-name").text("所有终端"));
+  side.add(all_tab);
   for (size_t i = 0; i < st_.terminals.size(); ++i) {
     const TermItem& t = st_.terminals[i];
-    H chip = el("span", t.tid == st_.active_term ? "term-chip active" : "term-chip");
+    H tb = el("div", t.tid == st_.term_tab ? "td-tab active" : "td-tab");
     std::string tid = t.tid;
-    chip.on(EventKind::kClick, [this, tid](const std::string&) {
-      update([&](AppState& s) { s.active_term = tid; });
+    tb.on(EventKind::kClick, [this, tid](const std::string&) {
+      update([&](AppState& s) { s.term_tab = tid; });
     });
-    chip.text("#" + t.tid + " " + t.shell);
-    sel.add(chip);
-  }
-  if (st_.terminals.empty()) {
-    sel.add(el("span", "term-chip dim").text("无终端"));
-  }
-  head.add(sel);
-  H g = el("span", "grow");
-  head.add(g);
-  head.add(comp::button("停止", [this](const std::string&) {
-    std::string tid = st_.active_term;
-    if (tid.empty()) return;
-    call_async("terminal.kill", Json{{"tid", tid}}, [this, tid](const BackendResult&) {
-      update([&](AppState& s) {
-        for (size_t i = 0; i < s.terminals.size(); ++i) {
-          if (s.terminals[i].tid == tid) s.terminals[i].status = "exited";
-        }
+    tb.add(el("span", t.status == "running" ? "term-dot running" : "term-dot").text("●"));
+    tb.add(el("span", "td-tab-name").text("#" + t.tid + " " + t.shell));
+    // 停止 lives on the tab itself (there is deliberately no "clear")
+    tb.add(comp::icon_button("\u25a0", "停止", [this, tid](const std::string&) {
+      call_async("terminal.kill", Json{{"tid", tid}}, [this, tid](const BackendResult&) {
+        update([&](AppState& s) {
+          for (size_t k = 0; k < s.terminals.size(); ++k) {
+            if (s.terminals[k].tid == tid) s.terminals[k].status = "exited";
+          }
+        });
       });
-    });
-  }, "ghost"));
-  drawer.add(head);
-  if (st_.terminal_open) {
-    H out = el("pre", "td-out");
-    out.text(st_.terminal_output.empty() ? "（等待输出…）" : st_.terminal_output);
-    drawer.add(out);
+    }));
+    side.add(tb);
   }
+  // 新增: inline form (never auto-clears existing terminals)
+  if (st_.term_new_open) {
+    H form = el("div", "td-new");
+    form.add(comp::text_input(st_.term_new_cmd, "命令…",
+                              [this](const std::string& v) { st_.term_new_cmd = v; }));
+    H acts = el("div", "td-new-acts");
+    acts.add(comp::button("运行", [this](const std::string&) {
+      if (st_.term_new_cmd.empty()) {
+        toast("请输入命令");
+        return;
+      }
+      std::string sid = active_sid();
+      std::string cmd = st_.term_new_cmd;
+      call_async("tool.invoke", Json{{"sid", sid},
+                                     {"name", "terminal.spawn"},
+                                     {"args", Json{{"command", cmd},
+                                                   {"background", true}}}},
+                 [this](const BackendResult& r) {
+        if (!r.ok) {
+          toast("启动失败：" + r.message);
+          return;
+        }
+        update([&](AppState& s) {
+          s.term_new_cmd.clear();
+          s.term_new_open = false;
+        });
+        load_terminals(active_sid());
+      });
+    }, "primary"));
+    acts.add(comp::button("取消", [this](const std::string&) {
+      update([&](AppState& s) { s.term_new_open = false; });
+    }, "ghost"));
+    form.add(acts);
+    side.add(form);
+  } else {
+    H add = el("div", "td-tab td-tab-add");
+    add.on(EventKind::kClick, [this](const std::string&) {
+      update([&](AppState& s) { s.term_new_open = true; });
+    });
+    add.add(el("i", "fa fa-plus"));
+    add.add(el("span", "td-tab-name").text("新增"));
+    side.add(add);
+  }
+  body.add(side);
+  drawer.add(body);
   return drawer.get();
 }
 
@@ -1934,26 +2037,24 @@ VNodePtr UiApp::build_settings() {
                                                       [this](const std::string& v) {
         st_.pv_name = v;
       })));
-      // 格式：固定下拉（OpenAI / Response / Anthropic / 套餐）
+      // 格式：请求形态（与供应商品牌无关）
       std::vector<std::string> kinds;
       kinds.push_back("OpenAI Chat");
       kinds.push_back("OpenAI Response");
       kinds.push_back("Anthropic");
-      kinds.push_back("套餐（opencode zen）");
       kinds.push_back("自定义");
-      const char* kind_ids[5] = {"openai-chat", "openai-response", "anthropic",
-                                 "plan", "custom"};
+      const char* kind_ids[4] = {"openai-chat", "openai-response", "anthropic",
+                                 "custom"};
       int kind_idx = 0;
-      for (int k = 0; k < 5; ++k) {
+      for (int k = 0; k < 4; ++k) {
         if (st_.pv_kind == kind_ids[k]) kind_idx = k;
       }
       detail.add(comp::field("格式", comp::select(kinds, kind_idx,
                                                   [this](const std::string& v) {
         int i = std::atoi(v.c_str());
-        const char* ids[5] = {"openai-chat", "openai-response", "anthropic",
-                              "plan", "custom"};
-        st_.pv_kind = ids[i < 0 || i > 4 ? 0 : i];
-      }), "决定请求路径与鉴权方式"));
+        const char* ids[4] = {"openai-chat", "openai-response", "anthropic", "custom"};
+        st_.pv_kind = ids[i < 0 || i > 3 ? 0 : i];
+      }), "请求长什么样（endpoint 由模板/下面的地址决定）"));
       detail.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
                                                           [this](const std::string& v) {
         st_.pv_base_url = v;
@@ -1962,9 +2063,7 @@ VNodePtr UiApp::build_settings() {
                                                          creating ? "sk-…" : "留空 = 不修改",
                                                          [this](const std::string& v) {
         st_.pv_key = v;
-      }), st_.pv_kind == "plan"
-              ? "套餐连接可不填；会话 id 自动作为 x-opencode-session 发送"
-              : (creating ? "" : "回显为脱敏值；不改动则留空")));
+      }), creating ? "" : "回显为脱敏值；不改动则留空"));
 
       // ---- 高级（折叠）----
       H adv = el("div", "pv-advanced");
@@ -1977,9 +2076,12 @@ VNodePtr UiApp::build_settings() {
       adv.add(ahead);
       if (st_.pv_advanced) {
         H abody = el("div", "pv-adv-body");
-        abody.add(comp::hint(st_.pv_kind == "plan"
-                                 ? "套餐连接自动携带 x-opencode-session，无需手动配置。"
-                                 : "仅在端点需要额外请求头时添加。"));
+        // 会话亲和头：opencode 系端点需要，与"格式"无关
+        abody.add(comp::field("发送会话亲和头", comp::toggle(st_.pv_send_session, "",
+                                                             [this](const std::string&) {
+          update([&](AppState& s) { s.pv_send_session = !s.pv_send_session; });
+        }), "opencode 系端点需要 x-opencode-session（会话 id）"));
+        abody.add(comp::hint("自定义 Header：仅当端点需要额外请求头时添加。"));
         for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
           H row = el("div", "settings-row");
           row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
@@ -2722,6 +2824,7 @@ void UiApp::select_provider(const std::string& id) {
       s.pv_kind = jsonutil::get<std::string>(r.data, "kind", "openai-chat");
       s.pv_base_url = jsonutil::get<std::string>(r.data, "baseUrl", "");
       s.pv_key.clear();  // 留空 = 不修改（后端保留原密钥）
+      s.pv_send_session = jsonutil::get<bool>(r.data, "sendSession", false);
       s.pv_headers.clear();
       s.pv_new_header_k.clear();
       s.pv_new_header_v.clear();
@@ -2751,10 +2854,22 @@ void UiApp::begin_new_provider(const std::string& template_id) {
       s.pv_template_picked = true;
       s.provider_selected.clear();
       s.pv_name = t.name;
-      s.pv_kind = t.kind;
+      // shape defaults to OpenAI Chat; only the endpoint/headers come from the
+      // template (opencode-style ones additionally need the session header,
+      // which the backend sends itself - so it is not kept as a custom header)
+      s.pv_kind = "openai-chat";
       s.pv_base_url = t.base_url;
       s.pv_key.clear();
-      s.pv_headers = t.headers;  // template's special headers
+      s.pv_headers.clear();
+      s.pv_send_session = false;
+      for (size_t k = 0; k < t.headers.size(); ++k) {
+        const std::string& hk = t.headers[k].first;
+        if (hk == "x-opencode-client" || hk == "x-opencode-session") {
+          s.pv_send_session = true;
+          continue;
+        }
+        s.pv_headers.push_back(t.headers[k]);
+      }
       s.pv_advanced = false;
       s.provider_status.clear();
       s.provider_models.clear();
@@ -2774,6 +2889,7 @@ void UiApp::save_provider() {
   conn["kind"] = st_.pv_kind.empty() ? "openai-chat" : st_.pv_kind;
   conn["baseUrl"] = st_.pv_base_url;
   conn["enabled"] = true;
+  conn["sendSession"] = st_.pv_send_session;
   if (!st_.pv_key.empty()) conn["apiKey"] = st_.pv_key;  // 空 = 后端保留原值
   Json h = Json::object();
   for (size_t i = 0; i < st_.pv_headers.size(); ++i) {

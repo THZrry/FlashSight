@@ -334,15 +334,17 @@ FS_TEST(uiapp_settings_page) {
     AppState::ProviderRow r;
     r.id = "p1";
     r.name = "zen";
-    r.kind = "plan";
+    r.kind = "openai-chat";  // opencode is a normal provider, not a shape
     r.endpoint = "https://opencode.ai/zen/v1";
     s.providers.push_back(r);
     s.provider_selected = "p1";
-    s.pv_kind = "plan";
+    s.pv_kind = "openai-chat";
     s.pv_base_url = "https://opencode.ai/zen/v1";
+    s.pv_send_session = true;  // x-opencode-session toggle lives in 高级
+    s.pv_advanced = true;
   });
   EXPECT_TRUE(dump_has(dom, "Endpoint"));
-  EXPECT_TRUE(dump_has(dom, "x-opencode-session"));
+  EXPECT_TRUE(dump_has(dom, "发送会话亲和头"));
   // every nav entry must render its own body (nav key == body branch)
   const char* sec_keys[] = {"general", "appearance", "providers", "session_defaults",
                             "subagents", "skills", "memory", "network", "terminal",

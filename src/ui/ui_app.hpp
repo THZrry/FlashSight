@@ -122,9 +122,16 @@ struct AppState {
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
-  std::string active_term;
+  std::string active_term;   // terminal used for 停止 etc.
   bool terminal_open = false;
-  std::string terminal_output;  // last poll output for the active terminal
+  // per-terminal accumulated output (tid -> text). "所有终端" concatenates
+  // these; a specific tab shows just its own. Kept per terminal so switching
+  // tabs never loses what another one printed.
+  std::map<std::string, std::string> term_outputs;
+  std::string term_tab = "all";  // selected tab: "all" | tid
+  // inline "new terminal" form (opened from the tab strip's "+")
+  bool term_new_open = false;
+  std::string term_new_cmd;
 
   // ---- subagents ----
   struct SubagentRow {
@@ -170,6 +177,7 @@ struct AppState {
   std::vector<std::pair<std::string, std::string> > pv_headers;  // custom headers
   std::string pv_new_header_k;
   std::string pv_new_header_v;
+  bool pv_send_session = false;  // send x-opencode-session (opencode-style endpoints)
   bool pv_advanced = false;                   // "高级" section expanded
   std::vector<std::string> provider_models;   // listModels result
   std::string provider_models_level;          // "api" | "preset"
@@ -278,7 +286,10 @@ struct SessionView {
   std::vector<TermItem> terminals;
   std::string active_term;
   bool terminal_open = false;
-  std::string terminal_output;
+  std::map<std::string, std::string> term_outputs;
+  std::string term_tab = "all";
+  bool term_new_open = false;
+  std::string term_new_cmd;
 
   std::vector<AppState::SubagentRow> subagents;
 

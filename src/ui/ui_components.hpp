@@ -19,6 +19,11 @@ namespace comp {
 // variant: "" (default) | "primary" | "ghost" | "danger" | "link"
 H button(const std::string& label, EventFn on_click, const std::string& variant = "");
 H icon_button(const std::string& glyph, const std::string& tip, EventFn on_click);
+// Icon + label button. The label collapses to icon-only when the container is
+// narrow (CSS container query), so toolbars stay usable on compact windows.
+// `icon` is a Font Awesome class suffix, e.g. "paperclip" -> .fa-paperclip.
+H icon_text_button(const std::string& icon, const std::string& label,
+                   EventFn on_click, const std::string& variant = "");
 // title-like small button (探索/项目/用量统计): color + underline only, no bg
 H title_button(const std::string& label, bool active, EventFn on_click);
 

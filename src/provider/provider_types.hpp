@@ -11,16 +11,21 @@
 namespace fs {
 
 // 调用形态（provider.md §1）
+// NOTE: 这描述的是"请求长什么样"，与供应商品牌无关。opencode 之类并不是一种
+// 形态——它只是 endpoint 不同、并多带一个 x-opencode-session 头，所以用
+// send_session 标记表达，而不是单独一种 kind。
 enum class ApiKind {
   kOpenAIChat,      // OpenAI Chat Completions（含自定义 endpoint + header）
   kOpenAIResponse,  // OpenAI Response API
   kAnthropic,       // Anthropic Messages
   kCustom,          // endpoint + 自定义 header（复用 chat 形态，仅 header 不同）
-  kPlan,            // 套餐连接（额度类，如 x-opencode-session）
+  kPlan,            // 兼容旧配置：读取时归一化为 kOpenAIChat + send_session
 };
 
 const char* api_kind_str(ApiKind k);
 bool api_kind_from_str(const std::string& s, ApiKind* out);
+// 供 UI 展示的形态名（kPlan 显示为 openai-chat）
+const char* api_kind_display_str(ApiKind k);
 
 // 模型能力标签（provider.md §4）
 struct ModelCapabilities {
@@ -51,6 +56,8 @@ struct ProviderConn {
   std::string api_key;   // 前期明文；TODO 迁钥匙串
   std::map<std::string, std::string> custom_headers;  // 自定义 header（provider.md §5）
   bool enabled = true;
+  // 发送会话亲和头 x-opencode-session（opencode 系套餐端点需要；与形态无关）
+  bool send_session = false;
 
   // 套餐（quota）字段：三态（钱/额度/unknown），用量页成本表依赖（provider.md §1）
   bool has_quota = false;

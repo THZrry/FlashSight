@@ -95,6 +95,21 @@ H icon_button(const std::string& glyph, const std::string& tip, EventFn on_click
   return b;
 }
 
+H icon_text_button(const std::string& icon, const std::string& label,
+                   EventFn on_click, const std::string& variant) {
+  H b = el("button", variant.empty() ? "btn it-btn" : ("btn it-btn " + variant));
+  b.attr("type", "button");
+  if (!label.empty()) b.attr("aria-label", label);
+  b.on(EventKind::kClick, on_click);
+  // <i class="fa fa-<icon>"></i> + <span class="it-label">label</span>; CSS
+  // hides the span (and trims the padding) when the toolbar gets narrow.
+  H i = el("i", "fa fa-" + icon);
+  i.attr("aria-hidden", "true");
+  b.add(i);
+  if (!label.empty()) b.add(el("span", "it-label").text(label));
+  return b;
+}
+
 H title_button(const std::string& label, bool active, EventFn on_click) {
   // small title-like nav: no background; active = color + underline
   H b = el("button", active ? "title-btn active" : "title-btn");

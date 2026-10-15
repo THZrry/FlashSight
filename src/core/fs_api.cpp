@@ -1050,39 +1050,58 @@ FsResult FsApi::provider_get_provider(const std::string& providerId) {
 }
 
 FsResult FsApi::provider_templates() {
-  // 新建向导模板：kind + baseUrl + 默认 header + 说明。用户选择后填写并保存。
+  // Endpoint presets. A template only pre-fills endpoint + extra headers: the
+  // request SHAPE is chosen separately by 格式 (openai-chat / openai-response /
+  // anthropic / custom). "套餐" is not a shape - it is just a provider that
+  // happens to send x-opencode-session, so it is modelled as a header preset.
   Json arr = Json::array();
-  auto add = [&arr](const char* id, const char* name, const char* kind,
-                    const char* base, const char* desc, const Json& headers) {
+  auto add = [&arr](const char* id, const char* name, const char* base,
+                    const char* desc, const Json& headers) {
     Json t = Json::object();
     t["id"] = id;
     t["name"] = name;
-    t["kind"] = kind;
     t["baseUrl"] = base;
     t["description"] = desc;
     t["headers"] = headers;
     arr.push_back(t);
   };
-  add("opencode-zen", "opencode zen（套餐）", "plan",
-      "https://opencode.ai/zen/v1",
-      "套餐连接：自动携带 x-opencode-session 会话亲和头，按额度计费。",
-      Json::object());
-  add("openai-chat", "OpenAI 兼容（Chat Completions）", "openai-chat",
-      "https://api.openai.com/v1",
-      "标准 /chat/completions，Bearer 鉴权。多数第三方兼容端点选这个。",
-      Json::object());
-  add("openai-response", "OpenAI Response API", "openai-response",
-      "https://api.openai.com/v1",
-      "使用 /responses 与 input 数组；输出在 output[].content[].text。",
-      Json::object());
-  add("anthropic", "Anthropic Messages", "anthropic",
-      "https://api.anthropic.com/v1",
-      "使用 /messages、x-api-key 与 anthropic-version 头。",
-      Json::object());
-  add("custom", "自定义（endpoint + header）", "custom",
-      "https://",
-      "复用 Chat 形态，仅 endpoint 与自定义 header 不同。",
-      Json::object());
+  // 套餐/聚合服务：endpoint 不同 + 需要会话亲和头
+  add("opencode-zen", "opencode zen", "https://opencode.ai/zen/v1",
+      "套餐服务：自动带 x-opencode-session 会话亲和头，按额度计费。",
+      Json{{"x-opencode-client", "flashsight"}});
+  add("opencode-go", "opencode go", "https://opencode.ai/go/v1",
+      "opencode go 端点：需要 x-opencode-session。",
+      Json{{"x-opencode-client", "flashsight"}});
+  // 官方直连
+  add("openai", "OpenAI", "https://api.openai.com/v1",
+      "OpenAI 官方端点（Chat 或 Response 形态）。", Json::object());
+  add("anthropic", "Anthropic", "https://api.anthropic.com/v1",
+      "Anthropic 官方端点：/messages + x-api-key。", Json::object());
+  add("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
+      "Gemini 的 OpenAI 兼容端点。", Json::object());
+  add("deepseek", "DeepSeek", "https://api.deepseek.com/v1",
+      "DeepSeek 官方端点（OpenAI 兼容）。", Json::object());
+  add("moonshot", "Moonshot / Kimi", "https://api.moonshot.cn/v1",
+      "月之暗面 OpenAI 兼容端点。", Json::object());
+  add("zhipu", "智谱 GLM", "https://open.bigmodel.cn/api/paas/v4",
+      "智谱 AI 的 OpenAI 兼容端点。", Json::object());
+  add("dashscope", "阿里通义千问", "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "DashScope 的 OpenAI 兼容端点。", Json::object());
+  add("siliconflow", "SiliconFlow", "https://api.siliconflow.cn/v1",
+      "硅基流动聚合端点（OpenAI 兼容）。", Json::object());
+  add("openrouter", "OpenRouter", "https://openrouter.ai/api/v1",
+      "多模型聚合网关（OpenAI 兼容）。", Json::object());
+  add("ollama", "Ollama（本地）", "http://127.0.0.1:11434/v1",
+      "本地推理，无需密钥。", Json::object());
+  add("lmstudio", "LM Studio（本地）", "http://127.0.0.1:1234/v1",
+      "本地推理，无需密钥。", Json::object());
+  add("vllm", "vLLM（自建）", "http://127.0.0.1:8000/v1",
+      "自建推理服务（OpenAI 兼容）。", Json::object());
+  add("azure", "Azure OpenAI", "https://YOUR-RESOURCE.openai.azure.com/openai/v1",
+      "需要 api-key 头（在高级里添加）。",
+      Json{{"api-key", "{{YOUR_KEY}}"}});
+  add("custom", "自定义端点", "https://",
+      "任意兼容端点；请求形态在格式里选。", Json::object());
   return FsResult::success(arr);
 }
 

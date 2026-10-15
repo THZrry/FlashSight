@@ -21,7 +21,7 @@ FsResult ProviderClient::chat(const ChatRequest& req, ChatResponse* out,
   switch (conn_.kind) {
     case ApiKind::kOpenAIChat:
     case ApiKind::kCustom:
-    case ApiKind::kPlan:  // 套餐（x-opencode-session）也用 chat 形态
+    case ApiKind::kPlan:  // legacy value: same chat shape, session header set
       r = chat_openai_chat(req, out, on_delta);
       break;
     case ApiKind::kOpenAIResponse:
@@ -55,8 +55,8 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
   http.url = conn_.base_url + "/chat/completions";
   http.headers["Content-Type"] = "application/json";
   http.headers["Authorization"] = "Bearer " + conn_.api_key;
-  // kPlan 套餐（opencode 实证）：自动带亲和/路由头；认证走 Bearer，session 头非 token
-  if (conn_.kind == ApiKind::kPlan) {
+  // 会话亲和头：这是供应商的一个开关（opencode 系端点需要），不是请求形态
+  if (conn_.send_session) {
     if (!req.session_id.empty()) {
       http.headers["x-opencode-session"] = req.session_id;
       http.headers["x-opencode-session-id"] = req.session_id;

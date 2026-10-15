@@ -9,9 +9,15 @@ const char* api_kind_str(ApiKind k) {
     case ApiKind::kOpenAIResponse: return "openai-response";
     case ApiKind::kAnthropic: return "anthropic";
     case ApiKind::kCustom: return "custom";
-    case ApiKind::kPlan: return "plan";
+    case ApiKind::kPlan: return "plan";  // legacy value still readable on disk
   }
   return "openai-chat";
+}
+
+const char* api_kind_display_str(ApiKind k) {
+  // legacy "plan" is really "openai-chat plus a session header"; show it as the
+  // shape it actually is so the UI never presents opencode as a request format
+  return k == ApiKind::kPlan ? "openai-chat" : api_kind_str(k);
 }
 
 bool api_kind_from_str(const std::string& s, ApiKind* out) {
@@ -58,10 +64,12 @@ Json ProviderConn::to_json() const {
   Json j = Json::object();
   j["id"] = id;
   j["name"] = name;
-  j["kind"] = api_kind_str(kind);
+  // legacy kPlan is reported as the shape it really is (openai-chat)
+  j["kind"] = api_kind_display_str(kind);
   j["baseUrl"] = base_url;
   // api_key 不写入 to_json（避免误泄漏到日志/事件）；持久化用 to_json_persist
   j["enabled"] = enabled;
+  j["sendSession"] = send_session || kind == ApiKind::kPlan;
   j["hasQuota"] = has_quota;
   j["quotaValue"] = quota_value;
   j["quotaKind"] = quota_kind;
@@ -77,7 +85,10 @@ ProviderConn ProviderConn::from_json(const Json& j) {
   p.name = jsonutil::get<std::string>(j, "name", "");
   ApiKind k = ApiKind::kOpenAIChat;
   api_kind_from_str(jsonutil::get<std::string>(j, "kind", "openai-chat"), &k);
-  p.kind = k;
+  // legacy "plan" configs: read back as a chat provider that sends the session
+  // header, so an old file keeps working without a migration step
+  p.send_session = jsonutil::get<bool>(j, "sendSession", k == ApiKind::kPlan);
+  p.kind = (k == ApiKind::kPlan) ? ApiKind::kOpenAIChat : k;
   p.base_url = jsonutil::get<std::string>(j, "baseUrl", "");
   p.api_key = jsonutil::get<std::string>(j, "apiKey", "");
   p.enabled = jsonutil::get<bool>(j, "enabled", true);
