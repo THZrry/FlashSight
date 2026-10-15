@@ -75,6 +75,11 @@ ui_shared = {
     "src/common/fs_json.cpp",
     "src/common/fs_log.cpp",
     "src/common/fs_i18n.cpp",
+    -- terminal engine (VT parser + screen grid): shared so the browser renders
+    -- the same grid the native build does. It also compiles into fs_core (see
+    -- dir_files below) so the backend can hold a Screen per terminal - hence
+    -- NOT in fs_ui's own file list, which would duplicate the symbols.
+    "src/term/fs_vt.cpp",
 }
 
 -- ==========================================================================
@@ -118,7 +123,7 @@ target("fs_ui_wasm")
     set_extension(".js")
     add_ldflags("-lembind", "-sALLOW_MEMORY_GROWTH=1", "-sDISABLE_EXCEPTION_CATCHING=0",
                 "--no-entry", {force = true})
-    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_vsplit,_fs_ui_key,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
+    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_vsplit,_fs_ui_key,_fs_ui_key_input,_fs_ui_cell_size,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
                 {force = true})
     add_ldflags("-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8",
                 {force = true})
@@ -232,7 +237,7 @@ target("fs_core")
     add_includedirs(includedirs)
     add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
     add_files(dir_files("src/core", "src/agent", "src/tools",
-                        "src/provider", "src/storage", "src/common"))
+                        "src/provider", "src/storage", "src/common", "src/term"))
     add_files("3rdparty/md4c-master/src/md4c.c",
               "3rdparty/md4c-master/src/md4c-html.c",
               "3rdparty/md4c-master/src/entity.c")

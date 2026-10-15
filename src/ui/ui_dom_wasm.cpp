@@ -15,6 +15,8 @@
 
 #include <map>
 
+#include "fs_json.hpp"
+
 namespace fs {
 namespace ui {
 
@@ -53,7 +55,8 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   var store = globalThis.__fsHandlers[node_id];
   if (store[kind]) el.removeEventListener(store[kind][0], store[kind][1], false);
   var names = ['click', 'input', 'change', 'keydown', 'keyenter', 'submit',
-               'dblclick', 'contextmenu', 'scroll', 'mouseenter', 'mouseleave'];
+               'dblclick', 'contextmenu', 'scroll', 'mouseenter', 'mouseleave',
+               'blur'];
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
@@ -255,6 +258,141 @@ EM_JS(void, fs_dom_vsplitter, (int split_node, int panel_node, int cb_id), {
   });
 });
 
+// ---- terminal key input ---------------------------------------------------
+// A terminal cannot be driven through a normal text input: Ctrl+C is a control
+// byte (not 'c'), Shift+Tab is not Tab, and every browser shortcut would fire
+// while the user types. So the terminal surface is a focusable <div> and this
+// listener (a) reports key + modifiers, (b) prevents the browser's default
+// action, and (c) forwards paste as one chunk.
+std::map<int, std::function<void(const KeyPress&)> >& key_input_cbs() {
+  static std::map<int, std::function<void(const KeyPress&)> > m;
+  return m;
+}
+int& key_input_seq() {
+  static int s = 0;
+  return s;
+}
+
+EM_JS(void, fs_dom_key_input, (int node_id, int cb_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  el.__fsKeyCb = cb_id;
+  if (el.__fsKeyInit) return;
+  el.__fsKeyInit = true;
+  // the surface must be focusable but must not behave like a text field
+  if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+  el.style.outline = 'none';
+
+  function send(kind, key, text, ev) {
+    if (typeof Module === 'undefined' || !Module._fs_ui_key_input) return;
+    var payload = JSON.stringify({
+      key: key || '',
+      text: text || '',
+      ctrl: !!(ev && ev.ctrlKey),
+      alt: !!(ev && ev.altKey),
+      shift: !!(ev && ev.shiftKey),
+      meta: !!(ev && ev.metaKey),
+      paste: kind === 'paste',
+    });
+    var len = Module.lengthBytesUTF8(payload) + 1;
+    var ptr = Module._malloc(len);
+    Module.stringToUTF8(payload, ptr, len);
+    Module._fs_ui_key_input(el.__fsKeyCb, ptr);
+    Module._free(ptr);
+  }
+
+  el.addEventListener('keydown', function (ev) {
+    // The browser must not act on anything typed into the terminal: Ctrl+W
+    // would close the tab, Tab would move focus, F5 would reload.
+    ev.preventDefault();
+    ev.stopPropagation();
+    send('keydown', ev.key, ev.key && ev.key.length > 1 ? '' : ev.key, ev);
+  });
+  el.addEventListener('keypress', function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+  });
+  el.addEventListener('paste', function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var text = '';
+    try {
+      text = (ev.clipboardData || window.clipboardData).getData('text') || '';
+    } catch (e) { text = ''; }
+    if (text) send('paste', '', text, ev);
+  });
+  // clicking the surface focuses it, so keys go to the terminal
+  el.addEventListener('mousedown', function () {
+    try { el.focus(); } catch (e) {}
+  });
+  // a click can also carry a focus request from the app
+  el.__fsFocus = function () { try { el.focus(); } catch (e) {} };
+});
+
+EM_JS(void, fs_dom_focus, (int node_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  try { el.focus(); } catch (e) {}
+});
+
+// Measure how many character cells fit in `el`. The cell size is measured from
+// the element's own font (a hidden probe span, so it works with any mono font
+// and any zoom), and a ResizeObserver re-reports whenever the box changes - that
+// is what keeps the child process's idea of the window in sync.
+EM_JS(void, fs_dom_cell_size, (int node_id, int cb_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  el.__fsCellCb = cb_id;
+  function report() {
+    if (typeof Module === 'undefined' || !Module._fs_ui_cell_size) return;
+    var probe = el.__fsProbe;
+    if (!probe) {
+      probe = document.createElement('span');
+      probe.textContent = 'MMMMMMMMMM';
+      probe.style.position = 'absolute';
+      probe.style.visibility = 'hidden';
+      probe.style.whiteSpace = 'pre';
+      probe.style.pointerEvents = 'none';
+      // inherit the terminal's font so the measurement matches the real grid
+      var cs = getComputedStyle(el);
+      probe.style.font = cs.font;
+      probe.style.fontFamily = cs.fontFamily;
+      probe.style.fontSize = cs.fontSize;
+      probe.style.lineHeight = cs.lineHeight;
+      probe.style.letterSpacing = cs.letterSpacing;
+      el.appendChild(probe);
+      el.__fsProbe = probe;
+    }
+    var w = probe.getBoundingClientRect().width / 10;
+    var lh = probe.getBoundingClientRect().height;
+    if (!(w > 0) || !(lh > 0)) return;
+    var pad = 0;
+    var cs2 = getComputedStyle(el);
+    pad = parseFloat(cs2.paddingLeft) + parseFloat(cs2.paddingRight);
+    var box = el.getBoundingClientRect();
+    var cols = Math.floor((box.width - pad) / w);
+    var rows = Math.floor(box.height / lh);
+    if (cols < 20) cols = 20;
+    if (rows < 5) rows = 5;
+    Module._fs_ui_cell_size(el.__fsCellCb, cols, rows);
+  }
+  if (!el.__fsCellInit) {
+    el.__fsCellInit = true;
+    if (typeof ResizeObserver !== 'undefined') {
+      el.__fsCellRO = new ResizeObserver(function () { report(); });
+      el.__fsCellRO.observe(el);
+    }
+    window.addEventListener('resize', report);
+  }
+  // report on the next frame: the element must be laid out before it can be
+  // measured, and a fresh node often is not yet
+  if (typeof requestAnimationFrame !== 'undefined') {
+    requestAnimationFrame(function () { report(); });
+  } else {
+    setTimeout(report, 16);
+  }
+});
+
 EM_JS(int, fs_dom_root, (), {
   var r = document.getElementById('fs-root');
   if (!r) {
@@ -294,6 +432,16 @@ std::map<int, std::function<void(int)> >& vsplit_cbs() {
   return m;
 }
 int& vsplit_seq() {
+  static int s = 0;
+  return s;
+}
+
+// terminal cell-size callbacks (one surface at a time)
+std::map<int, std::function<void(int, int)> >& cell_size_cbs() {
+  static std::map<int, std::function<void(int, int)> > m;
+  return m;
+}
+int& cell_size_seq() {
   static int s = 0;
   return s;
 }
@@ -494,6 +642,22 @@ class WasmDom : public IDom {
     fs_dom_global_key(cb_id);
   }
 
+  void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override {
+    int cb_id = ++key_input_seq();
+    key_input_cbs().clear();
+    key_input_cbs()[cb_id] = std::move(cb);
+    fs_dom_key_input(static_cast<int>(node.id), cb_id);
+  }
+
+  void focus(Node node) override { fs_dom_focus(static_cast<int>(node.id)); }
+
+  void bind_cell_size(Node node, std::function<void(int, int)> cb) override {
+    int cb_id = ++cell_size_seq();
+    cell_size_cbs().clear();
+    cell_size_cbs()[cb_id] = std::move(cb);
+    fs_dom_cell_size(static_cast<int>(node.id), cb_id);
+  }
+
  private:
   Node root() override { return Node{1}; }
 
@@ -551,6 +715,35 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_key(int cb_id, const char* key) {
   std::map<int, std::function<void(const std::string&)> >::iterator it = key_cbs().find(cb_id);
   if (it == key_cbs().end() || !it->second) return;
   it->second(std::string(key ? key : ""));
+}
+
+// Called from JS (fs_dom_cell_size) with the measured character-cell grid.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_cell_size(int cb_id, int cols, int rows) {
+  std::map<int, std::function<void(int, int)> >::iterator it =
+      cell_size_cbs().find(cb_id);
+  if (it == cell_size_cbs().end() || !it->second) return;
+  it->second(cols, rows);
+}
+
+// Called from JS (fs_dom_key_input) with a JSON key description.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_key_input(int cb_id, const char* json) {
+  std::map<int, std::function<void(const KeyPress&)> >::iterator it =
+      key_input_cbs().find(cb_id);
+  if (it == key_input_cbs().end() || !it->second) return;
+  KeyPress k;
+  try {
+    Json j = Json::parse(json ? json : "{}");
+    k.key = jsonutil::get<std::string>(j, "key", "");
+    k.text = jsonutil::get<std::string>(j, "text", "");
+    k.ctrl = jsonutil::get<bool>(j, "ctrl", false);
+    k.alt = jsonutil::get<bool>(j, "alt", false);
+    k.shift = jsonutil::get<bool>(j, "shift", false);
+    k.meta = jsonutil::get<bool>(j, "meta", false);
+    k.paste = jsonutil::get<bool>(j, "paste", false);
+  } catch (...) {
+    return;
+  }
+  it->second(k);
 }
 
 }  // namespace ui

@@ -112,6 +112,68 @@ FS_TEST(patch_attrs) {
   EXPECT_TRUE(d.find("data-x") == std::string::npos);
 }
 
+// ---------- patch: a dropped inline style must be cleared ----------
+// Regression: the terminal drawer sets an inline height while open. When the
+// new tree stopped setting it, the old value stayed on the node, so a collapsed
+// drawer kept the open height. Styles are not one-way.
+FS_TEST(patch_clears_dropped_style) {
+  NullDom dom;
+  H v1 = el("div").style("height", "340px");
+  mount(dom, v1, dom.root());
+  dom.clear_calls();
+  H v2 = el("div");
+  patch(dom, v1, v2, dom.root());
+  // the dropped style is explicitly reset to empty
+  bool cleared = false;
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    const NullDom::Call& c = dom.calls()[i];
+    if (c.method == "set_style" && c.detail == "height=") cleared = true;
+  }
+  EXPECT_TRUE(cleared);
+}
+
+// ---------- animations are declared by intent, from a closed registry ----------
+
+FS_TEST(anim_registry_is_closed) {
+  using namespace fs::ui::anim;
+  EXPECT_TRUE(known(kView));
+  EXPECT_TRUE(known(kEnter));
+  EXPECT_TRUE(known(kPop));
+  EXPECT_TRUE(known(kFade));
+  EXPECT_TRUE(known(kDrawer));
+  EXPECT_TRUE(known(kList));
+  EXPECT_FALSE(known("nope"));            // unknown intents are ignored
+  EXPECT_TRUE(css_class("nope").empty());
+  // every registered intent maps to a real class, and they are all distinct
+  const std::vector<std::string>& names = all();
+  EXPECT_TRUE(names.size() >= 8);
+  for (size_t i = 0; i < names.size(); ++i) {
+    EXPECT_FALSE(css_class(names[i]).empty());
+    for (size_t j = i + 1; j < names.size(); ++j) {
+      EXPECT_TRUE(css_class(names[i]) != css_class(names[j]));
+    }
+  }
+}
+
+FS_TEST(anim_unknown_intent_adds_nothing) {
+  NullDom dom;
+  // a typo'd intent must not produce a dead class on the element
+  H v = el("div", "card").anim("not-a-real-animation");
+  mount(dom, v, dom.root());
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("card") != std::string::npos);
+  EXPECT_TRUE(d.find("anim-not-a-real-animation") == std::string::npos);
+}
+
+FS_TEST(anim_merges_into_class) {
+  NullDom dom;
+  H v = el("div", "card").anim(fs::ui::anim::kEnter);
+  mount(dom, v, dom.root());
+  std::string d = dom.dump();
+  // one class attribute carrying both (a second class attr would be ignored)
+  EXPECT_TRUE(d.find("class=\"card anim-enter\"") != std::string::npos);
+}
+
 // ---------- patch: keyed list reorder moves, not recreates ----------
 
 FS_TEST(patch_keyed_reorder) {

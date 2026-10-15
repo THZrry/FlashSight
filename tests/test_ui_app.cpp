@@ -81,15 +81,21 @@ FS_TEST(uiapp_switch_home_tabs) {
   EXPECT_TRUE(dump_has(dom, "输入关键词"));
 }
 
-FS_TEST(uiapp_project_expand_sessions) {
+// The session list is always in the tree: CSS picks how to show it (wide shows
+// it directly, narrow collapses it behind the header), so the app must not
+// conditionally build it - a wide card would otherwise have nothing to show.
+FS_TEST(uiapp_project_card_renders_session_list) {
   NullDom dom;
   AppState st = AppState::make();
   seed_project(st);
   UiApp app(dom, st, nullptr);
   app.mount();
-  // right half is collapsed first
-  EXPECT_FALSE(dump_has(dom, "UI 框架重构"));
+  EXPECT_TRUE(dump_has(dom, "UI 框架重构"));   // the list is present
+  EXPECT_TRUE(dump_has(dom, "+ 新建会话"));
+  EXPECT_TRUE(dump_has(dom, "proj-right"));
+  // collapsed/expanded is a narrow-layout presentation detail driven by CSS
   app.update([](AppState& s) { s.projects[0].expanded = true; });
+  EXPECT_TRUE(dump_has(dom, "proj-right open"));
   EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
 }
 
@@ -360,9 +366,9 @@ FS_TEST(uiapp_drop_routes_by_kind) {
   EXPECT_TRUE(app.state().session_input.empty());
 }
 
-// 新增 terminal = "the shell from settings", not a typed command: the form
-// offers the detected shells and an optional name.
-FS_TEST(uiapp_new_terminal_picks_a_shell) {
+// Creating a terminal is one click: the shell comes from settings and there is
+// nothing to fill in up front (the name is edited on the tab afterwards).
+FS_TEST(uiapp_new_terminal_is_one_click) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
@@ -370,15 +376,96 @@ FS_TEST(uiapp_new_terminal_picks_a_shell) {
   app.update([](AppState& s) {
     seed_session(s, "sess_a");
     s.terminal_open = true;
-    s.term_new_open = true;
-    s.shells.push_back("自动探测");
-    s.shells.push_back("pwsh");
-    s.term_shell_index = 2;
   });
-  EXPECT_TRUE(dump_has(dom, "pwsh"));
-  EXPECT_TRUE(dump_has(dom, "名称（可选）"));
-  // there is no free-form command box any more
+  // the strip offers 新增 with no form behind it
+  EXPECT_TRUE(dump_has(dom, "新增"));
+  EXPECT_FALSE(dump_has(dom, "名称（可选）"));
   EXPECT_FALSE(dump_has(dom, "命令…"));
+}
+
+// A terminal is a grid, not a text box: the panel renders the engine's screen
+// (styled runs + a cursor) and takes raw keys, so there is no <input> for it.
+FS_TEST(uiapp_terminal_renders_grid_and_takes_keys) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "构建", "running"});
+    s.term_tab = "1";
+  });
+  // the grid the backend would send: two rows, the first with a colored run
+  Json grid = Json::object();
+  Json lines = Json::array();
+  Json row0 = Json::array();
+  row0.push_back(Json{{"x", 0}, {"t", "hello"}, {"fg", 0x0dbc79}});
+  Json row1 = Json::array();
+  row1.push_back(Json{{"x", 2}, {"t", "world"}, {"a", 1}});
+  lines.push_back(row0);
+  lines.push_back(row1);
+  grid["lines"] = lines;
+  grid["cols"] = 80;
+  grid["rows"] = 2;
+  grid["cursorX"] = 5;
+  grid["cursorY"] = 1;
+  grid["cursorVisible"] = true;
+  app.update([&](AppState& s) { s.term_grids["1"] = grid; });
+
+  EXPECT_TRUE(dump_has(dom, "term-screen"));   // the surface, not a textarea
+  EXPECT_TRUE(dump_has(dom, "ts-run"));
+  EXPECT_TRUE(dump_has(dom, "ts-cursor"));
+  EXPECT_TRUE(dump_has(dom, "hello"));
+  EXPECT_TRUE(dump_has(dom, "world"));
+  EXPECT_TRUE(dump_has(dom, "#0dbc79"));       // the color landed as a style
+  EXPECT_TRUE(dom.count_of("bind_key_input") >= 1);
+  EXPECT_TRUE(dom.count_of("bind_cell_size") >= 1);
+  // no <input>/<textarea> is used to drive the terminal
+  EXPECT_FALSE(dump_has(dom, "term-input"));
+}
+
+// The adapter measures the surface and reports the cell grid; the app forwards
+// it (the child process needs the window size to lay out full-screen programs).
+FS_TEST(uiapp_terminal_reports_cell_size) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "", "running"});
+    s.term_tab = "1";
+  });
+  dom.fire_cell_size_for_test(120, 30);
+  EXPECT_EQ(app.state().term_cols, 120);
+  EXPECT_EQ(app.state().term_rows, 30);
+}
+
+// Renaming a terminal only changes its label (the shell keeps running).
+FS_TEST(uiapp_terminal_rename_keeps_process) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "", "running"});
+    s.term_tab = "1";
+  });
+  app.update([](AppState& s) {
+    s.term_renaming = "1";
+    s.term_rename_text = "构建日志";
+  });
+  // the tab turns into an input (keys are diff identities, not attributes, so
+  // assert on the rendered class instead)
+  EXPECT_TRUE(dump_has(dom, "td-tab-rename"));
+  app.rename_terminal("1", "构建日志");
+  EXPECT_EQ(app.state().terminals[0].label, std::string("构建日志"));
+  EXPECT_EQ(app.state().terminals[0].status, std::string("running"));
+  EXPECT_TRUE(app.state().term_renaming.empty());
 }
 
 FS_TEST(uiapp_settings_page) {

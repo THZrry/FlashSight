@@ -62,6 +62,44 @@ class EventBus {
 
 EventBus& bus();
 
+// ---------------- Animation registry ----------------
+// Animations are declared by INTENT, not by CSS class. A part says what kind of
+// appearance it is ("this is a page swap", "this is a row appearing") and the
+// framework maps that to the class it applies on mount.
+//
+// Why a registry instead of classes sprinkled through the app: coverage becomes
+// checkable. Every part declares one, the set of names is closed (a typo is a
+// no-op the tests can catch), and the CSS lives in one place - previously some
+// parts animated because someone remembered to add a class and others silently
+// did not, which is exactly the inconsistency this replaces.
+namespace anim {
+
+// Whole page / tab swapping in.
+extern const char* const kView;
+// A card, row, panel or list item appearing.
+extern const char* const kEnter;
+// A list growing (its children enter with a stagger).
+extern const char* const kList;
+// A popover, menu or modal.
+extern const char* const kPop;
+// Text that streams in (barely there - it must not flicker).
+extern const char* const kFade;
+// A panel sliding in from a side.
+extern const char* const kSlideLeft;
+extern const char* const kSlideRight;
+// A bottom drawer opening.
+extern const char* const kDrawer;
+
+// Is `name` one of the registered animations? (Unknown names are ignored rather
+// than silently producing a dead class.)
+bool known(const std::string& name);
+// CSS class the framework applies for `name` ("" when unknown).
+std::string css_class(const std::string& name);
+// Every registered name (tests assert the app only uses these).
+const std::vector<std::string>& all();
+
+}  // namespace anim
+
 // ---------------- KeyedStore ----------------
 // Framework-level scoped state. A scope is anything the user switches between
 // (tabs, sessions, pages, panels): the app keeps ONE live copy of T (the
@@ -181,12 +219,13 @@ class H {
     n_->key = k;
     return *this;
   }
-  // Mount animation: adds class "anim-<name>" (CSS defines the keyframes).
-  // Fires when the element is created, i.e. on first mount and whenever the
-  // diff has to replace the node (key/tag change). See web/style.css.
-  // Merges into the existing class attribute - a second class attr would be
-  // ignored by the browser and silently drop the element's real styling.
-  H anim(const std::string& name) { return cls("anim-" + name); }
+  // Mount animation, declared by intent (see the anim registry above). The
+  // framework maps the intent to the class it applies; an unknown intent adds
+  // nothing, so a typo cannot silently produce a dead class.
+  H anim(const std::string& intent) {
+    std::string c = anim::css_class(intent);
+    return c.empty() ? *this : cls(c);
+  }
   H on(EventKind k, EventFn fn) {
     n_->events.push_back(VEvent{k, bus().add(fn)});
     return *this;

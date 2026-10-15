@@ -57,6 +57,9 @@ class TerminalRegistry {
   // 编码切换
   FsResult set_encoding(const std::string& tid, const std::string& enc);
 
+  // 改用户给的名字（终端跑着也能改）
+  FsResult set_label(const std::string& tid, const std::string& label);
+
   size_t count_running(const std::string& sid) const;
   size_t total_for_session(const std::string& sid) const;
 

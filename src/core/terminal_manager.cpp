@@ -10,14 +10,23 @@
 
 namespace fs {
 
-// 一个在跑的进程：reproc 句柄 + 累积输出 + 状态
+// 一个在跑的进程：reproc 句柄（管道模式）或 ConPty（真终端）+ 输出缓冲。
+//
+// 两种模式的区别只在"子进程看到什么"：管道模式给的是普通 stdio，ConPTY 模式
+// 给的是一个真正的控制台（有窗口大小、有 ANSI 输出、能跑全屏程序）。用户终端
+// 优先 ConPTY；不可用时退回管道，此时仍然把输出喂进同一个屏幕模型。
 struct TerminalManager::Proc {
   reproc_t* h = nullptr;
+  ConPty* pty = nullptr;  // non-null => real terminal
   std::string tid;
   std::string sid;
   std::string out;        // 累积的 stdout+stderr（已转成 UTF-8）
   std::string enc;        // 输出编码（空=系统默认，见 fs_encoding.hpp）
   std::string pending;    // 跨 read 边界的不完整多字节序列
+  vt::Screen screen;      // 屏幕网格（VT 解析结果；UI 直接画它）
+  int cols = 100;
+  int rows = 30;
+  bool screen_dirty = true;
   size_t reported = 0;    // out 中已上报给 UI 的字节数（tick 只发新增）
   bool exited = false;
   int exit_code = 0;
@@ -30,6 +39,11 @@ TerminalManager::~TerminalManager() {
   for (std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.begin();
        it != procs_.end(); ++it) {
     Proc& p = *it->second;
+    if (p.pty) {
+      p.pty->terminate();
+      delete p.pty;
+      p.pty = nullptr;
+    }
     if (p.h) {
       if (!p.exited) {
         // 退出时清理：先温和终止，再强杀（避免留孤儿）
@@ -77,7 +91,45 @@ std::vector<std::string> TerminalManager::build_argv_interactive(const ShellInfo
   return argv;
 }
 
+// 把一段（已解码成 UTF-8 的）子进程输出同时存进文本缓冲和屏幕网格。
+// 网格是 UI 真正画的东西：escape 序列在解析时被吃掉，光标/颜色/擦除都落成
+// 单元格状态。文本缓冲只用于"所有终端"概览和复制。
+void TerminalManager::feed_screen(Proc& p, const std::string& text) {
+  p.out += text;
+  p.screen.feed(text);
+  p.screen_dirty = true;
+  // 终端要回话（DSR：shell 问光标在哪，不回就卡住）时立刻写回子进程
+  std::string reply = p.screen.take_reply();
+  if (!reply.empty()) {
+    if (p.pty) {
+      p.pty->write(reply);
+    } else if (p.h) {
+      reproc_write(p.h, reinterpret_cast<const uint8_t*>(reply.data()),
+                   reply.size());
+    }
+  }
+  if (p.out.size() > (1u << 20)) {  // 上限 1MB，防失控
+    size_t cut = p.out.size() - (1u << 20);
+    // 不要切在 UTF-8 序列中间
+    while (cut < p.out.size() &&
+           (static_cast<unsigned char>(p.out[cut]) & 0xC0) == 0x80) {
+      ++cut;
+    }
+    p.out.erase(0, cut);
+    p.reported = p.reported > cut ? p.reported - cut : 0;
+  }
+}
+
 void TerminalManager::drain(Proc& p) {
+  if (p.pty) {
+    std::string raw;
+    if (!p.pty->read(&raw)) return;
+    if (raw.empty()) return;
+    // ConPTY 在 Windows 上吐的是 UTF-8（它内部做了一次转换），但仍可能被切在
+    // 多字节中间，所以照样过一遍解码器
+    feed_screen(p, encoding::decode_output(raw, "UTF-8", &p.pending));
+    return;
+  }
   if (!p.h) return;
   char buf[4096];
   for (;;) {
@@ -86,19 +138,9 @@ void TerminalManager::drain(Proc& p) {
     if (n > 0) {
       // 子进程给的是字节，不是文本：cmd/pwsh 在中文 Windows 上按 OEM 代码页
       // 输出，直接塞进 JSON 会让 dump() 抛非法 UTF-8（HTTP 500）。
-      std::string chunk = encoding::decode_output(
-          std::string(buf, static_cast<size_t>(n)), p.enc, &p.pending);
-      p.out += chunk;
-      if (p.out.size() > (1u << 20)) {  // 上限 1MB，防失控
-        size_t cut = p.out.size() - (1u << 20);
-        // 不要切在 UTF-8 序列中间
-        while (cut < p.out.size() &&
-               (static_cast<unsigned char>(p.out[cut]) & 0xC0) == 0x80) {
-          ++cut;
-        }
-        p.out.erase(0, cut);
-        p.reported = p.reported > cut ? p.reported - cut : 0;
-      }
+      feed_screen(p, encoding::decode_output(
+                         std::string(buf, static_cast<size_t>(n)), p.enc,
+                         &p.pending));
       continue;
     }
     // n <= 0：无更多数据 / 管道关闭 / 非阻塞
@@ -130,27 +172,50 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
 
   std::vector<std::string> argv = interactive ? build_argv_interactive(sh)
                                               : build_argv(sh, command);
-  std::vector<const char*> cargv;
-  for (size_t i = 0; i < argv.size(); ++i) cargv.push_back(argv[i].c_str());
-  cargv.push_back(nullptr);
+  int cols = static_cast<int>(jsonutil::get_int(args, "cols", 100));
+  int rows = static_cast<int>(jsonutil::get_int(args, "rows", 30));
+  if (cols < 20) cols = 20;
+  if (rows < 5) rows = 5;
 
-  reproc_t* h = reproc_new();
-  reproc_options opts;
-  std::memset(&opts, 0, sizeof(opts));
-  opts.working_directory = cwd.empty() ? nullptr : cwd.c_str();
-  // 交互式终端要接管 stdin（用户在终端栏里敲命令）；模型终端不需要
-  opts.redirect.in.type =
-      interactive ? REPROC_REDIRECT_PIPE : REPROC_REDIRECT_DISCARD;
-  opts.redirect.out.type = REPROC_REDIRECT_PIPE;     // 捕获 stdout
-  opts.redirect.err.type = REPROC_REDIRECT_STDOUT;   // stderr 合并到 stdout
-  opts.stop = (reproc_stop_actions)REPROC_STOP_ACTIONS_NULL;
-  opts.nonblocking = true;                            // 读不阻塞（poll 语义）
+  // 交互式终端优先走 ConPTY：管道给不了窗口大小、提示符和全屏程序，而用户终端
+  // 就是要一个真终端。不可用时（旧系统/非 Windows）退回管道，输出仍然进同一个
+  // 屏幕模型，只是没有窗口尺寸、全屏程序会退化。
+  std::unique_ptr<ConPty> pty;
+  if (interactive && ConPty::available()) {
+    std::unique_ptr<ConPty> candidate(new ConPty());
+    std::string exe = sh.path.empty() ? sh.name : sh.path;
+    if (candidate->start(exe, argv.size() > 1
+                                  ? std::vector<std::string>(argv.begin() + 1, argv.end())
+                                  : std::vector<std::string>(),
+                         cwd, cols, rows)) {
+      pty = std::move(candidate);
+    }
+  }
 
-  int rc = reproc_start(h, cargv.data(), opts);
-  if (rc < 0) {
-    std::string msg = reproc_strerror(rc);
-    h = reproc_destroy(h);
-    return FsResult::error(ErrCode::kIo, "spawn failed: " + msg);
+  reproc_t* h = nullptr;
+  if (!pty) {
+    std::vector<const char*> cargv;
+    for (size_t i = 0; i < argv.size(); ++i) cargv.push_back(argv[i].c_str());
+    cargv.push_back(nullptr);
+
+    h = reproc_new();
+    reproc_options opts;
+    std::memset(&opts, 0, sizeof(opts));
+    opts.working_directory = cwd.empty() ? nullptr : cwd.c_str();
+    // 交互式终端要接管 stdin（用户在终端栏里敲命令）；模型终端不需要
+    opts.redirect.in.type =
+        interactive ? REPROC_REDIRECT_PIPE : REPROC_REDIRECT_DISCARD;
+    opts.redirect.out.type = REPROC_REDIRECT_PIPE;     // 捕获 stdout
+    opts.redirect.err.type = REPROC_REDIRECT_STDOUT;   // stderr 合并到 stdout
+    opts.stop = (reproc_stop_actions)REPROC_STOP_ACTIONS_NULL;
+    opts.nonblocking = true;                            // 读不阻塞（poll 语义）
+
+    int rc = reproc_start(h, cargv.data(), opts);
+    if (rc < 0) {
+      std::string msg = reproc_strerror(rc);
+      h = reproc_destroy(h);
+      return FsResult::error(ErrCode::kIo, "spawn failed: " + msg);
+    }
   }
 
   // 注册表：用户终端 kUser；模型终端按前台/后台区分
@@ -164,9 +229,13 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
 
   std::unique_ptr<Proc> p(new Proc());
   p->h = h;
+  p->pty = pty.release();
   p->tid = e.tid;
   p->sid = sid;
   p->enc = encoding;
+  p->cols = cols;
+  p->rows = rows;
+  p->screen.resize(cols, rows);
   std::string tid = e.tid;
   procs_[tid] = std::move(p);
 
@@ -205,12 +274,15 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
   o["shell"] = sh.name;
   if (!label.empty()) o["label"] = label;
   o["interactive"] = interactive;
+  o["terminal"] = (procs_[tid]->pty != nullptr) ? "conpty" : "pipe";
+  o["cols"] = cols;
+  o["rows"] = rows;
   if (out) *out = o;
   return FsResult::success(o);
 }
 
-// 把用户输入写进交互式 shell 的 stdin（终端栏里敲的命令）。
-// 非阻塞管道写满时返回 written=0，不报错——UI 侧会提示重试。
+// 把用户输入写进终端。text 是 VT 编码后的原始字节（按键序列），不补换行——
+// Enter 由调用方编码成 \r。ConPTY 下这就是一个真终端的键盘输入。
 FsResult TerminalManager::write(const Json& args, Json* out) {
   std::lock_guard<std::mutex> lk(mu_);
   std::string tid = jsonutil::get<std::string>(args, "tid", "");
@@ -220,8 +292,21 @@ FsResult TerminalManager::write(const Json& args, Json* out) {
     return FsResult::error(ErrCode::kNotFound, "terminal not found: " + tid);
   }
   Proc& p = *it->second;
-  if (p.exited || !p.h) {
+  if (p.exited) {
     return FsResult::error(ErrCode::kInvalidArg, "terminal already exited");
+  }
+  if (p.pty) {
+    // ConPTY 直接吃 UTF-8 字节
+    bool ok = p.pty->write(text);
+    if (!ok) return FsResult::error(ErrCode::kIo, "write failed");
+    Json o = Json::object();
+    o["tid"] = tid;
+    o["written"] = static_cast<int64_t>(text.size());
+    if (out) *out = o;
+    return FsResult::success(o);
+  }
+  if (!p.h) {
+    return FsResult::error(ErrCode::kInvalidArg, "terminal has no input");
   }
   // 反向编码：cmd.exe 按 OEM 代码页读管道 stdin，UTF-8 的中文命令要转回去
   std::string bytes = encoding::encode_input(text, p.enc);
@@ -238,6 +323,33 @@ FsResult TerminalManager::write(const Json& args, Json* out) {
   return FsResult::success(o);
 }
 
+// 交互式终端的窗口大小（ConPTY 会把它告诉子进程；全屏程序据此排版）。
+FsResult TerminalManager::resize(const Json& args, Json* out) {
+  std::lock_guard<std::mutex> lk(mu_);
+  std::string tid = jsonutil::get<std::string>(args, "tid", "");
+  std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.find(tid);
+  if (it == procs_.end()) {
+    return FsResult::error(ErrCode::kNotFound, "terminal not found: " + tid);
+  }
+  Proc& p = *it->second;
+  int cols = static_cast<int>(jsonutil::get_int(args, "cols", p.cols));
+  int rows = static_cast<int>(jsonutil::get_int(args, "rows", p.rows));
+  if (cols < 20) cols = 20;
+  if (rows < 5) rows = 5;
+  if (cols == p.cols && rows == p.rows) return FsResult::success();
+  p.cols = cols;
+  p.rows = rows;
+  p.screen.resize(cols, rows);
+  p.screen_dirty = true;
+  if (p.pty) p.pty->resize(cols, rows);
+  Json o = Json::object();
+  o["tid"] = tid;
+  o["cols"] = cols;
+  o["rows"] = rows;
+  if (out) *out = o;
+  return FsResult::success(o);
+}
+
 FsResult TerminalManager::poll(const Json& args, Json* out) {
   std::lock_guard<std::mutex> lk(mu_);
   std::string tid = jsonutil::get<std::string>(args, "tid", "");
@@ -248,11 +360,20 @@ FsResult TerminalManager::poll(const Json& args, Json* out) {
   Proc& p = *it->second;
   drain(p);
   if (!p.exited) {
-    int w = reproc_wait(p.h, 0);  // 非阻塞检查
-    if (w != REPROC_ETIMEDOUT) {
-      p.exited = true;
-      p.exit_code = w;
-      reg_->mark_exited(tid, w, clock_->now_ms());
+    if (p.pty) {
+      int code = 0;
+      if (p.pty->exited(&code)) {
+        p.exited = true;
+        p.exit_code = code;
+        reg_->mark_exited(tid, code, clock_->now_ms());
+      }
+    } else if (p.h) {
+      int w = reproc_wait(p.h, 0);  // 非阻塞检查
+      if (w != REPROC_ETIMEDOUT) {
+        p.exited = true;
+        p.exit_code = w;
+        reg_->mark_exited(tid, w, clock_->now_ms());
+      }
     }
   }
   Json o = Json::object();
@@ -272,7 +393,12 @@ FsResult TerminalManager::kill(const Json& args, Json* out) {
     return FsResult::error(ErrCode::kNotFound, "terminal not found: " + tid);
   }
   Proc& p = *it->second;
-  if (p.h && !p.exited) {
+  if (p.pty) {
+    drain(p);  // 收走最后的输出再关控制台
+    p.pty->terminate();
+    p.exited = true;
+    p.exit_code = 0;
+  } else if (p.h && !p.exited) {
     reproc_terminate(p.h);       // 先温和
     int w = reproc_wait(p.h, 2000);
     if (w == REPROC_ETIMEDOUT) {
@@ -294,30 +420,41 @@ FsResult TerminalManager::kill(const Json& args, Json* out) {
 
 // 后台线程非阻塞轮询：把新增输出/退出状态汇总成事件列表交给宿主推送。
 // UI 不再需要手动"轮询"按钮——桌面端宿主按回调、浏览器端经 /api/events 推送。
+//
+// 事件里带的是屏幕网格（按样式合并后的紧凑行），不是原始字节流：escape 序列
+// 已经在这一层被解析掉，UI 直接画格子，不重复实现一个终端。
 std::vector<Json> TerminalManager::tick() {
   std::lock_guard<std::mutex> lk(mu_);
   std::vector<Json> out;
   for (std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.begin();
        it != procs_.end(); ++it) {
     Proc& p = *it->second;
-    if (!p.h) continue;
     bool was_exited = p.exited;
     size_t before = p.out.size();
     drain(p);
     bool new_out = p.out.size() > before;
     if (!p.exited) {
-      int w = reproc_wait(p.h, 0);  // 非阻塞检查
-      if (w != REPROC_ETIMEDOUT) {
-        p.exited = true;
-        p.exit_code = w;
-        reg_->mark_exited(p.tid, w, clock_->now_ms());
+      if (p.pty) {
+        int code = 0;
+        if (p.pty->exited(&code)) {
+          p.exited = true;
+          p.exit_code = code;
+          reg_->mark_exited(p.tid, code, clock_->now_ms());
+        }
+      } else if (p.h) {
+        int w = reproc_wait(p.h, 0);  // 非阻塞检查
+        if (w != REPROC_ETIMEDOUT) {
+          p.exited = true;
+          p.exit_code = w;
+          reg_->mark_exited(p.tid, w, clock_->now_ms());
+        }
       }
     }
     if (!new_out && p.exited == was_exited) continue;  // 无变化
     Json e = Json::object();
     e["tid"] = p.tid;
     e["sid"] = p.sid;
-    // 只发新增字节；累积内容仍可由 terminal.show 全量取
+    // 只发新增文本（供"所有终端"概览/日志）；屏幕网格由 terminal.grid 全量取
     if (new_out) {
       e["output"] = p.out.substr(p.reported);
     }
@@ -328,6 +465,99 @@ std::vector<Json> TerminalManager::tick() {
     out.push_back(e);
   }
   return out;
+}
+
+// 屏幕网格 -> UI。按样式把连续单元格合并成 run，这样一屏通常只有几十个节点，
+// 而不是 cols*rows 个。
+Json TerminalManager::screen_json(const Proc& p) {
+  Json lines = Json::array();
+  for (int y = 0; y < p.screen.rows(); ++y) {
+    Json runs = Json::array();
+    int x = 0;
+    while (x < p.screen.cols()) {
+      const vt::Cell& c = p.screen.cell(x, y);
+      if (c.flags & vt::kFlagWideTail) {
+        ++x;
+        continue;
+      }
+      std::string text;
+      int32_t fg = c.fg, bg = c.bg;
+      uint8_t attr = c.attr;
+      int start = x;
+      while (x < p.screen.cols()) {
+        const vt::Cell& k = p.screen.cell(x, y);
+        if (k.flags & vt::kFlagWideTail) {
+          ++x;
+          continue;
+        }
+        if (k.fg != fg || k.bg != bg || k.attr != attr) break;
+        uint32_t cp = k.ch ? k.ch : ' ';
+        // encode as UTF-8
+        if (cp < 0x80) {
+          text.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+          text.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+          text.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+          text.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+          text.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+          text.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+          text.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+          text.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+          text.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+          text.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+        ++x;
+      }
+      if (start >= p.screen.cols()) break;
+      // 整行末尾的空白不渲染（省节点；CSS 里右对齐的东西仍然正确）
+      bool blank = true;
+      for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != ' ') { blank = false; break; }
+      }
+      if (blank) continue;
+      Json run = Json::object();
+      run["x"] = start;
+      run["t"] = text;
+      if (fg != vt::kColorDefault) run["fg"] = fg;
+      if (bg != vt::kColorDefault) run["bg"] = bg;
+      if (attr) run["a"] = static_cast<int>(attr);
+      runs.push_back(run);
+    }
+    lines.push_back(runs);
+  }
+  Json o = Json::object();
+  o["cols"] = p.screen.cols();
+  o["rows"] = p.screen.rows();
+  o["lines"] = lines;
+  o["cursorX"] = p.screen.cursor_x();
+  o["cursorY"] = p.screen.cursor_y();
+  o["cursorVisible"] = p.screen.cursor_visible() && !p.exited;
+  o["alt"] = p.screen.alt_screen();
+  // DECCKM: the UI needs it to pick SS3 vs CSI when encoding an arrow key
+  o["appKeys"] = p.screen.app_cursor_keys();
+  o["bracketedPaste"] = p.screen.bracketed_paste();
+  o["title"] = p.screen.title();
+  return o;
+}
+
+FsResult TerminalManager::grid(const Json& args, Json* out) {
+  std::lock_guard<std::mutex> lk(mu_);
+  std::string tid = jsonutil::get<std::string>(args, "tid", "");
+  std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.find(tid);
+  if (it == procs_.end()) {
+    return FsResult::error(ErrCode::kNotFound, "terminal not found: " + tid);
+  }
+  Proc& p = *it->second;
+  // 取网格前先把子进程还没吐完的输出收干净，UI 看到的才是最新的
+  drain(p);
+  Json o = screen_json(p);
+  o["tid"] = tid;
+  o["status"] = p.exited ? "exited" : "running";
+  o["exitCode"] = p.exit_code;
+  if (out) *out = o;
+  return FsResult::success(o);
 }
 
 }  // namespace fs

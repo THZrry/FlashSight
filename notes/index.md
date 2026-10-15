@@ -127,16 +127,16 @@ The process of project: P0 环境搭建
   终端后端非阻塞轮询推事件（去掉手动轮询）、动画分三档（view/组件/文本）。
   详见 current.md <27>。
 
-<28>(SOLVED): 反馈第五批 —— 终端栏加高+顶部拖拽（bind_vsplitter，高度入状态）、
-  新建终端=设置里的 shell（交互式会话 + 输入行走 stdin，terminal.write）、
-  拖拽识别分类（dir/file/url/text -> 开项目 / @文件名 / 插链接）、
-  i18n 预留做实（中文即 key 的 tr() + ui.language 即时生效 + 系统语言探测）、
-  终端栏右侧文字删除。真 bug：GBK 输出让 /api/events 500（fs_encoding 解码 +
-  dump 兜底）、tick 双驱动数据竞争（TerminalManager 加锁）、悬空 pid
-  （session_get/terminal_spawn 用 meta.cwd 自愈）。详见 current.md <28>。
+<29>(SOLVED): 反馈第六批 —— 真终端（VT 解析器 fs_vt + 屏幕网格 + ConPTY 伪控制台）、
+  按键按 VT 编码（修饰键/DECCKM/bracketed paste）、动画注册表框架化（按意图声明）、
+  项目卡片容器查询双布局（宽屏直接可滚动列表 / 窄屏展开）、组件视觉重做。
+  真 bug：ConPTY 缺 STARTF_USESTDHANDLES 致子进程跑在父控制台、按键异步乱序、
+  光标 em 定位偏移、patch 不清除被删 inline style（收起抽屉仍撑高）、
+  /api/events 因 GBK 输出 500。详见 current.md <29>。
 
-## 当前状态（更新 2026-10-15）
+## 当前状态（更新 2026-10-16）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；112 用例 702 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；141 用例 843 断言通过。
+- 终端已是真终端（VT 解析 + ConPTY），组件视觉重做进行中（后续按分区继续）。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

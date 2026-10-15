@@ -14,6 +14,7 @@
 #include <cstdio>
 
 #include "fs_i18n.hpp"
+#include "term/fs_vt.hpp"
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
@@ -41,6 +42,37 @@ std::string term_display_name(const TermItem& t) {
   return t.shell.empty() ? std::string("shell") : t.shell;
 }
 
+// 0xRRGGBB -> "#rrggbb" for an inline style
+std::string color_css(int32_t rgb) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "#%06x", static_cast<unsigned>(rgb) & 0xFFFFFF);
+  return std::string(buf);
+}
+
+// A terminal grid (terminal.grid reply) as plain text: one line per row, the
+// runs concatenated. This is what the overview shows, so escape sequences are
+// already resolved by the engine and never reach the screen.
+std::string term_grid_text(const Json& grid) {
+  if (!grid.is_object()) return std::string();
+  const Json& lines = grid["lines"];
+  if (!lines.is_array()) return std::string();
+  std::string out;
+  for (size_t y = 0; y < lines.size(); ++y) {
+    std::string line;
+    const Json& runs = lines[y];
+    if (runs.is_array()) {
+      for (size_t k = 0; k < runs.size(); ++k) {
+        line += jsonutil::get<std::string>(runs[k], "t", "");
+      }
+    }
+    while (!line.empty() && line[line.size() - 1] == ' ') line.erase(line.size() - 1);
+    out += line;
+    out += "\n";
+  }
+  while (!out.empty() && out[out.size() - 1] == '\n') out.erase(out.size() - 1);
+  return out;
+}
+
 const char* kSideTitles[][2] = {
     {"usage", "用量"},   {"files", "文件"},     {"ops", "操作"},
     {"git", "Git"},      {"subagents", "子代理"}, {"calls", "调用"},
@@ -66,7 +98,7 @@ std::string folder_basename(const std::string& path) {
 // append a class to an already-built VNode (used for mount animations on
 // subtrees returned by the page builders)
 void add_class(const VNodePtr& v, const std::string& cls) {
-  if (!v) return;
+  if (!v || cls.empty()) return;
   for (size_t i = 0; i < v->attrs.size(); ++i) {
     if (v->attrs[i].key == "class") {
       if (!v->attrs[i].value.empty()) v->attrs[i].value += " ";
@@ -78,6 +110,12 @@ void add_class(const VNodePtr& v, const std::string& cls) {
   a.key = "class";
   a.value = cls;
   v->attrs.push_back(a);
+}
+
+// Apply an animation INTENT to an already-built subtree (see the anim registry
+// in ui_vdom.hpp). Used by the page builders, which return a finished tree.
+void add_anim(const VNodePtr& v, const std::string& intent) {
+  add_class(v, anim::css_class(intent));
 }
 
 // wall clock in ms (toast deadlines). On wasm, std::chrono::steady_clock can
@@ -195,9 +233,26 @@ void UiApp::pump() {
   if (backend_) backend_->poll();
   // Drive the backend's non-blocking terminal poller. On desktop FsApi runs it
   // on a thread already, so only the browser needs this tick; any output still
-  // arrives as a terminal.output event (no render from the tick itself).
+  // arrives as a terminal.output event.
   if (backend_ && !backend_->polls_server_side()) {
     backend_->call_async("terminal.tick", Json::object(), nullptr);
+  }
+  // A terminal's screen changes as output arrives, and the screen itself lives
+  // in the backend (that is where the VT parser is). Re-read the visible grid on
+  // every pump while a RUNNING terminal is showing: the call is cheap on
+  // localhost and this is what makes the panel live. (Relying on terminal.output
+  // events alone left the panel stale whenever an event was missed - right after
+  // a spawn, or after a tab switch.) An exited terminal's screen is frozen, so
+  // polling stops on its own.
+  if (st_.terminal_open && st_.term_tab != "all") {
+    bool running = false;
+    for (size_t i = 0; i < st_.terminals.size(); ++i) {
+      if (st_.terminals[i].tid == st_.term_tab) {
+        running = st_.terminals[i].status == "running";
+        break;
+      }
+    }
+    if (running && !term_grid_inflight_) load_terminal_grid(st_.term_tab);
   }
   // toasts carry a deadline: clear them here so they cannot linger forever
   // (pump runs on the browser's 250ms timer; the native build calls it too)
@@ -230,6 +285,10 @@ void UiApp::load_projects() {
     }
     st_.projects.swap(cards);
     render();
+    // The session list is part of the card in the wide layout (it is shown
+    // without any interaction), so fetch it for every card up front rather than
+    // waiting for a click that the wide layout never needs.
+    for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
   });
 }
 
@@ -289,10 +348,12 @@ void UiApp::save_session_view(const std::string& sid) {
   v.term_height = st_.term_height;
   v.term_outputs = st_.term_outputs;
   v.term_tab = st_.term_tab;
-  v.term_new_open = st_.term_new_open;
-  v.term_shell_index = st_.term_shell_index;
-  v.term_new_label = st_.term_new_label;
-  v.term_input = st_.term_input;
+  v.term_grids = st_.term_grids;
+  v.term_renaming = st_.term_renaming;
+  v.term_rename_text = st_.term_rename_text;
+  v.term_cols = st_.term_cols;
+  v.term_rows = st_.term_rows;
+  v.term_app_keys = st_.term_app_keys;
   v.subagents = st_.subagents;
   v.plan_open = st_.plan_open;
   v.plan_steps = st_.plan_steps;
@@ -332,10 +393,12 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.term_height = v.term_height;
   st_.term_outputs = v.term_outputs;
   st_.term_tab = v.term_tab;
-  st_.term_new_open = v.term_new_open;
-  st_.term_shell_index = v.term_shell_index;
-  st_.term_new_label = v.term_new_label;
-  st_.term_input = v.term_input;
+  st_.term_grids = v.term_grids;
+  st_.term_renaming = v.term_renaming;
+  st_.term_rename_text = v.term_rename_text;
+  st_.term_cols = v.term_cols;
+  st_.term_rows = v.term_rows;
+  st_.term_app_keys = v.term_app_keys;
   st_.subagents = v.subagents;
   st_.plan_open = v.plan_open;
   st_.plan_steps = v.plan_steps;
@@ -470,6 +533,7 @@ void UiApp::load_sessions(size_t project_index) {
       if (project_index < st.projects.size()) {
         st.projects[project_index].sessions = rows;
         st.projects[project_index].session_count = static_cast<int>(rows.size());
+        st.projects[project_index].sessions_loaded = true;
       }
     });
   });
@@ -694,6 +758,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     for (size_t i = 0; i < terms.size(); ++i) {
       if (terms[i].tid == tid) terms[i].status = "exited";
     }
+    // The screen itself lives in the backend (that is where the VT parser is),
+    // and pump() re-reads the visible terminal's grid, so nothing to do here -
+    // the accumulated text above is only for the overview and for copy.
   } else if (event == "terminal.output") {
     // pushed by the backend's non-blocking poller (no manual refresh).
     // Output accumulates per terminal, so "所有终端" can show every stream
@@ -833,6 +900,30 @@ void UiApp::render() {
         });
       }
     });
+    // the terminal surface takes raw keys (Ctrl+C is a byte, not a letter, and
+    // every browser shortcut must be suppressed while it has focus)
+    VNodePtr term = find_by_key(tree_, "term-screen");
+    if (term && term->dom.valid()) {
+      dom_.bind_key_input(term->dom, [this](const KeyPress& k) {
+        send_terminal_key(k);
+      });
+      // How many character cells fit? Only the DOM knows its own pixel size, so
+      // the adapter measures the mono font and reports cols/rows. The child
+      // process needs this (a full-screen program lays itself out by it).
+      dom_.bind_cell_size(term->dom, [this](int cols, int rows) {
+        resize_terminal(cols, rows);
+      });
+    }
+    // rename field: focus it so the user can type immediately
+    VNodePtr ren = find_by_key(tree_, "term-rename-input");
+    if (ren && ren->dom.valid()) dom_.focus(ren->dom);
+    // Focus the terminal surface only when asked (on spawn / tab switch / click).
+    // Focusing on every render would fight with the composer: pump() re-renders
+    // ~4x/sec, so anything the user focuses elsewhere would be stolen back.
+    if (term_focus_pending_) {
+      term_focus_pending_ = false;
+      if (term && term->dom.valid()) dom_.focus(term->dom);
+    }
   } while (render_pending_);
   render_in_progress_ = false;
 }
@@ -888,7 +979,7 @@ VNodePtr UiApp::build_shell() {
   page->key = "page:" + st_.active_tab;
   // page switch: the key changes, so the node is re-created -> the view
   // animation fires (fade + slide); see web/style.css
-  add_class(page, "anim-view");
+  add_anim(page, anim::kView);
   win.add(page);
   win.add(build_overlays());
   return win.get();
@@ -1011,48 +1102,51 @@ VNodePtr UiApp::build_home_projects() {
     top.add(actions);
     card.add(top);
 
-    // sessions area: the dominant half, always visible; clicking it expands
+    // Sessions area: the dominant half. The list is ALWAYS built - CSS decides
+    // how it is shown (wide: directly, with its own height and scroll; narrow:
+    // stacked below and collapsed until the header is clicked). Building it
+    // conditionally would mean the wide layout could not show it at all.
     H right = el("div", p.expanded ? "proj-right open" : "proj-right");
     H rhead = el("div", "proj-right-head");
     rhead.on(EventKind::kClick, [this, i](const std::string&) {
+      // Wide layout ignores this (CSS shows the list and hides the toggle); in
+      // the narrow layout it reveals/collapses the stacked list.
       update([&](AppState& s) {
         if (i < s.projects.size()) s.projects[i].expanded = !s.projects[i].expanded;
       });
-      if (i < st_.projects.size() && st_.projects[i].expanded) load_sessions(i);
     });
-    rhead.add(el("span", "prh-title").text("会话"));
+    rhead.add(el("span", "prh-title").text(tr("会话")));
     rhead.add(el("span", "prh-count").text(itos(p.expanded ? static_cast<int>(p.sessions.size())
                                                            : p.session_count)));
     rhead.add(el("span", "grow"));
-    rhead.add(el("span", "prh-toggle").text(p.expanded ? "收起 \u25be" : "展开 \u25b8"));
+    rhead.add(el("span", "prh-toggle").text(p.expanded ? tr("收起 \u25be")
+                                                       : tr("展开 \u25b8")));
     right.add(rhead);
-    if (p.expanded) {
-      H list = el("div", "proj-sessions");
-      for (size_t k = 0; k < p.sessions.size(); ++k) {
-        H row = el("div", "proj-session");
-        std::string sid = p.sessions[k].first;
-        std::string title = p.sessions[k].second;
-        row.on(EventKind::kClick, [this, sid, title](const std::string&) {
-          open_session(sid, title);
-        });
-        row.add(el("span", "ps-title").text(p.sessions[k].second));
-        row.add(el("span", "dim").text("›"));
-        list.add(row);
-      }
-      if (p.sessions.empty()) {
-        H empty = el("div", "proj-session dim-none");
-        empty.add(el("span", "ps-title").text("暂无会话"));
-        list.add(empty);
-      }
-      H addrow = el("div", "proj-session add");
-      std::string pid2 = p.pid;
-      addrow.on(EventKind::kClick, [this, pid2](const std::string&) {
-        new_session_in_project(pid2);
+    H list = el("div", "proj-sessions");
+    for (size_t k = 0; k < p.sessions.size(); ++k) {
+      H row = el("div", "proj-session");
+      std::string sid = p.sessions[k].first;
+      std::string title = p.sessions[k].second;
+      row.on(EventKind::kClick, [this, sid, title](const std::string&) {
+        open_session(sid, title);
       });
-      addrow.add(el("span", "ps-title").text("+ 新建会话"));
-      list.add(addrow);
-      right.add(list);
+      row.add(el("span", "ps-title").text(p.sessions[k].second));
+      row.add(el("span", "dim").text("\u203a"));
+      list.add(row);
     }
+    if (p.sessions.empty()) {
+      H empty = el("div", "proj-session dim-none");
+      empty.add(el("span", "ps-title").text(tr("暂无会话")));
+      list.add(empty);
+    }
+    H addrow = el("div", "proj-session add");
+    std::string pid2 = p.pid;
+    addrow.on(EventKind::kClick, [this, pid2](const std::string&) {
+      new_session_in_project(pid2);
+    });
+    addrow.add(el("span", "ps-title").text(tr("+ 新建会话")));
+    list.add(addrow);
+    right.add(list);
     card.add(right);
     wrap.add(card);
   }
@@ -1617,16 +1711,20 @@ VNodePtr UiApp::build_side_panel() {
   return side.get();
 }
 
-// Bottom bar: terminal. Left-right split: left is the output of the selected
-// tab ("所有终端" concatenates every stream), right is a vertical tab strip
-// whose first entry is always 所有终端, followed by one tab per terminal and
-// a 新增 entry. The title row toggles the bar; the strip on the TOP edge drags
+// Bottom bar: terminal. Left-right split: left is the screen of the selected
+// terminal ("所有终端" lists every stream as text), right is a vertical tab strip
+// whose first entry is always 所有终端, followed by one tab per terminal and a
+// 新增 entry. The title row toggles the bar; the strip on the TOP edge drags
 // the height.
 //
-// Terminals here are "the shell from settings" (交互式 shell), not one-off
-// commands: 新增 picks a shell + optional name and starts an interactive
-// session, and the selected terminal gets an input line so it is actually
-// usable. Model-started terminals show up in the same strip.
+// A terminal is a GRID, not a text box: the engine (fs_vt, backend side) parses
+// the VT stream into styled cells and this draws them, with the keys going back
+// through the DOM adapter's key-input binding. That is why there is no <input>
+// here - a real terminal cannot be driven through one (Ctrl+C is not 'c').
+//
+// 新增 creates a terminal in one click (the shell comes from settings; the name
+// is edited on the tab afterwards), and model-started terminals appear in the
+// same strip.
 VNodePtr UiApp::build_terminal_drawer() {
   H drawer = el("div", st_.terminal_open ? "terminal-bar open" : "terminal-bar");
   drawer.key("term-panel");
@@ -1647,7 +1745,10 @@ VNodePtr UiApp::build_terminal_drawer() {
     bool opening = !st_.terminal_open;
     update([&](AppState& s) { s.terminal_open = opening; });
     // refresh on open so terminals started while the bar was collapsed appear
-    if (opening && !active_sid().empty()) load_terminals(active_sid());
+    if (opening && !active_sid().empty()) {
+      load_terminals(active_sid());
+      if (st_.term_tab != "all") load_terminal_grid(st_.term_tab);
+    }
   });
   head.add(el("span", "td-caret").text(st_.terminal_open ? "\u25be" : "\u25b8"));
   head.add(el("span", "td-title").text(tr("终端")));
@@ -1665,51 +1766,107 @@ VNodePtr UiApp::build_terminal_drawer() {
 
   H body = el("div", "td-body");
 
-  // ---- left: output of the selected tab (+ input when a terminal is selected)
+  // ---- left: the selected terminal's screen (or the aggregate overview) ----
   H left = el("div", "td-left");
-  H out = el("pre", "td-out");
   if (st_.term_tab == "all") {
-    std::string all;
+    // Overview: one card per terminal showing its CURRENT screen as text (the
+    // engine's grid dump, so no escape codes leak) and, when clicked, jumping
+    // to that terminal. Nothing here is a dead end.
+    H list = el("div", "td-all");
     for (size_t i = 0; i < st_.terminals.size(); ++i) {
-      std::map<std::string, std::string>::const_iterator it =
-          st_.term_outputs.find(st_.terminals[i].tid);
-      if (it == st_.term_outputs.end() || it->second.empty()) continue;
-      all += "── #" + st_.terminals[i].tid + " " +
-             term_display_name(st_.terminals[i]) + " ──\n";
-      all += it->second;
-      if (!all.empty() && all.back() != '\n') all += "\n";
-    }
-    out.text(all.empty() ? tr("暂无输出") : all);
-  } else {
-    std::map<std::string, std::string>::const_iterator it =
-        st_.term_outputs.find(st_.term_tab);
-    out.text(it == st_.term_outputs.end() || it->second.empty() ? tr("暂无输出")
-                                                               : it->second);
-  }
-  left.add(out);
-
-  // interactive input: only for one specific, still-running terminal (the
-  // aggregate view has no single stdin to write to)
-  bool term_running = false;
-  if (st_.term_tab != "all") {
-    for (size_t i = 0; i < st_.terminals.size(); ++i) {
-      if (st_.terminals[i].tid == st_.term_tab &&
-          st_.terminals[i].status == "running") {
-        term_running = true;
-        break;
+      const TermItem& t = st_.terminals[i];
+      std::string tid = t.tid;
+      H item = el("div", "td-all-item");
+      item.on(EventKind::kClick, [this, tid](const std::string&) {
+        update([&](AppState& s) { s.term_tab = tid; });
+        term_focus_pending_ = true;
+        load_terminal_grid(tid);
+      });
+      H ih = el("div", "td-all-head");
+      ih.add(el("span", t.status == "running" ? "term-dot running" : "term-dot")
+                 .text("●"));
+      ih.add(el("span", "td-all-name").text("#" + tid + " " + term_display_name(t)));
+      ih.add(el("span", "grow"));
+      ih.add(el("span", "dim").text(t.status == "running" ? tr("运行中")
+                                                          : tr("已退出")));
+      item.add(ih);
+      H pre = el("pre", "td-all-out");
+      std::map<std::string, Json>::const_iterator gi = st_.term_grids.find(tid);
+      std::string text;
+      if (gi != st_.term_grids.end()) {
+        text = term_grid_text(gi->second);
+      } else {
+        std::map<std::string, std::string>::const_iterator it =
+            st_.term_outputs.find(tid);
+        if (it != st_.term_outputs.end()) text = it->second;
       }
+      pre.text(text.empty() ? tr("暂无输出") : text);
+      item.add(pre);
+      list.add(item);
     }
-  }
-  if (st_.term_tab != "all") {
-    H in_row = el("div", "td-input");
-    H ti = comp::text_input(
-        st_.term_input, tr("终端输入…（Enter 发送给终端）"),
-        [this](const std::string& v) { st_.term_input = v; },
-        [this](const std::string&) { write_terminal(st_.term_input); });
-    ti.key("term-input");
-    if (!term_running) ti.attr("disabled", "1");
-    in_row.add(ti);
-    left.add(in_row);
+    if (st_.terminals.empty()) {
+      list.add(comp::empty_state(tr("点「新增」启动一个终端"), "", nullptr));
+    }
+    left.add(list);
+  } else {
+    // the terminal surface: focusable, gets raw keys, draws the cell grid
+    H screen = el("div", "term-screen");
+    screen.key("term-screen");
+    screen.attr("tabindex", "0");
+    const Json* grid = nullptr;
+    std::map<std::string, Json>::const_iterator gi = st_.term_grids.find(st_.term_tab);
+    if (gi != st_.term_grids.end()) grid = &gi->second;
+    if (grid && grid->is_object()) {
+      const Json& lines = (*grid)["lines"];
+      bool cursor_visible = jsonutil::get<bool>(*grid, "cursorVisible", false);
+      int cx = static_cast<int>(jsonutil::get_int(*grid, "cursorX", 0));
+      int cy = static_cast<int>(jsonutil::get_int(*grid, "cursorY", 0));
+      if (lines.is_array()) {
+        for (size_t y = 0; y < lines.size(); ++y) {
+          H row = el("div", "ts-row");
+          row.style("height", "1.28em");
+          const Json& runs = lines[y];
+          if (runs.is_array()) {
+            for (size_t k = 0; k < runs.size(); ++k) {
+              const Json& run = runs[k];
+              std::string text = jsonutil::get<std::string>(run, "t", "");
+              if (text.empty()) continue;
+              H span = el("span", "ts-run");
+              // position by column so a run's own width never shifts the row
+              int x = static_cast<int>(jsonutil::get_int(run, "x", 0));
+              span.style("left", itos(x) + "ch");
+              int32_t fg = static_cast<int32_t>(jsonutil::get_int(run, "fg", -1));
+              int32_t bg = static_cast<int32_t>(jsonutil::get_int(run, "bg", -1));
+              int attr = static_cast<int>(jsonutil::get_int(run, "a", 0));
+              if (fg >= 0) span.style("color", color_css(fg));
+              if (bg >= 0) span.style("background", color_css(bg));
+              if (attr & 1) span.style("font-weight", "600");
+              if (attr & 2) span.style("opacity", ".72");
+              if (attr & 4) span.style("font-style", "italic");
+              if (attr & 8) span.style("text-decoration", "underline");
+              if (attr & 32) span.style("filter", "invert(1)");
+              if (attr & 64) span.style("text-decoration", "line-through");
+              span.text(text);
+              row.add(span);
+            }
+          }
+          // The cursor lives INSIDE its own row. Positioning it as a sibling of
+          // the rows (absolute, top: Nem) drifts: the row height is 1.28em while
+          // `em` in the offset is the font size, and the panel's padding is not
+          // part of either. Inside the row it inherits the row's box, so it
+          // lines up by construction.
+          if (cursor_visible && static_cast<int>(y) == cy) {
+            H cur = el("div", "ts-cursor");
+            cur.style("left", itos(cx) + "ch");
+            row.add(cur);
+          }
+          screen.add(row);
+        }
+      }
+    } else {
+      screen.add(el("div", "ts-empty").text(tr("（暂无输出）")));
+    }
+    left.add(screen);
   }
   body.add(left);
 
@@ -1725,13 +1882,41 @@ VNodePtr UiApp::build_terminal_drawer() {
   side.add(all_tab);
   for (size_t i = 0; i < st_.terminals.size(); ++i) {
     const TermItem& t = st_.terminals[i];
-    H tb = el("div", t.tid == st_.term_tab ? "td-tab active" : "td-tab");
     std::string tid = t.tid;
+    if (st_.term_renaming == tid) {
+      // renaming in place: the terminal keeps running, only the label changes.
+      // Losing focus commits (the same as Enter) - a rename field that keeps
+      // eating keystrokes after you click elsewhere is a trap.
+      H form = el("div", "td-tab td-tab-rename");
+      H inp = comp::text_input(st_.term_rename_text, term_display_name(t),
+                               [this](const std::string& v) { st_.term_rename_text = v; },
+                               [this, tid](const std::string&) {
+        rename_terminal(tid, st_.term_rename_text);
+      });
+      inp.key("term-rename-input");
+      inp.on(EventKind::kBlur, [this, tid](const std::string&) {
+        if (st_.term_renaming != tid) return;  // already committed
+        rename_terminal(tid, st_.term_rename_text);
+      });
+      form.add(inp);
+      side.add(form);
+      continue;
+    }
+    H tb = el("div", t.tid == st_.term_tab ? "td-tab active" : "td-tab");
     tb.on(EventKind::kClick, [this, tid](const std::string&) {
       update([&](AppState& s) { s.term_tab = tid; });
+      term_focus_pending_ = true;  // switching to a terminal focuses it
+      load_terminal_grid(tid);
     });
     tb.add(el("span", t.status == "running" ? "term-dot running" : "term-dot").text("●"));
     tb.add(el("span", "td-tab-name").text("#" + t.tid + " " + term_display_name(t)));
+    // double-click the name to rename it (name is cosmetic; no restart)
+    tb.add(comp::icon_button("\u270e", tr("重命名"), [this, tid](const std::string&) {
+      update([&](AppState& s) {
+        s.term_renaming = tid;
+        s.term_rename_text.clear();
+      });
+    }));
     // 停止 lives on the tab itself (there is deliberately no "clear")
     tb.add(comp::icon_button("\u25a0", tr("停止"), [this, tid](const std::string&) {
       call_async("terminal.kill", Json{{"tid", tid}}, [this, tid](const BackendResult&) {
@@ -1744,42 +1929,16 @@ VNodePtr UiApp::build_terminal_drawer() {
     }));
     side.add(tb);
   }
-  // 新增: pick the shell (from settings) + an optional name. There is no
-  // command box: a terminal IS the shell, you type into it afterwards.
-  if (st_.term_new_open) {
-    std::vector<std::string> shell_opts = st_.shells;
-    if (shell_opts.empty()) shell_opts.push_back(tr("自动探测"));
-    H form = el("div", "td-new");
-    form.add(el("div", "td-new-title").text(tr("新建终端")));
-    form.add(comp::select(shell_opts, st_.term_shell_index,
-                          [this](const std::string& v) {
-      st_.term_shell_index = std::atoi(v.c_str());
-    }));
-    form.add(comp::text_input(st_.term_new_label, tr("名称（可选）"),
-                              [this](const std::string& v) { st_.term_new_label = v; }));
-    H acts = el("div", "td-new-acts");
-    acts.add(comp::button(tr("启动"), [this, shell_opts](const std::string&) {
-      int idx = st_.term_shell_index;
-      std::string shell =
-          (idx <= 0 || idx >= static_cast<int>(shell_opts.size())) ? "" : shell_opts[idx];
-      start_terminal(shell, st_.term_new_label);
-    }, "primary"));
-    acts.add(comp::button(tr("取消"), [this](const std::string&) {
-      update([&](AppState& s) { s.term_new_open = false; });
-    }, "ghost"));
-    form.add(acts);
-    side.add(form);
-  } else {
-    H add = el("div", "td-tab td-tab-add");
-    add.on(EventKind::kClick, [this](const std::string&) {
-      update([&](AppState& s) { s.term_new_open = true; });
-      // the shell list comes from settings; load it on first use
-      if (st_.shells.empty()) load_shells();
-    });
-    add.add(el("i", "fa fa-plus"));
-    add.add(el("span", "td-tab-name").text(tr("新增")));
-    side.add(add);
-  }
+  // 新增: one click. The shell comes from settings (that is what "a terminal"
+  // means here) and the name is edited on the tab afterwards, so there is
+  // nothing to fill in.
+  H add = el("div", "td-tab td-tab-add");
+  add.on(EventKind::kClick, [this](const std::string&) {
+    start_terminal("", "");
+  });
+  add.add(el("i", "fa fa-plus"));
+  add.add(el("span", "td-tab-name").text(tr("新增")));
+  side.add(add);
   body.add(side);
   drawer.add(body);
   return drawer.get();
@@ -3127,9 +3286,9 @@ void UiApp::remove_kv(const std::string& key_setting, const std::string& k) {
 //   file -> we only have the name; insert it as an attachment reference
 //   url  -> insert the link into the composer
 //   text -> insert the text into the composer
-// Start a terminal running the shell from settings (not a typed command): the
-// user picks the shell + an optional name, and the backend launches an
-// interactive session in the project root.
+//
+// Creating a terminal is one click: it runs the shell from settings, and the
+// name is edited on the tab afterwards (nothing to type up front).
 void UiApp::start_terminal(const std::string& shell, const std::string& label) {
   std::string sid = active_sid();
   if (sid.empty()) {
@@ -3140,6 +3299,12 @@ void UiApp::start_terminal(const std::string& shell, const std::string& label) {
   args["sid"] = sid;
   if (!shell.empty()) args["shell"] = shell;
   if (!label.empty()) args["label"] = label;
+  // ask for a size up front: the shell prints its first prompt for a console of
+  // this width, and ConPTY tells the child about it
+  if (st_.term_cols > 0 && st_.term_rows > 0) {
+    args["cols"] = st_.term_cols;
+    args["rows"] = st_.term_rows;
+  }
   call_async("terminal.spawn", args, [this](const BackendResult& r) {
     if (!r.ok) {
       toast(tr("启动失败") + "：" + r.message);
@@ -3147,27 +3312,113 @@ void UiApp::start_terminal(const std::string& shell, const std::string& label) {
     }
     std::string tid = jsonutil::get<std::string>(r.data, "tid", "");
     update([&](AppState& s) {
-      s.term_new_open = false;
-      s.term_new_label.clear();
       if (!tid.empty()) s.term_tab = tid;  // jump to what we just started
     });
+    term_focus_pending_ = true;  // the new terminal takes the keyboard
     load_terminals(active_sid());
+    if (!tid.empty()) load_terminal_grid(tid);
   });
 }
 
-// Write one line to the selected interactive terminal. The newline is part of
-// the write: the shell needs it to actually run the line.
-void UiApp::write_terminal(const std::string& text) {
-  if (st_.term_tab == "all") return;  // no single stdin in the aggregate view
+// A terminal is driven by keys, not by lines of text: Ctrl+C is a control byte,
+// arrows depend on the program's cursor-key mode, and paste must be bracketed.
+// The term engine owns that encoding (it is terminal knowledge); here we only
+// forward the key press.
+void UiApp::send_terminal_key(const KeyPress& k) {
+  if (st_.term_tab == "all") return;  // the aggregate view has no single stdin
   std::string tid = st_.term_tab;
-  std::string line = text + "\n";
-  update([&](AppState& s) { s.term_input.clear(); });
-  VNodePtr ti = find_by_key(tree_, "term-input");
-  if (ti && ti->dom.valid()) dom_.set_attr(ti->dom, "value", "");
-  call_async("terminal.write", Json{{"tid", tid}, {"text", line}},
+  std::string bytes;
+  if (k.paste) {
+    // a paste is not typing: bracketed paste is how a shell knows to skip
+    // auto-indent and not run the text as commands
+    bool bracketed = false;
+    std::map<std::string, Json>::iterator it = st_.term_grids.find(tid);
+    if (it != st_.term_grids.end()) {
+      bracketed = jsonutil::get<bool>(it->second, "bracketedPaste", false);
+    }
+    bytes = vt::encode_paste(k.text, bracketed);
+  } else {
+    // arrows switch between SS3 and CSI depending on the mode the program set
+    bool app_keys = false;
+    std::map<std::string, Json>::iterator it = st_.term_grids.find(tid);
+    if (it != st_.term_grids.end()) {
+      app_keys = jsonutil::get<bool>(it->second, "appKeys", false);
+    }
+    st_.term_app_keys = app_keys;
+    bytes = vt::encode_key(k.key, k.ctrl, k.alt, k.shift, app_keys);
+  }
+  if (bytes.empty()) return;
+  // Queue and flush: keystrokes are bytes whose ORDER carries the meaning, and
+  // the transport is async, so writing them in parallel lets a fast typist's
+  // last character overtake the Enter. One write in flight at a time.
+  term_key_queue_ += bytes;
+  flush_terminal_keys();
+}
+
+// Send the queued keystrokes, one request at a time, preserving order. The next
+// chunk goes out only when the previous one has been acknowledged (or failed),
+// so the shell always sees the keys in the order they were pressed.
+void UiApp::flush_terminal_keys() {
+  if (term_key_inflight_) return;
+  if (term_key_queue_.empty()) return;
+  if (st_.term_tab == "all") {
+    term_key_queue_.clear();
+    return;
+  }
+  std::string tid = st_.term_tab;
+  std::string chunk;
+  chunk.swap(term_key_queue_);
+  term_key_inflight_ = true;
+  call_async("terminal.write", Json{{"tid", tid}, {"text", chunk}},
              [this](const BackendResult& r) {
-    if (!r.ok) toast(tr("发送失败") + "：" + r.message);
+    term_key_inflight_ = false;
+    if (!r.ok) {
+      term_key_queue_.clear();  // the terminal is gone; do not keep retrying
+      toast(tr("发送失败") + "：" + r.message);
+      return;
+    }
+    flush_terminal_keys();
   });
+}
+
+// The panel draws the engine's screen grid, not the raw byte stream: escape
+// sequences are already resolved into cells by the time it gets here.
+void UiApp::load_terminal_grid(const std::string& tid) {
+  if (tid.empty()) return;
+  term_grid_inflight_ = true;
+  call_async("terminal.grid", Json{{"tid", tid}},
+             [this, tid](const BackendResult& r) {
+    term_grid_inflight_ = false;
+    if (!r.ok) return;
+    // store it under its own tid: a reply can land after a tab switch, and the
+    // grid belongs to the terminal it was asked for
+    update([&](AppState& s) { s.term_grids[tid] = r.data; });
+  });
+}
+// Report how many character cells fit. The backend resizes the pseudo console,
+// which is what lets a full-screen program lay itself out correctly.
+void UiApp::resize_terminal(int cols, int rows) {
+  if (cols <= 0 || rows <= 0) return;
+  if (cols == st_.term_cols && rows == st_.term_rows) return;
+  st_.term_cols = cols;
+  st_.term_rows = rows;
+  if (st_.term_tab == "all") return;
+  std::string tid = st_.term_tab;
+  call_async("terminal.resize", Json{{"tid", tid}, {"cols", cols}, {"rows", rows}});
+  load_terminal_grid(tid);
+}
+
+// Renaming a terminal only touches its label (the shell keeps running).
+void UiApp::rename_terminal(const std::string& tid, const std::string& label) {
+  if (tid.empty()) return;
+  update([&](AppState& s) {
+    for (size_t i = 0; i < s.terminals.size(); ++i) {
+      if (s.terminals[i].tid == tid) s.terminals[i].label = label;
+    }
+    s.term_renaming.clear();
+    s.term_rename_text.clear();
+  });
+  call_async("terminal.rename", Json{{"tid", tid}, {"label", label}});
 }
 
 void UiApp::handle_drop(const std::string& kind, const std::string& value) {

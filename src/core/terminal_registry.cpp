@@ -117,6 +117,13 @@ FsResult TerminalRegistry::set_encoding(const std::string& tid, const std::strin
   return FsResult::success();
 }
 
+FsResult TerminalRegistry::set_label(const std::string& tid, const std::string& label) {
+  TermEntry* e = find(tid);
+  if (!e) return FsResult::error(ErrCode::kNotFound, "terminal not found: " + tid);
+  e->label = label;
+  return FsResult::success(Json{{"tid", tid}, {"label", label}});
+}
+
 std::vector<TermEntry> TerminalRegistry::list_for_session(const std::string& sid) const {
   std::vector<TermEntry> out;
   for (auto& kv : entries_) {

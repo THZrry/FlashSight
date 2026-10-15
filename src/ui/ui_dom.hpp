@@ -43,9 +43,24 @@ enum class EventKind {
   kScroll = 8,
   kMouseEnter = 9,
   kMouseLeave = 10,
+  kBlur = 11,
 };
 
 const char* event_kind_name(EventKind k);
+
+// A key press with its modifiers. A terminal cannot work from a formatted
+// string: Ctrl+C is not the character 'c', Shift+Tab is not Tab, and paste is
+// not typing. The adapter reports the raw facts and the terminal engine
+// (fs_vt) turns them into the escape sequence the child expects.
+struct KeyPress {
+  std::string key;   // "a" | "Enter" | "ArrowUp" | "F1" | "Escape" | "Tab" ...
+  std::string text;  // paste payload when paste == true
+  bool ctrl = false;
+  bool alt = false;
+  bool shift = false;
+  bool meta = false;
+  bool paste = false;
+};
 
 // Full DOM surface the framework needs. Handlers are passed as integer ids
 // into the framework's own registry (see EventBus in ui_vdom.hpp) so the
@@ -123,6 +138,30 @@ class IDom {
     (void)cb;
   }
 
+  // --- terminal keyboard input (node-scoped, with modifiers) ---
+  // Unlike the generic kKeyDown binding this also prevents the browser's default
+  // action (so Ctrl+W does not close the tab) and reports modifier state, which
+  // is what a terminal needs. Paste arrives through the same callback.
+  virtual void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) {
+    (void)node;
+    (void)cb;
+  }
+
+  // Focus a node so it starts receiving keys (the terminal surface is focusable
+  // but not an <input>: no caret, no browser text editing).
+  virtual void focus(Node node) { (void)node; }
+
+  // --- character-cell size (terminal geometry) ---
+  // How many character cells fit inside `node`? Only the DOM knows its own pixel
+  // size and its font metrics, so the adapter measures and reports; the child
+  // process needs this (a full-screen program lays itself out by it, and a shell
+  // wraps its prompt to it). Reports once immediately and again on every resize.
+  virtual void bind_cell_size(Node node,
+                              std::function<void(int cols, int rows)> cb) {
+    (void)node;
+    (void)cb;
+  }
+
   // --- root container the app renders into ---
   virtual Node root() = 0;
 
@@ -158,6 +197,17 @@ class NullDom : public IDom {
   void bind_drop_zone(Node node,
                       std::function<void(const std::string&, const std::string&)> cb) override;
   void bind_global_key(std::function<void(const std::string&)> cb) override;
+  void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override;
+  void focus(Node node) override;
+  void bind_cell_size(Node node, std::function<void(int, int)> cb) override;
+  // test hook: simulate a key press (with modifiers) on the bound terminal node
+  void fire_key_input_for_test(const KeyPress& k) {
+    if (key_input_cb_) key_input_cb_(k);
+  }
+  // test hook: simulate the adapter measuring the terminal surface
+  void fire_cell_size_for_test(int cols, int rows) {
+    if (cell_size_cb_) cell_size_cb_(cols, rows);
+  }
   // test hook: simulate a drop on the bound zone
   void fire_drop_for_test(const std::string& kind, const std::string& value) {
     if (drop_cb_) drop_cb_(kind, value);
@@ -199,6 +249,8 @@ class NullDom : public IDom {
   std::function<void(int)> split_cb_;
   std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
+  std::function<void(const KeyPress&)> key_input_cb_;
+  std::function<void(int, int)> cell_size_cb_;
 };
 
 }  // namespace ui

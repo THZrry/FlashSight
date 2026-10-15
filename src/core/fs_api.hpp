@@ -99,11 +99,18 @@ class FsApi {
   FsResult terminal_list(const std::string& sid);
   FsResult terminal_show(const std::string& tid);
   // 用户终端：起一个"设置里的那个 shell"的交互式会话（不是让用户自己敲命令）
-  // {sid, shell, label, cwd} -> {tid, status, shell, label}
+  // {sid, shell, label, cwd, cols, rows} -> {tid, status, shell, label, terminal}
   FsResult terminal_spawn(const std::string& sid, const std::string& shell,
-                          const std::string& label, const std::string& cwd);
-  // 把一行输入写进交互式终端的 stdin（UI 直接驱动，不走模型工具层）
+                          const std::string& label, const std::string& cwd,
+                          int cols = 100, int rows = 30);
+  // 把终端要的原始按键字节写进交互式终端（UI 已按 VT 编码，见 fs_vt encode_key）
   FsResult terminal_write(const std::string& tid, const std::string& text);
+  // 交互式终端窗口大小（ConPTY 会通知子进程）
+  FsResult terminal_resize(const std::string& tid, int cols, int rows);
+  // 屏幕网格：UI 画的东西（按样式合并成 run，避免 cols*rows 个节点）
+  FsResult terminal_grid(const std::string& tid);
+  // 改终端名字（终端跑着也能改；不影响进程）
+  FsResult terminal_rename(const std::string& tid, const std::string& label);
   FsResult terminal_kill(const std::string& tid);
   FsResult terminal_set_encoding(const std::string& tid, const std::string& enc);
   // 非阻塞轮询所有终端，把新增输出/退出推成 terminal.output / terminal.exit

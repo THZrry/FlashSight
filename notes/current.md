@@ -445,3 +445,62 @@ The process of project: P0 环境搭建 + P1 AppCore
     起终端、输入“echo 交互输出测试”回车出结果、URL 拖入插链接 + toast、
     文件拖入插 @名字、■ 停止后输入禁用、语言切 English（导航/终端标题变英文）
     再切回中文、/api/events 中文输出正常（“版本/交互输出测试”）。
+
+
+<29>(SOLVED): 反馈第六批 —— 真终端（VT 解析 + ConPTY）、动画框架化、卡片双布局、
+  组件视觉重做 + 5 个真 bug。
+  - 终端不再是文本流，是「屏幕」：新增 src/term/fs_vt（VT/ANSI 解析器 + 单元格
+    网格）。C0/CSI/OSC/DEC 图形字符集/UTF-8（含 CJK 双宽）/备用屏幕/DECCKM/
+    bracketed paste/DSR 回包（shell 问光标位置，不回会卡住）全部支持；连续同样式
+    单元格合并成 run 再交给 UI，一屏通常几十个节点而不是 cols*rows 个。
+    UI 按列定位（left: Nch）画格子 + 光标块，不再 pre 直接贴字节流（以前 
+    会漏到界面上）。18 个单测覆盖解析语义（换行不回车、自动换行、滚动区、
+    插删行列、SGR 256/真彩、备用屏幕、跨 read 拆包、宽字符、DEC 图形）。
+  - 真终端（ConPTY）：新增 src/core/conpty（Windows 伪控制台，Win10 1809+）。
+    管道给不了窗口大小、提示符和全屏程序，用户终端改走 ConPTY：子进程拿到真
+    控制台，我们拿 VT 字节流 + 按键。可用时 terminal=conpty，否则退回管道
+    （输出仍进同一个屏幕模型）。真 bug：**必须设 STARTF_USESTDHANDLES**——
+    否则子进程继承父进程的控制台句柄，输出跑到我们自己的控制台，伪控制台只吐
+    启动序列、shell 立刻退出。这个是逐项对比试出来的（见 temp/conpty_std.cpp）。
+  - 按键是字节，不是文本：IDom 新增 bind_key_input(KeyPress)/focus/bind_cell_size；
+    KeyPress 带修饰键。fs_vt::encode_key 负责终端语义（Ctrl+C=0x03、Shift+Tab=
+    ESC[Z、方向键按 DECCKM 在 SS3/CSI 间切换、Alt=ESC 前缀）；encode_paste 按
+    bracketed paste 包 ESC[200~/201~。终端的 <div> 自己吃键盘并阻止浏览器默认
+    行为（否则 Ctrl+W 关标签页）。
+    真 bug：**按键乱序** —— 写入走异步 HTTP，快速输入时后一个键会超车前一个
+    （实测 "d" 跑到 Enter 后面）。改为客户端队列 + 单飞行（term_key_queue_/
+    term_key_inflight_），上一个写完才发下一个。
+    真 bug：**光标不对齐** —— 光标是行的兄弟节点、用 top: Nem 定位，而行高是
+    1.28em、em 指的是字号、面板还有 padding，必然偏。改为放进它所在的行里。
+  - 终端实时刷新：屏幕在后端（解析器在那儿），pump() 每拍重取可见终端的网格
+    （带单飞行保护）；不再只靠 terminal.output 事件（漏一个事件面板就停更，
+    这正是"只有点进去才刷新"的原因）。运行中的终端才轮询，退出的自动停。
+  - 新建终端一键直创：不再有表单（shell 取设置里的默认 shell，名字在标签上改）。
+    标签上加 ✎ 重命名；**失焦即提交**（新增 kBlur 事件），输入框不会一直吃键。
+  - 终端「所有终端」：不再是拼接的裸文本（以前会显示 ），改成每个终端一张
+    卡片（当前屏幕文本 + 状态），**点击即跳到该终端**（之前只能看不能跳）。
+  - 终端收起不再撑高度：真 bug —— patch 只设新样式、从不清除被删掉的 inline
+    style，收起的抽屉一直保留 open 时写的 height。修复：patch_attrs 对被删除的
+    style 显式置空（框架级，任何组件都受益）。
+  - 动画框架化：新增 anim 注册表（ui_vdom）——动画按「意图」声明
+    （view/enter/list/pop/fade/slide-left/slide-right/drawer），框架映射到 class，
+    未注册的意图不生效（拼错不会产生死 class，测试可查）。补齐 CSS：新增
+    anim-list（列表逐行出现）与 anim-drawer（抽屉展开），并把列表/行类组件
+    （td-all-item/ts-row 等）纳入统一定义，不再靠"谁记得加 class"。
+  - 项目卡片双布局（按卡片自身宽度，容器查询）：宽屏**直接显示会话列表**并
+    可滚动（max-height 300px，没有展开/收起），卡片不再被 18 个会话撑大、
+    左侧也不再空；窄屏才堆叠 + 展开收起。列表改为始终构建（布局交给 CSS），
+    项目列表回来后为每张卡片预取会话。修了一个 CSS 优先级坑：基础折叠规则
+    比 min-width 容器查询更"晚"生效，导致宽屏也折叠——改为把折叠放进
+    max-width 容器查询里。
+  - 组件视觉重做（从组件开始，按用户要求）：调色板/圆角/阴影/字体变量重做
+    （更中性的灰阶 + 单一强调色 + 6px 圆角 + 真实阴影 + Inter/Cascadia Mono）；
+    按钮改扁平填充 + 发丝边框 + 焦点环（去掉渐变和斜面，hover 只变表面不变
+    字重，避免光标下跳动）；输入框/下拉加 hover 态与自绘 chevron；开关从胶囊
+    改成方形轨道（呼应"不要胶囊"）；顶部标签从文件夹页签改成圆角 chip；
+    section-title/field/badge 对齐到新尺度。
+  - 验证：141 用例 843 断言通过（新增 VT 18 例、动画注册表 3 例、样式清除 1 例、
+    终端网格/按键/尺寸/重命名 4 例）。浏览器实测：终端输入 abc 200ms 内自动
+    出现（不点任何地方）、光标与行对齐（cursorInRow=true 且 top 相同）、收起
+    340px→29px 且 inline height 清空、所有终端卡片可点击跳转、重命名失焦即
+    提交、卡片宽屏 339px 可滚动列表无 toggle / 窄屏 665px 折叠且有展开按钮。

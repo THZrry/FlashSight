@@ -7,77 +7,83 @@
  */
 :root {
   /* light (default) */
-  --bg: #f0f0f0;
-  --panel: #fafafa;
+  --bg: #f4f5f7;
+  --panel: #fbfbfc;
   --panel-2: #ffffff;
-  --panel-3: #f5f5f5;
-  --border: #d0d0d0;
-  --border-strong: #adadad;
-  --text: #1b1b1b;
-  --text-dim: #616161;
-  --text-faint: #8a8a8a;
-  --accent: #0a66c2;
-  --accent-hover: #0b5aa8;
-  --accent-soft: #e5f0fa;
+  --panel-3: #f0f1f4;
+  --border: #e2e4e9;
+  --border-strong: #c9cdd6;
+  --text: #16181d;
+  --text-dim: #5c6270;
+  --text-faint: #8b909c;
+  --accent: #2f6fed;
+  --accent-hover: #2559c8;
+  --accent-soft: #e8effd;
   --accent-text: #ffffff;
-  --sel: #cce4f7;
-  --hover: rgba(0, 0, 0, .06);
-  --active: rgba(0, 0, 0, .10);
-  --code-bg: #1e1e1e;
-  --code-text: #d4d4d4;
-  --titlebar: #e4e4e4;
-  --warn-bg: #fff4ce;
-  --warn-text: #6b5400;
-  --ok: #107c10;
-  --err: #c42b1c;
-  --radius: 3px;
-  --font: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  --mono: Consolas, "Courier New", monospace;
-  --pop: 0 4px 14px rgba(0, 0, 0, .18);
+  --sel: #d6e4fb;
+  --hover: rgba(16, 18, 24, .05);
+  --active: rgba(16, 18, 24, .09);
+  --code-bg: #1b1d23;
+  --code-text: #d6d8de;
+  --titlebar: #eceef2;
+  --warn-bg: #fff5d9;
+  --warn-text: #6a5200;
+  --ok: #12874a;
+  --err: #d13b2f;
+  --radius: 6px;
+  --radius-sm: 4px;
+  --shadow-1: 0 1px 2px rgba(16, 18, 24, .06);
+  --shadow-2: 0 4px 14px rgba(16, 18, 24, .10);
+  --font: "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei",
+          system-ui, sans-serif;
+  --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+  --pop: var(--shadow-2);
+  --focus-ring: 0 0 0 3px var(--accent-soft);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1f1f1f;
-    --panel: #262626;
-    --panel-2: #2d2d2d;
-    --panel-3: #232323;
-    --border: #3a3a3a;
-    --border-strong: #4d4d4d;
-    --text: #e6e6e6;
-    --text-dim: #a0a0a0;
-    --text-faint: #7a7a7a;
-    --accent: #4cc2ff;
-    --accent-hover: #6fd0ff;
-    --accent-soft: #1d3a4d;
-    --accent-text: #10222e;
-    --sel: #264f78;
-    --hover: rgba(255, 255, 255, .07);
-    --active: rgba(255, 255, 255, .12);
-    --code-bg: #161616;
-    --code-text: #d4d4d4;
-    --titlebar: #2b2b2b;
-    --warn-bg: #433a1c;
+    --bg: #16181c;
+    --panel: #1c1f24;
+    --panel-2: #22262c;
+    --panel-3: #191c21;
+    --border: #2c3038;
+    --border-strong: #3c424c;
+    --text: #e8eaef;
+    --text-dim: #a2a8b4;
+    --text-faint: #767d8a;
+    --accent: #5b9dff;
+    --accent-hover: #7db1ff;
+    --accent-soft: #1b2c47;
+    --accent-text: #0b1523;
+    --sel: #2a4570;
+    --hover: rgba(255, 255, 255, .06);
+    --active: rgba(255, 255, 255, .11);
+    --code-bg: #121418;
+    --code-text: #d6d8de;
+    --titlebar: #1f2227;
+    --warn-bg: #3d3316;
     --warn-text: #e8d18a;
-    --ok: #6ccb5f;
-    --err: #ff6b5e;
-    --pop: 0 4px 14px rgba(0, 0, 0, .5);
+    --ok: #4ec97e;
+    --err: #ff7368;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-2: 0 4px 16px rgba(0, 0, 0, .5);
+    --pop: var(--shadow-2);
+    --focus-ring: 0 0 0 3px rgba(91, 157, 255, .18);
   }
 }
 
 * { box-sizing: border-box; }
 
 /* ============================ animations ============================
-   Two families, both mount-only (a node animates when the diff CREATES it;
-   plain re-renders reuse the node so nothing replays - that would be noise).
+   Every animation the framework can apply, keyed by INTENT (see the anim
+   registry in ui_vdom.hpp). A part declares what kind of appearance it is and
+   the framework applies the matching class on mount - so coverage is uniform
+   instead of "whoever remembered to add a class".
 
-     1. view switches  : a whole page / tab swapping in   -> anim-view
-     2. component entry: a card, panel or row appearing   -> anim-enter
-   and one micro-fade for text that streams in            -> anim-fade
-
-   Durations: views are the most visible (~.18s), component entry a touch
-   less (~.14s), streamed text barely there (.05s). Easing is ease-out so
-   things settle instead of snapping. prefers-reduced-motion turns it all off.
+   All of them are mount-only: a node animates when the diff CREATES it, and a
+   plain re-render reuses the node so nothing replays (that would be noise).
+   prefers-reduced-motion turns the whole block off.
 */
 @keyframes anim-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes anim-view {
@@ -86,6 +92,10 @@
 }
 @keyframes anim-enter {
   from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes anim-list {
+  from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: none; }
 }
 @keyframes anim-pop {
@@ -100,15 +110,24 @@
   from { opacity: 0; transform: translateX(-12px); }
   to   { opacity: 1; transform: none; }
 }
+@keyframes anim-drawer {
+  from { opacity: .4; transform: translateY(14px); }
+  to   { opacity: 1; transform: none; }
+}
 
 .anim-view  { animation: anim-view .18s cubic-bezier(.22,.61,.36,1); }
 .anim-enter { animation: anim-enter .14s cubic-bezier(.22,.61,.36,1); }
+.anim-list  { animation: anim-list .12s cubic-bezier(.22,.61,.36,1); }
 .anim-pop   { animation: anim-pop .14s cubic-bezier(.22,.61,.36,1); }
 .anim-fade  { animation: anim-fade .05s ease-out; }
 .anim-slide-left  { animation: anim-slide-left .16s ease-out; }
 .anim-slide-right { animation: anim-slide-right .16s ease-out; }
+.anim-drawer { animation: anim-drawer .16s cubic-bezier(.22,.61,.36,1); }
 
-/* --- component entry: things that appear in a list/panel --- */
+/* --- component entry: things that appear in a list/panel ---
+   These carry the intent in the markup (H::anim / add_anim); the selectors here
+   are the ones whose parts are created by the diff rather than declared, so the
+   animation is attached by class instead of by hand at each call site. */
 .msg,                     /* a chat message arriving */
 .proj-card,               /* project cards */
 .proj-session,
@@ -120,7 +139,13 @@
 .term-row,
 .pv-item,
 .pv-tpl,
-.plan-step { animation: anim-enter .14s cubic-bezier(.22,.61,.36,1); }
+.plan-step,
+.td-all-item,
+.ts-row { animation: anim-enter .14s cubic-bezier(.22,.61,.36,1); }
+
+/* a list that grows: its rows stagger slightly instead of snapping in */
+.proj-sessions > .proj-session,
+.td-all > .td-all-item { animation: anim-list .12s cubic-bezier(.22,.61,.36,1); }
 
 /* the side panel slides in from the right when shown / expanded */
 .side-panel { animation: anim-slide-left .16s ease-out; }
@@ -129,11 +154,11 @@
    which is what we want (a blinking caret already signals liveness). */
 
 @media (prefers-reduced-motion: reduce) {
-  .anim-view, .anim-enter, .anim-pop, .anim-fade,
-  .anim-slide-left, .anim-slide-right,
+  .anim-view, .anim-enter, .anim-list, .anim-pop, .anim-fade,
+  .anim-slide-left, .anim-slide-right, .anim-drawer,
   .msg, .proj-card, .proj-session, .file-row, .settings-row,
   .subagent-card, .op-row, .call-row, .term-row, .pv-item, .pv-tpl,
-  .plan-step, .side-panel { animation: none; }
+  .plan-step, .side-panel, .td-all-item, .ts-row { animation: none; }
 }
 
 html, body {
@@ -157,52 +182,53 @@ html, body {
 /* ============================ top tab strip ============================ */
 .tabs {
   display: flex;
-  align-items: stretch;
-  height: 34px;
+  align-items: center;
+  gap: 2px;
+  height: 40px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
-  padding-left: 6px;
+  padding: 0 8px;
   flex: none;
   user-select: none;
 }
 .tabs .tab {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 12px 0 14px;
+  gap: 7px;
+  height: 28px;
+  padding: 0 10px 0 12px;
   border: 1px solid transparent;
-  border-bottom: none;
-  margin-top: 3px;
+  border-radius: var(--radius);
   color: var(--text-dim);
   cursor: pointer;
   white-space: nowrap;
-  border-radius: var(--radius) var(--radius) 0 0;
+  transition: background .12s ease, color .12s ease;
 }
 .tabs .tab:hover { background: var(--hover); color: var(--text); }
+/* Active tab is a filled chip, not a folder tab: a 6px radius and a tinted
+   surface read as "this is the current page" without the GTK tab shape. */
 .tabs .tab.active {
-  background: var(--panel-2);
-  border-color: var(--border);
-  color: var(--text);
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
   font-weight: 600;
-  box-shadow: inset 0 2px 0 var(--accent);
 }
 .tabs .tab .dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent); flex: none;
 }
 .tabs .tab .tab-close {
-  width: 16px; height: 16px; line-height: 14px; text-align: center;
-  border-radius: var(--radius);
+  width: 16px; height: 16px; line-height: 15px; text-align: center;
+  border-radius: var(--radius-sm);
   color: var(--text-faint);
   font-size: 14px;
 }
 .tabs .tab .tab-close:hover { background: var(--active); color: var(--text); }
 .tabs .tab-badge { font-size: 10px; }
 .tabs .tab.add {
-  padding: 0 12px;
+  padding: 0 10px;
   font-size: 16px;
   color: var(--text-dim);
-  margin-top: 3px;
 }
 .tabs .tab.add:hover { background: var(--hover); color: var(--text); }
 .tabs .spacer { flex: 1; }
@@ -321,6 +347,43 @@ html, body {
 .proj-session.dim-none { color: var(--text-faint); cursor: default; }
 .proj-session.dim-none:hover { background: transparent; }
 .ps-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Two layouts, chosen by the card's own width (container query, so it reacts to
+   the panel, not just the window):
+     * wide  : the session list is simply THERE, given a real height and made
+       scrollable, with no expand/collapse at all. A toggle in wide mode just
+       meant "either empty space on the right, or a card stretched to fit the
+       longest list", which is what we are replacing.
+     * narrow: identity on top, session list stacked below and collapsed by
+       default - an 18-session list would otherwise push the card off screen.
+
+   The wide layout is the DEFAULT and the narrow collapse is scoped to a
+   max-width container query, so the collapse can never win over it by
+   specificity (a min-width query plus a base collapse rule did exactly that). */
+.projects { container-type: inline-size; }
+
+.proj-right .proj-sessions {
+  display: flex;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+@container (max-width: 699px) {
+  .proj-right:not(.open) .proj-sessions { display: none; }
+  .proj-right:not(.open) { min-height: 0; }
+  .proj-right.open { min-height: 150px; }
+  /* in the narrow layout the header IS the control, so keep it clickable */
+  .proj-right-head { cursor: pointer; }
+  .proj-right-head:hover { background: var(--hover); color: var(--text); }
+}
+
+@container (min-width: 700px) {
+  /* the list is always shown, so the header is a label, not a control */
+  .proj-right .prh-toggle { display: none; }
+  .proj-right-head { cursor: default; }
+  .proj-right-head:hover { background: transparent; color: var(--text-dim); }
+  .proj-right { min-height: 0; }
+}
 
 /* narrow window: stack the two halves so the session list keeps full width */
 @media (max-width: 900px) {
@@ -783,8 +846,16 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   font-family: var(--mono);
   font-size: 12px;
   display: flex; flex-direction: column; min-height: 0;
+  /* collapsed: exactly the title row (the app only sets an inline height while
+     open, and the framework clears dropped inline styles, so a collapsed bar
+     cannot keep the open height) */
+  height: auto;
+  overflow: hidden;
 }
-.terminal-bar.open { box-shadow: 0 -4px 12px rgba(0,0,0,.18); }
+.terminal-bar.open {
+  box-shadow: 0 -4px 12px rgba(0,0,0,.18);
+  height: auto;   /* overridden by the inline height while open */
+}
 /* top edge: drag to set the drawer height (cursor + a few px of hit area) */
 .td-resize {
   flex: none; height: 5px; margin-bottom: -2px;
@@ -811,24 +882,83 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   flex: 1; min-width: 0; min-height: 0;
   display: flex; flex-direction: column;
 }
+/* the terminal surface: a real cell grid, not a text box.
+   Font must be an exact integer-ish mono size so ch/em math lines up with the
+   engine's columns; the engine measures the same font via a probe span. */
+.term-screen {
+  flex: 1; min-height: 0; min-width: 0;
+  position: relative;
+  overflow: hidden;
+  padding: 6px 8px;
+  background: #14141a;
+  color: #d8d8d8;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.28;
+  cursor: text;
+  outline: none;
+}
+.term-screen:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+.ts-row {
+  position: relative;
+  white-space: pre;
+  height: 1.28em;
+}
+.ts-run { position: absolute; top: 0; white-space: pre; }
+/* the cursor sits inside its row (see build_terminal_drawer): as a sibling of
+   the rows, an `em`-based offset drifts because the row is 1.28em tall while
+   `em` in the offset means the font size */
+.ts-cursor {
+  position: absolute;
+  top: 0; left: 0;
+  width: 1ch; height: 1.28em;
+  background: rgba(255, 255, 255, .55);
+  pointer-events: none;
+  animation: ts-blink 1.05s steps(1) infinite;
+}
+@keyframes ts-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+.ts-empty { color: #6a6a72; padding: 4px 2px; }
+
+/* 所有终端 overview: one card per terminal, each a click target that jumps to
+   that terminal (an overview you cannot navigate from is a dead end). */
+.td-all {
+  flex: 1; min-height: 0; overflow: auto;
+  padding: 6px 8px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.td-all-item {
+  border: 1px solid #2f2f36;
+  border-radius: var(--radius);
+  background: #1a1a1f;
+  cursor: pointer;
+  overflow: hidden;
+}
+.td-all-item:hover { border-color: var(--accent); }
+.td-all-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px;
+  background: #232329;
+  border-bottom: 1px solid #2f2f36;
+  font-size: 12px;
+}
+.td-all-name { color: #d8d8d8; }
+.td-all-out {
+  margin: 0; padding: 6px 8px;
+  max-height: 9.5em; overflow: auto;
+  white-space: pre-wrap;
+  color: #b8b8c0;
+}
+.td-tab-rename { padding: 4px 6px; }
+.td-tab-rename .text-input {
+  width: 100%; background: #101013; color: #d8d8d8;
+  border-color: #333; font-family: var(--mono); font-size: 12px;
+}
 .td-out {
   flex: 1; min-height: 0;
   margin: 0; padding: 8px 10px; overflow: auto;
   white-space: pre-wrap;
   cursor: text;
 }
-.td-input {
-  flex: none;
-  border-top: 1px solid #2b2b30;
-  padding: 5px 8px;
-  display: flex; gap: 6px;
-}
-.td-input .text-input {
-  flex: 1;
-  background: #101013; color: #d8d8d8;
-  border-color: #333; font-family: var(--mono); font-size: 12px;
-}
-.td-input .text-input:focus { border-color: var(--accent); }
 .td-tabs {
   flex: none; width: 190px;
   border-left: 1px solid #333;
@@ -987,68 +1117,99 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .pv-adv-caret { width: 12px; text-align: center; }
 .pv-adv-body { padding: 4px 12px 12px; border-top: 1px solid var(--border); }
 
-/* ============================ controls ============================ */
+/* ============================ controls ============================
+   A desktop control set, not a GTK form. The differences that matter:
+     * flat fills + a hairline border (gradients and bevels read as "1990s")
+     * one accent, used sparingly: focus rings and the primary action
+     * a 6px radius and a real shadow on raised surfaces
+     * hover/active change the SURFACE, never the text weight or size (that
+       makes a button jump under the cursor)
+*/
 .btn {
   font-family: var(--font);
   font-size: 13px;
-  padding: 5px 14px;
+  font-weight: 500;
+  padding: 6px 13px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  background: linear-gradient(var(--panel-2), var(--panel-3));
+  background: var(--panel-2);
   color: var(--text);
   cursor: pointer;
+  box-shadow: var(--shadow-1);
   transition: background .12s ease, border-color .12s ease, box-shadow .12s ease;
 }
-.btn:hover { background: var(--panel-2); border-color: var(--accent); }
-.btn:active { background: var(--active); box-shadow: inset 0 1px 2px rgba(0,0,0,.15); }
+.btn:hover { background: var(--panel-3); border-color: var(--text-faint); }
+.btn:active { background: var(--active); box-shadow: none; }
+.btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-text);
+  box-shadow: none;
 }
 .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn.ghost {
   background: transparent;
   border-color: transparent;
+  box-shadow: none;
   color: var(--text-dim);
 }
 .btn.ghost:hover { background: var(--hover); color: var(--text); border-color: transparent; }
-.btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
-.btn:disabled { opacity: .5; cursor: default; }
+.btn.danger { background: var(--err); border-color: var(--err); color: #fff; box-shadow: none; }
+.btn.danger:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: .45; cursor: default; box-shadow: none; }
 .icon-btn {
   font-family: var(--font);
-  width: 26px; height: 24px;
+  width: 28px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid transparent;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
   font-size: 13px;
+  transition: background .12s ease, color .12s ease;
 }
 .icon-btn:hover { background: var(--hover); color: var(--text); }
+.icon-btn:active { background: var(--active); }
 
 input.text-input, input.search-input, select.select, textarea.text-area {
   font-family: var(--font);
   font-size: 13px;
-  padding: 4px 8px;
+  padding: 6px 9px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--panel-2);
   color: var(--text);
   transition: border-color .12s ease, box-shadow .12s ease;
 }
+input.text-input:hover, select.select:hover, textarea.text-area:hover {
+  border-color: var(--text-faint);
+}
 input.text-input:focus, input.search-input:focus, select.select:focus, textarea.text-area:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: var(--focus-ring);
 }
-label.checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-.toggle-wrap { display: inline-flex; align-items: center; gap: 7px; }
+input.text-input::placeholder, textarea.text-area::placeholder { color: var(--text-faint); }
+/* a native select with a little breathing room and its own chevron */
+select.select {
+  padding-right: 26px;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+                    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.toggle-wrap { display: inline-flex; align-items: center; gap: 8px; }
+/* a switch, not a pill badge: square-ish track, clear on/off states */
 .toggle {
   position: relative;
-  width: 36px; height: 20px;
+  width: 34px; height: 19px;
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: 5px;
   background: var(--panel-3);
   cursor: pointer;
   padding: 0;
@@ -1056,43 +1217,47 @@ label.checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: po
 }
 .toggle .knob {
   position: absolute; top: 2px; left: 2px;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: var(--text-dim);
+  width: 13px; height: 13px;
+  border-radius: 3px;
+  background: var(--text-faint);
   transition: left .15s ease, background .15s ease;
 }
 .toggle.on { background: var(--accent); border-color: var(--accent); }
-.toggle.on .knob { left: 18px; background: #fff; }
+.toggle.on .knob { left: 17px; background: #fff; }
 .toggle-label { font-size: 12.5px; color: var(--text-dim); }
 
 .search-box {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 7px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--panel-2);
-  padding: 0 8px;
+  padding: 0 10px;
+  transition: border-color .12s ease, box-shadow .12s ease;
 }
-.search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.search-box:hover { border-color: var(--text-faint); }
+.search-box:focus-within { border-color: var(--accent); box-shadow: var(--focus-ring); }
 .search-ico { color: var(--text-faint); }
-.search-box .search-input { border: none; background: transparent; flex: 1; padding: 5px 0; }
+.search-box .search-input { border: none; background: transparent; flex: 1; padding: 6px 0; }
 .search-box .search-input:focus { box-shadow: none; }
 
-.field { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.field > label { width: 120px; flex: none; color: var(--text-dim); }
+.field { display: flex; align-items: center; gap: 14px; margin-bottom: 13px; }
+.field > label { width: 130px; flex: none; color: var(--text-dim); }
 .field .ctl { flex: 1; min-width: 0; display: flex; }
 .field .ctl > * { flex: 1; }
 .field .hint { color: var(--text-faint); font-size: 12px; }
 
 .section-title {
-  font-size: 14px; margin: 0 0 14px;
-  padding-bottom: 6px;
+  font-size: 13px; font-weight: 600;
+  margin: 0 0 14px;
+  padding-bottom: 7px;
   border-bottom: 1px solid var(--border);
+  color: var(--text);
 }
 
 .badge {
-  display: inline-block; min-width: 16px; text-align: center; font-size: 11px;
-  padding: 0 5px; border: 1px solid var(--border-strong); border-radius: 8px;
-  background: var(--panel); color: var(--text-dim);
+  display: inline-block; min-width: 18px; text-align: center; font-size: 11px;
+  padding: 0 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--panel-3); color: var(--text-dim);
 }
 .spinner {
   display: inline-block; width: 14px; height: 14px;

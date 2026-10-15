@@ -622,13 +622,24 @@ FsResult FsApi::terminal_show(const std::string& tid) {
   return FsResult::success(j);
 }
 FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
-                               const std::string& label, const std::string& cwd) {
+                               const std::string& label, const std::string& cwd,
+                               int cols, int rows) {
   Json args = Json::object();
   args["sid"] = sid;
   args["interactive"] = true;   // 交互式 shell：没有"要执行的命令"
   args["background"] = true;
   args["label"] = label;
-  if (!shell.empty()) args["shell"] = shell;
+  args["cols"] = cols;
+  args["rows"] = rows;
+  if (!shell.empty()) {
+    args["shell"] = shell;
+  } else {
+    // 没指定就用设置里的默认 shell（用户终端 = "设置里的那个 shell"）
+    Json def = settings_->get_value(kKeyTerminalShell, Json(""));
+    if (def.is_string() && !def.get<std::string>().empty()) {
+      args["shell"] = def.get<std::string>();
+    }
+  }
   std::string work = cwd;
   if (work.empty()) {
     // 默认在项目根起终端（模型与用户看到同一个工作目录）。项目注册表重建后
@@ -657,6 +668,21 @@ FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
 FsResult FsApi::terminal_write(const std::string& tid, const std::string& text) {
   Json out;
   return terminal_mgr_->write(Json{{"tid", tid}, {"text", text}}, &out);
+}
+
+FsResult FsApi::terminal_resize(const std::string& tid, int cols, int rows) {
+  Json out;
+  return terminal_mgr_->resize(Json{{"tid", tid}, {"cols", cols}, {"rows", rows}},
+                               &out);
+}
+
+FsResult FsApi::terminal_grid(const std::string& tid) {
+  Json out;
+  return terminal_mgr_->grid(Json{{"tid", tid}}, &out);
+}
+
+FsResult FsApi::terminal_rename(const std::string& tid, const std::string& label) {
+  return terminals_->set_label(tid, label);
 }
 
 FsResult FsApi::terminal_kill(const std::string& tid) {

@@ -21,6 +21,7 @@ const char* event_kind_name(EventKind k) {
     case EventKind::kScroll: return "scroll";
     case EventKind::kMouseEnter: return "mouseenter";
     case EventKind::kMouseLeave: return "mouseleave";
+    case EventKind::kBlur: return "blur";
   }
   return "?";
 }
@@ -225,6 +226,20 @@ void NullDom::bind_drop_zone(
 void NullDom::bind_global_key(std::function<void(const std::string&)> cb) {
   key_cb_ = cb;
   calls_.push_back(Call{"bind_global_key", 0, ""});
+}
+
+void NullDom::bind_key_input(Node node, std::function<void(const KeyPress&)> cb) {
+  key_input_cb_ = cb;
+  calls_.push_back(Call{"bind_key_input", node.id, ""});
+}
+
+void NullDom::focus(Node node) {
+  calls_.push_back(Call{"focus", node.id, ""});
+}
+
+void NullDom::bind_cell_size(Node node, std::function<void(int, int)> cb) {
+  cell_size_cb_ = cb;
+  calls_.push_back(Call{"bind_cell_size", node.id, ""});
 }
 
 std::string NullDom::dump() const {

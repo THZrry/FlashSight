@@ -110,11 +110,25 @@ UiApi::UiApi(FsApi* api) {
   reg("terminal.show", [api](const Json& a) { return api->terminal_show(s(a, "tid")); });
   // 用户终端：起"设置里的那个 shell"，不需要用户输入命令
   reg("terminal.spawn", [api](const Json& a) {
-    return api->terminal_spawn(s(a, "sid"), s(a, "shell"), s(a, "label"), s(a, "cwd"));
+    return api->terminal_spawn(s(a, "sid"), s(a, "shell"), s(a, "label"),
+                               s(a, "cwd"),
+                               static_cast<int>(i(a, "cols", 100)),
+                               static_cast<int>(i(a, "rows", 30)));
   });
-  // 交互式终端的输入
+  // 交互式终端的按键（UI 已按 VT 编码；含控制字符，不能走普通文本输入）
   reg("terminal.write", [api](const Json& a) {
     return api->terminal_write(s(a, "tid"), s(a, "text"));
+  });
+  // 窗口大小变化（全屏程序据此排版）
+  reg("terminal.resize", [api](const Json& a) {
+    return api->terminal_resize(s(a, "tid"), static_cast<int>(i(a, "cols", 100)),
+                                static_cast<int>(i(a, "rows", 30)));
+  });
+  // 屏幕网格（终端真正画的东西）
+  reg("terminal.grid", [api](const Json& a) { return api->terminal_grid(s(a, "tid")); });
+  // 改名字（终端跑着也能改）
+  reg("terminal.rename", [api](const Json& a) {
+    return api->terminal_rename(s(a, "tid"), s(a, "label"));
   });
   reg("terminal.kill", [api](const Json& a) { return api->terminal_kill(s(a, "tid")); });
   reg("terminal.setEncoding", [api](const Json& a) {

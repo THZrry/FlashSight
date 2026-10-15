@@ -40,7 +40,10 @@ struct ProjectCard {
   std::string path;
   std::string updated;              // "2 分钟前"
   int session_count = 0;
-  bool expanded = false;            // session list loaded?
+  // The session list is always rendered (CSS picks the layout: wide shows it
+  // directly, narrow collapses it behind the header), so it is always loaded.
+  bool sessions_loaded = false;
+  bool expanded = false;            // narrow layout: list revealed?
   std::vector<std::pair<std::string, std::string> > sessions;  // sid, title
 };
 
@@ -131,13 +134,21 @@ struct AppState {
   // tabs never loses what another one printed.
   std::map<std::string, std::string> term_outputs;
   std::string term_tab = "all";  // selected tab: "all" | tid
-  // inline "new terminal" form (opened from the tab strip's "+"). A terminal is
-  // "the shell from settings", not a command the user types: the form picks a
-  // shell from the detected list and an optional name.
-  bool term_new_open = false;
-  int term_shell_index = 0;  // index into `shells` (0 = 自动探测)
-  std::string term_new_label;
-  std::string term_input;    // interactive input line for the selected terminal
+  // The terminal engine's screen grids (tid -> terminal.grid reply). A terminal
+  // is a grid of styled cells, not a text stream, so this - not term_outputs -
+  // is what the panel draws. term_outputs stays for the aggregate overview and
+  // for copy.
+  std::map<std::string, Json> term_grids;
+  // creating a terminal is one click: it uses the shell from settings, and the
+  // name can be edited on the tab afterwards
+  std::string term_renaming;      // tid whose tab is being renamed ("" = none)
+  std::string term_rename_text;
+  // last size reported to the backend (so we only resize on a real change)
+  int term_cols = 0;
+  int term_rows = 0;
+  // DECCKM for the selected terminal (arrows are SS3 vs CSI). Read from its
+  // grid; needed when encoding a key press.
+  bool term_app_keys = false;
 
   // ---- subagents ----
   struct SubagentRow {
@@ -296,10 +307,12 @@ struct SessionView {
   int term_height = 340;
   std::map<std::string, std::string> term_outputs;
   std::string term_tab = "all";
-  bool term_new_open = false;
-  int term_shell_index = 0;
-  std::string term_new_label;
-  std::string term_input;
+  std::map<std::string, Json> term_grids;
+  std::string term_renaming;
+  std::string term_rename_text;
+  int term_cols = 0;
+  int term_rows = 0;
+  bool term_app_keys = false;
 
   std::vector<AppState::SubagentRow> subagents;
 
@@ -374,10 +387,19 @@ class UiApp {
   void handle_drop(const std::string& kind, const std::string& value);
   // handle a dropped folder name: resolve to a path, then open as project
   void handle_dropped_folder(const std::string& name);
-  // start a terminal running the shell from settings (not a typed command)
+  // start a terminal running the shell from settings (not a typed command).
+  // shell "" = whatever settings says; label "" = rename later on the tab.
   void start_terminal(const std::string& shell, const std::string& label);
-  // write one line to the selected interactive terminal
-  void write_terminal(const std::string& text);
+  // send one key press to the selected terminal (VT-encoded by the term engine)
+  void send_terminal_key(const KeyPress& k);
+  // send the queued keystrokes in order (one write in flight at a time)
+  void flush_terminal_keys();
+  // pull the screen grid for one terminal (what the panel draws)
+  void load_terminal_grid(const std::string& tid);
+  // tell the backend how many cells fit (ConPTY forwards it to the child)
+  void resize_terminal(int cols, int rows);
+  // rename a terminal's tab (label is stored in the registry)
+  void rename_terminal(const std::string& tid, const std::string& label);
   void close_tab(const std::string& id);
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);
@@ -420,6 +442,19 @@ class UiApp {
   int render_count_ = 0;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
   bool render_pending_ = false;
+  // ask the next render to focus the terminal surface (only on spawn / tab
+  // switch / click - focusing every render would fight the composer, since
+  // pump() re-renders several times a second)
+  bool term_focus_pending_ = false;
+  // a grid fetch is in flight (pump re-reads the visible terminal's screen; the
+  // guard keeps a slow reply from stacking up requests)
+  bool term_grid_inflight_ = false;
+  // Keys are bytes and their ORDER is the meaning. Writes go over an async
+  // transport, so two keystrokes could otherwise land out of order (a fast
+  // typist's "d" arriving after the Enter). Keystrokes therefore queue here and
+  // exactly one write is in flight at a time.
+  std::string term_key_queue_;
+  bool term_key_inflight_ = false;
   // per-scope UI state: framework KeyedStore keyed by tab id. The flat fields
   // on AppState are the live copy of whichever scope is active.
   KeyedStore<SessionView> views_;

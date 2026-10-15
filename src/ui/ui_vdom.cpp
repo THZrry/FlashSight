@@ -2,6 +2,7 @@
 #include "ui_vdom.hpp"
 
 #include <algorithm>
+#include <string>
 
 namespace fs {
 namespace ui {
@@ -10,6 +11,59 @@ EventBus& bus() {
   static EventBus b;
   return b;
 }
+
+// ---------------- Animation registry ----------------
+// One place that decides what each appearance looks like. Durations live in the
+// CSS (keyframes + the .anim-* rules); this table only fixes the vocabulary, so
+// the app cannot invent an animation the CSS does not implement.
+namespace anim {
+
+const char* const kView = "view";
+const char* const kEnter = "enter";
+const char* const kList = "list";
+const char* const kPop = "pop";
+const char* const kFade = "fade";
+const char* const kSlideLeft = "slide-left";
+const char* const kSlideRight = "slide-right";
+const char* const kDrawer = "drawer";
+
+namespace {
+struct Entry {
+  const char* name;
+  const char* cls;
+};
+const Entry kTable[] = {
+    {kView, "anim-view"},
+    {kEnter, "anim-enter"},
+    {kList, "anim-list"},
+    {kPop, "anim-pop"},
+    {kFade, "anim-fade"},
+    {kSlideLeft, "anim-slide-left"},
+    {kSlideRight, "anim-slide-right"},
+    {kDrawer, "anim-drawer"},
+};
+const int kCount = static_cast<int>(sizeof(kTable) / sizeof(kTable[0]));
+}  // namespace
+
+bool known(const std::string& name) { return !css_class(name).empty(); }
+
+std::string css_class(const std::string& name) {
+  for (int i = 0; i < kCount; ++i) {
+    if (name == kTable[i].name) return kTable[i].cls;
+  }
+  return std::string();
+}
+
+const std::vector<std::string>& all() {
+  static std::vector<std::string> names = [] {
+    std::vector<std::string> v;
+    for (int i = 0; i < kCount; ++i) v.push_back(kTable[i].name);
+    return v;
+  }();
+  return names;
+}
+
+}  // namespace anim
 
 void EventBus::retain(const std::vector<int>& keep) {
   std::vector<int> sorted = keep;
@@ -107,9 +161,22 @@ void patch_attrs(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
     attr_get(*neu, oldv->attrs[i].key, &found);
     if (!found) dom.remove_attr(neu->dom, oldv->attrs[i].key);
   }
-  // styles: re-apply changed only (styles are few; overwrite is fine)
+  // styles: re-apply changed, and CLEAR the ones the new tree no longer sets.
+  // Without the clear, an inline style survives forever: the terminal drawer
+  // sets height while open and, once collapsed, the stale inline height kept it
+  // full-size (a node that stops setting a style must stop having it).
   for (size_t i = 0; i < neu->styles.size(); ++i) {
     dom.set_style(neu->dom, neu->styles[i].key, neu->styles[i].value);
+  }
+  for (size_t i = 0; i < oldv->styles.size(); ++i) {
+    bool still = false;
+    for (size_t j = 0; j < neu->styles.size(); ++j) {
+      if (neu->styles[j].key == oldv->styles[i].key) {
+        still = true;
+        break;
+      }
+    }
+    if (!still) dom.set_style(neu->dom, oldv->styles[i].key, "");
   }
 }
 
