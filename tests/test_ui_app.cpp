@@ -21,6 +21,21 @@ bool dump_has(NullDom& dom, const std::string& needle) {
   return dom.dump().find(needle) != std::string::npos;
 }
 
+// The 所有终端 overview cards only (the terminal STRIP is a sibling and lists
+// every terminal regardless of the filter, so a whole-dump search cannot tell
+// "filtered out of the overview" from "still in the strip").
+std::string dump_overview(NullDom& dom) {
+  const std::string& d = dom.dump();
+  size_t a = d.find("td-all");
+  if (a == std::string::npos) return std::string();
+  size_t b = d.find("td-tabs", a);
+  return d.substr(a, b == std::string::npos ? std::string::npos : b - a);
+}
+
+bool overview_has(NullDom& dom, const std::string& needle) {
+  return dump_overview(dom).find(needle) != std::string::npos;
+}
+
 // seed one project with one session, mirroring a backend project.list reply
 void seed_project(AppState& s) {
   ProjectCard p;
@@ -510,6 +525,10 @@ FS_TEST(uiapp_terminal_close_tab_keeps_process) {
   for (size_t i = 0; i < dom.calls().size(); ++i) {
     EXPECT_TRUE(dom.calls()[i].detail.find("terminal.kill") == std::string::npos);
   }
+  // closing is not a dead end: the strip offers a way back
+  EXPECT_TRUE(find_by_key(app.tree_for_test(), "term-tab:restore") != nullptr);
+  app.restore_closed_terminals();
+  EXPECT_TRUE(app.state().term_hidden.empty());
 }
 
 // The 文件 button uploads (a DOM-adapter binding opens the chooser) instead of
@@ -671,23 +690,23 @@ FS_TEST(uiapp_terminal_filter_modes) {
 
   // name match: the labelled terminal survives, the others are filtered out
   app.update([](AppState& s) { s.term_filter = "构建"; });
-  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
-  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+  EXPECT_TRUE(overview_has(dom, "#3 构建日志"));
+  EXPECT_FALSE(overview_has(dom, "#1 pwsh"));
 
   // fuzzy: a plain pattern is a subsequence match, so a partial name works
   // (this is over the actual characters, not pinyin)
   app.update([](AppState& s) { s.term_filter = "构建日"; });   // 构建日志
-  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
-  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+  EXPECT_TRUE(overview_has(dom, "#3 构建日志"));
+  EXPECT_FALSE(overview_has(dom, "#1 pwsh"));
 
   // regex when the pattern looks like one
   app.update([](AppState& s) { s.term_filter = "构建|pwsh"; });
-  EXPECT_TRUE(dump_has(dom, "#1 pwsh"));
-  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
+  EXPECT_TRUE(overview_has(dom, "#1 pwsh"));
+  EXPECT_TRUE(overview_has(dom, "#3 构建日志"));
 
   // a half-typed regex must not blank the list (it falls back to fuzzy)
   app.update([](AppState& s) { s.term_filter = "构建["; });
-  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
+  EXPECT_TRUE(overview_has(dom, "#3 构建日志"));
 
   // no match at all -> an explicit empty state, not a blank panel
   app.update([](AppState& s) { s.term_filter = "zzzz-no-such"; });
@@ -704,8 +723,8 @@ FS_TEST(uiapp_terminal_filter_modes) {
   // only as a subsequence once the separators are ignored... which they are
   // not, so use a pattern that really is a subsequence of the command.
   app.update([](AppState& s) { s.term_filter = "npmbuild"; });
-  EXPECT_TRUE(dump_has(dom, "#7 pwsh"));
-  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+  EXPECT_TRUE(overview_has(dom, "#7 pwsh"));
+  EXPECT_FALSE(overview_has(dom, "#1 pwsh"));
   // ...and off again it matches nothing
   app.update([](AppState& s) { s.term_filter_input = false; });
   EXPECT_TRUE(dump_has(dom, "无匹配终端"));
@@ -724,8 +743,8 @@ FS_TEST(uiapp_terminal_filter_modes) {
   grid["cols"] = 80;
   grid["rows"] = 1;
   app.update([&](AppState& s) { s.term_grids["5"] = grid; });
-  EXPECT_TRUE(dump_has(dom, "#5 pwsh"));
-  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+  EXPECT_TRUE(overview_has(dom, "#5 pwsh"));
+  EXPECT_FALSE(overview_has(dom, "#1 pwsh"));
 }
 
 // Below the threshold there is no search box (it would be noise).
@@ -765,6 +784,72 @@ FS_TEST(uiapp_terminal_strip_entries_are_keyed) {
   EXPECT_TRUE(find_by_key(tree, "term-tab:1") != nullptr);
   EXPECT_TRUE(find_by_key(tree, "term-tab:2") != nullptr);
   EXPECT_TRUE(find_by_key(tree, "term-tab:add") != nullptr);
+}
+
+// The strip lists EVERY terminal even while a filter is active: the filter is
+// for finding things on the overview page, and hiding a tab (especially one you
+// just created) would make it look like the terminal was never started.
+FS_TEST(uiapp_terminal_strip_unaffected_by_filter) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "pwsh", "构建日志", "running"});
+    s.terminals.push_back(TermItem{"2", "cmd", "dev-server", "running"});
+    s.term_tab = "all";
+    s.term_filter = "构建";   // matches only #1
+  });
+  // the overview cards ARE filtered...
+  EXPECT_TRUE(overview_has(dom, "#1 构建日志"));
+  EXPECT_FALSE(overview_has(dom, "#2 dev-server"));
+  // ...but both tabs are still in the strip
+  const VNodePtr& tree = app.tree_for_test();
+  EXPECT_TRUE(find_by_key(tree, "term-tab:1") != nullptr);
+  EXPECT_TRUE(find_by_key(tree, "term-tab:2") != nullptr);
+}
+
+// A focused control keeps the user's text: the app must not write the stale
+// value back over it (the composer does not re-render per keystroke, so any
+// background re-render would reset the caret mid-typing).
+FS_TEST(uiapp_focused_input_keeps_its_value) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+
+  // find the composer textarea in the tree
+  VNodePtr ta = find_by_key(app.tree_for_test(), "session-input");
+  ASSERT_TRUE(ta != nullptr);
+  ASSERT_TRUE(ta->dom.valid());
+  dom.set_focused_for_test(ta->dom);
+  dom.clear_calls();
+
+  // a re-render happens (e.g. the terminal tick); the app's state still holds
+  // the old text because typing deliberately does not re-render
+  app.render();
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    const NullDom::Call& c = dom.calls()[i];
+    if (c.method == "set_attr" && c.node == ta->dom.id &&
+        c.detail.find("value=") == 0) {
+      EXPECT_TRUE(false);  // the stale value was written over the user's text
+    }
+  }
+  // and with focus elsewhere the write is allowed again (a programmatic clear)
+  dom.set_focused_for_test(Node{0});
+  app.update([](AppState& s) { s.session_input = "from-app"; });
+  bool wrote = false;
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    const NullDom::Call& c = dom.calls()[i];
+    if (c.method == "set_attr" && c.node == ta->dom.id &&
+        c.detail == "value=from-app") {
+      wrote = true;
+    }
+  }
+  EXPECT_TRUE(wrote);
 }
 
 FS_TEST(uiapp_settings_page) {

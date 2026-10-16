@@ -147,8 +147,14 @@ Node create_node(IDom& dom, const VNodePtr& v) {
 }
 
 void patch_attrs(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
+  // A focused control's value is the user's, not ours. The composer deliberately
+  // does not re-render per keystroke (that would fight the caret), so a
+  // background re-render would otherwise write the stale value back and reset
+  // the caret mid-typing. Skip `value` while the node has focus.
+  const bool focused = dom.is_focused(neu->dom);
   // set new / changed
   for (size_t i = 0; i < neu->attrs.size(); ++i) {
+    if (focused && neu->attrs[i].key == "value") continue;
     bool found = false;
     const std::string& old_val = attr_get(*oldv, neu->attrs[i].key, &found);
     if (!found || old_val != neu->attrs[i].value) {
@@ -157,6 +163,7 @@ void patch_attrs(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
   }
   // remove dropped
   for (size_t i = 0; i < oldv->attrs.size(); ++i) {
+    if (focused && oldv->attrs[i].key == "value") continue;
     bool found = false;
     attr_get(*neu, oldv->attrs[i].key, &found);
     if (!found) dom.remove_attr(neu->dom, oldv->attrs[i].key);

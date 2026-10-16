@@ -85,6 +85,14 @@ class IDom {
   virtual void set_visible(Node node, bool visible) = 0;
   // read back a form control's value (used to skip redundant writes)
   virtual std::string get_value(Node node) = 0;
+  // Is this node the focused element? A focused control's value belongs to the
+  // USER - the app must not write over it (the composer deliberately does not
+  // re-render per keystroke, so a background re-render would otherwise restore
+  // the stale value and reset the caret mid-typing).
+  virtual bool is_focused(Node node) {
+    (void)node;
+    return false;
+  }
 
   // --- events ---
   // on() binds the handler for (node, kind), replacing any previous binding
@@ -212,6 +220,7 @@ class NullDom : public IDom {
   void set_style(Node node, const std::string& key, const std::string& value) override;
   void set_visible(Node node, bool visible) override;
   std::string get_value(Node node) override;
+  bool is_focused(Node node) override;
   void on(Node node, EventKind kind, int handler_id) override;
   void off(Node node, EventKind kind) override;
   void bind_splitter(Node splitter, Node side,
@@ -263,6 +272,9 @@ class NullDom : public IDom {
   Node root() override { return Node{1}; }
   const char* backend_name() const override { return "null"; }
 
+  // test hook: simulate the user focusing a node (see is_focused)
+  void set_focused_for_test(Node n) { focused_for_test_ = n.id; }
+
   // ---- inspection (tests) ----
   struct Call {
     std::string method;
@@ -289,6 +301,8 @@ class NullDom : public IDom {
   std::function<void(int, int)> cell_size_cb_;
   std::function<void(const std::string&)> file_pick_cb_;
   std::function<void(bool)> scroll_pin_cb_;
+  // test hook: the node the app treats as focused
+  uint64_t focused_for_test_ = 0;
 };
 
 }  // namespace ui

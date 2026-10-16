@@ -2118,10 +2118,12 @@ VNodePtr UiApp::build_terminal_drawer() {
   all_tab.add(el("i", "fa fa-terminal"));
   all_tab.add(el("span", "td-tab-name").text(tr("所有终端")));
   side.add(all_tab);
-  // (the search box lives on the 所有终端 page itself, where the cards are)
-  std::vector<const TermItem*> shown = filtered_terminals();
-  for (size_t i = 0; i < shown.size(); ++i) {
-    const TermItem& t = *shown[i];
+  // The strip always lists EVERY terminal. The filter belongs to the overview
+  // page (that is where you search); applying it here would hide the tab of a
+  // terminal you just created whose name does not match the pattern - the tab
+  // would simply be missing.
+  for (size_t i = 0; i < st_.terminals.size(); ++i) {
+    const TermItem& t = st_.terminals[i];
     std::string tid = t.tid;
     if (st_.term_renaming == tid) {
       // renaming in place: the terminal keeps running, only the label changes.
@@ -2188,6 +2190,20 @@ VNodePtr UiApp::build_terminal_drawer() {
   add.add(el("i", "fa fa-plus"));
   add.add(el("span", "td-tab-name").text(tr("新增")));
   side.add(add);
+
+  // A closed tab is only hidden (the process keeps running), so there must be a
+  // way back - otherwise closing a terminal would be a dead end.
+  if (!st_.term_hidden.empty()) {
+    H back = el("div", "td-tab td-tab-restore");
+    back.key("term-tab:restore");
+    back.on(EventKind::kClick, [this](const std::string&) {
+      restore_closed_terminals();
+    });
+    back.add(el("i", "fa fa-rotate-left"));
+    back.add(el("span", "td-tab-name").text(
+        tr("已关闭") + " (" + itos(static_cast<int>(st_.term_hidden.size())) + ")"));
+    side.add(back);
+  }
   body.add(side);
   drawer.add(body);
   return drawer.get();
@@ -3562,6 +3578,10 @@ void UiApp::start_terminal(const std::string& shell, const std::string& label) {
     std::string tid = jsonutil::get<std::string>(r.data, "tid", "");
     update([&](AppState& s) {
       if (!tid.empty()) s.term_tab = tid;  // jump to what we just started
+      // You just asked for a terminal, so you must be able to see it: a filter
+      // left over from an earlier search would otherwise hide its card on the
+      // overview page.
+      s.term_filter.clear();
     });
     term_focus_pending_ = true;  // the new terminal takes the keyboard
     load_terminals(active_sid());
@@ -3843,6 +3863,14 @@ void UiApp::close_terminal_tab(const std::string& tid) {
       s.term_rename_text.clear();
     }
   });
+}
+
+// Bring back every closed tab. Closing only hides a terminal (the process keeps
+// running), so without this a closed terminal would be unreachable - the tab is
+// the only way to see it.
+void UiApp::restore_closed_terminals() {
+  update([&](AppState& s) { s.term_hidden.clear(); });
+  load_terminals(active_sid());
 }
 
 void UiApp::handle_dropped_folder(const std::string& name) {  if (name.empty()) return;

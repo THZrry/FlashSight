@@ -434,6 +434,9 @@ class UiApp {
   // running (the model may still be using it) and it reappears if it prints
   // again. Only 停止 ends the process.
   void close_terminal_tab(const std::string& tid);
+  // Bring back every tab the user closed (they are only hidden, so this is how
+  // a closed terminal is found again - otherwise closing would be a dead end).
+  void restore_closed_terminals();
   void close_tab(const std::string& id);
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);

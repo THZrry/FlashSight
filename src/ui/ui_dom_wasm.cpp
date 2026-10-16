@@ -688,6 +688,13 @@ class WasmDom : public IDom {
     return v.as<std::string>();
   }
 
+  bool is_focused(Node node) override {
+    val n = at(node);
+    if (n.isNull() || n.isUndefined()) return false;
+    val active = val::global("document")["activeElement"];
+    return !active.isNull() && !active.isUndefined() && active == n;
+  }
+
   void on(Node node, EventKind kind, int handler_id) override {
     fs_dom_bind(static_cast<int>(node.id), static_cast<int>(kind), handler_id);
   }

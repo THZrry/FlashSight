@@ -194,6 +194,8 @@ std::string NullDom::get_value(Node node) {
   return "";
 }
 
+bool NullDom::is_focused(Node node) { return node.id == focused_for_test_; }
+
 void NullDom::on(Node node, EventKind kind, int handler_id) {
   calls_.push_back(Call{"on", node.id,
                         std::string(event_kind_name(kind)) + "#" +
