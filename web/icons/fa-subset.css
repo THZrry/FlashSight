@@ -30,8 +30,11 @@
 .fa-arrow-up:before{content:"\f062"}
 .fa-arrow-left:before{content:"\f060"}
 .fa-play:before{content:"\f04b"}
+.fa-pause:before{content:"\f04c"}
 .fa-stop:before{content:"\f04d"}
 .fa-rotate:before{content:"\f2f1"}
+.fa-rotate-left:before{content:"\f2ea"}
+.fa-paper-plane:before{content:"\f1d8"}
 .fa-copy:before{content:"\f0c5"}
 .fa-check:before{content:"\f00c"}
 .fa-triangle-exclamation:before{content:"\f071"}

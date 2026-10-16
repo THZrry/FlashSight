@@ -26,11 +26,22 @@ WANTED = [
     'paperclip', 'folder-open', 'folder', 'terminal', 'robot', 'diagram-project',
     'code-branch', 'gear', 'sliders', 'magnifying-glass', 'xmark', 'plus',
     'minus', 'chevron-right', 'chevron-down', 'chevron-left', 'arrow-up',
-    'arrow-left', 'play', 'stop', 'rotate', 'copy', 'check', 'triangle-exclamation',
+    'arrow-left', 'play', 'pause', 'stop', 'rotate', 'rotate-left', 'paper-plane',
+    'copy', 'check', 'triangle-exclamation',
     'circle-info', 'trash', 'pen', 'floppy-disk', 'bolt', 'clock', 'list-check',
     'comments', 'file-lines', 'bars', 'ellipsis', 'circle-notch', 'spinner',
     'right-from-bracket', 'plug', 'server', 'wand-magic-sparkles', 'shield-halved',
 ]
+
+# Codepoints for icons we need whose upstream rule may be missing or an alias
+# that the selector parse does not recognise. Keeping them here means the subset
+# stays reproducible without the upstream CSS file (the shipped WOFF2 is the
+# complete solid font, so any of its glyphs can be referenced).
+FALLBACK = {
+    'pause': '\\f04c',
+    'rotate-left': '\\f2ea',
+    'paper-plane': '\\f1d8',
+}
 
 OUT_CSS = os.path.join('web', 'icons', 'fa-subset.css')
 
@@ -53,6 +64,10 @@ def main():
             mm = re.match(r'^\.fa-([a-z0-9-]+):before$', sel)
             if mm and mm.group(1) in WANTED and mm.group(1) not in found:
                 found[mm.group(1)] = m.group(1)
+
+    for name, cp in FALLBACK.items():
+        if name in WANTED and name not in found:
+            found[name] = cp
 
     missing = [w for w in WANTED if w not in found]
     if missing:

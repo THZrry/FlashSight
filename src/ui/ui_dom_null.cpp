@@ -258,6 +258,20 @@ void NullDom::scroll_to_bottom(Node node) {
   calls_.push_back(Call{"scroll_to_bottom", node.id, ""});
 }
 
+void NullDom::play_animation(Node node, const std::string& cls) {
+  if (cls.empty()) return;
+  played_anims_.push_back(cls);
+  calls_.push_back(Call{"play_animation", node.id, cls});
+}
+
+void NullDom::set_appearance(const Appearance& a) {
+  appearance_ = a;
+  calls_.push_back(Call{"set_appearance", 0,
+                        "palette=" + a.palette + " mode=" + a.mode +
+                            " font=" + a.font + " mono=" + a.mono +
+                            " size=" + std::to_string(a.font_size)});
+}
+
 std::string NullDom::dump() const {
   std::ostringstream os;
   impl_->dump_rec(os, 1, 0);

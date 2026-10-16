@@ -859,6 +859,74 @@ FS_TEST(uiapp_focused_input_keeps_its_value) {
   EXPECT_TRUE(wrote);
 }
 
+// Appearance settings reach the DOM adapter, which owns the CSS variables:
+// palette, mode, fonts and size. Without this the settings would persist but
+// never actually re-theme anything.
+FS_TEST(uiapp_appearance_applies_to_dom) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  // a fresh app pushes the defaults (so a page that never set anything still
+  // gets a defined mode instead of relying on the CSS media query)
+  EXPECT_EQ(dom.appearance_for_test().mode, std::string("auto"));
+  EXPECT_EQ(dom.appearance_for_test().palette, std::string("default"));
+
+  app.update([](AppState& s) { s.settings_nav = "appearance"; });
+  app.set_setting("ui.theme", "forest");
+  app.set_setting("ui.mode", "dark");
+  app.set_setting("ui.font.size", 16);
+  app.set_setting("ui.font.family", "Fira Sans");
+  EXPECT_EQ(dom.appearance_for_test().palette, std::string("forest"));
+  EXPECT_EQ(dom.appearance_for_test().mode, std::string("dark"));
+  EXPECT_EQ(dom.appearance_for_test().font_size, 16);
+  EXPECT_EQ(dom.appearance_for_test().font, std::string("Fira Sans"));
+  // the legacy meaning of ui.theme (a mode) is still accepted
+  app.set_setting("ui.theme", "light");
+  EXPECT_EQ(dom.appearance_for_test().mode, std::string("light"));
+  EXPECT_EQ(dom.appearance_for_test().palette, std::string("default"));
+}
+
+// Switching a settings section replays its entry animation. The body node
+// survives the patch, so without the replay token the animation only ever ran
+// on the first section you opened.
+FS_TEST(uiapp_settings_sections_animate) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  dom.clear_calls();
+  app.update([](AppState& s) { s.settings_nav = "appearance"; });
+  app.update([](AppState& s) { s.settings_nav = "network"; });
+  app.update([](AppState& s) { s.settings_nav = "about"; });
+  int replays = 0;
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    if (dom.calls()[i].method == "play_animation") ++replays;
+  }
+  EXPECT_TRUE(replays >= 3);  // one per section switch
+}
+
+// A page whose content arrives late animates when the content lands, not only
+// when the empty page was created (which is how an animation could look like it
+// never ran).
+FS_TEST(uiapp_page_animation_replays_after_load) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  dom.clear_calls();
+  // history arrives
+  app.update([](AppState& s) { s.session_loaded = true; });
+  int replays = 0;
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    if (dom.calls()[i].method == "play_animation") ++replays;
+  }
+  EXPECT_TRUE(replays >= 1);
+}
+
 FS_TEST(uiapp_settings_page) {
   NullDom dom;
   AppState st = AppState::make();
@@ -891,10 +959,10 @@ FS_TEST(uiapp_settings_page) {
                             "subagents", "skills", "memory", "network", "terminal",
                             "files", "environment", "browser", "computer",
                             "shortcuts", "about"};
-  const char* sec_text[] = {"思考语言", "主题", "Endpoint", "会话默认",
+  const char* sec_text[] = {"保留轮数", "主题", "Endpoint", "会话默认",
                             "并行上限", "外部工具包", "长期记忆", "网络总开关", "默认 shell",
                             "自动 git init", "CLI 工具路径", "浏览器控制", "电脑控制",
-                            "发送消息", "C++ VNode 框架"};
+                            "发送消息", "版本"};
   for (size_t i = 0; i < sizeof(sec_keys) / sizeof(sec_keys[0]); ++i) {
     std::string key = sec_keys[i];
     app.update([&](AppState& s) { s.settings_nav = key; });

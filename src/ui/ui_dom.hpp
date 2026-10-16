@@ -194,6 +194,32 @@ class IDom {
     (void)cb;
   }
 
+  // --- animation (re)start ---
+  // Mount-only animations are applied by the CSS class, but a node that already
+  // exists gets PATCHED, not created - so an animation declared on a stable-keyed
+  // node (a drawer opening, a panel appearing) never fires. This restarts it on
+  // the live node: drop the class, force a style flush, add it back.
+  virtual void play_animation(Node node, const std::string& cls) {
+    (void)node;
+    (void)cls;
+  }
+
+  // --- appearance (palette / mode / fonts) ---
+  // Applied to the document root, because these are the variables the whole
+  // stylesheet is built from. `mode` is "auto" | "light" | "dark"; the adapter
+  // resolves "auto" against the OS preference and writes the RESOLVED value, so
+  // the CSS only needs two blocks instead of a media query plus overrides.
+  // Empty strings mean "leave that part alone".
+  struct Appearance {
+    std::string palette;     // palette name ("default", "slate", ...)
+    std::string mode;        // "auto" | "light" | "dark"
+    std::string font;        // UI font family ("" = built-in stack)
+    std::string mono;        // monospace family ("" = built-in stack)
+    int font_size = 0;       // px (0 = built-in size)
+    bool code_highlight = true;
+  };
+  virtual void set_appearance(const Appearance& a) { (void)a; }
+
   // --- root container the app renders into ---
   virtual Node root() = 0;
 
@@ -237,6 +263,12 @@ class NullDom : public IDom {
                         std::function<void(const std::string&)> cb) override;
   void bind_scroll_pin(Node node, std::function<void(bool)> cb) override;
   void scroll_to_bottom(Node node) override;
+  void play_animation(Node node, const std::string& cls) override;
+  void set_appearance(const Appearance& a) override;
+  // test hook: the last appearance the app applied
+  const Appearance& appearance_for_test() const { return appearance_; }
+  // test hook: animations the framework asked to (re)play
+  const std::vector<std::string>& played_animations() const { return played_anims_; }
   // test hook: simulate the user scrolling the pinned node
   void fire_scroll_pin_for_test(bool at_bottom) {
     if (scroll_pin_cb_) scroll_pin_cb_(at_bottom);
@@ -301,6 +333,8 @@ class NullDom : public IDom {
   std::function<void(int, int)> cell_size_cb_;
   std::function<void(const std::string&)> file_pick_cb_;
   std::function<void(bool)> scroll_pin_cb_;
+  std::vector<std::string> played_anims_;
+  Appearance appearance_;
   // test hook: the node the app treats as focused
   uint64_t focused_for_test_ = 0;
 };

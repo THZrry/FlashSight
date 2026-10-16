@@ -94,6 +94,11 @@ struct AppState {
   // ---- session (active one) ----
   std::string session_input;
   std::vector<comp::ChatMsg> messages;
+  // the active session's history has been fetched. Used as the page animation's
+  // replay token: the page animates when it is created, and again when the
+  // history actually arrives - otherwise a slow load plays the animation over
+  // an empty page and it is gone before there is anything to see.
+  bool session_loaded = false;
   std::string model = "gpt-4o-mini";
   int model_index = 0;
   std::string permission = "permissive";
@@ -181,7 +186,16 @@ struct AppState {
   };
   std::vector<SubagentRow> subagents;
 
-  // ---- settings ----
+  // ---- settings / 外观 ----
+  // Read from the settings store (ui.theme / ui.font / ui.codeHighlight) and
+  // pushed to the DOM adapter, which owns the CSS variables.
+  std::string ui_theme = "default";   // palette name
+  std::string ui_mode = "auto";       // "auto" | "light" | "dark"
+  std::string ui_font;                // ui.font.family ("" = built-in stack)
+  std::string ui_mono;                // ui.font.monoFamily
+  int ui_font_size = 0;               // ui.font.size (0 = built-in size)
+
+  // ---- settings / 通用 ----
   std::string settings_nav = "general";  // section key; nav and body always agree
   std::string thinking_lang = "auto";
   std::string ui_lang = "auto";          // "auto|zh|en"; drives i18n in-process
@@ -293,6 +307,7 @@ struct AppState {
 struct SessionView {
   bool loaded = false;  // history/panels fetched from the backend yet?
   std::vector<comp::ChatMsg> messages;
+  bool session_loaded = false;
   std::string session_input;
   std::string model = "gpt-4o-mini";
   int model_index = 0;
@@ -399,6 +414,9 @@ class UiApp {
   void set_setting(const std::string& key, const Json& value);
   // Parse a settings value map ({key:{value,...}}) into local caches.
   void apply_settings(const Json& values);
+  // Push the appearance settings to the DOM adapter (palette/mode/fonts). Called
+  // after apply_settings and whenever one of them changes.
+  void apply_appearance();
 
   // actions (public: also callable from tests and future menu bindings)
   void toast(const std::string& text);

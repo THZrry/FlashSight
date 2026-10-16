@@ -103,7 +103,10 @@ SettingValue SettingsStore::get(const std::string& key) const {
   else if (key == kKeyTerminalEncoding) sv.value = ""; // 空=系统默认
   else if (key == kKeyUiLang) sv.value = "auto";
   else if (key == kKeyUiTheme) sv.value = "default";
+  else if (key == kKeyUiMode) sv.value = "auto";
   else if (key == kKeyUiCodeHighlight) sv.value = true;
+  else if (key == kKeyUiTabs) sv.value = "top";
+  else if (key == kKeyUiTabTooltip) sv.value = true;
   else if (key == kKeyBrowserEnabled) sv.value = false;
   else if (key == kKeyComputerEnabled) sv.value = false;
   else if (key == kKeyComputerScreenshot) sv.value = true;

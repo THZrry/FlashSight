@@ -1,12 +1,38 @@
 /* FlashSight UI - desktop-native style (NOT Material Design).
- * Light/dark via prefers-color-scheme. Square corners, 1px borders,
- * standard desktop controls with subtle background transitions.
+ *
+ * Theming is variable-driven, and the app sets the variables on <html> (see
+ * IDom::set_appearance / fs_dom_appearance):
+ *   * `data-mode` picks light or dark for the CURRENT palette. The app resolves
+ *     "auto" against the OS preference before writing it, so the CSS needs no
+ *     theme media query - only the unset default below does (a page that has
+ *     never been told, e.g. before the app mounts).
+ *   * `palette-<name>` overrides the accent/hue variables of a palette; the
+ *     greys come from the mode, so every palette has a light and a dark face.
+ *   * `--font-user` / `--mono-user` / `--font-size-user` carry the user's font
+ *     choices (empty = the built-in stack).
  *
  * Layout: single top tab strip (closable tabs + "+"), home with centered
  * title buttons, project cards, article-style chat, free side-panel tabs.
  */
 :root {
-  /* light (default) */
+  /* ---- built-in stacks (the user setting layers on top of these) ---- */
+  --font-base: "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei",
+               system-ui, sans-serif;
+  --mono-base: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New",
+               monospace;
+  --font: var(--font-user, var(--font-base));
+  --mono: var(--mono-user, var(--mono-base));
+  --font-size-base: 13.5px;
+  --font-size: var(--font-size-user, var(--font-size-base));
+
+  --radius: 6px;
+  --radius-sm: 4px;
+  --pop: var(--shadow-2);
+}
+
+/* ---- default palette: neutral greys + a single blue accent ---- */
+:root,
+:root[data-mode="light"] {
   --bg: #f4f5f7;
   --panel: #fbfbfc;
   --panel-2: #ffffff;
@@ -30,48 +56,68 @@
   --warn-text: #6a5200;
   --ok: #12874a;
   --err: #d13b2f;
-  --radius: 6px;
-  --radius-sm: 4px;
   --shadow-1: 0 1px 2px rgba(16, 18, 24, .06);
   --shadow-2: 0 4px 14px rgba(16, 18, 24, .10);
-  --font: "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei",
-          system-ui, sans-serif;
-  --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
-  --pop: var(--shadow-2);
   --focus-ring: 0 0 0 3px var(--accent-soft);
 }
 
+:root[data-mode="dark"] {
+  --bg: #16181c;
+  --panel: #1c1f24;
+  --panel-2: #22262c;
+  --panel-3: #191c21;
+  --border: #2c3038;
+  --border-strong: #3c424c;
+  --text: #e8eaef;
+  --text-dim: #a2a8b4;
+  --text-faint: #767d8a;
+  --accent: #5b9dff;
+  --accent-hover: #7db1ff;
+  --accent-soft: #1b2c47;
+  --accent-text: #0b1523;
+  --sel: #2a4570;
+  --hover: rgba(255, 255, 255, .06);
+  --active: rgba(255, 255, 255, .11);
+  --code-bg: #121418;
+  --code-text: #d6d8de;
+  --titlebar: #1f2227;
+  --warn-bg: #3d3316;
+  --warn-text: #e8d18a;
+  --ok: #4ec97e;
+  --err: #ff7368;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, .5);
+  --focus-ring: 0 0 0 3px rgba(91, 157, 255, .18);
+}
+
+/* Before the app tells us anything, follow the OS (this is the only theme
+   media query left: once data-mode is set it always wins). */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16181c;
-    --panel: #1c1f24;
-    --panel-2: #22262c;
-    --panel-3: #191c21;
-    --border: #2c3038;
-    --border-strong: #3c424c;
-    --text: #e8eaef;
-    --text-dim: #a2a8b4;
-    --text-faint: #767d8a;
-    --accent: #5b9dff;
-    --accent-hover: #7db1ff;
-    --accent-soft: #1b2c47;
-    --accent-text: #0b1523;
-    --sel: #2a4570;
-    --hover: rgba(255, 255, 255, .06);
-    --active: rgba(255, 255, 255, .11);
-    --code-bg: #121418;
-    --code-text: #d6d8de;
-    --titlebar: #1f2227;
-    --warn-bg: #3d3316;
-    --warn-text: #e8d18a;
-    --ok: #4ec97e;
-    --err: #ff7368;
+  :root:not([data-mode]) {
+    --bg: #16181c; --panel: #1c1f24; --panel-2: #22262c; --panel-3: #191c21;
+    --border: #2c3038; --border-strong: #3c424c;
+    --text: #e8eaef; --text-dim: #a2a8b4; --text-faint: #767d8a;
+    --accent: #5b9dff; --accent-hover: #7db1ff; --accent-soft: #1b2c47;
+    --accent-text: #0b1523; --sel: #2a4570;
+    --hover: rgba(255, 255, 255, .06); --active: rgba(255, 255, 255, .11);
+    --code-bg: #121418; --titlebar: #1f2227;
+    --warn-bg: #3d3316; --warn-text: #e8d18a; --ok: #4ec97e; --err: #ff7368;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
     --shadow-2: 0 4px 16px rgba(0, 0, 0, .5);
-    --pop: var(--shadow-2);
     --focus-ring: 0 0 0 3px rgba(91, 157, 255, .18);
   }
 }
+
+/* ---- palettes: each overrides the HUE variables only, so it composes with
+   whichever mode is active (light/dark greys stay as they are) ---- */
+:root.palette-slate   { --accent: #5b7a99; --accent-hover: #6d8cad; --accent-soft: #e7edf3; --sel: #d3dfe9; }
+:root.palette-forest  { --accent: #2f8f5b; --accent-hover: #26794c; --accent-soft: #e3f2e9; --sel: #cfe8da; }
+:root.palette-plum    { --accent: #8b4a9c; --accent-hover: #774084; --accent-soft: #f2e7f5; --sel: #e4d2ea; }
+:root.palette-amber   { --accent: #b5761b; --accent-hover: #9a6416; --accent-soft: #fbf0dc; --sel: #f0dfc0; }
+:root[data-mode="dark"].palette-slate  { --accent: #8fb0cc; --accent-hover: #a6c3da; --accent-soft: #24313c; --sel: #2b3d4c; --accent-text: #0d151c; }
+:root[data-mode="dark"].palette-forest { --accent: #5cc98a; --accent-hover: #7ad7a1; --accent-soft: #1c3327; --sel: #234434; --accent-text: #08160e; }
+:root[data-mode="dark"].palette-plum   { --accent: #c48fd4; --accent-hover: #d3a5e0; --accent-soft: #2e2133; --sel: #3d2b45; --accent-text: #170d1a; }
+:root[data-mode="dark"].palette-amber  { --accent: #e0a94f; --accent-hover: #eabb6c; --accent-soft: #332a18; --sel: #453823; --accent-text: #1a1206; }
 
 * { box-sizing: border-box; }
 
@@ -165,7 +211,9 @@ html, body {
   margin: 0;
   height: 100%;
   font-family: var(--font);
-  font-size: 13.5px;
+  /* the user's font size setting scales the whole UI (it is the root size that
+     every `rem`-free layout still respects through inherited font-size) */
+  font-size: var(--font-size);
   line-height: 1.55;
   color: var(--text);
   background: var(--bg);
@@ -789,29 +837,46 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .composer-tools {
   display: flex; align-items: center; gap: 8px;
-  /* Wrapping is safe now that buttons are nowrap+flex:none: a narrow toolbar
-     folds into a second row instead of squeezing labels into vertical text. */
+  /* Wrapping is the last resort: it is allowed so a genuinely tiny composer
+     degrades instead of clipping buttons, but the thresholds below are chosen
+     so the row only wraps when there is really no other option. */
   flex-wrap: wrap;
   row-gap: 6px;
+  /* a fixed row height: switching a button between labelled and icon-only must
+     not change the composer's height, or every crossing of the threshold
+     reflows the history above it (that is the twitch while dragging) */
+  min-height: 28px;
 }
-.composer-tools .btn { white-space: nowrap; flex: none; }
+.composer-tools .btn { white-space: nowrap; flex: none; height: 28px; }
 /* selects shrink before anything wraps, so the row stays on one line longer */
-.composer-tools .select { min-width: 0; max-width: 130px; }
+.composer-tools .select { min-width: 0; max-width: 130px; height: 28px; }
 .composer-hint { color: var(--text-faint); font-size: 11.5px; }
 
 /* icon + label buttons (comp::icon_text_button). The label collapses to
    icon-only based on the COMPOSER's own width (container query), not the
    viewport - the toolbar can be narrow even in a wide window when the side
-   panel is open. Threshold ~= the width the labelled row needs. */
+   panel is open. */
 .composer { container-type: inline-size; }
 .it-btn { display: inline-flex; align-items: center; gap: 6px; }
 .it-btn .fa { font-size: 13px; line-height: 1; }
 .it-label { white-space: nowrap; }
-@container (max-width: 700px) {
+
+/* Some buttons read better as a WORD when there is room and as an icon when
+   there is not (发送/挂起 are the obvious ones: an icon alone is ambiguous, a
+   label alone is wide). So the icon is hidden while the label fits. */
+.composer-tools .btn.text-wide .fa { display: none; }
+
+/* The threshold is the width the LABELLED row actually needs, not a guess: 5
+   icon+label buttons + 2 selects + 2 more buttons + gaps is ~940px. A lower
+   value left a band where the row was supposed to be labelled but did not fit,
+   so it wrapped - which is exactly the boundary glitch. Below it everything is
+   icon-only, which fits from ~420px, so the two modes never overlap. */
+@container (max-width: 940px) {
   .composer-tools { gap: 6px; row-gap: 6px; }
   .it-btn { padding-left: 7px; padding-right: 7px; }
   .it-btn .it-label { display: none; }
   .it-btn .fa { font-size: 14px; }
+  .composer-tools .btn.text-wide .fa { display: inline-block; }
   /* let the model/permission selects give up width first, so the row still
      fits on one line instead of wrapping */
   .composer-tools .select { max-width: 88px; }
@@ -1105,13 +1170,13 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .snav-item {
   display: flex; align-items: center;
   padding: 6px 12px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  color: var(--text);
-  transition: background .1s ease;
+  color: var(--text-dim);
+  transition: background .1s ease, color .1s ease;
 }
-.snav-item:hover { background: var(--hover); }
-.snav-item.active { background: var(--sel); font-weight: 600; }
+.snav-item:hover { background: var(--hover); color: var(--text); }
+.snav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .settings-body { flex: 1; padding: 20px 26px; overflow: auto; max-width: 860px; }
 .settings-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .settings-row {
@@ -1122,6 +1187,50 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .sr-name { width: 130px; font-family: var(--mono); }
 .provider-list { margin-bottom: 16px; }
 .hint { color: var(--text-faint); font-size: 12px; line-height: 1.5; }
+
+/* ---- 外观：调色板选择 + 字号步进 ---- */
+.palette-row {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-bottom: 18px;
+}
+.palette-swatch {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  cursor: pointer;
+  font-size: 12.5px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.palette-swatch:hover { border-color: var(--border-strong); }
+.palette-swatch.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  font-weight: 600;
+}
+/* the dot previews the palette's accent, independent of the active theme */
+.palette-dot {
+  width: 15px; height: 15px; flex: none;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12);
+}
+.palette-preview-default { background: #2f6fed; }
+.palette-preview-slate   { background: #5b7a99; }
+.palette-preview-forest  { background: #2f8f5b; }
+.palette-preview-plum    { background: #8b4a9c; }
+.palette-preview-amber   { background: #b5761b; }
+
+/* a value with -/+ buttons: for settings with a sane range and a natural step */
+.stepper { display: flex; align-items: center; gap: 8px; }
+.stepper-value {
+  min-width: 72px; text-align: center;
+  font-family: var(--mono); font-size: 12.5px;
+}
+.stepper .icon-btn {
+  border-color: var(--border-strong);
+  background: var(--panel-2);
+}
 
 /* ---- 供应商：左列表 + 右详情 ---- */
 .pv-two { display: flex; gap: 18px; align-items: flex-start; }

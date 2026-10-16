@@ -325,6 +325,15 @@ void patch_node(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
   patch_attrs(dom, oldv, neu);
   patch_events(dom, oldv, neu);
   patch_children(dom, oldv, neu);
+  // Replay the declared animation when the token changed. A mount animation
+  // fires on creation, so a node that survives the patch would never animate
+  // again - which is how an animation got "swallowed" (it played while the
+  // panel was still empty and was over by the time the content arrived). A part
+  // bumps the token when its content is actually there.
+  if (neu->anim_key != oldv->anim_key && !neu->anim_key.empty()) {
+    std::string cls = anim::css_class(neu->anim);
+    if (!cls.empty()) dom.play_animation(neu->dom, cls);
+  }
 }
 
 }  // namespace

@@ -175,13 +175,21 @@ EM_JS(void, fs_dom_drop_zone, (int node_id, int cb_id), {
 EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
   var bar = globalThis.__fsNodes[split_node];
   var side = globalThis.__fsNodes[side_node];
-  if (!bar || !side) return;
-  // rebinding just swaps the callback id; listeners install once
+  if (!bar) return;
+  // Rebinding just swaps the callback id (0 = no binding at all).
   bar.__fsSplitCb = cb_id;
+  bar.__fsSplitSide = side || null;
+  // The listeners install once and read the CURRENT id at press time: the
+  // divider node survives the patch, so its old listeners would otherwise keep
+  // dragging a panel that is no longer there (which silently persisted a bogus
+  // width - the collapsed panel came back with the wrong size).
+  bar.style.cursor = cb_id ? 'col-resize' : 'default';
   if (bar.__fsSplitInit) return;
   bar.__fsSplitInit = true;
-  bar.style.cursor = 'col-resize';
   bar.addEventListener('mousedown', function (down) {
+    if (!bar.__fsSplitCb) return;          // not bound (panel collapsed)
+    var side = bar.__fsSplitSide;
+    if (!side) return;
     // a press on the handle is a click, not a drag
     var t = down.target;
     if (t && t.classList && t.classList.contains('splitter-handle')) return;
@@ -210,7 +218,9 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
       document.addEventListener('click', swallow, true);
       setTimeout(function () { document.removeEventListener('click', swallow, true); }, 0);
       var w = parseInt(side.style.width, 10);
-      if (isFinite(w) && Module._fs_ui_split) Module._fs_ui_split(bar.__fsSplitCb, w);
+      if (isFinite(w) && bar.__fsSplitCb && Module._fs_ui_split) {
+        Module._fs_ui_split(bar.__fsSplitCb, w);
+      }
     }
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
@@ -465,6 +475,61 @@ EM_JS(void, fs_dom_scroll_bottom, (int node_id), {
   var el = globalThis.__fsNodes[node_id];
   if (!el) return;
   el.scrollTop = el.scrollHeight;
+});
+
+// Restart a mount-only animation on a node that already exists. The CSS class is
+// already on it (the app declares it every render), so simply leaving it there
+// does nothing: the animation ran once when the node was created. Removing the
+// class, forcing a reflow so the browser drops the animation, then re-adding it
+// replays it. Without the reflow the browser coalesces the two changes and
+// nothing happens.
+EM_JS(void, fs_dom_play_animation, (int node_id, const char* cls), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  var name = UTF8ToString(cls);
+  if (!name) return;
+  el.classList.remove(name);
+  // reading offsetWidth flushes the style change, which is what makes the
+  // re-add count as a NEW animation rather than a no-op
+  void el.offsetWidth;
+  el.classList.add(name);
+});
+
+// Apply the appearance to the document root. The stylesheet is built from CSS
+// variables on :root, so setting them here re-themes the whole UI in one place;
+// "auto" mode is resolved against the OS preference HERE, which is why the CSS
+// needs no media query for the theme (only the default, unset case does).
+//
+// classList, not className string surgery: it is idempotent and cannot produce
+// duplicates. Rebuilding the attribute by splitting and re-joining a string
+// accumulated junk ("t palette-fore t palette-forest ...") because every call
+// appended to whatever was already there.
+EM_JS(void, fs_dom_appearance, (const char* palette, const char* mode,
+                               const char* font, const char* mono,
+                               int font_size, int code_highlight), {
+  var root = document.documentElement;
+  var pal = UTF8ToString(palette);
+  var m = UTF8ToString(mode);
+  var f = UTF8ToString(font);
+  var mo = UTF8ToString(mono);
+  if (m === 'auto' || !m) {
+    m = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        ? 'dark' : 'light';
+  }
+  // a palette is a class; the resolved mode is an attribute so the two compose
+  // (palette = which hues, mode = light/dark of that palette)
+  var stale = [];
+  for (var i = 0; i < root.classList.length; i++) {
+    var c = root.classList[i];
+    if (c.indexOf('palette-') === 0) stale.push(c);
+  }
+  for (var k = 0; k < stale.length; k++) root.classList.remove(stale[k]);
+  if (pal && pal !== 'default') root.classList.add('palette-' + pal);
+  root.setAttribute('data-mode', m);
+  root.style.setProperty('--font-user', f ? ('"' + f + '", var(--font-base)') : '');
+  root.style.setProperty('--mono-user', mo ? ('"' + mo + '", var(--mono-base)') : '');
+  root.style.setProperty('--font-size-user', font_size > 0 ? (font_size + 'px') : '');
+  root.setAttribute('data-code-highlight', code_highlight ? '1' : '0');
 });
 
 EM_JS(int, fs_dom_root, (), {
@@ -776,6 +841,15 @@ class WasmDom : public IDom {
 
   void scroll_to_bottom(Node node) override {
     fs_dom_scroll_bottom(static_cast<int>(node.id));
+  }
+
+  void play_animation(Node node, const std::string& cls) override {
+    fs_dom_play_animation(static_cast<int>(node.id), cls.c_str());
+  }
+
+  void set_appearance(const Appearance& a) override {
+    fs_dom_appearance(a.palette.c_str(), a.mode.c_str(), a.font.c_str(),
+                      a.mono.c_str(), a.font_size, a.code_highlight ? 1 : 0);
   }
 
  private:

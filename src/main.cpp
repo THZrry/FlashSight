@@ -1,6 +1,11 @@
-// FlashSight desktop entry
-// WhaleUI 未就位前的过渡：起本地 HTTP 服务，提供内嵌的 wasm UI + 后端 API。
-// 以后接 WhaleUI 时换成 NativeBackend（进程内直调 FsApi），UI 逻辑不变。
+// FlashSight desktop entry.
+//
+// Two desktop paths, chosen at BUILD time (xmake f --whaleui=y):
+//   * default      : local HTTP server + embedded wasm UI (browser window)
+//   * FS_UI_WHALEUI: WhaleUI native window, UI rendered by the engine itself
+//                    (no browser, no HTTP; NativeBackend calls FsApi in-process)
+// The WhaleUI path is written and wired but NOT compiled in by default - see
+// doc-internal/ui-whaleui.md for what is left before the switch.
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -19,10 +24,21 @@
 #include "common/fs_version.hpp"
 #include "core/fs_api.hpp"
 #include "storage/fs_store.hpp"
+
+#ifdef FS_UI_WHALEUI
+namespace fs {
+namespace ui {
+// ui_main_whale.cpp: runs the WhaleUI desktop UI (blocks until the window closes)
+int run_whale_ui(FsApi* api);
+}  // namespace ui
+}  // namespace fs
+#else
 #include "ui/ui_server.hpp"
+#endif
 
 namespace {
 
+#ifndef FS_UI_WHALEUI
 // 用系统默认浏览器打开 URL（Windows: start / POSIX: xdg-open）
 void open_browser(const std::string& url) {
 #if defined(_WIN32)
@@ -35,6 +51,7 @@ void open_browser(const std::string& url) {
   int rc = std::system(cmd.c_str());
   (void)rc;
 }
+#endif
 
 }  // namespace
 
@@ -61,6 +78,13 @@ int main(int argc, char** argv) {
       root.empty() ? gp.root : ghc::filesystem::path(root);
   fs::FsApi api(data_root);
 
+#ifdef FS_UI_WHALEUI
+  (void)port;
+  (void)no_browser;
+  std::printf("UI: WhaleUI (native window)\n");
+  std::printf("data root: %s\n", data_root.string().c_str());
+  return fs::ui::run_whale_ui(&api);
+#else
   fs::ui::UiServer server;
   server.bind_api(&api);
   fs::FsResult r = server.start(port);
@@ -86,4 +110,5 @@ int main(int argc, char** argv) {
 #endif
   }
   return 0;
+#endif
 }

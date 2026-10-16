@@ -41,9 +41,14 @@ constexpr char kKeySubagents[] = "subagents";                     // {name: {ena
 // 长期记忆（provider.md 5：用户偏好管理）
 constexpr char kKeyLongMemory[] = "model.longMemory";             // {key: value}
 // 外观（设置-通用-外观）
-constexpr char kKeyUiTheme[] = "ui.theme";                        // 主题名
+// 调色板与深浅是两个维度：ui.theme 选"哪套配色"，ui.mode 选"这套配色的浅色/深色"
+// （auto = 跟随系统）。拆开之后每套配色都自动有浅深两面。
+constexpr char kKeyUiTheme[] = "ui.theme";                        // 调色板名
+constexpr char kKeyUiMode[] = "ui.mode";                          // "auto|light|dark"
 constexpr char kKeyUiFont[] = "ui.font";                          // {family, size, monoFamily}
 constexpr char kKeyUiCodeHighlight[] = "ui.codeHighlight";        // bool
+constexpr char kKeyUiTabs[] = "ui.tabs";                          // "top|left" 标签页位置
+constexpr char kKeyUiTabTooltip[] = "ui.tabTooltip";              // bool 悬停显示完整会话名
 // 浏览器控制（设置-通用-浏览器控制）
 constexpr char kKeyBrowserEnabled[] = "browser.enabled";
 constexpr char kKeyBrowserDriver[] = "browser.driver";            // driver 路径/名

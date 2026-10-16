@@ -38,7 +38,27 @@ includedirs = {
     "3rdparty/mbedtls-3.6.4/include",
     "3rdparty/qjs-regex",
     "3rdparty/reproc/include",
+    "3rdparty/whaleui/include",
 }
+
+-- WhaleUI integration switch. OFF by default: the desktop UI is written and
+-- wired (ui_dom_whale.cpp / ui_main_whale.cpp, guarded by FS_UI_WHALEUI) but not
+-- compiled in until WhaleUI itself is finished. See doc-internal/ui-whaleui.md.
+option("whaleui")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build the WhaleUI desktop UI (native window) instead of the wasm/HTTP one")
+option_end()
+
+-- path to a WhaleUI build (the directory holding libwhaleui-*.a); only used with
+-- --whaleui=y. Override with `xmake f --whaleui=y --whaleui_libdir=...`
+option("whaleui_libdir")
+    set_default("C:/aaa/WhaleUI/build/mingw/x86_64/release")
+    set_showmenu(true)
+    set_description("Directory containing WhaleUI's built static library")
+option_end()
+
+local whaleui_on = has_config("whaleui")
 
 -- wasm needs a smaller include set (no mbedtls/httplib/md4c/reproc)
 wasm_includedirs = {
@@ -50,6 +70,15 @@ wasm_includedirs = {
 
 if is_plat("windows") then
     add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN")
+end
+
+-- Shared config: the WhaleUI desktop UI. Only the native build can use it (the
+-- wasm target is the browser backend), and ui_dom_whale/ui_main_whale are
+-- #ifdef'd so defining the macro is what turns the code on.
+if whaleui_on and not is_plat("wasm") then
+    add_defines("FS_UI_WHALEUI")
+    local libdir = get_config("whaleui_libdir")
+    add_linkdirs(libdir)
 end
 
 -- collect cpp files of dirs that exist (empty dirs are not errors)
@@ -231,6 +260,38 @@ function mbedtls_link()
     add_ldflags("-lbcrypt", "-lcrypt32")
 end
 
+-- WhaleUI static library + its own dependencies (only with --whaleui=y).
+-- WhaleUI builds against SDL3 / SDL3_ttf (prebuilt packages under its 3rdparty/)
+-- and lexbor / utf8proc / stb / SDL3_image (xrepo). Its DLLs must sit next to
+-- the exe at run time, so they are copied after the link.
+function whaleui_link(target)
+    local libdir = get_config("whaleui_libdir")
+    local whaleui_dir = "C:/aaa/WhaleUI"
+    target:add("linkdirs", libdir)
+    target:add("links", "whaleui-full")
+    if os.isdir(path.join(whaleui_dir, "3rdparty/sdl3/lib")) then
+        target:add("linkdirs", path.join(whaleui_dir, "3rdparty/sdl3/lib"))
+        target:add("links", "SDL3")
+    end
+    if os.isdir(path.join(whaleui_dir, "3rdparty/sdl3_ttf/lib")) then
+        target:add("linkdirs", path.join(whaleui_dir, "3rdparty/sdl3_ttf/lib"))
+        target:add("links", "SDL3_ttf")
+    end
+    target:after_build(function (t)
+        local outdir = path.directory(t:targetfile())
+        for _, dll in ipairs({"SDL3.dll", "SDL3_ttf.dll", "dxcompiler.dll", "dxil.dll"}) do
+            for _, dir in ipairs({libdir, path.join(whaleui_dir, "3rdparty/sdl3/bin"),
+                                  path.join(whaleui_dir, "3rdparty/sdl3_ttf/bin")}) do
+                local src = path.join(dir, dll)
+                if os.isfile(src) then
+                    os.cp(src, path.join(outdir, dll))
+                    break
+                end
+            end
+        end
+    end)
+end
+
 target("fs_core")
     set_kind("static")
     set_languages("c++14")
@@ -288,8 +349,14 @@ target("fs_ui")
     set_languages("c++14")
     add_includedirs(includedirs)
     add_files(dir_files("src/ui"))
+    if whaleui_on then
+        -- The WhaleUI desktop UI needs no HTTP server, and ui_server.cpp pulls in
+        -- ui_assets_gen.hpp (which only the wasm bundle produces) - so drop it
+        -- from this build. The browser path is unaffected (default config).
+        remove_files("src/ui/ui_server.cpp")
+    end
     add_cxxflags("-Wall")
-    if emcc_ok then
+    if emcc_ok and not whaleui_on then
         -- fs_ui_wasm is built first (sequential policy above); its after_build
         -- packs web/ into src/ui/ui_assets_gen.hpp, which fs_ui then includes.
         add_deps("fs_ui_wasm", {link = false})
@@ -306,6 +373,9 @@ target("flashsight")
         add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
     end
     mbedtls_link()
+    if whaleui_on then
+        whaleui_link(target_instance_placeholder)
+    end
 
 target("fs_tests")
     set_kind("binary")

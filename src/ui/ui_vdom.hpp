@@ -176,6 +176,16 @@ struct VNode {
   std::string tag;   // empty => text node
   std::string text;  // text content (text node, or element shortcut)
   std::string key;   // diff identity for lists
+  // Declared mount animation (an anim:: intent name). Applied as a class on
+  // creation; see anim_key for replaying it on an existing node.
+  std::string anim;
+  // Replay token. A mount animation fires when the node is CREATED, so a node
+  // that survives a patch never animates again - which is why an animation could
+  // be "swallowed": it played while the panel was still empty (a load was in
+  // flight) and was over by the time the content arrived. When this token
+  // changes on a matched node the framework replays the declared animation, so a
+  // part can say "animate me when my content is actually there".
+  std::string anim_key;
   std::vector<VAttr> attrs;
   std::vector<VStyle> styles;
   std::vector<VEvent> events;
@@ -223,8 +233,15 @@ class H {
   // framework maps the intent to the class it applies; an unknown intent adds
   // nothing, so a typo cannot silently produce a dead class.
   H anim(const std::string& intent) {
+    n_->anim = intent;
     std::string c = anim::css_class(intent);
     return c.empty() ? *this : cls(c);
+  }
+  // Replay token for the declared animation: changing it replays the animation
+  // on an existing node (see VNode::anim_key).
+  H anim_key(const std::string& token) {
+    n_->anim_key = token;
+    return *this;
   }
   H on(EventKind k, EventFn fn) {
     n_->events.push_back(VEvent{k, bus().add(fn)});

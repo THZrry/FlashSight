@@ -11,10 +11,11 @@
 #include "ui_app.hpp"
 
 #include <chrono>
-#include <cstdio>
 #include <cctype>
+#include <cstdio>
 #include <regex>
 
+#include "core/settings_store.hpp"
 #include "fs_i18n.hpp"
 #include "term/fs_vt.hpp"
 
@@ -165,6 +166,8 @@ void add_class(const VNodePtr& v, const std::string& cls) {
 // Apply an animation INTENT to an already-built subtree (see the anim registry
 // in ui_vdom.hpp). Used by the page builders, which return a finished tree.
 void add_anim(const VNodePtr& v, const std::string& intent) {
+  if (!v) return;
+  v->anim = intent;
   add_class(v, anim::css_class(intent));
 }
 
@@ -304,6 +307,10 @@ UiApp::~UiApp() {
 
 void UiApp::mount() {
   root_ = dom_.root();
+  // Push the appearance defaults immediately: the CSS keeps a media query for
+  // "never told", but once the app is up the mode must be explicit (the user can
+  // pin light/dark regardless of the OS).
+  apply_appearance();
   if (backend_) {
     unsubscribe_events_ = backend_->subscribe(
         [this](const std::string& e, const Json& p) { on_backend_event(e, p); });
@@ -444,6 +451,7 @@ void UiApp::save_session_view(const std::string& sid) {
   if (sid.empty()) return;
   SessionView& v = views_.get_or_create(sid);
   v.messages = st_.messages;
+  v.session_loaded = st_.session_loaded;
   v.session_input = st_.session_input;
   v.model = st_.model;
   v.model_index = st_.model_index;
@@ -484,6 +492,7 @@ void UiApp::load_session_view(const std::string& sid) {
   SessionView v = default_session_view();
   views_.restore(sid, &v);  // keeps the defaults when the key is new
   st_.messages = v.messages;
+  st_.session_loaded = v.session_loaded;
   st_.session_input = v.session_input;
   st_.model = v.model;
   st_.model_index = v.model_index;
@@ -624,6 +633,10 @@ void UiApp::load_session(const std::string& sid) {
       st_.session_ops = ops;
       st_.session_calls = calls;
       if (!pid.empty()) st_.active_pid = pid;
+      // the page's animation replay token: the page animates again now that
+      // there is actually something to look at (a slow load used to play the
+      // animation over an empty page, so it was over before content arrived)
+      st_.session_loaded = true;
       render();
     }
     load_terminals(sid);
@@ -990,10 +1003,15 @@ void UiApp::render() {
     collect_handler_ids(tree_, &live);
     bus().retain(live);
     // (re)wire the side-panel drag divider; bind_splitter is idempotent, so
-    // this works whether the node survived a patch or was just created
+    // this works whether the node survived a patch or was just created.
+    //
+    // Only while the panel is SHOWN: a collapsed divider is just a thin handle
+    // strip, and dragging it had no visible effect but still reported a width -
+    // which then came back as the panel's width on expand and made it look
+    // broken. With no binding there is nothing to drag and nothing to persist.
     VNodePtr bar = find_by_key(tree_, "side-splitter");
     VNodePtr side = find_by_key(tree_, "side-panel");
-    if (bar && side && bar->dom.valid() && side->dom.valid()) {
+    if (bar && side && !st_.side_collapsed && bar->dom.valid() && side->dom.valid()) {
       // persist the dragged width into state so it survives tab switches and
       // node re-creation (the inline width alone is lost with the node)
       dom_.bind_splitter(bar->dom, side->dom, [this](int w) {
@@ -1004,6 +1022,9 @@ void UiApp::render() {
           }
         }
       });
+    } else if (bar && bar->dom.valid()) {
+      // clear any binding left over from when the panel was open
+      dom_.bind_splitter(bar->dom, Node{0}, nullptr);
     }
     // (re)wire the bottom panel's top-edge drag handle (terminal height)
     VNodePtr grip = find_by_key(tree_, "term-splitter");
@@ -1163,7 +1184,16 @@ VNodePtr UiApp::build_shell() {
   // above - so a page switch animates because it is DECLARED, not because a
   // builder remembered to add a class. The key change makes the diff recreate
   // the node, which is what fires the animation.
+  //
+  // The token also carries the load state: a session page whose history has
+  // arrived animates again, so a slow load does not spend the animation on an
+  // empty page (which is how an animation could look like it never ran).
   add_anim(page, page_anim_for(page_id) ? page_anim_for(page_id) : anim::kView);
+  {
+    std::string token = page_id;
+    if (page_id == "session" && st_.session_loaded) token += ":loaded";
+    page->anim_key = token;
+  }
   win.add(page);
   win.add(build_overlays());
   return win.get();
@@ -1597,16 +1627,28 @@ VNodePtr UiApp::build_session() {
     }
   }));
   tools.add(perm_sel);
-  // 挂起 is a plain button and sits right next to 发送
-  tools.add(comp::button(st_.suspended ? "恢复" : "挂起", [this](const std::string&) {
+  // 挂起 sits right next to 发送. Both read as a WORD when there is room and as
+  // an icon when there is not (an icon alone is ambiguous; a label alone is
+  // wide), so they carry the "text-wide" variant: icon hidden while the label
+  // fits. Their height never changes, so crossing the threshold cannot reflow
+  // the row.
+  H suspend = comp::icon_text_button(
+      st_.suspended ? "play" : "pause", st_.suspended ? tr("恢复") : tr("挂起"),
+      [this](const std::string&) {
     bool next = !st_.suspended;
     std::string sid = active_sid();
     update([&](AppState& s) { s.suspended = next; });
     if (!sid.empty()) {
       call_async(next ? "session.suspend" : "session.resume", Json{{"sid", sid}});
     }
-  }, "ghost"));
-  tools.add(comp::button("发送", [this](const std::string&) { send_message(); }, "primary"));
+  }, "ghost");
+  suspend.key("suspend-btn").cls("text-wide");
+  tools.add(suspend);
+  H send = comp::icon_text_button("paper-plane", tr("发送"),
+                                  [this](const std::string&) { send_message(); },
+                                  "primary");
+  send.key("send-btn").cls("text-wide");
+  tools.add(send);
   comp_box.add(tools);
   // "/" skill picker: an overlay floating ABOVE the composer (it must not
   // push the input around), dismissed by picking / clicking outside / Esc
@@ -1920,9 +1962,12 @@ VNodePtr UiApp::build_terminal_drawer() {
   drawer.key("term-panel");
   if (st_.terminal_open) {
     drawer.style("height", itos(st_.term_height) + "px");
-    // declared here so opening the drawer animates by declaration, not by a
-    // class someone remembered to add
-    drawer.anim(anim::kDrawer);
+    // Declared here, and the token changes with the OPEN state so the framework
+    // replays it on the existing node - a keyed node is patched, not recreated,
+    // so the class alone would only ever animate the first time.
+    drawer.anim(anim::kDrawer).anim_key("open");
+  } else {
+    drawer.anim(anim::kDrawer).anim_key("closed");
   }
 
   // top edge: drag handle (the whole bar is a flex column, so this is the very
@@ -2369,6 +2414,38 @@ void UiApp::apply_settings(const Json& values) {
       st_.cli_tools.push_back(std::make_pair(it.key(), v));
     }
   }
+  // ---- appearance ----
+  // ui.theme is "<palette>" or "<palette>:<mode>" is NOT used: palette and mode
+  // are separate concerns (which hues vs light/dark), so they are separate keys.
+  // ui.theme keeps its historical meaning (the palette name) and ui.mode is new.
+  {
+    std::string theme = sv_str(st_.settings_values, "ui.theme", "default");
+    if (theme == "light" || theme == "dark") {
+      // legacy values from the first pass, where the theme WAS the mode
+      st_.ui_mode = theme;
+      st_.ui_theme = "default";
+    } else {
+      st_.ui_theme = theme.empty() ? "default" : theme;
+      st_.ui_mode = sv_str(st_.settings_values, "ui.mode", "auto");
+    }    st_.ui_font = sv_str(st_.settings_values, "ui.font.family", "");
+    st_.ui_mono = sv_str(st_.settings_values, "ui.font.monoFamily", "");
+    st_.ui_font_size = sv_int(st_.settings_values, "ui.font.size", 0);
+    apply_appearance();
+  }
+}
+
+// Hand the appearance to the DOM adapter, which owns the CSS variables. Kept
+// separate from apply_settings so a change can re-theme without re-deriving
+// every cached list.
+void UiApp::apply_appearance() {
+  IDom::Appearance a;
+  a.palette = st_.ui_theme;
+  a.mode = st_.ui_mode;
+  a.font = st_.ui_font;
+  a.mono = st_.ui_mono;
+  a.font_size = st_.ui_font_size;
+  a.code_highlight = sv_bool(st_.settings_values, "ui.codeHighlight", true);
+  dom_.set_appearance(a);
 }
 
 void UiApp::load_settings_section(const std::string& section) {
@@ -2479,6 +2556,11 @@ VNodePtr UiApp::build_settings() {
 
   H body = el("div", "settings-body");
   const std::string& sec = st_.settings_nav;
+  // The body is declared as an entry-animated panel keyed by SECTION, so
+  // switching sections replays the animation (the node would otherwise be
+  // patched in place and never animate). This is the per-page animation the
+  // settings pages were missing.
+  body.anim(anim::kEnter).anim_key("sec:" + sec);
   if (backend_) load_settings_section(sec);
 
   if (sec == "providers") {
@@ -2571,7 +2653,6 @@ VNodePtr UiApp::build_settings() {
                                                              [this](const std::string&) {
           update([&](AppState& s) { s.pv_send_session = !s.pv_send_session; });
         }), "opencode 系端点需要 x-opencode-session（会话 id）"));
-        abody.add(comp::hint("自定义 Header：仅当端点需要额外请求头时添加。"));
         for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
           H row = el("div", "settings-row");
           row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
@@ -2608,7 +2689,6 @@ VNodePtr UiApp::build_settings() {
             fetch_provider_models(sel);
           }));
         } else {
-          macts.add(comp::hint("保存后可获取模型列表。"));
         }
         abody.add(macts);
         if (!st_.provider_models.empty()) {
@@ -2658,7 +2738,6 @@ VNodePtr UiApp::build_settings() {
     if (st_.provider_creating && !st_.pv_template_picked) {
       // step 1: pick a template (it only pre-fills endpoint + headers)
       detail.add(comp::section_title("新建供应商"));
-      detail.add(comp::hint("选择一个模板作为起点（只预填 Endpoint 与特殊 Header）。"));
       H tpls = el("div", "pv-templates");
       for (size_t i = 0; i < st_.provider_templates.size(); ++i) {
         const AppState::ProviderTemplate& t = st_.provider_templates[i];
@@ -2691,7 +2770,6 @@ VNodePtr UiApp::build_settings() {
   } else if (sec == "subagents") {
     // --- 子代理 ---
     body.add(comp::section_title("子代理"));
-    body.add(comp::hint("预置代理（agent-loop.md 6）；开关与模型写入 subagents.<name>.* 设置键。"));
     for (size_t i = 0; i < st_.preset_agents.size(); ++i) {
       const AppState::PresetRow& a = st_.preset_agents[i];
       H row = el("div", "settings-row");
@@ -2738,8 +2816,6 @@ VNodePtr UiApp::build_settings() {
   } else if (sec == "skills") {
     // --- MCP 与 Skill ---
     body.add(comp::section_title("MCP 与 Skill"));
-    body.add(comp::hint("内置 Skill 由模型按需加载（skill.list / skill.load）；"
-                        "browser-control 等经由浏览器加载口。"));
     if (st_.skills.empty()) {
       body.add(comp::empty_state("暂无已注册 skill。", "", nullptr));
     }
@@ -2761,8 +2837,6 @@ VNodePtr UiApp::build_settings() {
 
     // ---- 外部工具包（MCP/Skill 文件夹导入）----
     body.add(comp::section_title("外部工具包"));
-    body.add(comp::hint("从外部文件夹导入工具包（claude code / opencode / 自定义目录），"
-                        "可启用或停用；启用态随设置持久化。"));
     H macts = el("div", "settings-actions");
     macts.add(comp::button("自动探测", [this](const std::string&) { detect_mcp(); }, "primary"));
     body.add(macts);
@@ -2802,8 +2876,6 @@ VNodePtr UiApp::build_settings() {
   } else if (sec == "memory") {
     // --- 长期记忆 ---
     body.add(comp::section_title("长期记忆"));
-    body.add(comp::hint("键值对存于 model.longMemory，随设置持久化，模型可读；"
-                        "会话内持久要点见 session.summarize（turn.keyPoints）。"));
     for (size_t i = 0; i < st_.long_memory.size(); ++i) {
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(st_.long_memory[i].first));
@@ -2827,46 +2899,124 @@ VNodePtr UiApp::build_settings() {
     }, "ghost"));
     body.add(madd);
   } else if (sec == "appearance") {
-    body.add(comp::section_title("外观"));
-    body.add(comp::field("主题", comp::select(
-        std::vector<std::string>{"跟随系统", "浅色", "深色"}, 0,
+    // 外观：调色板 / 深浅 / 语言 / 字体 / 代码高亮。每一项都直接生效（写设置 +
+    // 立即 apply_appearance），所以没有"保存"按钮，也不需要解释性文字。
+    body.add(comp::section_title(tr("主题")));
+    struct PaletteRow {
+      const char* id;
+      const char* label;
+    };
+    static const PaletteRow kPalettes[] = {
+        {"default", "默认蓝"}, {"slate", "石板灰"},
+        {"forest", "森林绿"}, {"plum", "紫罗兰"}, {"amber", "琥珀橙"},
+    };
+    H swatches = el("div", "palette-row");
+    for (size_t i = 0; i < sizeof(kPalettes) / sizeof(kPalettes[0]); ++i) {
+      std::string id = kPalettes[i].id;
+      bool active = st_.ui_theme == id;
+      H sw = el("div", active ? "palette-swatch active" : "palette-swatch");
+      sw.on(EventKind::kClick, [this, id](const std::string&) {
+        update([&](AppState& s) { s.ui_theme = id; });
+        set_setting("ui.theme", id);
+        apply_appearance();
+      });
+      H dot = el("span", "palette-dot palette-preview-" + id);
+      sw.add(dot);
+      sw.add(el("span", "palette-name").text(tr(kPalettes[i].label)));
+      swatches.add(sw);
+    }
+    body.add(swatches);
+    body.add(comp::field(tr("深浅"), comp::select(
+        std::vector<std::string>{tr("跟随系统"), tr("浅色"), tr("深色")},
+        st_.ui_mode == "light" ? 1 : st_.ui_mode == "dark" ? 2 : 0,
         [this](const std::string& v) {
       int idx = std::atoi(v.c_str());
-      const char* themes[3] = {"default", "light", "dark"};
-      set_setting("ui.theme", themes[idx < 0 || idx > 2 ? 0 : idx]);
-    }), "网页端深浅色经 prefers-color-scheme 自动；桌面端接 WhaleUI 主题。"));
-    body.add(comp::field(tr("语言"), comp::select(
+      const char* modes[3] = {"auto", "light", "dark"};
+      std::string m = modes[idx < 0 || idx > 2 ? 0 : idx];
+      update([&](AppState& s) { s.ui_mode = m; });
+      set_setting("ui.mode", m);
+      apply_appearance();
+    })));
+
+    body.add(comp::section_title(tr("语言")));
+    body.add(comp::field(tr("界面语言"), comp::select(
         std::vector<std::string>{tr("跟随系统"), "中文", "English"},
         st_.ui_lang == "zh" ? 1 : st_.ui_lang == "en" ? 2 : 0,
         [this](const std::string& v) {
       int idx = std::atoi(v.c_str());
       const char* langs[3] = {"auto", "zh", "en"};
       set_setting("ui.language", langs[idx < 0 || idx > 2 ? 0 : idx]);
-    }), tr("界面语言；「跟随系统」按操作系统 locale 选择")));
-    body.add(comp::field("代码高亮", comp::toggle(
+    })));
+    body.add(comp::field(tr("思考语言"), comp::select(
+        std::vector<std::string>{tr("跟随系统"), "中文", "English"},
+        st_.thinking_lang == "zh" ? 1 : st_.thinking_lang == "en" ? 2 : 0,
+        [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      const char* langs[3] = {"auto", "zh", "en"};
+      std::string l = langs[idx < 0 || idx > 2 ? 0 : idx];
+      update([&](AppState& s) { s.thinking_lang = l; });
+      set_setting("model.thinkingLang", l);
+    })));
+
+    body.add(comp::section_title(tr("字体")));
+    // Font choices are free text with a datalist of common families: a picker
+    // cannot know what the OS has, and typing a family is what a desktop app
+    // does anyway. Empty = the built-in stack.
+    H ui_font_in = comp::text_input(st_.ui_font, tr("系统默认"),
+                                    [this](const std::string& v) {
+      st_.ui_font = v;
+    }, [this](const std::string&) {
+      set_setting("ui.font.family", st_.ui_font);
+      apply_appearance();
+    });
+    ui_font_in.on(EventKind::kBlur, [this](const std::string&) {
+      set_setting("ui.font.family", st_.ui_font);
+      apply_appearance();
+    });
+    body.add(comp::field(tr("界面字体"), ui_font_in));
+    H mono_in = comp::text_input(st_.ui_mono, tr("系统默认"),
+                                 [this](const std::string& v) { st_.ui_mono = v; },
+                                 [this](const std::string&) {
+      set_setting("ui.font.monoFamily", st_.ui_mono);
+      apply_appearance();
+    });
+    mono_in.on(EventKind::kBlur, [this](const std::string&) {
+      set_setting("ui.font.monoFamily", st_.ui_mono);
+      apply_appearance();
+    });
+    body.add(comp::field(tr("等宽字体"), mono_in));
+    // A size stepper rather than a free number: the value has a sane range and
+    // stepping is how people actually adjust it.
+    H size_row = el("div", "stepper");
+    size_row.add(comp::icon_button("\u2212", tr("减小"), [this](const std::string&) {
+      int n = st_.ui_font_size > 0 ? st_.ui_font_size : 14;
+      n = n > 10 ? n - 1 : 10;
+      update([&](AppState& s) { s.ui_font_size = n; });
+      set_setting("ui.font.size", n);
+      apply_appearance();
+    }));
+    size_row.add(el("span", "stepper-value").text(
+        itos(st_.ui_font_size > 0 ? st_.ui_font_size : 14) + " px"));
+    size_row.add(comp::icon_button("+", tr("增大"), [this](const std::string&) {
+      int n = st_.ui_font_size > 0 ? st_.ui_font_size : 14;
+      n = n < 24 ? n + 1 : 24;
+      update([&](AppState& s) { s.ui_font_size = n; });
+      set_setting("ui.font.size", n);
+      apply_appearance();
+    }));
+    body.add(comp::field(tr("字号"), size_row));
+
+    body.add(comp::section_title(tr("代码")));
+    body.add(comp::field(tr("语法高亮"), comp::toggle(
         sv_bool(st_.settings_values, "ui.codeHighlight", true), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "ui.codeHighlight", true);
       set_setting("ui.codeHighlight", !cur);
+      apply_appearance();
     })));
-    body.add(comp::section_title("字体"));
-    body.add(comp::field("界面字体", comp::text_input(
-        sv_str(st_.settings_values, "ui.font.family", ""), "系统默认",
-        [this](const std::string& v) { set_setting("ui.font.family", v); }),
-        "ui.font.family（空 = 系统默认）"));
-    body.add(comp::field("字号", comp::text_input(
-        std::to_string(sv_int(st_.settings_values, "ui.font.size", 13)), "",
-        [this](const std::string& v) {
-      int n = std::atoi(v.c_str());
-      set_setting("ui.font.size", n > 0 ? n : 13);
-    }), "ui.font.size（px）"));
-    body.add(comp::field("等宽字体", comp::text_input(
-        sv_str(st_.settings_values, "ui.font.monoFamily", ""), "系统默认",
-        [this](const std::string& v) { set_setting("ui.font.monoFamily", v); }),
-        "ui.font.monoFamily（代码块）"));
   } else if (sec == "session_defaults") {
     body.add(comp::section_title("会话默认"));
-    body.add(comp::hint("新会话创建时的默认值（session.default.*）；已有会话不受影响。"));
+    body.add(comp::hint(tr("只影响新会话；已有会话不受影响")));
     body.add(comp::field("默认模型", comp::text_input(
         sv_str(st_.settings_values, "session.default.model", ""), "继承全局",
         [this](const std::string& v) { set_setting("session.default.model", v); })));
@@ -2920,7 +3070,7 @@ VNodePtr UiApp::build_settings() {
       set_setting("permissions.network.verifyCert", !cur);
     })));
     body.add(comp::section_title("代理"));
-    body.add(comp::hint("httplib 不读系统代理环境变量；需要代理时在此显式设置（留空 = 直连）。"));
+    body.add(comp::hint(tr("留空 = 直连")));
     body.add(comp::field("代理主机", comp::text_input(
         sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
         [this](const std::string& v) {
@@ -2964,7 +3114,7 @@ VNodePtr UiApp::build_settings() {
       set_setting("permissions.files.autoGitInit", !cur);
     })));
     body.add(comp::section_title("黑名单（拒绝访问）"));
-    body.add(comp::hint("优先级：黑名单 > 白名单 > 三档默认。一行一个路径前缀。"));
+    body.add(comp::hint(tr("优先级：黑名单 > 白名单 > 默认档；一行一个路径前缀")));
     body.add(comp::textarea(st_.file_blacklist_text, "每行一个路径…",
                             [this](const std::string& v) {
       st_.file_blacklist_text = v;  // 提交时拆分成数组
@@ -2985,8 +3135,6 @@ VNodePtr UiApp::build_settings() {
     body.add(fsave);
   } else if (sec == "environment") {
     body.add(comp::section_title("环境"));
-    body.add(comp::hint("全局环境变量 + 项目 project.json 覆盖（可 ignoreGlobal）；"
-                        "终端 spawn 时合并注入。"));
     for (size_t i = 0; i < st_.env_vars.size(); ++i) {
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(st_.env_vars[i].first));
@@ -3010,7 +3158,6 @@ VNodePtr UiApp::build_settings() {
     }, "ghost"));
     body.add(eadd);
     body.add(comp::section_title("CLI 工具路径"));
-    body.add(comp::hint("key-value 表；运行时把 key 告诉模型，模型按 key 调用。"));
     for (size_t i = 0; i < st_.cli_tools.size(); ++i) {
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(st_.cli_tools[i].first));
@@ -3035,7 +3182,7 @@ VNodePtr UiApp::build_settings() {
     body.add(cadd);
   } else if (sec == "shortcuts") {
     body.add(comp::section_title("快捷键"));
-    body.add(comp::hint("键位绑定（shortcuts 设置键）；桌面端接入后生效。"));
+    body.add(comp::hint(tr("桌面端接入后生效")));
     const char* keys[][2] = {
         {"发送消息", "Enter"},    {"换行", "Shift+Enter"},
         {"关闭标签页", "Ctrl+W"}, {"新建标签页", "Ctrl+T"},
@@ -3053,8 +3200,6 @@ VNodePtr UiApp::build_settings() {
     }
   } else if (sec == "browser") {
     body.add(comp::section_title("浏览器控制"));
-    body.add(comp::hint("模型通过 browser-control skill 驱动外部浏览器；"
-                        "skill 由模型按需加载（/browser-load）。"));
     body.add(comp::field("启用浏览器控制", comp::toggle(
         sv_bool(st_.settings_values, "browser.enabled", true), "",
         [this](const std::string&) {
@@ -3087,7 +3232,6 @@ VNodePtr UiApp::build_settings() {
     body.add(bacts);
   } else if (sec == "computer") {
     body.add(comp::section_title("电脑控制"));
-    body.add(comp::hint("截图 / 鼠标键盘控制需要平台后端；当前为配置预留。"));
     body.add(comp::field("启用电脑控制", comp::toggle(
         sv_bool(st_.settings_values, "computer.enabled", false), "",
         [this](const std::string&) {
@@ -3100,59 +3244,86 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "computer.screenshot", false);
       set_setting("computer.screenshot", !cur);
     })));
-    body.add(comp::hint("截图/图像解码后端未接线，相关工具调用返回 not-supported。"));
   } else if (sec == "about") {
-    body.add(comp::section_title("关于"));
-    body.add(comp::key_value("FlashSight", st_.about_version));
-    body.add(comp::key_value("构建", "C++14 · xmake · wasm(emcc) · 内嵌本地服务"));
-    body.add(comp::key_value("UI", "C++ VNode 框架（DOM Adapter / diff / Composers / user）"));
-    body.add(comp::hint("WhaleUI 就绪后：桌面版改走 NativeBackend 进程内直调 FsApi，不再起 HTTP。"));
+    body.add(comp::section_title(tr("关于")));
+    body.add(comp::key_value(tr("版本"), st_.about_version));
+    body.add(comp::key_value(tr("构建"), "C++14 · xmake · wasm(emcc)"));
+    body.add(comp::key_value(tr("界面"), "FlashSight UI (C++ VNode)"));
   } else {
-    // --- 常规 ---
-    body.add(comp::section_title("常规"));
-    body.add(comp::field("思考语言", comp::select(
-        std::vector<std::string>{"自动", "中文", "English"},
-        st_.thinking_lang == "zh" ? 1 : st_.thinking_lang == "en" ? 2 : 0,
+    // --- 常规：界面显示 + 会话历史（history.*）+ 用量保留 ---
+    body.add(comp::section_title(tr("界面显示")));
+    // Tab placement: the docs ask for a label-page mode that can become a
+    // vertical side strip. It is a real layout switch, not a cosmetic one.
+    body.add(comp::field(tr("标签位置"), comp::select(
+        std::vector<std::string>{tr("顶部"), tr("左侧")},
+        sv_str(st_.settings_values, "ui.tabs", "top") == "left" ? 1 : 0,
         [this](const std::string& v) {
-      int i = std::atoi(v.c_str());
-      std::string lang = i == 1 ? "zh" : i == 2 ? "en" : "auto";
-      update([&](AppState& s) { s.thinking_lang = lang; });
-      call_async("thinking.setLang", Json{{"lang", lang}},
-                 [this](const BackendResult& r) {
-        toast(r.ok ? "已切换思考语言" : ("失败：" + r.message));
-      });
-    }), "切换工具描述与思考输出的语言（model.thinkingLang）"));
-    body.add(comp::field("历史轮数", comp::text_input(st_.history_recent, "",
-                                                      [this](const std::string& v) {
-      st_.history_recent = v;
-    }), "压缩折叠前保留的最近轮数（history.recentTurns）"));
-    body.add(comp::field("token 预算", comp::text_input(st_.history_budget, "",
-                                                        [this](const std::string& v) {
-      st_.history_budget = v;
-    }), "压缩折叠的 token 预算（history.tokenBudget）"));
-    body.add(comp::field("防过拟合", comp::toggle(
+      set_setting("ui.tabs", std::atoi(v.c_str()) == 1 ? "left" : "top");
+    })));
+    body.add(comp::field(tr("会话名提示"), comp::toggle(
+        sv_bool(st_.settings_values, "ui.tabTooltip", true), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "ui.tabTooltip", true);
+      set_setting("ui.tabTooltip", !cur);
+    })));
+
+    body.add(comp::section_title(tr("会话历史")));
+    H hist_row = el("div", "stepper");
+    hist_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
+      int n = std::atoi(st_.history_recent.c_str());
+      n = n > 4 ? n - 1 : 4;
+      st_.history_recent = itos(n);
+      set_setting("history.recentTurns", n);
+    }));
+    hist_row.add(el("span", "stepper-value").text(
+        (st_.history_recent.empty() ? std::string("20") : st_.history_recent) +
+        " 轮"));
+    hist_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
+      int n = std::atoi(st_.history_recent.c_str());
+      n = n < 100 ? n + 1 : 100;
+      st_.history_recent = itos(n);
+      set_setting("history.recentTurns", n);
+    }));
+    body.add(comp::field(tr("保留轮数"), hist_row));
+    H bud_row = el("div", "stepper");
+    bud_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
+      int n = std::atoi(st_.history_budget.c_str());
+      n = n > 1000 ? n - 1000 : 1000;
+      st_.history_budget = itos(n);
+      set_setting("history.tokenBudget", n);
+    }));
+    bud_row.add(el("span", "stepper-value").text(
+        (st_.history_budget.empty() ? std::string("8000") : st_.history_budget) +
+        " tok"));
+    bud_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
+      int n = std::atoi(st_.history_budget.c_str());
+      n = n < 128000 ? n + 1000 : 128000;
+      st_.history_budget = itos(n);
+      set_setting("history.tokenBudget", n);
+    }));
+    body.add(comp::field(tr("token 预算"), bud_row));
+    body.add(comp::field(tr("防过拟合"), comp::toggle(
         sv_bool(st_.settings_values, "session.overfitEnabled", false), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "session.overfitEnabled", false);
       set_setting("session.overfitEnabled", !cur);
-    }), "重复输出/工具循环检测（默认关）"));
-    body.add(comp::field("用量保留天数", comp::text_input(
-        std::to_string(sv_int(st_.settings_values, "usage.retainDays", 90)), "",
-        [this](const std::string& v) {
-      int n = std::atoi(v.c_str());
-      set_setting("usage.retainDays", n > 0 ? n : 90);
-    }), "usage.retainDays（默认 90）"));
-    H save = el("div", "settings-actions");
-    save.add(comp::button("保存", [this](const std::string&) {
-      Json v1 = st_.history_recent.empty() ? Json(20)
-                                           : Json(std::stoi(st_.history_recent));
-      Json v2 = st_.history_budget.empty() ? Json(8000)
-                                           : Json(std::stoi(st_.history_budget));
-      call_async("settings.set", Json{{"key", "history.recentTurns"}, {"value", v1}});
-      call_async("settings.set", Json{{"key", "history.tokenBudget"}, {"value", v2}},
-                 [this](const BackendResult& r) { toast(r.ok ? "已保存" : "保存失败"); });
-    }, "primary"));
-    body.add(save);
+    })));
+
+    body.add(comp::section_title(tr("用量统计")));
+    H days_row = el("div", "stepper");
+    days_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
+      int n = sv_int(st_.settings_values, "usage.retainDays", 90);
+      n = n > 7 ? n - 7 : 7;
+      set_setting("usage.retainDays", n);
+    }));
+    days_row.add(el("span", "stepper-value").text(
+        itos(sv_int(st_.settings_values, "usage.retainDays", 90)) + " 天"));
+    days_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
+      int n = sv_int(st_.settings_values, "usage.retainDays", 90);
+      n = n < 3650 ? n + 7 : 3650;
+      set_setting("usage.retainDays", n);
+    }));
+    body.add(comp::field(tr("保留天数"), days_row));
   }
   wrap.add(body);
   return wrap.get();
