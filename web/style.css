@@ -637,20 +637,6 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   z-index: 2;
 }
 .splitter-handle:hover { color: var(--text); border-color: var(--accent); }
-/* kind picker for the side panel "+" */
-.side-menu {
-  position: absolute;
-  top: 30px; right: 8px;
-  z-index: 20;
-  background: var(--panel-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--pop);
-  min-width: 120px;
-  padding: 4px 0;
-}
-.side-menu-item { padding: 6px 14px; font-size: 12.5px; cursor: pointer; }
-.side-menu-item:hover { background: var(--sel); }
 /* whole-window folder drop feedback */
 .drop-hover { outline: 2px dashed var(--accent); outline-offset: -4px; }
 .panel-tabs {
@@ -919,8 +905,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 @keyframes ts-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
 .ts-empty { color: #6a6a72; padding: 4px 2px; }
 
-/* 所有终端 overview: one card per terminal, each a click target that jumps to
-   that terminal (an overview you cannot navigate from is a dead end). */
+/* 所有终端 overview: one card per terminal showing its last few lines, each a
+   click target that jumps to that terminal (an overview you cannot navigate
+   from is a dead end). Scrolls, so many terminals stay usable. */
 .td-all {
   flex: 1; min-height: 0; overflow: auto;
   padding: 6px 8px;
@@ -932,6 +919,7 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   background: #1a1a1f;
   cursor: pointer;
   overflow: hidden;
+  flex: none;
 }
 .td-all-item:hover { border-color: var(--accent); }
 .td-all-head {
@@ -944,11 +932,50 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .td-all-name { color: #d8d8d8; }
 .td-all-out {
   margin: 0; padding: 6px 8px;
-  max-height: 9.5em; overflow: auto;
+  max-height: 6.4em;      /* ~5 lines, so a card stays small */
+  overflow: hidden;
   white-space: pre-wrap;
   color: #b8b8c0;
 }
 .td-tab-rename { padding: 4px 6px; }
+
+/* the side panel's "+" page: every panel kind, each with a one-line reason to
+   exist. A page, not a menu, because the descriptions are the point. */
+.side-add {
+  position: absolute; inset: 0;
+  z-index: 30;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 12px;
+  overflow: auto;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.side-add-head { font-weight: 600; font-size: 13px; }
+.side-add-grid {
+  display: grid; gap: 8px;
+  grid-template-columns: 1fr;
+}
+.side-add-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 9px 11px;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.side-add-card:hover { border-color: var(--accent); background: var(--accent-soft); }
+.side-add-card.open { border-color: var(--border-strong); }
+.side-add-name { font-size: 13px; font-weight: 500; }
+.side-add-desc { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+.side-add-tag {
+  display: inline-block; margin-top: 5px;
+  font-size: 11px; color: var(--text-faint);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  padding: 0 5px;
+}
+.side-add-acts { display: flex; gap: 8px; margin-top: auto; padding-top: 6px; }
+/* the side panel needs a positioning context for the "+" page */
+.side-panel { position: relative; }
 .td-tab-rename .text-input {
   width: 100%; background: #101013; color: #d8d8d8;
   border-color: #333; font-family: var(--mono); font-size: 12px;

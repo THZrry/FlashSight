@@ -22,8 +22,7 @@ const char* event_kind_name(EventKind k) {
     case EventKind::kMouseEnter: return "mouseenter";
     case EventKind::kMouseLeave: return "mouseleave";
     case EventKind::kBlur: return "blur";
-  }
-  return "?";
+  }  return "?";
 }
 
 // ---- tree model (per instance, kept in Impl so tests are isolated) ----
@@ -240,6 +239,12 @@ void NullDom::focus(Node node) {
 void NullDom::bind_cell_size(Node node, std::function<void(int, int)> cb) {
   cell_size_cb_ = cb;
   calls_.push_back(Call{"bind_cell_size", node.id, ""});
+}
+
+void NullDom::bind_file_picker(Node node, const std::string& pid,
+                               std::function<void(const std::string&)> cb) {
+  file_pick_cb_ = cb;
+  calls_.push_back(Call{"bind_file_picker", node.id, pid});
 }
 
 std::string NullDom::dump() const {

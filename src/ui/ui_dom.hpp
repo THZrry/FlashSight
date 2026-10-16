@@ -162,6 +162,19 @@ class IDom {
     (void)cb;
   }
 
+  // --- file picker (upload) ---
+  // Clicking `node` opens the OS file chooser. The picked files are sent to the
+  // backend (which stores them inside the project, where the model's file tools
+  // can read them) and the callback reports the saved paths as JSON:
+  //   {"files":[{"name":"a.png","path":"<abs>","size":1234}], "error":"..."}
+  // The transfer itself stays on the JS side - the UI never carries file bytes.
+  virtual void bind_file_picker(Node node, const std::string& pid,
+                                std::function<void(const std::string&)> cb) {
+    (void)node;
+    (void)pid;
+    (void)cb;
+  }
+
   // --- root container the app renders into ---
   virtual Node root() = 0;
 
@@ -200,6 +213,12 @@ class NullDom : public IDom {
   void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override;
   void focus(Node node) override;
   void bind_cell_size(Node node, std::function<void(int, int)> cb) override;
+  void bind_file_picker(Node node, const std::string& pid,
+                        std::function<void(const std::string&)> cb) override;
+  // test hook: simulate a file picker completing
+  void fire_file_pick_for_test(const std::string& reply) {
+    if (file_pick_cb_) file_pick_cb_(reply);
+  }
   // test hook: simulate a key press (with modifiers) on the bound terminal node
   void fire_key_input_for_test(const KeyPress& k) {
     if (key_input_cb_) key_input_cb_(k);
@@ -251,6 +270,7 @@ class NullDom : public IDom {
   std::function<void(const std::string&)> key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;
   std::function<void(int, int)> cell_size_cb_;
+  std::function<void(const std::string&)> file_pick_cb_;
 };
 
 }  // namespace ui

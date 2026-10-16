@@ -127,16 +127,15 @@ The process of project: P0 环境搭建
   终端后端非阻塞轮询推事件（去掉手动轮询）、动画分三档（view/组件/文本）。
   详见 current.md <27>。
 
-<29>(SOLVED): 反馈第六批 —— 真终端（VT 解析器 fs_vt + 屏幕网格 + ConPTY 伪控制台）、
-  按键按 VT 编码（修饰键/DECCKM/bracketed paste）、动画注册表框架化（按意图声明）、
-  项目卡片容器查询双布局（宽屏直接可滚动列表 / 窄屏展开）、组件视觉重做。
-  真 bug：ConPTY 缺 STARTF_USESTDHANDLES 致子进程跑在父控制台、按键异步乱序、
-  光标 em 定位偏移、patch 不清除被删 inline style（收起抽屉仍撑高）、
-  /api/events 因 GBK 输出 500。详见 current.md <29>。
+<30>(SOLVED): 反馈第七批 —— 终端跟手（独立 50ms 网格定时器 + 内容未变不重渲染）、
+  「文件」按钮改为上传（bind_file_picker + /api/upload + project_save_upload 落
+  项目内 .flashsight/uploads）、终端概览每卡最近 5 行 + round-robin 刷新、
+  终端标签可关闭（只移除标签、进程继续）、侧栏「+」改临时页面（列出全部面板
+  种类 + 已打开标记）、动画按页面声明表统一触发。详见 current.md <30>。
 
 ## 当前状态（更新 2026-10-16）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；141 用例 843 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；146 用例 1519 断言通过。
 - 终端已是真终端（VT 解析 + ConPTY），组件视觉重做进行中（后续按分区继续）。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

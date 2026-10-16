@@ -73,6 +73,32 @@ std::string term_grid_text(const Json& grid) {
   return out;
 }
 
+// The last `n` non-empty lines of a grid: what the overview card shows. A whole
+// screen per terminal made the list unusable as soon as there were a few.
+std::string term_grid_tail(const Json& grid, int n) {
+  std::string all = term_grid_text(grid);
+  if (all.empty()) return all;
+  std::vector<std::string> lines;
+  size_t i = 0;
+  while (i <= all.size()) {
+    size_t e = all.find('\n', i);
+    if (e == std::string::npos) e = all.size();
+    std::string line = all.substr(i, e - i);
+    if (!line.empty()) lines.push_back(line);
+    if (e == all.size()) break;
+    i = e + 1;
+  }
+  if (static_cast<int>(lines.size()) > n) {
+    lines.erase(lines.begin(), lines.end() - n);
+  }
+  std::string out;
+  for (size_t k = 0; k < lines.size(); ++k) {
+    if (!out.empty()) out += "\n";
+    out += lines[k];
+  }
+  return out;
+}
+
 const char* kSideTitles[][2] = {
     {"usage", "用量"},   {"files", "文件"},     {"ops", "操作"},
     {"git", "Git"},      {"subagents", "子代理"}, {"calls", "调用"},
@@ -237,28 +263,42 @@ void UiApp::pump() {
   if (backend_ && !backend_->polls_server_side()) {
     backend_->call_async("terminal.tick", Json::object(), nullptr);
   }
-  // A terminal's screen changes as output arrives, and the screen itself lives
-  // in the backend (that is where the VT parser is). Re-read the visible grid on
-  // every pump while a RUNNING terminal is showing: the call is cheap on
-  // localhost and this is what makes the panel live. (Relying on terminal.output
-  // events alone left the panel stale whenever an event was missed - right after
-  // a spawn, or after a tab switch.) An exited terminal's screen is frozen, so
-  // polling stops on its own.
-  if (st_.terminal_open && st_.term_tab != "all") {
-    bool running = false;
-    for (size_t i = 0; i < st_.terminals.size(); ++i) {
-      if (st_.terminals[i].tid == st_.term_tab) {
-        running = st_.terminals[i].status == "running";
-        break;
-      }
-    }
-    if (running && !term_grid_inflight_) load_terminal_grid(st_.term_tab);
-  }
   // toasts carry a deadline: clear them here so they cannot linger forever
   // (pump runs on the browser's 250ms timer; the native build calls it too)
   if (!st_.toast.empty() && now_ms() >= st_.toast_deadline_ms) {
     st_.toast.clear();
     render();
+  }
+}
+
+// Terminal refresh, driven by its own (faster) timer: a terminal must keep up
+// with typing, so it cannot wait for the 250ms event pump. Only one grid fetch
+// is in flight at a time.
+//
+// The overview needs every terminal's screen (each card shows its last few
+// lines), so there it walks the list round-robin - one terminal per tick keeps
+// the request rate bounded no matter how many terminals are open.
+void UiApp::tick_terminal() {
+  if (!st_.terminal_open) return;
+  if (term_grid_inflight_) return;
+  if (st_.term_tab != "all") {
+    for (size_t i = 0; i < st_.terminals.size(); ++i) {
+      if (st_.terminals[i].tid == st_.term_tab) {
+        if (st_.terminals[i].status == "running") load_terminal_grid(st_.term_tab);
+        return;
+      }
+    }
+    return;
+  }
+  // overview: round-robin over the running terminals
+  if (st_.terminals.empty()) return;
+  size_t n = st_.terminals.size();
+  for (size_t k = 0; k < n; ++k) {
+    size_t i = (term_grid_rr_ + k) % n;
+    if (st_.terminals[i].status != "running") continue;
+    term_grid_rr_ = (i + 1) % n;
+    load_terminal_grid(st_.terminals[i].tid);
+    return;
   }
 }
 
@@ -304,6 +344,13 @@ void UiApp::load_terminals(const std::string& sid) {
       it.shell = jsonutil::get<std::string>(t, "shell", "");
       it.label = jsonutil::get<std::string>(t, "label", "");
       it.status = jsonutil::get<std::string>(t, "status", "running");
+      // a terminal whose tab the user closed stays hidden (the process is still
+      // running; only 停止 ends it)
+      bool hidden = false;
+      for (size_t k = 0; k < st_.term_hidden.size(); ++k) {
+        if (st_.term_hidden[k] == it.tid) { hidden = true; break; }
+      }
+      if (hidden) continue;
       terms.push_back(it);
     }
     st_.terminals.swap(terms);
@@ -772,9 +819,14 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     outs[tid] += text;
     if (outs[tid].size() > (1u << 20)) outs[tid].erase(0, outs[tid].size() - (1u << 20));
     // A terminal the model started shows up here first: register it so the tab
-    // strip lists it without waiting for a manual refresh.
+    // strip lists it without waiting for a manual refresh. A terminal the user
+    // closed the tab for is not resurrected by its own output.
+    bool hidden = false;
+    for (size_t i = 0; i < st_.term_hidden.size(); ++i) {
+      if (st_.term_hidden[i] == tid) { hidden = true; break; }
+    }
     std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
-    bool known = false;
+    bool known = hidden;
     for (size_t i = 0; i < terms.size(); ++i) {
       if (terms[i].tid == tid) { known = true; break; }
     }
@@ -917,6 +969,14 @@ void UiApp::render() {
     // rename field: focus it so the user can type immediately
     VNodePtr ren = find_by_key(tree_, "term-rename-input");
     if (ren && ren->dom.valid()) dom_.focus(ren->dom);
+    // the 文件 button opens the OS file chooser (only the browser can do that),
+    // and the adapter hands back the saved paths
+    VNodePtr up = find_by_key(tree_, "upload-btn");
+    if (up && up->dom.valid()) {
+      dom_.bind_file_picker(up->dom, st_.active_pid, [this](const std::string& reply) {
+        handle_upload_reply(reply);
+      });
+    }
     // Focus the terminal surface only when asked (on spawn / tab switch / click).
     // Focusing on every render would fight with the composer: pump() re-renders
     // ~4x/sec, so anything the user focuses elsewhere would be stolen back.
@@ -931,6 +991,33 @@ void UiApp::render() {
 // ===========================================================================
 // Shell: top tabs + active page + overlays
 // ===========================================================================
+
+// Which animation each PAGE appears with. Every page must be listed here: the
+// framework looks the intent up by page id, so a page cannot quietly end up
+// without an animation - adding a page means adding its row (and the test
+// below asserts the table covers every page the app can show).
+namespace {
+struct PageAnim {
+  const char* page;   // page id ("home", "settings", "session")
+  const char* anim;   // anim registry intent
+};
+const PageAnim kPageAnims[] = {
+    {"home", anim::kView},
+    {"settings", anim::kView},
+    // a session page also fades/slides in; it is the most common switch, so it
+    // gets the same treatment rather than being special-cased
+    {"session", anim::kView},
+};
+const size_t kPageAnimCount = sizeof(kPageAnims) / sizeof(kPageAnims[0]);
+
+const char* page_anim_for(const std::string& page) {
+  for (size_t i = 0; i < kPageAnimCount; ++i) {
+    if (page == kPageAnims[i].page) return kPageAnims[i].anim;
+  }
+  return nullptr;
+}
+}  // namespace
+
 VNodePtr UiApp::build_shell() {
   H win = el("div", "window");
   win.key("drop-zone");  // drag & drop a folder anywhere on the window
@@ -968,18 +1055,24 @@ VNodePtr UiApp::build_shell() {
   // ---- page ----
   // keyed by tab so switching pages replaces the subtree instead of patching
   // unrelated content into it
+  std::string page_id;
   VNodePtr page;
   if (st_.active_tab == "home") {
+    page_id = "home";
     page = build_home();
   } else if (st_.active_tab == "settings") {
+    page_id = "settings";
     page = build_settings();
   } else {
+    page_id = "session";
     page = build_session();
   }
   page->key = "page:" + st_.active_tab;
-  // page switch: the key changes, so the node is re-created -> the view
-  // animation fires (fade + slide); see web/style.css
-  add_anim(page, anim::kView);
+  // The framework applies the animation, looked up from the page's declaration
+  // above - so a page switch animates because it is DECLARED, not because a
+  // builder remembered to add a class. The key change makes the diff recreate
+  // the node, which is what fires the animation.
+  add_anim(page, page_anim_for(page_id) ? page_anim_for(page_id) : anim::kView);
   win.add(page);
   win.add(build_overlays());
   return win.get();
@@ -1304,10 +1397,12 @@ VNodePtr UiApp::build_session() {
   H tools = el("div", "composer-tools");
   // left: session functions, compact buttons (icon + label; label collapses
   // to icon-only when the toolbar is crowded, per user feedback)
-  tools.add(comp::icon_text_button("paperclip", "文件", [this](const std::string&) {
-    // open the file tree; picking a file inserts its path into the input
-    open_or_focus_side_tab("files");
-  }, "ghost"));
+  // 文件 = upload an attachment. The click is handled by the DOM adapter
+  // (bind_file_picker, wired in render()) because only the browser can open a
+  // file chooser; there is no app-side click handler here on purpose.
+  H upload = comp::icon_text_button("paperclip", tr("文件"), nullptr, "ghost");
+  upload.key("upload-btn");
+  tools.add(upload);
   tools.add(comp::icon_text_button("wand-magic-sparkles", "命令", [this](const std::string&) {
     // list skills; picking one inserts "/<name>" into the composer
     call_async("skill.list", Json::object(), [this](const BackendResult& r) {
@@ -1539,24 +1634,62 @@ VNodePtr UiApp::build_side_panel() {
   },
                             [this](const std::string& k) { close_side_tab(k); },
                             [this](const std::string&) {
-    // "+" opens a kind picker; it must never silently default to one page
+    // "+" opens a temporary page that aggregates every panel kind (with a
+    // description); it must never silently default to one page
     update([&](AppState& s) { s.side_menu_open = !s.side_menu_open; });
   }));
+
+  // ---- the "+" page: pick a panel to add ----
+  // A page rather than a popup menu: there are enough kinds that each needs a
+  // one-line explanation, and a menu cannot carry that. Picking one adds the
+  // panel (and, like every panel, it is a real tab that can be closed again).
   if (st_.side_menu_open) {
-    H pop = el("div", "side-menu");
-    // kind order roughly by frequency; key -> title from side_title()
-    const char* kinds[] = {"files", "ops", "calls", "git", "subagents", "terminal", "usage"};
-    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
-      std::string kind = kinds[i];
-      H it = el("div", "side-menu-item");
-      it.on(EventKind::kClick, [this, kind](const std::string&) {
+    H page = el("div", "side-add");
+    page.anim(anim::kEnter);
+    page.add(el("div", "side-add-head").text(tr("添加面板")));
+    page.add(comp::hint(tr("选一个面板加到右侧栏；已打开的直接跳过去。")));
+    struct KindInfo {
+      const char* kind;
+      const char* desc;
+    };
+    static const KindInfo kKinds[] = {
+        {"files", "项目文件树与预览"},
+        {"ops", "本会话的系统操作记录"},
+        {"calls", "模型发起的工具调用"},
+        {"subagents", "子代理运行状态与引导"},
+        {"terminal", "终端列表（含模型启动的）"},
+        {"usage", "上下文水位与本会话成本"},
+        {"git", "Git 状态与变更（待接线）"},
+    };
+    H grid = el("div", "side-add-grid");
+    for (size_t i = 0; i < sizeof(kKinds) / sizeof(kKinds[0]); ++i) {
+      std::string kind = kKinds[i].kind;
+      H card = el("div", "side-add-card");
+      // an already-open panel is shown as such and jumps instead of duplicating
+      bool open = false;
+      for (size_t k = 0; k < st_.side_tabs.size(); ++k) {
+        if (st_.side_tabs[k].kind == kind) open = true;
+      }
+      if (open) card.cls("open");
+      card.on(EventKind::kClick, [this, kind](const std::string&) {
         update([&](AppState& s) { s.side_menu_open = false; });
         open_or_focus_side_tab(kind);
       });
-      it.add(el("span").text(side_title(kind)));
-      pop.add(it);
+      card.add(el("div", "side-add-name").text(side_title(kind)));
+      card.add(el("div", "side-add-desc").text(tr(kKinds[i].desc)));
+      if (open) card.add(el("div", "side-add-tag").text(tr("已打开")));
+      grid.add(card);
     }
-    side.add(pop);
+    page.add(grid);
+    H acts = el("div", "side-add-acts");
+    acts.add(comp::button(tr("取消"), [this](const std::string&) {
+      update([&](AppState& s) { s.side_menu_open = false; });
+    }, "ghost"));
+    page.add(acts);
+    side.add(page);
+    H sbody = el("div", "side-body");
+    side.add(sbody);
+    return side.get();
   }
 
   H body = el("div", "side-body");
@@ -1728,7 +1861,12 @@ VNodePtr UiApp::build_side_panel() {
 VNodePtr UiApp::build_terminal_drawer() {
   H drawer = el("div", st_.terminal_open ? "terminal-bar open" : "terminal-bar");
   drawer.key("term-panel");
-  if (st_.terminal_open) drawer.style("height", itos(st_.term_height) + "px");
+  if (st_.terminal_open) {
+    drawer.style("height", itos(st_.term_height) + "px");
+    // declared here so opening the drawer animates by declaration, not by a
+    // class someone remembered to add
+    drawer.anim(anim::kDrawer);
+  }
 
   // top edge: drag handle (the whole bar is a flex column, so this is the very
   // first child and sits above the title row). Only while open - a collapsed
@@ -1769,9 +1907,9 @@ VNodePtr UiApp::build_terminal_drawer() {
   // ---- left: the selected terminal's screen (or the aggregate overview) ----
   H left = el("div", "td-left");
   if (st_.term_tab == "all") {
-    // Overview: one card per terminal showing its CURRENT screen as text (the
-    // engine's grid dump, so no escape codes leak) and, when clicked, jumping
-    // to that terminal. Nothing here is a dead end.
+    // Overview: one card per terminal showing its LAST FEW LINES (a full screen
+    // per terminal would make the list unusable once there are several) and,
+    // when clicked, jumping to that terminal. Nothing here is a dead end.
     H list = el("div", "td-all");
     for (size_t i = 0; i < st_.terminals.size(); ++i) {
       const TermItem& t = st_.terminals[i];
@@ -1794,7 +1932,7 @@ VNodePtr UiApp::build_terminal_drawer() {
       std::map<std::string, Json>::const_iterator gi = st_.term_grids.find(tid);
       std::string text;
       if (gi != st_.term_grids.end()) {
-        text = term_grid_text(gi->second);
+        text = term_grid_tail(gi->second, 5);
       } else {
         std::map<std::string, std::string>::const_iterator it =
             st_.term_outputs.find(tid);
@@ -1910,14 +2048,20 @@ VNodePtr UiApp::build_terminal_drawer() {
     });
     tb.add(el("span", t.status == "running" ? "term-dot running" : "term-dot").text("●"));
     tb.add(el("span", "td-tab-name").text("#" + t.tid + " " + term_display_name(t)));
-    // double-click the name to rename it (name is cosmetic; no restart)
+    // rename (the name is cosmetic; the shell keeps running)
     tb.add(comp::icon_button("\u270e", tr("重命名"), [this, tid](const std::string&) {
       update([&](AppState& s) {
         s.term_renaming = tid;
         s.term_rename_text.clear();
       });
     }));
-    // 停止 lives on the tab itself (there is deliberately no "clear")
+    // close the TAB without ending the terminal (the model may still be using
+    // it); 停止 is the one that actually kills it
+    tb.add(comp::icon_button("\u00d7", tr("关闭标签（终端继续运行）"),
+                             [this, tid](const std::string&) {
+      close_terminal_tab(tid);
+    }));
+    // 停止 ends the process (there is deliberately no "clear")
     tb.add(comp::icon_button("\u25a0", tr("停止"), [this, tid](const std::string&) {
       call_async("terminal.kill", Json{{"tid", tid}}, [this, tid](const BackendResult&) {
         update([&](AppState& s) {
@@ -3390,8 +3534,10 @@ void UiApp::load_terminal_grid(const std::string& tid) {
              [this, tid](const BackendResult& r) {
     term_grid_inflight_ = false;
     if (!r.ok) return;
-    // store it under its own tid: a reply can land after a tab switch, and the
-    // grid belongs to the terminal it was asked for
+    // Skip the re-render when nothing changed: this runs ~20x/sec while a
+    // terminal is visible, and an idle terminal's screen is byte-identical.
+    std::map<std::string, Json>::iterator it = st_.term_grids.find(tid);
+    if (it != st_.term_grids.end() && it->second == r.data) return;
     update([&](AppState& s) { s.term_grids[tid] = r.data; });
   });
 }
@@ -3450,8 +3596,74 @@ void UiApp::handle_drop(const std::string& kind, const std::string& value) {
   if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
 }
 
-void UiApp::handle_dropped_folder(const std::string& name) {
-  if (name.empty()) return;
+// An upload finished. The files were stored inside the project by the backend,
+// so the model can read them with its ordinary file tools - what it needs is the
+// path. We insert the relative paths into the composer (and say so), rather than
+// silently attaching something the user cannot see.
+void UiApp::handle_upload_reply(const std::string& reply_json) {
+  Json j;
+  try {
+    j = Json::parse(reply_json);
+  } catch (...) {
+    toast(tr("上传失败"));
+    return;
+  }
+  const Json& files = j.contains("files") ? j["files"] : Json::array();
+  if (!files.is_array() || files.empty()) {
+    std::string err = jsonutil::get<std::string>(j, "error", "");
+    toast(err.empty() ? tr("未选择文件") : (tr("上传失败") + "：" + err));
+    return;
+  }
+  if (st_.active_tab == "home" || st_.active_tab == "settings") {
+    toast(tr("请先打开一个会话"));
+    return;
+  }
+  std::string insert;
+  for (size_t i = 0; i < files.size(); ++i) {
+    std::string rel = jsonutil::get<std::string>(files[i], "rel", "");
+    if (rel.empty()) continue;
+    if (!insert.empty()) insert += " ";
+    insert += "@" + rel;
+  }
+  if (insert.empty()) return;
+  update([&](AppState& s) {
+    if (!s.session_input.empty() && s.session_input.back() != ' ') s.session_input += ' ';
+    s.session_input += insert;
+  });
+  VNodePtr ta = find_by_key(tree_, "session-input");
+  if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
+  toast(tr("已添加附件") + "（" + itos(static_cast<int>(files.size())) + "）");
+}
+
+// Remove a terminal from the strip without ending it. The process keeps running
+// (the model may still be using it) - only 停止 kills it. We just stop showing
+// its tab, and it comes back if it prints again (which is what the user wants:
+// "remove the tab", not "kill the terminal").
+void UiApp::close_terminal_tab(const std::string& tid) {
+  if (tid.empty()) return;
+  update([&](AppState& s) {
+    for (size_t i = 0; i < s.terminals.size(); ++i) {
+      if (s.terminals[i].tid == tid) {
+        s.terminals.erase(s.terminals.begin() + i);
+        break;
+      }
+    }
+    // remember it so the next refresh does not bring the tab back (the process
+    // is still running - it is only the tab that is gone)
+    bool known = false;
+    for (size_t i = 0; i < s.term_hidden.size(); ++i) {
+      if (s.term_hidden[i] == tid) { known = true; break; }
+    }
+    if (!known) s.term_hidden.push_back(tid);
+    if (s.term_tab == tid) s.term_tab = "all";
+    if (s.term_renaming == tid) {
+      s.term_renaming.clear();
+      s.term_rename_text.clear();
+    }
+  });
+}
+
+void UiApp::handle_dropped_folder(const std::string& name) {  if (name.empty()) return;
   call_async("project.resolveDrop", Json{{"name", name}}, [this, name](const BackendResult& r) {
     if (!r.ok) return;
     if (jsonutil::get<bool>(r.data, "notFound", false)) {

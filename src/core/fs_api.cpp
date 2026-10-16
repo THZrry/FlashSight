@@ -342,6 +342,63 @@ FsResult FsApi::project_read_file(const std::string& pid, const std::string& rel
   return FsResult::success(Json{{"content", ss.str()}});
 }
 
+// 保存聊天附件：写进 <project>/.flashsight/uploads/。放在项目里（而不是临时
+// 目录）是为了让模型能像读别的文件一样按路径读它——附件的意义就是"模型能看"。
+// 同名不覆盖：加 -1/-2 后缀，否则第二次上传会静默盖掉第一次的内容。
+FsResult FsApi::project_save_upload(const std::string& pid, const std::string& name,
+                                    const std::string& bytes) {
+  std::string root = path_for(pid);
+  if (root.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  }
+  // 只取基名：浏览器给的 filename 可能带路径（也防目录穿越）
+  std::string base = name;
+  size_t cut = base.find_last_of("/\\");
+  if (cut != std::string::npos) base = base.substr(cut + 1);
+  if (base.empty() || base == "." || base == "..") base = "upload";
+  // 去掉会破坏路径的字符（Windows 保留字符）
+  for (size_t i = 0; i < base.size(); ++i) {
+    char c = base[i];
+    if (c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' ||
+        c == '|' || c < 0x20) {
+      base[i] = '_';
+    }
+  }
+  ghc::filesystem::path dir =
+      ghc::filesystem::path(root) / ".flashsight" / "uploads";
+  std::error_code ec;
+  ghc::filesystem::create_directories(dir, ec);
+  if (ec) {
+    return FsResult::error(ErrCode::kIo, "cannot create uploads dir: " + ec.message());
+  }
+  std::string stem = base, ext;
+  size_t dot = base.find_last_of('.');
+  if (dot != std::string::npos && dot > 0) {
+    stem = base.substr(0, dot);
+    ext = base.substr(dot);
+  }
+  ghc::filesystem::path target = dir / base;
+  for (int n = 1; ghc::filesystem::exists(target, ec) && n < 1000; ++n) {
+    target = dir / (stem + "-" + std::to_string(n) + ext);
+  }
+  std::ofstream ofs(target.string(), std::ios::binary);
+  if (!ofs) {
+    return FsResult::error(ErrCode::kIo, "cannot write " + target.string());
+  }
+  ofs.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  ofs.close();
+  if (!ofs) {
+    return FsResult::error(ErrCode::kIo, "write failed: " + target.string());
+  }
+  std::string rel = ".flashsight/uploads/" + target.filename().string();
+  Json o = Json::object();
+  o["name"] = target.filename().string();
+  o["path"] = target.string();
+  o["rel"] = rel;
+  o["size"] = static_cast<int64_t>(bytes.size());
+  return FsResult::success(o);
+}
+
 // ----- session.* -----
 FsResult FsApi::session_new(const std::string& pid, const std::string& cwd) {
   return sessions_->new_session(pid, cwd);
@@ -725,7 +782,10 @@ void FsApi::start_terminal_poller() {
   poller_.reset(new std::thread([this]() {
     while (!poller_stop_.load()) {
       terminal_tick();
-      std::this_thread::sleep_for(std::chrono::milliseconds(400));
+      // The desktop has no fast grid timer, so this thread is what keeps the
+      // browser's event stream live; 60ms keeps the terminal feeling like a
+      // keyboard without busy-waiting.
+      std::this_thread::sleep_for(std::chrono::milliseconds(60));
     }
   }));
 }

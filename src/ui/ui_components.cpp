@@ -100,7 +100,9 @@ H icon_text_button(const std::string& icon, const std::string& label,
   H b = el("button", variant.empty() ? "btn it-btn" : ("btn it-btn " + variant));
   b.attr("type", "button");
   if (!label.empty()) b.attr("aria-label", label);
-  b.on(EventKind::kClick, on_click);
+  // A null handler is allowed: some buttons are driven by a DOM-adapter binding
+  // instead (the file picker opens a chooser, which only the browser can do).
+  if (on_click) b.on(EventKind::kClick, on_click);
   // <i class="fa fa-<icon>"></i> + <span class="it-label">label</span>; CSS
   // hides the span (and trims the padding) when the toolbar gets narrow.
   H i = el("i", "fa fa-" + icon);

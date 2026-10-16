@@ -93,7 +93,10 @@ struct AppState {
   std::vector<SideTab> side_tabs;
   std::string active_side = "usage";
   int side_seq = 0;
-  bool side_menu_open = false;  // "+" popup with side tab kinds
+  // "+" shows a temporary PAGE listing every panel kind (with a one-line
+  // explanation), not a small popup: it is where new panels are discovered, and
+  // a menu could not carry the descriptions. Picking one opens that panel.
+  bool side_menu_open = false;
   int side_width = 320;         // side panel width (px); persisted in state
   bool side_collapsed = false;  // side panel hidden (toggle in the divider)
   // ---- side panel / 文件树 ----
@@ -149,6 +152,11 @@ struct AppState {
   // DECCKM for the selected terminal (arrows are SS3 vs CSI). Read from its
   // grid; needed when encoding a key press.
   bool term_app_keys = false;
+  // terminals the user closed the tab for. The PROCESS keeps running (the model
+  // may still be using it, and only 停止 kills it); it is just not shown. Kept
+  // per session so a closed tab does not come back on the next refresh, while a
+  // terminal the model starts later still appears normally.
+  std::vector<std::string> term_hidden;
 
   // ---- subagents ----
   struct SubagentRow {
@@ -313,6 +321,7 @@ struct SessionView {
   int term_cols = 0;
   int term_rows = 0;
   bool term_app_keys = false;
+  std::vector<std::string> term_hidden;
 
   std::vector<AppState::SubagentRow> subagents;
 
@@ -339,6 +348,10 @@ class UiApp {
   // Drive backend events (browser polls; desktop is a no-op). Call from a
   // timer/loop; applies stream.delta/turn.done/permission.prompt/etc.
   void pump();
+  // Terminal-only refresh, on a much faster timer than pump(): a terminal has to
+  // feel like a keyboard, and waiting for the 250ms event pump made keystrokes
+  // appear in batches instead of one by one.
+  void tick_terminal();
   // Async backend call with a completion handler (browser-safe). The sync
   // call() is unavailable in the wasm build, so all UI actions go through here.
   void call_async(const std::string& method, const Json& args,
@@ -387,6 +400,9 @@ class UiApp {
   void handle_drop(const std::string& kind, const std::string& value);
   // handle a dropped folder name: resolve to a path, then open as project
   void handle_dropped_folder(const std::string& name);
+  // an upload finished: insert the saved files' paths into the composer so the
+  // model can read them (the bytes never reach the UI)
+  void handle_upload_reply(const std::string& reply_json);
   // start a terminal running the shell from settings (not a typed command).
   // shell "" = whatever settings says; label "" = rename later on the tab.
   void start_terminal(const std::string& shell, const std::string& label);
@@ -400,6 +416,10 @@ class UiApp {
   void resize_terminal(int cols, int rows);
   // rename a terminal's tab (label is stored in the registry)
   void rename_terminal(const std::string& tid, const std::string& label);
+  // Remove a terminal from the tab strip WITHOUT killing it: the process keeps
+  // running (the model may still be using it) and it reappears if it prints
+  // again. Only 停止 ends the process.
+  void close_terminal_tab(const std::string& tid);
   void close_tab(const std::string& id);
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);
@@ -449,6 +469,9 @@ class UiApp {
   // a grid fetch is in flight (pump re-reads the visible terminal's screen; the
   // guard keeps a slow reply from stacking up requests)
   bool term_grid_inflight_ = false;
+  // round-robin cursor for the overview's grid refresh (one terminal per tick,
+  // so the request rate stays bounded however many terminals are open)
+  size_t term_grid_rr_ = 0;
   // Keys are bytes and their ORDER is the meaning. Writes go over an async
   // transport, so two keystrokes could otherwise land out of order (a fast
   // typist's "d" arriving after the Enter). Keystrokes therefore queue here and

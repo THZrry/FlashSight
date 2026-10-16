@@ -393,6 +393,55 @@ EM_JS(void, fs_dom_cell_size, (int node_id, int cb_id), {
   }
 });
 
+// File upload: clicking `el` opens the OS chooser; the picked files are POSTed
+// to the local server (multipart) which stores them inside the project so the
+// model's file tools can read them. The bytes never enter C++: the transfer and
+// the reply are both handled here, and only the saved paths are handed back.
+EM_JS(void, fs_dom_file_picker, (int node_id, int cb_id, const char* pid), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  el.__fsPickCb = cb_id;
+  el.__fsPickPid = UTF8ToString(pid);
+  if (el.__fsPickInit) return;
+  el.__fsPickInit = true;
+  el.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var inp = document.createElement('input');
+    inp.type = 'file';
+    inp.multiple = true;
+    // images and documents are what a chat attachment usually is, but "any" is
+    // allowed - the backend decides what it can store
+    inp.style.display = 'none';
+    document.body.appendChild(inp);
+    inp.addEventListener('change', function () {
+      var files = Array.prototype.slice.call(inp.files || []);
+      document.body.removeChild(inp);
+      if (!files.length) {
+        report({ files: [] });
+        return;
+      }
+      var fd = new FormData();
+      fd.append('pid', el.__fsPickPid || '');
+      for (var i = 0; i < files.length; i++) fd.append('file', files[i], files[i].name);
+      fetch('/api/upload', { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (j) { report(j && j.data ? j.data : j); })
+        .catch(function (e) { report({ error: String(e) }); });
+    });
+    inp.click();
+  });
+  function report(obj) {
+    if (typeof Module === 'undefined' || !Module._fs_ui_file_pick) return;
+    var text = JSON.stringify(obj);
+    var len = Module.lengthBytesUTF8(text) + 1;
+    var ptr = Module._malloc(len);
+    Module.stringToUTF8(text, ptr, len);
+    Module._fs_ui_file_pick(el.__fsPickCb, ptr);
+    Module._free(ptr);
+  }
+});
+
 EM_JS(int, fs_dom_root, (), {
   var r = document.getElementById('fs-root');
   if (!r) {
@@ -442,6 +491,16 @@ std::map<int, std::function<void(int, int)> >& cell_size_cbs() {
   return m;
 }
 int& cell_size_seq() {
+  static int s = 0;
+  return s;
+}
+
+// file-picker callbacks
+std::map<int, std::function<void(const std::string&)> >& file_pick_cbs() {
+  static std::map<int, std::function<void(const std::string&)> > m;
+  return m;
+}
+int& file_pick_seq() {
   static int s = 0;
   return s;
 }
@@ -658,6 +717,14 @@ class WasmDom : public IDom {
     fs_dom_cell_size(static_cast<int>(node.id), cb_id);
   }
 
+  void bind_file_picker(Node node, const std::string& pid,
+                        std::function<void(const std::string&)> cb) override {
+    int cb_id = ++file_pick_seq();
+    file_pick_cbs().clear();
+    file_pick_cbs()[cb_id] = std::move(cb);
+    fs_dom_file_picker(static_cast<int>(node.id), cb_id, pid.c_str());
+  }
+
  private:
   Node root() override { return Node{1}; }
 
@@ -723,6 +790,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_cell_size(int cb_id, int cols, int ro
       cell_size_cbs().find(cb_id);
   if (it == cell_size_cbs().end() || !it->second) return;
   it->second(cols, rows);
+}
+
+// Called from JS (fs_dom_file_picker) with the upload result as JSON.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_file_pick(int cb_id, const char* json) {
+  std::map<int, std::function<void(const std::string&)> >::iterator it =
+      file_pick_cbs().find(cb_id);
+  if (it == file_pick_cbs().end() || !it->second) return;
+  it->second(std::string(json ? json : "{}"));
 }
 
 // Called from JS (fs_dom_key_input) with a JSON key description.

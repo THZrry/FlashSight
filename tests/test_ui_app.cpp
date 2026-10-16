@@ -468,6 +468,117 @@ FS_TEST(uiapp_terminal_rename_keeps_process) {
   EXPECT_TRUE(app.state().term_renaming.empty());
 }
 
+// Every page the app can show must declare an animation: the framework looks the
+// intent up by page id, so an unlisted page would silently appear with none.
+// This is the coverage check for "animation must not be forgotten".
+FS_TEST(uiapp_every_page_declares_an_animation) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  // the three page shapes: home, settings, and a session
+  app.show("settings");
+  std::string d1 = dom.dump();
+  EXPECT_TRUE(d1.find("anim-view") != std::string::npos);
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  std::string d2 = dom.dump();
+  EXPECT_TRUE(d2.find("anim-view") != std::string::npos);
+  app.show("home");
+  std::string d3 = dom.dump();
+  EXPECT_TRUE(d3.find("anim-view") != std::string::npos);
+}
+
+// Creating a terminal is one click, and the tab strip offers a close that does
+// NOT end the process (the model may still be using it).
+FS_TEST(uiapp_terminal_close_tab_keeps_process) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "", "running"});
+    s.term_tab = "1";
+  });
+  app.close_terminal_tab("1");
+  EXPECT_TRUE(app.state().terminals.empty());
+  EXPECT_EQ(app.state().term_tab, std::string("all"));
+  // it is remembered as closed, so a refresh does not bring the tab back
+  EXPECT_EQ(app.state().term_hidden.size(), size_t(1));
+  // and the terminal was NOT killed (no terminal.kill was issued)
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    EXPECT_TRUE(dom.calls()[i].detail.find("terminal.kill") == std::string::npos);
+  }
+}
+
+// The 文件 button uploads (a DOM-adapter binding opens the chooser) instead of
+// opening the file panel; the reply inserts the saved paths into the composer.
+FS_TEST(uiapp_file_button_uploads) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.active_pid = "p1";
+  });
+  EXPECT_TRUE(dom.count_of("bind_file_picker") >= 1);
+  dom.fire_file_pick_for_test(
+      "{\"files\":[{\"rel\":\".flashsight/uploads/a.png\",\"name\":\"a.png\","
+      "\"size\":10},{\"rel\":\".flashsight/uploads/b.pdf\",\"name\":\"b.pdf\","
+      "\"size\":20}]}");
+  const std::string& in = app.state().session_input;
+  EXPECT_TRUE(in.find("@.flashsight/uploads/a.png") != std::string::npos);
+  EXPECT_TRUE(in.find("@.flashsight/uploads/b.pdf") != std::string::npos);
+  EXPECT_FALSE(app.state().toast.empty());
+}
+
+// The side panel "+" opens a page listing every panel kind (with a reason to
+// exist), and an already-open panel is marked as such.
+FS_TEST(uiapp_side_add_page_lists_kinds) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.update([](AppState& s) { s.side_menu_open = true; });
+  EXPECT_TRUE(dump_has(dom, "side-add"));
+  EXPECT_TRUE(dump_has(dom, "添加面板"));
+  EXPECT_TRUE(dump_has(dom, "项目文件树与预览"));   // each kind explains itself
+  EXPECT_TRUE(dump_has(dom, "模型发起的工具调用"));
+  EXPECT_TRUE(dump_has(dom, "已打开"));             // seeded panels are marked
+}
+
+// The terminal overview shows a few lines per terminal (not a whole screen) and
+// is scrollable, so many terminals stay usable.
+FS_TEST(uiapp_terminal_overview_is_tail) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "构建", "running"});
+    s.term_tab = "all";
+  });
+  // a 10-line screen: only the tail should be shown
+  Json lines = Json::array();
+  for (int i = 0; i < 10; ++i) {
+    Json row = Json::array();
+    row.push_back(Json{{"x", 0}, {"t", "line" + std::to_string(i)}});
+    lines.push_back(row);
+  }
+  Json grid = Json::object();
+  grid["lines"] = lines;
+  grid["cols"] = 80;
+  grid["rows"] = 10;
+  app.update([&](AppState& s) { s.term_grids["1"] = grid; });
+  EXPECT_TRUE(dump_has(dom, "line9"));    // the newest line is there
+  EXPECT_FALSE(dump_has(dom, "line0"));   // the oldest ones are dropped
+}
+
 FS_TEST(uiapp_settings_page) {
   NullDom dom;
   AppState st = AppState::make();

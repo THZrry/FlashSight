@@ -62,6 +62,11 @@ class FsApi {
   FsResult project_files(const std::string& pid, const std::string& rel);
   // 读取项目内文件（侧栏预览）-> {content}
   FsResult project_read_file(const std::string& pid, const std::string& rel);
+  // 保存上传的文件（聊天附件）：写进 <project>/.flashsight/uploads/，
+  // 模型用普通文件工具按路径读。同名不覆盖（加序号）。
+  // -> {name, path, size, rel}
+  FsResult project_save_upload(const std::string& pid, const std::string& name,
+                               const std::string& bytes);
 
   // ----- session.* -----
   FsResult session_new(const std::string& pid, const std::string& cwd);

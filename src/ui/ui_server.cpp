@@ -132,6 +132,44 @@ FsResult UiServer::start(int port) {
     res.set_content(body, "application/json");
   });
 
+  // ---- file upload (chat attachments) ----
+  // The browser posts multipart/form-data; the file is written into the
+  // project's .flashsight/uploads/ so the model's file tools can read it by
+  // path (the model never sees browser-side bytes). Returns the saved paths.
+  impl_->svr->Post("/api/upload", [this](const httplib::Request& req,
+                                         httplib::Response& res) {
+    if (!impl_->bound_api) {
+      res.status = 503;
+      res.set_content("{\"ok\":false,\"code\":\"not-supported\"}", "application/json");
+      return;
+    }
+    std::string pid = req.has_param("pid") ? req.get_param_value("pid") : "";
+    if (req.form.has_field("pid")) pid = req.form.get_field("pid");
+    Json saved = Json::array();
+    std::string error;
+    // iterate the parts in the order the browser sent them (the multipart type
+    // is insertion-ordered on purpose)
+    const httplib::FormFiles& files = req.form.files;
+    for (httplib::FormFiles::const_iterator it = files.begin(); it != files.end();
+         ++it) {
+      const httplib::FormData& f = it->second;
+      if (f.name != "file") continue;
+      FsResult r = impl_->bound_api->project_save_upload(pid, f.filename, f.content);
+      if (!r.ok()) {
+        error = r.message;
+        continue;
+      }
+      saved.push_back(r.data);
+    }
+    Json out = Json::object();
+    out["ok"] = error.empty() || !saved.empty();
+    Json data = Json::object();
+    data["files"] = saved;
+    if (!error.empty()) data["error"] = error;
+    out["data"] = data;
+    res.set_content(out.dump(), "application/json");
+  });
+
   // ---- static assets (fallback; keep last so /api/* wins) ----
   impl_->svr->Get("/(.*)", [](const httplib::Request& req, httplib::Response& res) {
     std::string path = req.matches.size() > 1 ? req.matches[1].str() : "";

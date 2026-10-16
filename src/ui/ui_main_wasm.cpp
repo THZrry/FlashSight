@@ -24,6 +24,13 @@ AppState g_state;
 void fs_ui_tick(void* /*user_data*/) {
   if (g_app) g_app->pump();
 }
+
+// Timer: terminal refresh. Separate and much faster than the event pump - a
+// terminal has to keep up with typing, and the 250ms event cadence made
+// keystrokes appear in batches. Only does work while a terminal is visible.
+void fs_ui_term_tick(void* /*user_data*/) {
+  if (g_app) g_app->tick_terminal();
+}
 }  // namespace
 
 // Called from index.html once the wasm runtime is ready.
@@ -36,6 +43,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_start() {
   g_app->mount();
   // ~4 events/sec is plenty for a local server; keeps the tab idle-cheap.
   emscripten_set_interval(fs_ui_tick, 250, nullptr);
+  // The terminal gets its own, much tighter cadence (~20/sec). It is a no-op
+  // unless the drawer is open on a running terminal, so the idle cost is zero.
+  emscripten_set_interval(fs_ui_term_tick, 50, nullptr);
 }
 
 // Switch top-level tab by id ("home", "settings", "s1"...).
