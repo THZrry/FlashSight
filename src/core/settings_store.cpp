@@ -107,6 +107,7 @@ SettingValue SettingsStore::get(const std::string& key) const {
   else if (key == kKeyUiCodeHighlight) sv.value = true;
   else if (key == kKeyUiTabs) sv.value = "top";
   else if (key == kKeyUiTabTooltip) sv.value = true;
+  else if (key == kKeyUiMaxTabs) sv.value = 8;
   else if (key == kKeyBrowserEnabled) sv.value = false;
   else if (key == kKeyComputerEnabled) sv.value = false;
   else if (key == kKeyComputerScreenshot) sv.value = true;

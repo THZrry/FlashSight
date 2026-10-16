@@ -49,6 +49,7 @@ constexpr char kKeyUiFont[] = "ui.font";                          // {family, si
 constexpr char kKeyUiCodeHighlight[] = "ui.codeHighlight";        // bool
 constexpr char kKeyUiTabs[] = "ui.tabs";                          // "top|left" 标签页位置
 constexpr char kKeyUiTabTooltip[] = "ui.tabTooltip";              // bool 悬停显示完整会话名
+constexpr char kKeyUiMaxTabs[] = "ui.maxTabs";                    // 会话标签上限（0=不限）
 // 浏览器控制（设置-通用-浏览器控制）
 constexpr char kKeyBrowserEnabled[] = "browser.enabled";
 constexpr char kKeyBrowserDriver[] = "browser.driver";            // driver 路径/名

@@ -440,11 +440,58 @@ void UiApp::load_terminals(const std::string& sid) {
       terms.push_back(it);
     }
     st_.terminals.swap(terms);
+    // The backend sorts by tid; the strip shows them in the user's own order
+    // (see term_order). tids not seen before are appended, and tids that are
+    // gone are dropped, so the order stays in sync without re-sorting what the
+    // user arranged.
+    {
+      std::vector<std::string> order;
+      for (size_t i = 0; i < st_.term_order.size(); ++i) {
+        for (size_t k = 0; k < st_.terminals.size(); ++k) {
+          if (st_.terminals[k].tid == st_.term_order[i]) {
+            order.push_back(st_.term_order[i]);
+            break;
+          }
+        }
+      }
+      for (size_t k = 0; k < st_.terminals.size(); ++k) {
+        bool known = false;
+        for (size_t i = 0; i < order.size(); ++i) {
+          if (order[i] == st_.terminals[k].tid) { known = true; break; }
+        }
+        if (!known) order.push_back(st_.terminals[k].tid);
+      }
+      st_.term_order.swap(order);
+    }
     if (!st_.terminals.empty() && st_.active_term.empty()) {
       st_.active_term = st_.terminals[0].tid;
     }
     render();
   });
+}
+
+// Terminals in display order: the strip and the overview both use this so they
+// can never disagree about what exists or in what order.
+std::vector<const TermItem*> UiApp::ordered_terminals() const {
+  std::vector<const TermItem*> out;
+  for (size_t i = 0; i < st_.term_order.size(); ++i) {
+    for (size_t k = 0; k < st_.terminals.size(); ++k) {
+      if (st_.terminals[k].tid == st_.term_order[i]) {
+        out.push_back(&st_.terminals[k]);
+        break;
+      }
+    }
+  }
+  // a terminal that arrived without going through load_terminals (an event for a
+  // terminal the model just started) still has to show up
+  for (size_t k = 0; k < st_.terminals.size(); ++k) {
+    bool known = false;
+    for (size_t i = 0; i < out.size(); ++i) {
+      if (out[i]->tid == st_.terminals[k].tid) { known = true; break; }
+    }
+    if (!known) out.push_back(&st_.terminals[k]);
+  }
+  return out;
 }
 
 void UiApp::save_session_view(const std::string& sid) {
@@ -483,6 +530,8 @@ void UiApp::save_session_view(const std::string& sid) {
   v.term_cols = st_.term_cols;
   v.term_rows = st_.term_rows;
   v.term_app_keys = st_.term_app_keys;
+  v.term_order = st_.term_order;
+  v.term_hidden = st_.term_hidden;
   v.subagents = st_.subagents;
   v.plan_open = st_.plan_open;
   v.plan_steps = st_.plan_steps;
@@ -524,6 +573,8 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.term_cols = v.term_cols;
   st_.term_rows = v.term_rows;
   st_.term_app_keys = v.term_app_keys;
+  st_.term_order = v.term_order;
+  st_.term_hidden = v.term_hidden;
   st_.subagents = v.subagents;
   st_.plan_open = v.plan_open;
   st_.plan_steps = v.plan_steps;
@@ -933,6 +984,14 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       it.shell = "shell";
       it.status = "running";
       terms.push_back(it);
+      // register it in the display order too, or the strip would show it at a
+      // position the order list does not know about
+      std::vector<std::string>& order = is_active ? st_.term_order : vp->term_order;
+      bool in_order = false;
+      for (size_t i = 0; i < order.size(); ++i) {
+        if (order[i] == tid) { in_order = true; break; }
+      }
+      if (!in_order) order.push_back(tid);
     }
   }
 }
@@ -1544,13 +1603,10 @@ VNodePtr UiApp::build_session() {
       });
     });
   }, "ghost"));
-  tools.add(comp::icon_text_button("robot", "子代理", [this](const std::string&) {
-    if (active_sid().empty()) {
-      toast("请先打开一个会话");
-      return;
-    }
-    open_or_focus_side_tab("subagents");
-  }, "ghost"));
+  // 子代理 and 终端 used to sit here as well. Both were duplicates: the subagent
+  // list is a side panel (opened from the panel "+"), and terminals have their
+  // own drawer at the bottom of the page with a toggle of their own. Two ways in
+  // to the same place is noise in a row this narrow.
   tools.add(comp::icon_text_button("diagram-project", "规划", [this](const std::string&) {
     bool open = !st_.plan_open;
     std::string sid = active_sid();
@@ -1570,11 +1626,6 @@ VNodePtr UiApp::build_session() {
         update([&](AppState& s) { s.plan_steps = steps; });
       });
     }
-  }, "ghost"));
-  tools.add(comp::icon_text_button("terminal", "终端", [this](const std::string&) {
-    bool opening = !st_.terminal_open;
-    update([&](AppState& s) { s.terminal_open = opening; });
-    if (opening && !active_sid().empty()) load_terminals(active_sid());
   }, "ghost"));
   // middle: session settings (selects styled compactly)
   H grow = el("span", "grow");
@@ -2161,13 +2212,15 @@ VNodePtr UiApp::build_terminal_drawer() {
   all_tab.add(el("i", "fa fa-terminal"));
   all_tab.add(el("span", "td-tab-name").text(tr("所有终端")));
   side.add(all_tab);
-  // The strip lists every terminal that has a TAB. A closed terminal is not a
-  // tab - it is a row in the overview list (it keeps running; closing only
-  // removes the tab), which is where you find it again. The filter belongs to
-  // the overview page: applying it here would hide the tab of a terminal you
-  // just created whose name does not match.
-  for (size_t i = 0; i < st_.terminals.size(); ++i) {
-    const TermItem& t = st_.terminals[i];
+  // The strip lists every terminal that has a TAB, in the user's own order
+  // (ordered_terminals). A closed terminal is not a tab - it is a row in the
+  // overview list (it keeps running; closing only removes the tab), which is
+  // where you find it again. The filter belongs to the overview page: applying
+  // it here would hide the tab of a terminal you just created whose name does
+  // not match.
+  std::vector<const TermItem*> strip = ordered_terminals();
+  for (size_t i = 0; i < strip.size(); ++i) {
+    const TermItem& t = *strip[i];
     std::string tid = t.tid;
     if (term_tab_closed(tid)) continue;
     if (st_.term_renaming == tid) {
@@ -2261,6 +2314,7 @@ const SettingsItem kSettingsNav[] = {
     {"通用", "computer", "电脑控制"},
     {"模型", "providers", "供应商"},
     {"模型", "session_defaults", "会话默认"},
+    {"模型", "context", "上下文"},
     {"模型", "model_prefs", "模型偏好"},
     {"模型", "subagents", "子代理"},
     {"模型", "skills", "MCP 与 Skill"},
@@ -2600,14 +2654,18 @@ VNodePtr UiApp::build_settings() {
     H detail = el("div", "pv-detail");
 
     // The form is shared by "new" and "edit": 格式 is a fixed dropdown, the
-    // template only pre-fills endpoint + headers, and 高级 holds headers/models.
+    // template only pre-fills endpoint + headers, and 高级 holds headers.
+    //
+    // Layout: the fields and the model list are two PANELS in a wrapping flex
+    // row, so a wide detail puts the models beside the form (using the right
+    // half, which used to be empty) and a narrow one drops them below in the
+    // same column. No media query is needed for either case.
     auto build_form = [this, &detail](bool creating) {
-      detail.add(comp::section_title(creating ? "新建供应商" : "编辑供应商"));
-      if (creating) {
-        detail.add(comp::hint("模板只是预填 Endpoint 与特殊 Header；格式可随时改。"));
-      }
-      detail.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
-                                                      [this](const std::string& v) {
+      H cols = el("div", "pv-detail-cols");
+      H form = el("div", "pv-form");
+      form.add(comp::section_title(creating ? "新建供应商" : "编辑供应商"));
+      form.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
+                                                    [this](const std::string& v) {
         st_.pv_name = v;
       })));
       // 格式：请求形态（与供应商品牌无关）
@@ -2622,44 +2680,44 @@ VNodePtr UiApp::build_settings() {
       for (int k = 0; k < 4; ++k) {
         if (st_.pv_kind == kind_ids[k]) kind_idx = k;
       }
-      detail.add(comp::field("格式", comp::select(kinds, kind_idx,
-                                                  [this](const std::string& v) {
+      form.add(comp::field("格式", comp::select(kinds, kind_idx,
+                                                [this](const std::string& v) {
         int i = std::atoi(v.c_str());
         const char* ids[4] = {"openai-chat", "openai-response", "anthropic", "custom"};
         st_.pv_kind = ids[i < 0 || i > 3 ? 0 : i];
       }), "请求长什么样（endpoint 由模板/下面的地址决定）"));
-      detail.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
-                                                          [this](const std::string& v) {
+      form.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
+                                                        [this](const std::string& v) {
         st_.pv_base_url = v;
       }), "如 https://api.openai.com/v1"));
-      detail.add(comp::field("API Key", comp::text_input(st_.pv_key,
-                                                         creating ? "sk-…" : "留空 = 不修改",
-                                                         [this](const std::string& v) {
+      form.add(comp::field("API Key", comp::text_input(st_.pv_key,
+                                                       creating ? "sk-…" : "留空 = 不修改",
+                                                       [this](const std::string& v) {
         st_.pv_key = v;
       }), creating ? "" : "回显为脱敏值；不改动则留空"));
 
-      // ---- 高级（折叠）----
+      // ---- 高级（折叠）：自定义 header + 会话亲和头 ----
       H adv = el("div", "pv-advanced");
       H ahead = el("div", "pv-adv-head");
       ahead.on(EventKind::kClick, [this](const std::string&) {
         update([&](AppState& s) { s.pv_advanced = !s.pv_advanced; });
       });
       ahead.add(el("span", "pv-adv-caret").text(st_.pv_advanced ? "\u25be" : "\u25b8"));
-      ahead.add(el("span").text("高级（自定义 Header / 模型）"));
+      ahead.add(el("span").text(tr("高级（自定义请求头）")));
       adv.add(ahead);
       if (st_.pv_advanced) {
         H abody = el("div", "pv-adv-body");
         // 会话亲和头：opencode 系端点需要，与"格式"无关
-        abody.add(comp::field("发送会话亲和头", comp::toggle(st_.pv_send_session, "",
-                                                             [this](const std::string&) {
+        abody.add(comp::field(tr("发送会话亲和头"), comp::toggle(st_.pv_send_session, "",
+                                                                 [this](const std::string&) {
           update([&](AppState& s) { s.pv_send_session = !s.pv_send_session; });
-        }), "opencode 系端点需要 x-opencode-session（会话 id）"));
+        }), tr("opencode 系端点需要 x-opencode-session（会话 id）")));
         for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
           H row = el("div", "settings-row");
           row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
           row.add(el("span", "dim grow").text(st_.pv_headers[i].second));
           size_t idx = i;
-          row.add(comp::button("删除", [this, idx](const std::string&) {
+          row.add(comp::button(tr("删除"), [this, idx](const std::string&) {
             update([&](AppState& s) {
               if (idx < s.pv_headers.size()) s.pv_headers.erase(s.pv_headers.begin() + idx);
             });
@@ -2667,11 +2725,11 @@ VNodePtr UiApp::build_settings() {
           abody.add(row);
         }
         H addh = el("div", "pv-header-add");
-        addh.add(comp::text_input(st_.pv_new_header_k, "Header 名",
+        addh.add(comp::text_input(st_.pv_new_header_k, tr("Header 名"),
                                   [this](const std::string& v) { st_.pv_new_header_k = v; }));
-        addh.add(comp::text_input(st_.pv_new_header_v, "值",
+        addh.add(comp::text_input(st_.pv_new_header_v, tr("值"),
                                   [this](const std::string& v) { st_.pv_new_header_v = v; }));
-        addh.add(comp::button("添加", [this](const std::string&) {
+        addh.add(comp::button(tr("添加"), [this](const std::string&) {
           if (st_.pv_new_header_k.empty()) return;
           update([&](AppState& s) {
             s.pv_headers.push_back(std::make_pair(s.pv_new_header_k, s.pv_new_header_v));
@@ -2680,46 +2738,25 @@ VNodePtr UiApp::build_settings() {
           });
         }, "ghost"));
         abody.add(addh);
-
-        // 模型：获取列表（预置/API 两级回退）
-        abody.add(comp::section_title("模型"));
-        H macts = el("div", "settings-actions");
-        std::string sel = st_.provider_selected;
-        if (!sel.empty()) {
-          macts.add(comp::button("获取模型列表", [this, sel](const std::string&) {
-            fetch_provider_models(sel);
-          }));
-        } else {
-        }
-        abody.add(macts);
-        if (!st_.provider_models.empty()) {
-          H ml = el("div", "pv-models");
-          for (size_t i = 0; i < st_.provider_models.size(); ++i) {
-            ml.add(el("span", "pv-model").text(st_.provider_models[i]));
-          }
-          abody.add(ml);
-          abody.add(el("div", "hint").text(
-              "级别：" + st_.provider_models_level + "（user > api > preset > 保守缺省）"));
-        }
         adv.add(abody);
       }
-      detail.add(adv);
+      form.add(adv);
 
       if (!st_.provider_status.empty()) {
-        detail.add(el("div", "pv-status").text(st_.provider_status));
+        form.add(el("div", "pv-status").text(st_.provider_status));
       }
       H acts = el("div", "settings-actions");
       std::string sel = st_.provider_selected;
-      acts.add(comp::button("保存", [this](const std::string&) { save_provider(); }, "primary"));
+      acts.add(comp::button(tr("保存"), [this](const std::string&) { save_provider(); }, "primary"));
       if (!creating) {
-        acts.add(comp::button("测试连接", [this, sel](const std::string&) {
+        acts.add(comp::button(tr("测试连接"), [this, sel](const std::string&) {
           test_provider(sel);
         }));
-        acts.add(comp::button("删除", [this, sel](const std::string&) {
+        acts.add(comp::button(tr("删除"), [this, sel](const std::string&) {
           delete_provider(sel);
         }, "danger"));
       }
-      acts.add(comp::button("取消", [this](const std::string&) {
+      acts.add(comp::button(tr("取消"), [this](const std::string&) {
         update([&](AppState& s) {
           s.provider_creating = false;
           s.pv_template_picked = false;
@@ -2733,12 +2770,48 @@ VNodePtr UiApp::build_settings() {
           s.provider_models.clear();
         });
       }, "ghost"));
-      detail.add(acts);
+      form.add(acts);
+      cols.add(form);
+
+      // ---- 模型：独立面板（宽屏在右侧，窄屏落到表单下面）----
+      H mpanel = el("div", "pv-models-panel");
+      mpanel.add(comp::section_title(tr("模型")));
+      H macts = el("div", "settings-actions");
+      if (!sel.empty()) {
+        macts.add(comp::button(tr("获取模型列表"), [this, sel](const std::string&) {
+          fetch_provider_models(sel);
+        }, "primary"));
+      }
+      mpanel.add(macts);
+      if (st_.provider_models.empty()) {
+        mpanel.add(el("div", "hint").text(
+            creating ? tr("保存后可获取模型列表") : tr("还没有模型列表，点上面获取")));
+      } else {
+        // one row per model: a list reads better than a wrapped cloud of chips
+        // when the panel is a real column
+        H ml = el("div", "pv-model-list");
+        for (size_t i = 0; i < st_.provider_models.size(); ++i) {
+          H row = el("div", "pv-model-row");
+          row.add(el("i", "fa fa-bolt"));
+          row.add(el("span", "pv-model-name").text(st_.provider_models[i]));
+          ml.add(row);
+        }
+        mpanel.add(ml);
+        mpanel.add(el("div", "hint").text(
+            tr("来源") + "：" + st_.provider_models_level +
+            tr("（用户 > API > 预置 > 保守缺省）")));
+      }
+      cols.add(mpanel);
+
+      detail.add(cols);
     };
 
     if (st_.provider_creating && !st_.pv_template_picked) {
-      // step 1: pick a template (it only pre-fills endpoint + headers)
-      detail.add(comp::section_title("新建供应商"));
+      // step 1: pick a template (it only pre-fills endpoint + headers). The grid
+      // is auto-fill, so a wider window shows more templates per row instead of
+      // stretching two of them across the whole page.
+      detail.add(comp::section_title(tr("新建供应商")));
+      detail.add(comp::hint(tr("模板只预填 Endpoint 与请求头；格式可随时改")));
       H tpls = el("div", "pv-templates");
       for (size_t i = 0; i < st_.provider_templates.size(); ++i) {
         const AppState::ProviderTemplate& t = st_.provider_templates[i];
@@ -2747,9 +2820,17 @@ VNodePtr UiApp::build_settings() {
         c.on(EventKind::kClick, [this, tid](const std::string&) {
           begin_new_provider(tid);
         });
-        c.add(el("div", "pv-tpl-name").text(t.name));
-        c.add(el("div", "pv-tpl-desc").text(t.description));
-        c.add(el("div", "pv-tpl-url").text(t.base_url));
+        // The mark is a letter drawn in CSS (no network, no extra assets): the
+        // first letter of the template, tinted per template so the grid is
+        // scannable by shape+color rather than by reading every name.
+        H mark = el("span", "pv-tpl-mark");
+        mark.text(t.name.empty() ? "?" : t.name.substr(0, 1));
+        c.add(mark);
+        H body = el("div", "pv-tpl-body");
+        body.add(el("div", "pv-tpl-name").text(t.name));
+        body.add(el("div", "pv-tpl-desc").text(t.description));
+        body.add(el("div", "pv-tpl-url").text(t.base_url));
+        c.add(body);
         tpls.add(c);
       }
       detail.add(tpls);
@@ -2762,7 +2843,7 @@ VNodePtr UiApp::build_settings() {
       detail.add(back);
       build_form(true);
     } else if (st_.provider_selected.empty()) {
-      detail.add(comp::empty_state("从左侧选择一个供应商，或点「新建」。", "", nullptr));
+      detail.add(comp::empty_state(tr("从左侧选择一个供应商，或点「新建」"), "", nullptr));
     } else {
       build_form(false);
     }
@@ -2839,6 +2920,58 @@ VNodePtr UiApp::build_settings() {
       set_setting("subagents.maxDepth", n < 8 ? n + 1 : 8);
     }));
     body.add(comp::field(tr("嵌套深度"), dep_row));
+  } else if (sec == "context") {
+    // --- 上下文（session-history.md §3：短视图 + 外层压缩摘要）---
+    // These are the knobs the HistoryBuilder reads: how much recent history goes
+    // to the model verbatim, and the token budget above which the oldest turns
+    // get compressed into a summary. They used to sit in 常规 under the heading
+    // "会话历史", which described them as storage settings - they are not: they
+    // decide what the MODEL sees each turn.
+    body.add(comp::section_title(tr("短视图")));
+    H hist_row = el("div", "stepper");
+    hist_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
+      int n = std::atoi(st_.history_recent.c_str());
+      n = n > 4 ? n - 1 : 4;
+      st_.history_recent = itos(n);
+      set_setting("history.recentTurns", n);
+    }));
+    hist_row.add(el("span", "stepper-value").text(
+        (st_.history_recent.empty() ? std::string("20") : st_.history_recent) +
+        tr(" 轮")));
+    hist_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
+      int n = std::atoi(st_.history_recent.c_str());
+      n = n < 100 ? n + 1 : 100;
+      st_.history_recent = itos(n);
+      set_setting("history.recentTurns", n);
+    }));
+    body.add(comp::field(tr("保留最近"), hist_row));
+
+    body.add(comp::section_title(tr("压缩")));
+    H bud_row = el("div", "stepper");
+    bud_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
+      int n = std::atoi(st_.history_budget.c_str());
+      n = n > 1000 ? n - 1000 : 1000;
+      st_.history_budget = itos(n);
+      set_setting("history.tokenBudget", n);
+    }));
+    bud_row.add(el("span", "stepper-value").text(
+        (st_.history_budget.empty() ? std::string("8000") : st_.history_budget) +
+        " tok"));
+    bud_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
+      int n = std::atoi(st_.history_budget.c_str());
+      n = n < 128000 ? n + 1000 : 128000;
+      st_.history_budget = itos(n);
+      set_setting("history.tokenBudget", n);
+    }));
+    body.add(comp::field(tr("token 预算"), bud_row));
+
+    body.add(comp::section_title(tr("防过拟合")));
+    body.add(comp::field(tr("重复检测"), comp::toggle(
+        sv_bool(st_.settings_values, "session.overfitEnabled", false), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "session.overfitEnabled", false);
+      set_setting("session.overfitEnabled", !cur);
+    })));
   } else if (sec == "model_prefs") {
     // --- 模型偏好（provider.md §5：子代理/摘要模型的通用偏好）---
     body.add(comp::section_title(tr("子代理")));
@@ -3305,7 +3438,11 @@ VNodePtr UiApp::build_settings() {
     body.add(comp::key_value(tr("构建"), "C++14 · xmake · wasm(emcc)"));
     body.add(comp::key_value(tr("界面"), "FlashSight UI (C++ VNode)"));
   } else {
-    // --- 常规：界面显示 + 会话历史（history.*）+ 用量保留 ---
+    // --- 常规：界面显示 ---
+    // Per rules/goal.md, 通用·常规 is "界面显示等" - UI behaviour. The context
+    // window / compression knobs are agent behaviour and live under 模型 (see the
+    // 上下文 section), which is where someone looking for "how much history does
+    // the model see" would actually look.
     body.add(comp::section_title(tr("界面显示")));
     // Tab placement: the docs ask for a label-page mode that can become a
     // vertical side strip. It is a real layout switch, not a cosmetic one.
@@ -3321,50 +3458,19 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "ui.tabTooltip", true);
       set_setting("ui.tabTooltip", !cur);
     })));
-
-    body.add(comp::section_title(tr("会话历史")));
-    H hist_row = el("div", "stepper");
-    hist_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
-      int n = std::atoi(st_.history_recent.c_str());
-      n = n > 4 ? n - 1 : 4;
-      st_.history_recent = itos(n);
-      set_setting("history.recentTurns", n);
-    }));
-    hist_row.add(el("span", "stepper-value").text(
-        (st_.history_recent.empty() ? std::string("20") : st_.history_recent) +
-        " 轮"));
-    hist_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
-      int n = std::atoi(st_.history_recent.c_str());
-      n = n < 100 ? n + 1 : 100;
-      st_.history_recent = itos(n);
-      set_setting("history.recentTurns", n);
-    }));
-    body.add(comp::field(tr("保留轮数"), hist_row));
-    H bud_row = el("div", "stepper");
-    bud_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
-      int n = std::atoi(st_.history_budget.c_str());
-      n = n > 1000 ? n - 1000 : 1000;
-      st_.history_budget = itos(n);
-      set_setting("history.tokenBudget", n);
-    }));
-    bud_row.add(el("span", "stepper-value").text(
-        (st_.history_budget.empty() ? std::string("8000") : st_.history_budget) +
-        " tok"));
-    bud_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
-      int n = std::atoi(st_.history_budget.c_str());
-      n = n < 128000 ? n + 1000 : 128000;
-      st_.history_budget = itos(n);
-      set_setting("history.tokenBudget", n);
-    }));
-    body.add(comp::field(tr("token 预算"), bud_row));
-    body.add(comp::field(tr("防过拟合"), comp::toggle(
-        sv_bool(st_.settings_values, "session.overfitEnabled", false), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "session.overfitEnabled", false);
-      set_setting("session.overfitEnabled", !cur);
+    body.add(comp::field(tr("会话标签上限"), comp::select(
+        std::vector<std::string>{"5", "8", "12", "不限"},
+        [&]() {
+          int n = sv_int(st_.settings_values, "ui.maxTabs", 8);
+          return n <= 5 ? 0 : n <= 8 ? 1 : n <= 12 ? 2 : 3;
+        }(),
+        [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      const int vals[4] = {5, 8, 12, 0};
+      set_setting("ui.maxTabs", vals[idx < 0 || idx > 3 ? 1 : idx]);
     })));
 
-    body.add(comp::section_title(tr("用量统计")));
+    body.add(comp::section_title(tr("数据保留")));
     H days_row = el("div", "stepper");
     days_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
       int n = sv_int(st_.settings_values, "usage.retainDays", 90);
@@ -3372,13 +3478,13 @@ VNodePtr UiApp::build_settings() {
       set_setting("usage.retainDays", n);
     }));
     days_row.add(el("span", "stepper-value").text(
-        itos(sv_int(st_.settings_values, "usage.retainDays", 90)) + " 天"));
+        itos(sv_int(st_.settings_values, "usage.retainDays", 90)) + tr(" 天")));
     days_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
       int n = sv_int(st_.settings_values, "usage.retainDays", 90);
       n = n < 3650 ? n + 7 : 3650;
       set_setting("usage.retainDays", n);
     }));
-    body.add(comp::field(tr("保留天数"), days_row));
+    body.add(comp::field(tr("用量记录保留"), days_row));
   }
   wrap.add(body);
   return wrap.get();
@@ -3998,8 +4104,9 @@ void UiApp::handle_upload_reply(const std::string& reply_json) {
 std::vector<const TermItem*> UiApp::filtered_terminals() const {
   std::vector<const TermItem*> out;
   const std::string& pat = st_.term_filter;
-  for (size_t i = 0; i < st_.terminals.size(); ++i) {
-    const TermItem& t = st_.terminals[i];
+  std::vector<const TermItem*> all = ordered_terminals();
+  for (size_t i = 0; i < all.size(); ++i) {
+    const TermItem& t = *all[i];
     if (pat.empty()) {
       out.push_back(&t);
       continue;
@@ -4049,21 +4156,16 @@ H UiApp::build_terminal_search() {
   return box;
 }
 
-// Remove a terminal from the tab strip without ending it. The process keeps
-// running (the model may still be using it) - only 停止 kills it. The terminal
-// stays listed in the overview, and clicking its card there brings the tab back,
-// so closing a tab is never a dead end.
+// Close a terminal's TAB without ending it. The process keeps running (the model
+// may still be using it) - only 停止 kills it.
+//
+// The terminal stays in the list: `terminals` is what BOTH the strip and the
+// overview read, and only the STRIP skips closed ones (term_tab_closed). Removing
+// it here is what made a closed terminal vanish from 所有 as well, so it looked
+// gone until the next backend refresh put it back.
 void UiApp::close_terminal_tab(const std::string& tid) {
   if (tid.empty()) return;
   update([&](AppState& s) {
-    for (size_t i = 0; i < s.terminals.size(); ++i) {
-      if (s.terminals[i].tid == tid) {
-        s.terminals.erase(s.terminals.begin() + i);
-        break;
-      }
-    }
-    // remember it so the next refresh does not bring the tab back (the process
-    // is still running - it is only the tab that is gone)
     bool known = false;
     for (size_t i = 0; i < s.term_hidden.size(); ++i) {
       if (s.term_hidden[i] == tid) { known = true; break; }
@@ -4080,6 +4182,11 @@ void UiApp::close_terminal_tab(const std::string& tid) {
 // Bring back a closed terminal's tab. Closing only hides the tab (the process
 // keeps running), and the overview card does this on click, so the tab is
 // recoverable from the list where the terminal is visible.
+//
+// The reopened tab goes to the END of the strip: reopening is "give me this
+// back", and it should appear where a new tab would - not jump into numeric
+// position in the middle of the strip (which is what the backend's tid sort
+// would do, and it makes the tab you just asked for hard to find).
 void UiApp::reopen_terminal_tab(const std::string& tid) {
   if (tid.empty()) return;
   update([&](AppState& s) {
@@ -4089,6 +4196,13 @@ void UiApp::reopen_terminal_tab(const std::string& tid) {
         break;
       }
     }
+    for (size_t i = 0; i < s.term_order.size(); ++i) {
+      if (s.term_order[i] == tid) {
+        s.term_order.erase(s.term_order.begin() + i);
+        break;
+      }
+    }
+    s.term_order.push_back(tid);
   });
 }
 
@@ -4130,6 +4244,12 @@ void UiApp::close_tab(const std::string& id) {
 void UiApp::open_or_focus_side_tab(const std::string& kind) {
   if (kind.empty()) return;  // never silently default to a tab kind
   const SideKind* k = side_kind(kind);
+  // Opening a panel implies wanting to SEE it: a manually collapsed side panel
+  // must expand, or the click looks broken (the panel was "opened" but nothing
+  // appeared).
+  if (st_.side_collapsed) {
+    update([&](AppState& s) { s.side_collapsed = false; });
+  }
   // A singleton kind focuses its existing tab; a multi kind (files, git) always
   // adds another, because two file panels are two directories.
   if (k && !k->multi) {
@@ -4170,7 +4290,6 @@ void UiApp::load_side_tab(const std::string& id) {
   if (kind == "subagents") load_subagents(active_sid());
   if (kind == "files" && !st_.active_pid.empty()) load_files(id, st_.active_pid, path);
 }
-
 void UiApp::close_side_tab(const std::string& id) {
   update([&](AppState& s) {
     for (size_t i = 0; i < s.side_tabs.size(); ++i) {

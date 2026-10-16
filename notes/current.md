@@ -696,3 +696,78 @@ The process of project: P0 环境搭建 + P1 AppCore
     里加了 build_*/ 规则（build/ 单独保留，因为它是最常用的那个）。
   - 教训：`git add -A` 在有多个 build 目录时会把它们全带上；临时构建目录一律
     用 build_ 前缀，规则才能覆盖。
+
+<38>(SOLVED): WhaleUI 桌面 UI 接入 —— h/hpp 取回、WhaleDom + 原生入口、开关式编译。
+  - 头文件：`3rdparty/whaleui/include/{whaleui.h,whaleui.hpp}`（WhaleUI include/ 副本；
+    3rdparty 不入 git）。
+  - 新增 `src/ui/ui_dom_whale.cpp`（WhaleDom：用 `whaleui_dom_*` 实现 IDom）与
+    `src/ui/ui_main_whale.cpp`（原生入口：建 App/Window、注入 web/style.css +
+    图标子集、挂 UiApp、事件循环）。`src/main.cpp` 按 `FS_UI_WHALEUI` 二选一。
+  - 开关：`xmake f --whaleui=y [--whaleui_libdir=...] [--whaleui_pkgdir=...]`；
+    默认 **关闭**（`ui_dom_whale.cpp`/`ui_main_whale.cpp` 整体在 `#ifdef` 内，
+    `ui_server.cpp` 只在默认配置编译）。打开时跳过 fs_ui_wasm、链接
+    libwhaleui-full + SDL3/SDL3_ttf 预编译包 + xrepo 的 lexbor/utf8proc/SDL3_image
+    （从 xmake 包缓存直接找 .a，不重复 add_requires —— 本机重装 lexbor 需要 VS）。
+    after_build 把 DLL 与 web/ 资产拷到 exe 旁边。
+  - 关键坑：
+    (a) 静态库链接顺序 —— `whaleui_link()` 必须挂在 **fs_ui**（引用 whaleui_* 的
+        目标）上，挂 flashsight 会让 -lwhaleui-full 排在 fs_ui.lib 之前，全部符号
+        未定义。
+    (b) `ui_app.cpp` 一行未改，四个后端（wasm/null/whale/未来）共用同一套上层。
+    (c) WhaleUI 没有"改写文本节点"的 API，所以适配层用**槽位下标**做 Node id，
+        set_text 换 lexbor 文本节点而 id 不变。
+    (d) 布尔属性（checked/disabled/selected）必须按**存在性**处理（"0" 要
+        remove_attribute），否则 `:checked` 永远为真。
+    (e) 空字符串 style 要 `style_remove_property`（不是写 `prop:`），否则
+        diff 的"这轮不再设置"会留下陈旧内联样式。
+  - 详细说明与验收清单：`doc-internal/ui-whaleui.md`（含 7 项已知缺口 A-G）。
+  - 首次运行发现 WhaleUI 布局缺陷（界面只出标签条）：见 <39>。
+
+<39>(UNRESOLVED): WhaleUI 布局缺陷 —— flex 项的"主轴"尺寸用视口单位时塌成 1px。
+  - 现象：桌面 UI 只画出 40px 顶部标签条，页面主体全空；布局 dump 显示应用根容器
+    `.window`（`height:100vh;display:flex;flex-direction:column`）被算成 1280x1，
+    所有 `flex:1` 后代跟着塌成 0。
+  - 根因（只读定位，未改 WhaleUI）：
+    `layout_flex` 解析 flex 项假设主轴尺寸走 `len_or_auto`（layout.cpp:3471）
+    → `len_px`（layout.cpp:568）→ `len_px_impl(v, base, em, 0, 0)`：**视口宽高硬编码 0**，
+    于是 `vh/vw` 全算成 0；随后被"避免 0 尺寸主轴项"的地板兜成 1
+    （layout.cpp:3515 `if (main_size[i] < 1 && grow[i] <= 0) main_size[i] = 1`）。
+    同一处百分比基数用 `inner_w`，导致 column 里 `height:50%` 按**宽度**解析
+    （实测 640 = 1280 的 50%，应为 410）。
+    带视口的 `len_or_auto_vp`（layout.cpp:595）已存在且元素自身尺寸已在用
+    （layout.cpp:2704-2705），只有 flex 项这条路径没用；`est_node_height`
+    （layout.cpp:4091）同病。
+  - 复现与报告已交上游：`C:/aaa/WhaleUI/temp/incorrect1/`（`incorrect1.cpp` 15 个变体
+    + `README.md`）。实测：单层 flex column + `height:100vh` 即触发；交叉轴不受影响；
+    rem/px 正常；`min-height:100vh` 或 `height:100%` 可规避。
+  - 影响：**当前 WhaleUI 构建下桌面 UI 无法正常渲染**。决定先记录、等上游修复，
+    不改应用代码（规避方案已记在 doc-internal/ui-whaleui.md §5）。
+
+<40>(SOLVED): 终端标签与"所有"解耦 + 空间利用 + 常规/上下文归位。
+  - 关闭标签 ≠ 移除终端：`close_terminal_tab` 只把 tid 记进 `term_hidden`，
+    不再从 `st_.terminals` 删除，所以「所有终端」照旧列出它（标"标签已关闭"），
+    进程也不受影响；`reopen_terminal_tab` 从 `term_hidden` 和 `term_order` 里
+    去掉再 `push_back`，因此重新打开是**追加到末尾**而不是按 tid 插回中间。
+  - 新增 `AppState::term_order`（会话视图同步持久化）：`load_terminals` 保序
+    同步（已知保序、新的追加、消失的丢弃），`ordered_terminals()` 统一供标签条
+    与筛选后的概览使用，`terminal.output` 事件里也登记新 tid。
+  - 输入框去掉「子代理」「终端」按钮（与侧栏「+」和底部终端抽屉重复）；
+    `open_or_focus_side_tab` 先清 `side_collapsed`，程序化打开面板时侧栏必弹出。
+  - 供应商页：表单改 `.pv-detail-cols` 两栏（`.pv-form` flex 1 1 340px +
+    `.pv-models-panel` flex 1 1 260px），模型列表从折叠的「高级」里提出到右栏
+    用 `.pv-model-row` 行渲染；模板网格 `auto-fill minmax(260px,1fr)` + 首字母
+    徽标 `.pv-tpl-mark`。
+  - 设置页空间利用：`.settings-body` 改 grid（`auto-fill minmax(400px,1fr)`），
+    只有 `.field` 参与分栏，标题/提示/列表/自带多栏的页跨整行；
+    max-width 860 → 1180。`ui.maxTabs`（默认 8，0 = 不限）新增到 settings_store。
+  - 依据 rules/goal.md 重排设置：常规 = 界面显示（标签位置/会话名提示/标签上限）
+    + 数据保留；新增「模型 · 上下文」承载短视图（history.recentTurns）、
+    压缩（history.tokenBudget）、防过拟合（session.overfitEnabled）——这些决定
+    **模型看到什么**，不是存储策略，所以归到模型下。
+  - 修 CSS：`.field .hint` 改为 `flex 1 1 100%` 换行到控件下方。原先内联时在窄栏
+    里与控件抢行并"赢"了，控件被压成 0 宽、提示直接画在 select 上。
+  - 测试：161 用例 / 1560 断言通过（`uiapp_terminal_close_tab_keeps_process`
+    改为断言终端仍在列表、新增 `uiapp_reopened_tab_appends`、
+    `uiapp_settings_page` 加入 `context` 段）。
+  - 注意：`.xmake` 里的 builddir 曾被改成 `build_check`，导致测试跑的是旧 exe
+    （"改了没生效"）；`xmake f -o build` 复位。改动后务必确认 exe 时间戳。

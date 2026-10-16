@@ -511,7 +511,9 @@ FS_TEST(uiapp_every_page_declares_an_animation) {
 }
 
 // Creating a terminal is one click, and the tab strip offers a close that does
-// NOT end the process (the model may still be using it).
+// NOT end the process (the model may still be using it) and does NOT remove the
+// terminal from the list either: 所有终端 shows every terminal whether or not it
+// has a tab, so closing a tab only un-tabs it.
 FS_TEST(uiapp_terminal_close_tab_keeps_process) {
   NullDom dom;
   AppState st = AppState::make();
@@ -524,18 +526,43 @@ FS_TEST(uiapp_terminal_close_tab_keeps_process) {
     s.term_tab = "1";
   });
   app.close_terminal_tab("1");
-  EXPECT_TRUE(app.state().terminals.empty());
+  // still in the list (so 所有终端 keeps showing it), but no longer a tab
+  EXPECT_EQ(app.state().terminals.size(), size_t(1));
   EXPECT_EQ(app.state().term_tab, std::string("all"));
-  // it is remembered as closed, so a refresh does not bring the tab back
   EXPECT_EQ(app.state().term_hidden.size(), size_t(1));
   // and the terminal was NOT killed (no terminal.kill was issued)
   for (size_t i = 0; i < dom.calls().size(); ++i) {
     EXPECT_TRUE(dom.calls()[i].detail.find("terminal.kill") == std::string::npos);
   }
-  // closing is not a dead end: the overview card reopens it (and the terminal
-  // was never removed from the list, only its tab)
+  // closing is not a dead end: the overview card reopens it
   app.reopen_terminal_tab("1");
   EXPECT_TRUE(app.state().term_hidden.empty());
+}
+
+// A reopened tab appends to the strip instead of slotting back into tid order:
+// the tabs read as "the order you opened them", so reopening must not make a
+// new tab appear in the middle of the strip.
+FS_TEST(uiapp_reopened_tab_appends) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "one", "running"});
+    s.terminals.push_back(TermItem{"2", "cmd", "two", "running"});
+    s.terminals.push_back(TermItem{"3", "cmd", "three", "running"});
+    s.term_order = {"1", "2", "3"};
+  });
+  // close the middle tab, then reopen it
+  app.close_terminal_tab("2");
+  app.reopen_terminal_tab("2");
+  std::vector<const TermItem*> ord = app.ordered_terminals();
+  EXPECT_EQ(ord.size(), size_t(3));
+  EXPECT_EQ(ord[0]->tid, std::string("1"));
+  EXPECT_EQ(ord[1]->tid, std::string("3"));
+  EXPECT_EQ(ord[2]->tid, std::string("2"));  // appended, not back in the middle
 }
 
 // The 文件 button uploads (a DOM-adapter binding opens the chooser) instead of
@@ -954,17 +981,19 @@ FS_TEST(uiapp_settings_page) {
   });
   EXPECT_TRUE(dump_has(dom, "Endpoint"));
   EXPECT_TRUE(dump_has(dom, "发送会话亲和头"));
-  // every nav entry must render its own body (nav key == body branch)
+  // every nav entry must render its own body (nav key == body branch).
+  // 常规 is 界面显示 (UI behaviour); the context-window knobs live under 模型 ·
+  // 上下文 because they decide what the model sees, not what is stored.
   const char* sec_keys[] = {"general", "appearance", "browser", "computer",
-                            "providers", "session_defaults", "model_prefs",
-                            "subagents", "skills", "memory", "network",
-                            "terminal", "files", "environment",
+                            "providers", "session_defaults", "context",
+                            "model_prefs", "subagents", "skills", "memory",
+                            "network", "terminal", "files", "environment",
                             "shortcuts", "about"};
-  const char* sec_text[] = {"保留轮数", "主题", "浏览器控制", "电脑控制",
-                            "Endpoint", "会话默认", "摘要模型",
-                            "并行上限", "外部工具包", "长期记忆", "网络总开关",
-                            "默认 shell", "自动 git init", "CLI 工具路径",
-                            "发送消息", "版本"};
+  const char* sec_text[] = {"界面显示", "主题", "浏览器控制", "电脑控制",
+                            "Endpoint", "会话默认", "保留最近",
+                            "摘要模型", "并行上限", "外部工具包", "长期记忆",
+                            "网络总开关", "默认 shell", "自动 git init",
+                            "CLI 工具路径", "发送消息", "版本"};
   for (size_t i = 0; i < sizeof(sec_keys) / sizeof(sec_keys[0]); ++i) {
     std::string key = sec_keys[i];
     app.update([&](AppState& s) { s.settings_nav = key; });

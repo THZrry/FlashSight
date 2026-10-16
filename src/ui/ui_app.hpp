@@ -164,6 +164,8 @@ struct AppState {
   // DECCKM for the selected terminal (arrows are SS3 vs CSI). Read from its
   // grid; needed when encoding a key press.
   bool term_app_keys = false;
+  // tab display order (the user's arrangement, not the backend's tid sort)
+  std::vector<std::string> term_order;
   // terminals the user closed the tab for. The PROCESS keeps running (the model
   // may still be using it, and only 停止 kills it); it is just not shown. Kept
   // per session so a closed tab does not come back on the next refresh, while a
@@ -345,6 +347,11 @@ struct SessionView {
   int term_cols = 0;
   int term_rows = 0;
   bool term_app_keys = false;
+  // Tab display order (tids). The backend returns terminals sorted by tid, but a
+  // tab strip is a WORKING SET: a terminal you just created or reopened belongs
+  // at the end, where you left it, not back in numeric position. New tids are
+  // appended here as they appear; reopening moves one to the end.
+  std::vector<std::string> term_order;
   std::vector<std::string> term_hidden;
   std::string term_filter;
   bool term_filter_input = false;
@@ -444,6 +451,9 @@ class UiApp {
     }
     return false;
   }
+  // terminals in display order (the user's arrangement, not the backend's tid
+  // sort) - the strip and the overview both read this
+  std::vector<const TermItem*> ordered_terminals() const;
   // terminals matching the current filter, in display order (empty filter = all)
   std::vector<const TermItem*> filtered_terminals() const;
   // the filter row itself (only built once the strip is crowded)

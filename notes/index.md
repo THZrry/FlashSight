@@ -133,9 +133,30 @@ The process of project: P0 环境搭建
   通用、新增模型偏好、子代理模型取自供应商列表、上限改步进、关于页精简）。
   详见 current.md <36>。
 
+<38>(SOLVED): WhaleUI 桌面 UI 接入 —— 头文件取回 3rdparty/whaleui/include/、新增
+  WhaleDom（ui_dom_whale.cpp）+ 原生入口（ui_main_whale.cpp）、main.cpp 按
+  FS_UI_WHALEUI 二选一、xmake 加 --whaleui 开关（默认关闭，等 WhaleUI 完工）。
+  ui_app/vdom/components 一行未改。坑：静态库链接顺序要挂 fs_ui 不是 flashsight；
+  WhaleUI 无"改写文本节点"API 故 Node 用槽位下标；布尔属性按存在性；空 style 要
+  remove_property。详见 current.md <38> 与 doc-internal/ui-whaleui.md。
+
+<39>(UNRESOLVED): WhaleUI 布局缺陷 —— flex 项主轴尺寸写成视口单位（vh/vw）时塌成
+  1px，导致桌面 UI 只画出标签条。根因：layout_flex 走 len_px（视口硬编码 0）
+  再被 1px 地板兜住（layout.cpp:3471 / 3515）；百分比基数还用了宽度
+  （layout.cpp:3471）。复现 + 报告已交上游 WhaleUI temp/incorrect1/。
+  详见 current.md <39>。
+
 ## 当前状态（更新 2026-10-16）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
 - UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；160 用例 1568 断言通过。
 - 终端已是真终端（VT 解析 + ConPTY + scrollback + 搜索）；设置/外观已做实。
-- 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。
+- WhaleUI 桌面后端已接入并接线（`--whaleui=y`，默认不编译），头文件与构建开关就位。
+- 等：WhaleUI 修 flex 主轴视口单位塌 1px（notes <39>，已交上游）；vision 平台截图/图像解码后端。
+
+<40>(SOLVED): 终端标签与"所有"解耦（关标签不删终端、重开追加到末尾，新增
+  `term_order`）+ 空间利用（设置页 grid 双栏、供应商表单双栏 + 模型列表右栏、
+  模板网格自适应）+ 输入框去掉重复的「子代理」「终端」按钮 + 侧栏程序化打开
+  必弹出 + 依据 rules/goal.md 重排设置（常规只留界面显示/数据保留，新增
+  「模型 · 上下文」放短视图/压缩/防过拟合）+ 修 .field .hint 抢行压塌控件。
+  161 用例 1560 断言。详见 current.md <40>。
