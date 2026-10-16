@@ -1,0 +1,7 @@
+{
+    errdata = "src\\core\\project_manager.cpp:13:6: warning: 'void fs::{anonymous}::maybe_git_init(const ghc::filesystem::path&, bool)' defined but not used [-Wunused-function]\
+   13 | void maybe_git_init(const ghc::filesystem::path& root, bool allowed) {\
+      |      ^~~~~~~~~~~~~~\
+cc1plus.exe: note: unrecognized command-line option '-Wno-gnu-line-marker' may have been intended to silence earlier diagnostics\
+"
+}

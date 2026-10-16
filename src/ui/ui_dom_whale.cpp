@@ -12,15 +12,25 @@
 // WHY THIS FILE IS BEHIND A MACRO
 //
 // WhaleUI is not finished yet (drag & drop is the remaining piece), so the
-// desktop path is written but NOT compiled in: build it with `xmake f --whaleui=y`
-// once WhaleUI is ready. Until then the native build keeps using NullDom and the
-// browser (wasm) build is unaffected. The gaps this adapter has to work around
-// are listed in doc-internal/ui-whaleui.md.
+// desktop path is written and wired but NOT compiled in: build it with
+// `xmake f --whaleui=y` once WhaleUI is ready. Until then the native build keeps
+// using NullDom and the browser (wasm) build is unaffected. The gaps this
+// adapter has to work around, and what must be checked on the first run, are
+// listed in doc-internal/ui-whaleui.md.
 //
-// Node identity: `Node::id` indexes `slots_`, it is NOT the element pointer.
-// The indirection is required for TEXT nodes - WhaleUI has no "write the data of
-// this text node" call, so set_text() swaps the underlying lexbor text node
-// while the id (which is what the diff compares) stays the same.
+// Two design points worth knowing before reading:
+//
+//  * Node identity: `Node::id` indexes `slots_`, it is NOT the element pointer.
+//    The indirection is needed for TEXT nodes - WhaleUI has no "write the data
+//    of this text node" call, so set_text() swaps the underlying lexbor text
+//    node while the id (which is what the diff compares) stays the same.
+//
+//  * Keyboard: the browser build binds listeners to nodes. Here the window key
+//    callback is used instead, because WhaleUI's programmatic focus does not
+//    move the ENGINE focus (see doc-internal/ui-whaleui.md) - a node-scoped
+//    keydown listener would only fire after the user clicked that node. The
+//    window callback fires whatever has focus, so the adapter checks
+//    document.activeElement itself.
 // ---------------------------------------------------------------------------
 #include "ui_dom.hpp"
 
@@ -31,6 +41,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <system_error>
@@ -51,19 +62,13 @@ struct Slot {
   bool is_text = false;
 };
 
-// A bound listener. WhaleUI hands back a plain C callback + userdata, so the
-// C++ closure lives here and a single trampoline unwraps it.
+// A bound DOM listener. WhaleUI hands back a plain C callback + userdata, so the
+// C++ closure lives here and one trampoline unwraps it.
 struct Listener {
-  std::string type;                                  // DOM event name
+  std::string type;  // DOM event name
   whaleui_dom_element_t* el = nullptr;
   std::function<void(whaleui_dom_event_t*)> fn;
 };
-
-class WhaleDom;
-
-// One UI per process, like the EventBus singleton: the C trampoline needs to
-// find the adapter without userdata plumbing at every call site.
-WhaleDom* g_dom = nullptr;
 
 void trampoline(whaleui_dom_event_t* ev, void* ud) {
   Listener* l = static_cast<Listener*>(ud);
@@ -73,8 +78,8 @@ void trampoline(whaleui_dom_event_t* ev, void* ud) {
 
 // DOM event name for an EventKind. kKeyEnter has no DOM event of its own: the
 // framework wants "Enter was pressed in this control (no Shift)", which the
-// browser glue synthesizes from keydown; here it is a keydown listener with a
-// filter (see bind_kind).
+// browser glue synthesizes from keydown - here it is a keydown listener with a
+// filter (see on()).
 const char* dom_name(EventKind k) {
   switch (k) {
     case EventKind::kClick: return "click";
@@ -93,10 +98,45 @@ const char* dom_name(EventKind k) {
   return "click";
 }
 
+// WHALEUI_KEY_* -> the DOM KeyboardEvent.key name the app matches on. The
+// terminal engine (fs_vt) and the app's Escape handling both key off these
+// names, so they must match the browser glue's spelling exactly.
+std::string key_name(int keycode) {
+  switch (keycode) {
+    case WHALEUI_KEY_ENTER: return "Enter";
+    case WHALEUI_KEY_ESCAPE: return "Escape";
+    case WHALEUI_KEY_TAB: return "Tab";
+    case WHALEUI_KEY_BACKSPACE: return "Backspace";
+    case WHALEUI_KEY_DELETE: return "Delete";
+    case WHALEUI_KEY_HOME: return "Home";
+    case WHALEUI_KEY_END: return "End";
+    case WHALEUI_KEY_UP: return "ArrowUp";
+    case WHALEUI_KEY_DOWN: return "ArrowDown";
+    case WHALEUI_KEY_LEFT: return "ArrowLeft";
+    case WHALEUI_KEY_RIGHT: return "ArrowRight";
+    case WHALEUI_KEY_SPACE: return " ";
+    default: break;
+  }
+  if (keycode >= 'a' && keycode <= 'z') {
+    return std::string(1, static_cast<char>(keycode));
+  }
+  if (keycode >= 'A' && keycode <= 'Z') {
+    return std::string(1, static_cast<char>(keycode));
+  }
+  if (keycode >= '0' && keycode <= '9') {
+    return std::string(1, static_cast<char>(keycode));
+  }
+  if (keycode >= 1073741882 && keycode <= 1073741941) {  // F1..F24
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "F%d", keycode - 1073741881);
+    return std::string(buf);
+  }
+  return std::string();
+}
+
 class WhaleDom : public IDom {
  public:
   WhaleDom(whaleui_app_t* app, whaleui_window_t* win) : app_(app), win_(win) {
-    g_dom = this;
     doc_ = whaleui_window_get_document(win_);
     slots_.resize(2);  // 0 unused; 1 = root
     // The shell HTML carries an empty <div id="fs-root">; the app renders the
@@ -104,6 +144,9 @@ class WhaleDom : public IDom {
     root_el_ = whaleui_dom_get_element_by_id(doc_, "fs-root");
     if (!root_el_) root_el_ = whaleui_dom_body(doc_);
     slots_[1].el = root_el_;
+    // One window key callback drives both the terminal keys and the global
+    // (document-level) keys; see the header comment.
+    whaleui_window_set_key_callback(win_, &WhaleDom::on_window_key, this);
   }
 
   ~WhaleDom() override {
@@ -118,7 +161,6 @@ class WhaleDom : public IDom {
     for (size_t i = 0; i < aux_l_.size(); ++i) drop_listener(aux_l_[i]);
     if (resize_obs_) whaleui_dom_resize_observer_destroy(resize_obs_);
     if (measure_canvas_) whaleui_dom_element_destroy(measure_canvas_);
-    if (g_dom == this) g_dom = nullptr;
   }
 
   // ---- structure ----------------------------------------------------------
@@ -136,7 +178,7 @@ class WhaleDom : public IDom {
     whaleui_dom_element_t* c = el_of(child);
     if (!p || !c) return;
     // never append a node into itself or one of its ancestors (lexbor would
-    // build a cycle and every later walk would spin forever)
+    // build a cycle and every later tree walk would spin forever)
     for (whaleui_dom_element_t* a = p; a; a = whaleui_dom_parent(a)) {
       if (a == c) return;
     }
@@ -153,10 +195,11 @@ class WhaleDom : public IDom {
   void remove(Node node) override {
     Slot& s = slot(node);
     if (!s.el) return;
-    // Detach, then destroy: WhaleUI's element_destroy only frees a DETACHED
-    // node, and the framework calls remove() exactly for subtrees it is
-    // dropping. Without the destroy every re-render would leak the nodes it
-    // replaced (a chat log re-renders thousands of them).
+    // Detach + destroy. WhaleUI's element_destroy only frees a DETACHED node,
+    // and the framework calls remove() exactly for subtrees it is dropping -
+    // without the destroy every re-render would leak what it replaced (a chat
+    // log replaces thousands of nodes). Nothing may hold the id afterwards:
+    // patch_children only re-inserts nodes that survive the same patch.
     drop_kind_listeners(node);
     drop_aux_listeners_for(s.el);
     whaleui_dom_remove(s.el);
@@ -168,9 +211,14 @@ class WhaleDom : public IDom {
   void clear(Node parent) override {
     whaleui_dom_element_t* p = el_of(parent);
     if (!p) return;
-    // children are detached but NOT destroyed here: clear() is only used on
-    // nodes whose children the framework still tracks.
-    while (true) {
+    // Children are detached but NOT destroyed: the framework only calls clear()
+    // for nodes whose children it still tracks.
+    //
+    // NOTE: WhaleUI's first_child is the first ELEMENT child (text nodes are
+    // skipped), so a text-only parent looks empty here. The framework's diff
+    // never calls clear() - it removes nodes individually - so this is a
+    // contract gap rather than a live bug; see doc-internal/ui-whaleui.md.
+    for (;;) {
       whaleui_dom_element_t* c = whaleui_dom_first_child(p);
       if (!c) break;
       whaleui_dom_remove_child(p, c);
@@ -199,9 +247,9 @@ class WhaleDom : public IDom {
       whaleui_dom_set_value(el, value.c_str());
       return;
     }
-    // HTML boolean attributes carry no value; `:checked`/`:disabled` match on
-    // PRESENCE, so "0" must remove the attribute rather than set it to "0"
-    // (which would still match - the classic checkbox-that-will-not-turn-off).
+    // HTML boolean attributes carry no value, and :checked/:disabled match on
+    // PRESENCE - so "0" must REMOVE the attribute rather than set it to "0"
+    // (setting "0" would still match: the checkbox that will not turn off).
     if (key == "checked" || key == "disabled" || key == "selected") {
       bool on = value == "1" || value == "true" || value == "checked";
       if (on) {
@@ -227,8 +275,9 @@ class WhaleDom : public IDom {
   void set_style(Node node, const std::string& key, const std::string& value) override {
     whaleui_dom_element_t* el = el_of(node);
     if (!el) return;
-    // an empty value means "stop setting this" - remove it, so a stale inline
-    // declaration cannot outlive the state that produced it
+    // An empty value means "stop setting this": remove the declaration, so a
+    // stale inline style cannot outlive the state that produced it (the
+    // terminal drawer sets a height while open and must lose it when closed).
     if (value.empty()) {
       whaleui_dom_style_remove_property(el, key.c_str());
       return;
@@ -241,8 +290,7 @@ class WhaleDom : public IDom {
   }
 
   std::string get_value(Node node) override {
-    const char* v = whaleui_dom_get_value(el_of(node));
-    return str_of(v);
+    return str_of(whaleui_dom_get_value(el_of(node)));
   }
 
   bool is_focused(Node node) override {
@@ -261,10 +309,9 @@ class WhaleDom : public IDom {
     l->el = el;
     l->fn = [handler_id, kind](whaleui_dom_event_t* ev) {
       if (kind == EventKind::kKeyEnter) {
-        // Enter without Shift: Enter alone means "send" in the composer, and
-        // Shift+Enter must stay a newline
-        std::string key = str_of(whaleui_dom_event_key(ev));
-        if (key != "Enter") return;
+        // Enter WITHOUT Shift means "send" in the composer; Shift+Enter must
+        // stay a newline, so it is not reported at all.
+        if (str_of(whaleui_dom_event_key(ev)) != "Enter") return;
         if (whaleui_dom_event_shift_key(ev)) return;
         whaleui_dom_event_prevent_default(ev);
         bus().fire(handler_id, std::string());
@@ -290,45 +337,12 @@ class WhaleDom : public IDom {
 
   void bind_splitter(Node splitter, Node side,
                      std::function<void(int)> on_resize) override {
-    whaleui_dom_element_t* bar = el_of(splitter);
-    whaleui_dom_element_t* panel = el_of(side);
-    if (!bar) return;
-    drag_.vertical = false;
-    drag_.side = panel;
-    drag_.cb = on_resize;
-    if (!bar) return;
-    bind_aux(drag_bar_, bar, "mousedown", [this](whaleui_dom_event_t* ev) {
-      if (!drag_.side || !drag_.cb) return;
-      whaleui_dom_rect_t r;
-      if (whaleui_dom_get_bounding_client_rect(drag_.side, &r) != 0) return;
-      drag_.active = true;
-      drag_.moved = false;
-      drag_.start = whaleui_dom_event_mouse_x(ev);
-      drag_.start_size = static_cast<int>(r.width);
-      drag_.size = drag_.start_size;
-      attach_drag_listeners();
-    });
+    bind_drag(hbar_, el_of(splitter), el_of(side), false, on_resize);
   }
 
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override {
-    whaleui_dom_element_t* bar = el_of(splitter);
-    whaleui_dom_element_t* body = el_of(panel);
-    if (!bar) return;
-    drag_.vertical = true;
-    drag_.side = body;
-    drag_.cb = on_resize;
-    bind_aux(drag_bar_, bar, "mousedown", [this](whaleui_dom_event_t* ev) {
-      if (!drag_.side || !drag_.cb) return;
-      whaleui_dom_rect_t r;
-      if (whaleui_dom_get_bounding_client_rect(drag_.side, &r) != 0) return;
-      drag_.active = true;
-      drag_.moved = false;
-      drag_.start = whaleui_dom_event_mouse_y(ev);
-      drag_.start_size = static_cast<int>(r.height);
-      drag_.size = drag_.start_size;
-      attach_drag_listeners();
-    });
+    bind_drag(vbar_, el_of(splitter), el_of(panel), true, on_resize);
   }
 
   // ---- drop zone ----------------------------------------------------------
@@ -339,8 +353,8 @@ class WhaleDom : public IDom {
     drop_cb_ = cb;
     whaleui_dom_element_t* el = el_of(node);
     if (!el) return;
-    // dragover must be cancelled for the engine to treat this element as a
-    // drop target (browser contract: preventDefault in dragover accepts)
+    // dragover must be cancelled for the engine to treat this element as a drop
+    // target (the browser contract: preventDefault in dragover accepts).
     bind_aux(drop_over_, el, "dragover", [](whaleui_dom_event_t* ev) {
       whaleui_dom_event_prevent_default(ev);
     });
@@ -357,51 +371,46 @@ class WhaleDom : public IDom {
   }
 
   // ---- global key (document level) ---------------------------------------
-
+  // Escape must work whatever has focus, so it rides the WINDOW key callback
+  // rather than a DOM listener: the engine dispatches keydown to its own focus
+  // element, which can be null (nothing clicked yet) and then no DOM listener
+  // would ever see the key. The window callback always fires.
   void bind_global_key(std::function<void(const std::string&)> cb) override {
-    global_key_cb_ = cb;
-    if (global_key_l_) return;  // installed once
-    // The engine dispatches keydown to the focused element; a listener on the
-    // document target sees it on the way up, whatever has focus.
-    bind_aux(global_key_l_, reinterpret_cast<whaleui_dom_element_t*>(doc_),
-             "keydown", [this](whaleui_dom_event_t* ev) {
-               if (global_key_cb_) {
-                 global_key_cb_(str_of(whaleui_dom_event_key(ev)));
-               }
-             });
+    global_key_cb_ = cb;  // delivered by on_window_key (installed in the ctor)
   }
 
-  // ---- terminal keyboard input -------------------------------------------
-
+  // ---- terminal keyboard input (node-scoped, with modifiers) -------------
+  // A DOM keydown listener, NOT the window callback: a terminal needs the
+  // modifier state (Ctrl+C is a byte, not the letter 'c', and Shift+Tab is not
+  // Tab) and the window callback carries only the keycode. The engine
+  // dispatches keydown to the element it considers focused, which a mouse press
+  // on the surface sets - so the terminal must be clicked once before it takes
+  // keys (WhaleUI's programmatic focus does not move the engine focus; see
+  // doc-internal/ui-whaleui.md).
   void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override {
     key_input_cb_ = cb;
     whaleui_dom_element_t* el = el_of(node);
     if (!el) return;
     bind_aux(key_down_, el, "keydown", [this](whaleui_dom_event_t* ev) {
       if (!key_input_cb_) return;
-      KeyPress k;
-      k.key = str_of(whaleui_dom_event_key(ev));
-      int mods = whaleui_dom_event_mods(ev);
-      k.ctrl = (mods & WHALEUI_MOD_CTRL) != 0;
-      k.alt = (mods & WHALEUI_MOD_ALT) != 0;
-      k.shift = (mods & WHALEUI_MOD_SHIFT) != 0;
-      k.meta = (mods & WHALEUI_MOD_META) != 0;
-      // The engine's own editing default must not run for terminal keys, and
-      // the browser's shortcuts have no equivalent here - so nothing to
-      // suppress; the terminal surface is not an editable control.
-      key_input_cb_(k);
-    });
-    bind_aux(key_paste_, el, "paste", [this](whaleui_dom_event_t* ev) {
-      if (!key_input_cb_) return;
-      KeyPress k;
-      k.paste = true;
-      k.text = str_of(whaleui_dom_event_clipboard_text(ev));
-      if (k.text.empty()) return;
+      KeyPress k = key_press(ev);
+      // Ctrl+V: the surface is not an editable control, so the engine's own
+      // paste path never runs for it - read the system clipboard here.
+      if (k.ctrl && (k.key == "v" || k.key == "V")) {
+        k.key.clear();
+        k.paste = true;
+        k.text = str_of(whaleui_clipboard_get_text());
+        if (k.text.empty()) return;
+        whaleui_dom_event_prevent_default(ev);
+      }
       key_input_cb_(k);
     });
   }
 
-  void focus(Node node) override { whaleui_dom_focus(el_of(node)); }
+  void focus(Node node) override {
+    whaleui_dom_element_t* el = el_of(node);
+    if (el) whaleui_dom_focus(el);
+  }
 
   // ---- character-cell size (terminal geometry) ---------------------------
 
@@ -410,12 +419,9 @@ class WhaleDom : public IDom {
     whaleui_dom_element_t* el = el_of(node);
     if (!el) return;
     // One observer per element: WhaleUI's observer carries a SINGLE callback
-    // for every element it watches, so watching two terminals with one observer
-    // would report both through the last-registered callback.
-    if (cell_el_ == el && resize_obs_) {
-      report_cells(el);
-      return;
-    }
+    // for every element it watches, so two terminals under one observer would
+    // both report through the last-registered callback.
+    if (cell_el_ == el && resize_obs_) return;
     if (resize_obs_) {
       whaleui_dom_resize_observer_destroy(resize_obs_);
       resize_obs_ = nullptr;
@@ -424,14 +430,13 @@ class WhaleDom : public IDom {
     resize_obs_ = whaleui_dom_create_resize_observer(doc_);
     if (resize_obs_ &&
         whaleui_dom_resize_observer_observe(resize_obs_, el,
-                                            &WhaleDom::on_cell_resize,
-                                            this) == 0) {
-      // the observer delivers the initial size on its first frame
+                                            &WhaleDom::on_cell_resize, this) == 0) {
+      // the observer reports the initial size on its first frame
       return;
     }
-    // no observer: report once, so the child process still gets a usable grid
+    // no observer: measure once, so the child process still gets a usable grid
     // (it just will not follow a later resize)
-    report_cells(el);
+    report_cells(el, 0, 0);
   }
 
   // ---- scroll -------------------------------------------------------------
@@ -439,7 +444,7 @@ class WhaleDom : public IDom {
   void bind_scroll_pin(Node node, std::function<void(bool)> cb) override {
     scroll_pin_cb_ = cb;
     (void)node;
-    // WhaleUI exposes no scroll position read (see doc-internal/ui-whaleui.md),
+    // WhaleUI exposes no scroll-position read (see doc-internal/ui-whaleui.md),
     // so "is the view at the bottom?" cannot be answered yet. Reporting `true`
     // keeps the useful half of the contract: new output follows the view.
     if (scroll_pin_cb_) scroll_pin_cb_(true);
@@ -457,9 +462,9 @@ class WhaleDom : public IDom {
     (void)node;
     (void)pid;
     (void)cb;
-    // A native chooser needs an FsApi entry point (folder_picker has the
-    // folder dialog only). Until that exists the button does nothing rather
-    // than reporting a fake success; see doc-internal/ui-whaleui.md.
+    // A native chooser needs an FsApi entry point (folder_picker has the FOLDER
+    // dialog only). Until that exists the button does nothing rather than
+    // reporting a fake success; see doc-internal/ui-whaleui.md.
   }
 
   // ---- animation (re)start ------------------------------------------------
@@ -468,8 +473,8 @@ class WhaleDom : public IDom {
     whaleui_dom_element_t* el = el_of(node);
     if (!el || cls.empty()) return;
     whaleui_dom_class_remove(el, cls.c_str());
-    // Re-add on the NEXT loop iteration: dropping and adding inside one call is
-    // coalesced by the style pass, and the animation would never replay.
+    // Re-add on the NEXT loop iteration: dropping and re-adding inside one call
+    // is coalesced by the style pass, so the animation would never replay.
     Pending* p = new Pending();
     p->el = el;
     p->cls = cls;
@@ -482,19 +487,32 @@ class WhaleDom : public IDom {
     whaleui_dom_element_t* root = whaleui_dom_document_element(doc_);
     if (!root) return;
     // The stylesheet is variable-driven and reads these off :root, so this is
-    // the whole theming surface (see web/style.css header).
+    // the whole theming surface (see the web/style.css header).
     std::string mode = a.mode;
     if (mode != "light" && mode != "dark") {
       mode = whaleui_app_resolved_theme(app_) == WHALEUI_THEME_DARK ? "dark"
                                                                    : "light";
     }
-    std::string cls = a.palette.empty() || a.palette == "default"
-                          ? std::string()
-                          : ("palette-" + a.palette);
-    const char* cur = whaleui_dom_get_attribute(root, "class");
-    std::string classes = str_of(cur);
-    if (!cls.empty() && classes.find(cls) == std::string::npos) {
-      classes = classes.empty() ? cls : (classes + " " + cls);
+    // A palette is a class; the resolved mode is an attribute, so the two
+    // compose (palette = which hues, mode = light/dark of that palette).
+    std::string want = a.palette.empty() || a.palette == "default"
+                           ? std::string()
+                           : ("palette-" + a.palette);
+    std::string classes;
+    {
+      std::string cur = str_of(whaleui_dom_get_attribute(root, "class"));
+      size_t i = 0;
+      while (i < cur.size()) {
+        size_t sp = cur.find(' ', i);
+        std::string tok = cur.substr(i, sp == std::string::npos ? sp : sp - i);
+        if (!tok.empty() && tok.compare(0, 8, "palette-") != 0) {
+          if (!classes.empty()) classes += " ";
+          classes += tok;
+        }
+        if (sp == std::string::npos) break;
+        i = sp + 1;
+      }
+      if (!want.empty()) classes = classes.empty() ? want : (classes + " " + want);
     }
     whaleui_dom_set_attribute(root, "class", classes.c_str());
     whaleui_dom_set_attribute(root, "data-mode", mode.c_str());
@@ -505,7 +523,7 @@ class WhaleDom : public IDom {
     set_root_var(root, "--font-size-user",
                  a.font_size > 0 ? (std::to_string(a.font_size) + "px")
                                  : std::string(),
-                 "");
+                 nullptr);
   }
 
   // ---- root / identity ----------------------------------------------------
@@ -513,10 +531,9 @@ class WhaleDom : public IDom {
   Node root() override { return Node{1}; }
   const char* backend_name() const override { return "whaleui"; }
 
-  // ---- helpers ------------------------------------------------------------
+ private:
+  // ---- value reporting (mirrors the browser glue) -------------------------
 
-  // The framework's callback: (node, kind) -> value string, mirroring what the
-  // browser glue reports.
   static std::string event_value(EventKind kind, whaleui_dom_event_t* ev) {
     if (kind == EventKind::kKeyDown) {
       return str_of(whaleui_dom_event_key(ev));
@@ -525,8 +542,7 @@ class WhaleDom : public IDom {
     if (!el) return std::string();
     if (is_control(el)) {
       // a checkbox/radio reports its checkedness, not its value attribute
-      std::string tag = str_of(whaleui_dom_tag_name(el));
-      if (tag == "input") {
+      if (str_of(whaleui_dom_tag_name(el)) == "input") {
         std::string type = str_of(whaleui_dom_get_attribute(el, "type"));
         if (type == "checkbox" || type == "radio") {
           return whaleui_dom_has_attribute(el, "checked") ? "1" : "0";
@@ -559,38 +575,29 @@ class WhaleDom : public IDom {
         *value = path;
         return;
       }
+      // A file drop keeps its full path: the model's file tools can read it
+      // directly, which a bare name could not.
       *kind = "file";
-      if (!path.empty()) {
-        *value = name.empty() ? ghc::filesystem::path(path).filename().string()
-                              : name;
-        // a file drop keeps its full path: the model's file tools can read it
-        // directly, which a bare name could not
-        *value = path;
-      } else {
-        *value = name;
-      }
+      *value = !path.empty() ? path : name;
       return;
     }
-    std::string uri_list = str_of(whaleui_data_transfer_get_data(dt, "text/uri-list"));
+    std::string uri_list =
+        str_of(whaleui_data_transfer_get_data(dt, "text/uri-list"));
     if (!uri_list.empty()) {
       size_t nl = uri_list.find('\n');
-      std::string first = nl == std::string::npos ? uri_list : uri_list.substr(0, nl);
+      std::string first =
+          nl == std::string::npos ? uri_list : uri_list.substr(0, nl);
       if (!first.empty() && first[0] != '#') {
         *kind = "url";
         *value = first;
         return;
       }
     }
-    std::string text = str_of(whaleui_data_transfer_get_data(dt, "text/plain"));
-    if (text.empty()) text = str_of(whaleui_data_transfer_text(dt));
+    std::string text = str_of(whaleui_data_transfer_get_text(dt));
     if (!text.empty()) {
       *kind = "text";
       *value = text;
     }
-  }
-
-  static const char* whaleui_data_transfer_text(whaleui_data_transfer_t* dt) {
-    return whaleui_data_transfer_get_text(dt);
   }
 
   void set_root_var(whaleui_dom_element_t* root, const char* var,
@@ -599,11 +606,14 @@ class WhaleDom : public IDom {
       whaleui_dom_style_remove_property(root, var);
       return;
     }
-    std::string v = fallback && *fallback
-                        ? ("\"" + user + "\", var(" + fallback + ")")
-                        : user;
+    // The stylesheet composes the user's family in front of the built-in stack
+    // (`--font: var(--font-user, var(--font-base))`), so an empty setting must
+    // remove the variable rather than set it to "".
+    std::string v = fallback ? ("\"" + user + "\", var(" + fallback + ")") : user;
     whaleui_dom_set_style(root, var, v.c_str());
   }
+
+  // ---- slot bookkeeping ---------------------------------------------------
 
   Slot& slot(Node n) {
     if (n.id >= slots_.size()) slots_.resize(static_cast<size_t>(n.id) + 1);
@@ -627,8 +637,7 @@ class WhaleDom : public IDom {
   void replace_text_node(Slot& s, const std::string& text) {
     whaleui_dom_element_t* old = s.el;
     whaleui_dom_element_t* parent = whaleui_dom_parent(old);
-    whaleui_dom_element_t* fresh =
-        whaleui_dom_create_text_node(doc_, text.c_str());
+    whaleui_dom_element_t* fresh = whaleui_dom_create_text_node(doc_, text.c_str());
     if (!fresh) return;
     if (parent) whaleui_dom_insert_before(parent, fresh, old);
     whaleui_dom_remove(old);
@@ -636,6 +645,8 @@ class WhaleDom : public IDom {
     s.el = fresh;
     s.is_text = true;
   }
+
+  // ---- listener bookkeeping ----------------------------------------------
 
   void drop_listener(Listener* l) {
     if (!l) return;
@@ -663,13 +674,17 @@ class WhaleDom : public IDom {
         ++i;
       }
     }
+    Listener** slots[] = {&hbar_, &vbar_, &key_down_, &drop_over_, &drop_drop_};
+    for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); ++i) {
+      if (*slots[i] && (*slots[i])->el == el) *slots[i] = nullptr;
+    }
   }
 
   // Bind one auxiliary listener into a slot, replacing whatever was there.
-  // Aux slots are the ones the app drives directly (drop zone, terminal keys,
-  // splitters) rather than through EventKind.
-  void bind_aux(Listener*& slot_ref, whaleui_dom_element_t* el,
-                const char* type, std::function<void(whaleui_dom_event_t*)> fn) {
+  // Aux slots are the ones the app drives directly (drop zone, splitters)
+  // rather than through an EventKind.
+  void bind_aux(Listener*& slot_ref, whaleui_dom_element_t* el, const char* type,
+                std::function<void(whaleui_dom_event_t*)> fn) {
     if (!el) return;
     if (slot_ref && slot_ref->el == el && slot_ref->type == type) {
       slot_ref->fn = fn;  // same target: swap the closure, keep the listener
@@ -696,69 +711,102 @@ class WhaleDom : public IDom {
 
   // ---- splitter drag ------------------------------------------------------
 
-  void attach_drag_listeners() {
-    whaleui_dom_element_t* docel = reinterpret_cast<whaleui_dom_element_t*>(doc_);
-    whaleui_dom_add_event_listener(docel, "mousemove", &WhaleDom::on_drag_move, this);
-    whaleui_dom_add_event_listener(docel, "mouseup", &WhaleDom::on_drag_up, this);
+  void bind_drag(Listener*& slot_ref, whaleui_dom_element_t* bar,
+                 whaleui_dom_element_t* target, bool vertical,
+                 std::function<void(int)> on_resize) {
+    if (!bar) return;
+    Drag& d = vertical ? vdrag_ : hdrag_;
+    d.vertical = vertical;
+    d.target = target;
+    d.cb = on_resize;
+    bind_aux(slot_ref, bar, "mousedown", [this, vertical](whaleui_dom_event_t* ev) {
+      Drag& dr = vertical ? vdrag_ : hdrag_;
+      if (!dr.target || !dr.cb) return;
+      whaleui_dom_rect_t r;
+      if (whaleui_dom_get_bounding_client_rect(dr.target, &r) != 0) return;
+      dr.active = true;
+      dr.moved = false;
+      dr.start = vertical ? whaleui_dom_event_mouse_y(ev)
+                          : whaleui_dom_event_mouse_x(ev);
+      dr.start_size = static_cast<int>(vertical ? r.height : r.width);
+      dr.size = dr.start_size;
+      drag_live_ = &dr;  // one session at a time; the doc handlers resolve it
+      whaleui_dom_element_t* docel = reinterpret_cast<whaleui_dom_element_t*>(doc_);
+      whaleui_dom_add_event_listener(docel, "mousemove", &WhaleDom::on_drag_move,
+                                     this);
+      whaleui_dom_add_event_listener(docel, "mouseup", &WhaleDom::on_drag_up, this);
+    });
   }
 
   static void on_drag_move(whaleui_dom_event_t* ev, void* ud) {
-    WhaleDom* d = static_cast<WhaleDom*>(ud);
-    if (!d || !d->drag_.active || !d->drag_.side) return;
-    int pos = d->drag_.vertical ? whaleui_dom_event_mouse_y(ev)
-                                : whaleui_dom_event_mouse_x(ev);
-    int delta = pos - d->drag_.start;
-    if (delta > 3 || delta < -3) d->drag_.moved = true;
-    if (!d->drag_.moved) return;
-    int size = d->drag_.start_size - delta;  // the handle sits on the near edge
-    if (d->drag_.vertical) {
+    WhaleDom* self = static_cast<WhaleDom*>(ud);
+    if (!self || !self->drag_live_) return;
+    Drag& d = *self->drag_live_;
+    if (!d.active || !d.target) return;
+    int pos = d.vertical ? whaleui_dom_event_mouse_y(ev)
+                         : whaleui_dom_event_mouse_x(ev);
+    int delta = pos - d.start;
+    if (delta > 3 || delta < -3) d.moved = true;
+    if (!d.moved) return;
+    // The handle sits on the panel's near edge, so dragging TOWARD the panel
+    // (left on the side divider, up on the bottom drawer) grows it.
+    int size = d.start_size - delta;
+    if (d.vertical) {
       if (size < 120) size = 120;
       int w = 0, h = 0;
-      whaleui_window_get_size(d->win_, &w, &h);
+      whaleui_window_get_size(self->win_, &w, &h);
       int maxh = static_cast<int>(h * 0.85);
       if (size > maxh) size = maxh;
-      whaleui_dom_set_style(d->drag_.side, "height",
+      whaleui_dom_set_style(d.target, "height",
                             (std::to_string(size) + "px").c_str());
     } else {
       if (size < 220) size = 220;
       if (size > 720) size = 720;
-      whaleui_dom_set_style(d->drag_.side, "width",
+      whaleui_dom_set_style(d.target, "width",
                             (std::to_string(size) + "px").c_str());
-      whaleui_dom_set_style(d->drag_.side, "flex", "0 0 auto");
+      whaleui_dom_set_style(d.target, "flex", "0 0 auto");
     }
-    d->drag_.size = size;
+    d.size = size;
   }
 
   static void on_drag_up(whaleui_dom_event_t* ev, void* ud) {
     (void)ev;
-    WhaleDom* d = static_cast<WhaleDom*>(ud);
-    if (!d) return;
-    whaleui_dom_element_t* docel = reinterpret_cast<whaleui_dom_element_t*>(d->doc_);
-    whaleui_dom_remove_event_listener(docel, "mousemove", &WhaleDom::on_drag_move, d);
-    whaleui_dom_remove_event_listener(docel, "mouseup", &WhaleDom::on_drag_up, d);
-    if (!d->drag_.active) return;
-    d->drag_.active = false;
-    if (!d->drag_.moved) return;  // a plain click on the divider: nothing to persist
-    if (d->drag_.cb) d->drag_.cb(d->drag_.size);
+    WhaleDom* self = static_cast<WhaleDom*>(ud);
+    if (!self) return;
+    whaleui_dom_element_t* docel = reinterpret_cast<whaleui_dom_element_t*>(self->doc_);
+    whaleui_dom_remove_event_listener(docel, "mousemove", &WhaleDom::on_drag_move,
+                                      self);
+    whaleui_dom_remove_event_listener(docel, "mouseup", &WhaleDom::on_drag_up, self);
+    if (!self->drag_live_) return;
+    Drag& d = *self->drag_live_;
+    self->drag_live_ = nullptr;
+    if (!d.active) return;
+    d.active = false;
+    if (!d.moved) return;  // a plain click on the divider: nothing to persist
+    if (d.cb) d.cb(d.size);
   }
 
   // ---- terminal cell measurement -----------------------------------------
 
   static void on_cell_resize(whaleui_dom_element_t* el, float w, float h,
                              void* ud) {
-    (void)w;
-    (void)h;
-    WhaleDom* d = static_cast<WhaleDom*>(ud);
-    if (d) d->report_cells(el);
+    WhaleDom* self = static_cast<WhaleDom*>(ud);
+    if (self) self->report_cells(el, w, h);
   }
 
-  void report_cells(whaleui_dom_element_t* el) {
+  void report_cells(whaleui_dom_element_t* el, float w, float h) {
     if (!cell_cb_ || !el) return;
-    whaleui_dom_rect_t r;
-    if (whaleui_dom_get_bounding_client_rect(el, &r) != 0) return;
-    if (r.width <= 0 || r.height <= 0) return;
-    // Measure one character with the surface's own font: a hidden <canvas> is
-    // the only text-measuring API WhaleUI exposes.
+    if (w <= 0 || h <= 0) {
+      whaleui_dom_rect_t r;
+      if (whaleui_dom_get_bounding_client_rect(el, &r) != 0) return;
+      w = r.width;
+      h = r.height;
+    }
+    if (w <= 0 || h <= 0) return;
+    // Measure one character with the surface's own font. A hidden <canvas> is
+    // the only text-measuring API WhaleUI exposes (there is no
+    // measureText-on-an-element call), so the font string is read off the
+    // surface's computed style and handed to the canvas.
     if (!measure_ctx_) {
       measure_canvas_ = whaleui_dom_create_element(doc_, "canvas");
       measure_ctx_ = whaleui_canvas_get_context(measure_canvas_, "2d");
@@ -770,10 +818,11 @@ class WhaleDom : public IDom {
     if (cs) {
       char fs_buf[32] = {0}, fam_buf[192] = {0};
       char padl[32] = {0}, padr[32] = {0};
-      if (whaleui_style_declaration_get(cs, "font-size", fs_buf, sizeof(fs_buf)) == 0 &&
-          whaleui_style_declaration_get(cs, "font-family", fam_buf, sizeof(fam_buf)) == 0) {
-        font = std::string(fs_buf) + " " + fam_buf;
-      }
+      bool have_fs = whaleui_style_declaration_get(cs, "font-size", fs_buf,
+                                                   sizeof(fs_buf)) == 0;
+      bool have_fam = whaleui_style_declaration_get(cs, "font-family", fam_buf,
+                                                    sizeof(fam_buf)) == 0;
+      if (have_fs && have_fam) font = std::string(fs_buf) + " " + fam_buf;
       if (whaleui_style_declaration_get(cs, "padding-left", padl, sizeof(padl)) == 0) {
         pad += std::atof(padl);
       }
@@ -787,11 +836,43 @@ class WhaleDom : public IDom {
     if (whaleui_canvas_measure_text(measure_ctx_, "MMMMMMMMMM", &w10, &lh) != 0) return;
     if (w10 <= 0 || lh <= 0) return;
     double adv = static_cast<double>(w10) / 10.0;
-    int cols = static_cast<int>((static_cast<double>(r.width) - pad) / adv);
-    int rows = static_cast<int>(static_cast<double>(r.height) / lh);
+    int cols = static_cast<int>((static_cast<double>(w) - pad) / adv);
+    int rows = static_cast<int>(static_cast<double>(h) / lh);
     if (cols < 20) cols = 20;
     if (rows < 5) rows = 5;
     cell_cb_(cols, rows);
+  }
+
+  // ---- keyboard (window level) -------------------------------------------
+  // Only Escape is delivered here (the app's global key contract): everything
+  // else the app cares about is bound to a node. The engine gives this callback
+  // no modifiers, and the app's global handler only matches "Escape", so that
+  // is all this reports.
+  static void on_window_key(whaleui_app_t* app, int keycode, int pressed,
+                            void* ud) {
+    (void)app;
+    WhaleDom* self = static_cast<WhaleDom*>(ud);
+    if (!self || !pressed || !self->global_key_cb_) return;
+    std::string key = key_name(keycode);
+    if (key.empty()) return;
+    self->global_key_cb_(key);
+  }
+
+  // The key + modifiers of a DOM keydown, in the shape the terminal engine
+  // (fs_vt) expects.
+  static KeyPress key_press(whaleui_dom_event_t* ev) {
+    KeyPress k;
+    k.key = str_of(whaleui_dom_event_key(ev));
+    if (k.key.empty()) {
+      // fall back to the keycode when the engine has no name for it
+      k.key = key_name(whaleui_dom_event_key_code(ev));
+    }
+    int mods = whaleui_dom_event_mods(ev);
+    k.ctrl = (mods & WHALEUI_MOD_CTRL) != 0;
+    k.alt = (mods & WHALEUI_MOD_ALT) != 0;
+    k.shift = (mods & WHALEUI_MOD_SHIFT) != 0;
+    k.meta = (mods & WHALEUI_MOD_META) != 0;
+    return k;
   }
 
   // ---- deferred animation replay -----------------------------------------
@@ -809,7 +890,6 @@ class WhaleDom : public IDom {
     delete p;
   }
 
- private:
   whaleui_app_t* app_ = nullptr;
   whaleui_window_t* win_ = nullptr;
   whaleui_dom_document_t* doc_ = nullptr;
@@ -820,29 +900,30 @@ class WhaleDom : public IDom {
   std::map<uint64_t, std::map<int, Listener*> > kind_l_;
   std::vector<Listener*> aux_l_;
   // auxiliary listener slots (one live listener each)
-  Listener* drag_bar_ = nullptr;
+  Listener* hbar_ = nullptr;      // side-panel divider
+  Listener* vbar_ = nullptr;      // bottom-drawer grip
+  Listener* key_down_ = nullptr;  // terminal keydown
   Listener* drop_over_ = nullptr;
   Listener* drop_drop_ = nullptr;
-  Listener* global_key_l_ = nullptr;
-  Listener* key_down_ = nullptr;
-  Listener* key_paste_ = nullptr;
   std::function<void(const std::string&, const std::string&)> drop_cb_;
   std::function<void(const std::string&)> global_key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;
   std::function<void(int, int)> cell_cb_;
   std::function<void(bool)> scroll_pin_cb_;
 
-  struct DragState {
+  struct Drag {
     bool active = false;
     bool moved = false;
     bool vertical = false;
-    whaleui_dom_element_t* side = nullptr;
+    whaleui_dom_element_t* target = nullptr;
     int start = 0;
     int start_size = 0;
     int size = 0;
     std::function<void(int)> cb;
   };
-  DragState drag_;
+  Drag hdrag_;
+  Drag vdrag_;
+  Drag* drag_live_ = nullptr;  // the session the doc handlers resolve
 
   whaleui_resize_observer_t* resize_obs_ = nullptr;
   whaleui_dom_element_t* cell_el_ = nullptr;

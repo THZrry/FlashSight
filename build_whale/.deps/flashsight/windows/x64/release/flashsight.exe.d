@@ -1,0 +1,44 @@
+{
+    values = {
+        [[C:\Program Files\mingw64\bin\x86_64-w64-mingw32-g++]],
+        {
+            "-m64",
+            [[-LC:\aaa\WhaleUI\build\mingw\x86_64\release]],
+            [[-LC:\aaa\WhaleUI\3rdparty\sdl3\lib]],
+            [[-LC:\aaa\WhaleUI\3rdparty\sdl3_ttf\lib]],
+            [[-Lbuild_whale\windows\x64\release]],
+            "-lfs_core",
+            "-lfs_ui",
+            "-lwhaleui-full",
+            "-lSDL3",
+            "-lSDL3_ttf",
+            "-lws2_32",
+            "-luser32",
+            "-lshell32",
+            "-lole32",
+            "-luuid",
+            "-lgdi32",
+            "-lwinmm",
+            "-limm32",
+            "-loleaut32",
+            "-lversion",
+            "-ladvapi32",
+            "-lsetupapi",
+            [[C:\Users\Xu\AppData\Local\.xmake\packages\l\lexbor\v3.0.0\7873236936ca4d0e93ae023623df170b\lib\liblexbor_static.a]],
+            [[C:\Users\Xu\AppData\Local\.xmake\packages\u\utf8proc\v2.11.3\f51ae5bb03b047a89be540f82f80ed57\lib\libutf8proc.a]],
+            [[C:\Users\Xu\AppData\Local\.xmake\packages\l\libsdl3_image\3.4.0\da526bde0fbe451b982df9236d74a9e3\lib\libSDL3_image.a]],
+            [[C:\aaa\FlashSight/3rdparty/mbedtls-3.6.4/build/library/libmbedtls.a]],
+            [[C:\aaa\FlashSight/3rdparty/mbedtls-3.6.4/build/library/libmbedx509.a]],
+            [[C:\aaa\FlashSight/3rdparty/mbedtls-3.6.4/build/library/libmbedcrypto.a]],
+            [[C:\aaa\FlashSight/3rdparty/mbedtls-3.6.4/build/3rdparty/everest/libeverest.a]],
+            [[C:\aaa\FlashSight/3rdparty/mbedtls-3.6.4/build/3rdparty/p256-m/libp256m.a]],
+            "-lbcrypt",
+            "-lcrypt32"
+        }
+    },
+    files = {
+        [[build_whale\.objs\flashsight\windows\x64\release\src\main.cpp.obj]],
+        [[build_whale\windows\x64\release\fs_core.lib]],
+        [[build_whale\windows\x64\release\fs_ui.lib]]
+    }
+}

@@ -1,0 +1,6 @@
+{
+    errdata = "In file included from tests\\test_terminal.cpp:3:\
+tests\\test_framework.hpp:50:75: warning: backslash-newline at end of file\
+   50 | #define ASSERT_TRUE(x)                                                    \\\
+"
+}

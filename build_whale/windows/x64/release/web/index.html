@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>FlashSight</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="icons/fa-subset.css">
+</head>
+<body>
+<!-- The C++ UI (wasm) builds the entire DOM into #fs-root on startup. -->
+<div id="fs-root"></div>
+<script src="fs_ui.js"></script>
+<script>
+  // emscripten runtime ready -> start the C++ UI
+  var Module = Module || {};
+  Module.onRuntimeInitialized = function () {
+    if (typeof Module._fs_ui_start === 'function') {
+      Module._fs_ui_start();
+    }
+  };
+</script>
+</body>
+</html>

@@ -837,11 +837,12 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .composer-tools {
   display: flex; align-items: center; gap: 8px;
-  /* Wrapping is the last resort: it is allowed so a genuinely tiny composer
-     degrades instead of clipping buttons, but the thresholds below are chosen
-     so the row only wraps when there is really no other option. */
-  flex-wrap: wrap;
-  row-gap: 6px;
+  /* NEVER wraps. The row has two modes (labelled / icon-only, chosen by the
+     container query below) and both are sized to fit; a wrapping flex container
+     only ever produced accidental second lines - including the spacer, which as
+     a flex-grow item can be pushed onto its own line when the line is judged
+     full, leaving a stray gap under the toolbar. */
+  flex-wrap: nowrap;
   /* a fixed row height: switching a button between labelled and icon-only must
      not change the composer's height, or every crossing of the threshold
      reflows the history above it (that is the twitch while dragging) */
@@ -872,16 +873,23 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
    so it wrapped - which is exactly the boundary glitch. Below it everything is
    icon-only, which fits from ~420px, so the two modes never overlap. */
 @container (max-width: 940px) {
-  .composer-tools { gap: 6px; row-gap: 6px; }
-  .it-btn { padding-left: 7px; padding-right: 7px; }
+  /* Icon-only mode has to FIT, not just be narrower. At the roomier spacing the
+     row needed 449px inside a 451px container - a 2px margin, which sub-pixel
+     rounding turns into a wrap (the row folded onto a second line right at the
+     boundary, which is exactly the glitch). Tighter gap + padding leaves real
+     slack instead of a coin flip. */
+  .composer-tools { gap: 3px; row-gap: 6px; }
+  .it-btn { padding-left: 5px; padding-right: 5px; }
   .it-btn .it-label { display: none; }
   .it-btn .fa { font-size: 14px; }
   .composer-tools .btn.text-wide .fa { display: inline-block; }
-  /* let the model/permission selects give up width first, so the row still
-     fits on one line instead of wrapping */
-  .composer-tools .select { max-width: 88px; }
+  /* the selects give up width first (they are the only items whose text can
+     truncate without losing the control's meaning) */
+  .composer-tools .select { max-width: 78px; }
   .composer-tools .bar-group { min-width: 0; }
-  .composer-tools .btn { padding-left: 9px; padding-right: 9px; }
+  .composer-tools .btn { padding-left: 7px; padding-right: 7px; }
+  /* the spacer has no room to spare in this mode */
+  .composer-tools .grow { display: none; }
 }
 
 /* "/" skill picker: overlay ABOVE the composer (never reflows the input) */

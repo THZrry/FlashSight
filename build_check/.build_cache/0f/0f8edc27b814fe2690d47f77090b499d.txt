@@ -1,0 +1,13 @@
+{
+    errdata = "src\\provider\\provider_runtime.cpp:5:9: warning: 'NOMINMAX' redefined\
+    5 | #define NOMINMAX\
+      |         ^~~~~~~~\
+In file included from C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/x86_64-w64-mingw32/bits/c++config.h:733,\
+                 from C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/cstdint:40,\
+                 from src\\provider\\provider_runtime.hpp:4,\
+                 from src\\provider\\provider_runtime.cpp:2:\
+C:/Program Files/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/c++/x86_64-w64-mingw32/bits/os_defines.h:45:9: note: this is the location of the previous definition\
+   45 | #define NOMINMAX 1\
+      |         ^~~~~~~~\
+"
+}

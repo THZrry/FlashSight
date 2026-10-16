@@ -955,13 +955,15 @@ FS_TEST(uiapp_settings_page) {
   EXPECT_TRUE(dump_has(dom, "Endpoint"));
   EXPECT_TRUE(dump_has(dom, "发送会话亲和头"));
   // every nav entry must render its own body (nav key == body branch)
-  const char* sec_keys[] = {"general", "appearance", "providers", "session_defaults",
-                            "subagents", "skills", "memory", "network", "terminal",
-                            "files", "environment", "browser", "computer",
+  const char* sec_keys[] = {"general", "appearance", "browser", "computer",
+                            "providers", "session_defaults", "model_prefs",
+                            "subagents", "skills", "memory", "network",
+                            "terminal", "files", "environment",
                             "shortcuts", "about"};
-  const char* sec_text[] = {"保留轮数", "主题", "Endpoint", "会话默认",
-                            "并行上限", "外部工具包", "长期记忆", "网络总开关", "默认 shell",
-                            "自动 git init", "CLI 工具路径", "浏览器控制", "电脑控制",
+  const char* sec_text[] = {"保留轮数", "主题", "浏览器控制", "电脑控制",
+                            "Endpoint", "会话默认", "摘要模型",
+                            "并行上限", "外部工具包", "长期记忆", "网络总开关",
+                            "默认 shell", "自动 git init", "CLI 工具路径",
                             "发送消息", "版本"};
   for (size_t i = 0; i < sizeof(sec_keys) / sizeof(sec_keys[0]); ++i) {
     std::string key = sec_keys[i];

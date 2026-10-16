@@ -2257,8 +2257,11 @@ struct SettingsItem {
 const SettingsItem kSettingsNav[] = {
     {"通用", "general", "常规"},
     {"通用", "appearance", "外观"},
+    {"通用", "browser", "浏览器控制"},
+    {"通用", "computer", "电脑控制"},
     {"模型", "providers", "供应商"},
     {"模型", "session_defaults", "会话默认"},
+    {"模型", "model_prefs", "模型偏好"},
     {"模型", "subagents", "子代理"},
     {"模型", "skills", "MCP 与 Skill"},
     {"模型", "memory", "长期记忆"},
@@ -2266,8 +2269,6 @@ const SettingsItem kSettingsNav[] = {
     {"权限", "terminal", "终端"},
     {"权限", "files", "文件"},
     {"权限", "environment", "环境"},
-    {"权限", "browser", "浏览器控制"},
-    {"权限", "computer", "电脑控制"},
     {"其他", "shortcuts", "快捷键"},
     {"其他", "about", "关于"},
 };
@@ -2769,13 +2770,21 @@ VNodePtr UiApp::build_settings() {
     body.add(two);
   } else if (sec == "subagents") {
     // --- 子代理 ---
-    body.add(comp::section_title("子代理"));
+    body.add(comp::section_title(tr("子代理")));
+    // The model choices come from the configured providers, not a hardcoded
+    // list: "which model runs this subagent" can only be answered by the models
+    // this install actually has.
+    std::vector<std::string> model_opts;
+    model_opts.push_back(tr("继承会话"));
+    for (size_t i = 0; i < st_.provider_models.size(); ++i) {
+      model_opts.push_back(st_.provider_models[i]);
+    }
     for (size_t i = 0; i < st_.preset_agents.size(); ++i) {
       const AppState::PresetRow& a = st_.preset_agents[i];
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(a.name));
       row.add(el("span", "dim grow").text(a.description));
-      if (a.read_only) row.add(comp::badge("只读"));
+      if (a.read_only) row.add(comp::badge(tr("只读")));
       bool enabled = a.enabled;
       std::string name = a.name;
       row.add(comp::toggle(enabled, "", [this, name, enabled](const std::string&) {
@@ -2791,28 +2800,74 @@ VNodePtr UiApp::build_settings() {
           });
         });
       }));
-      row.add(comp::select(std::vector<std::string>{"继承会话", "gpt-4o-mini",
-                                                    "claude-sonnet"},
-                           0, [this, name](const std::string& v) {
+      // which model this agent uses (empty = inherit the session's)
+      std::string cur = sv_str(st_.settings_values, "subagents." + name + ".model", "");
+      int sel = 0;
+      for (size_t k = 0; k < model_opts.size(); ++k) {
+        if (model_opts[k] == cur) sel = static_cast<int>(k);
+      }
+      row.add(comp::select(model_opts, sel, [this, name, model_opts](const std::string& v) {
         int idx = std::atoi(v.c_str());
-        std::string model = idx == 1 ? "gpt-4o-mini"
-                            : idx == 2 ? "claude-sonnet" : "";
+        std::string model = (idx <= 0 || idx >= static_cast<int>(model_opts.size()))
+                                ? "" : model_opts[idx];
         set_setting("subagents." + name + ".model", model);
       }));
       body.add(row);
     }
-    body.add(comp::field("并行上限", comp::text_input(
-        std::to_string(sv_int(st_.settings_values, "subagents.maxParallel", 4)),
-        "", [this](const std::string& v) {
-      int n = std::atoi(v.c_str());
-      set_setting("subagents.maxParallel", n > 0 ? n : 4);
-    }), "subagents.maxParallel（默认 4）"));
-    body.add(comp::field("嵌套深度", comp::text_input(
-        std::to_string(sv_int(st_.settings_values, "subagents.maxDepth", 3)),
-        "", [this](const std::string& v) {
-      int n = std::atoi(v.c_str());
-      set_setting("subagents.maxDepth", n > 0 ? n : 3);
-    }), "subagents.maxDepth（默认 3，addon1.md）"));
+    body.add(comp::section_title(tr("上限")));
+    H par_row = el("div", "stepper");
+    par_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
+      int n = sv_int(st_.settings_values, "subagents.maxParallel", 4);
+      set_setting("subagents.maxParallel", n > 1 ? n - 1 : 1);
+    }));
+    par_row.add(el("span", "stepper-value").text(
+        itos(sv_int(st_.settings_values, "subagents.maxParallel", 4)) + tr(" 个")));
+    par_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
+      int n = sv_int(st_.settings_values, "subagents.maxParallel", 4);
+      set_setting("subagents.maxParallel", n < 16 ? n + 1 : 16);
+    }));
+    body.add(comp::field(tr("并行上限"), par_row));
+    H dep_row = el("div", "stepper");
+    dep_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
+      int n = sv_int(st_.settings_values, "subagents.maxDepth", 3);
+      set_setting("subagents.maxDepth", n > 1 ? n - 1 : 1);
+    }));
+    dep_row.add(el("span", "stepper-value").text(
+        itos(sv_int(st_.settings_values, "subagents.maxDepth", 3)) + tr(" 层")));
+    dep_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
+      int n = sv_int(st_.settings_values, "subagents.maxDepth", 3);
+      set_setting("subagents.maxDepth", n < 8 ? n + 1 : 8);
+    }));
+    body.add(comp::field(tr("嵌套深度"), dep_row));
+  } else if (sec == "model_prefs") {
+    // --- 模型偏好（provider.md §5：子代理/摘要模型的通用偏好）---
+    body.add(comp::section_title(tr("子代理")));
+    body.add(comp::field(tr("默认模型"), comp::text_input(
+        sv_str(st_.settings_values, "model.pref.subagent.model", ""),
+        tr("继承会话"),
+        [this](const std::string& v) {
+      set_setting("model.pref.subagent.model", v);
+    })));
+    body.add(comp::field(tr("默认思考档"), comp::select(
+        std::vector<std::string>{tr("继承"), tr("关"), tr("低"), tr("中"), tr("高")},
+        [&]() {
+          std::string t = sv_str(st_.settings_values, "model.pref.subagent.thinking", "");
+          return t == "off" ? 1 : t == "low" ? 2 : t == "medium" ? 3
+                 : t == "high" ? 4 : 0;
+        }(),
+        [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      const char* vals[5] = {"", "off", "low", "medium", "high"};
+      set_setting("model.pref.subagent.thinking", vals[idx < 0 || idx > 4 ? 0 : idx]);
+    })));
+    body.add(comp::section_title(tr("摘要")));
+    // 摘要默认继承会话模型：只有在需要便宜模型时才有必要单独指定
+    body.add(comp::field(tr("摘要模型"), comp::text_input(
+        sv_str(st_.settings_values, "model.pref.summary.model", ""),
+        tr("继承会话"),
+        [this](const std::string& v) {
+      set_setting("model.pref.summary.model", v);
+    })));
   } else if (sec == "skills") {
     // --- MCP 与 Skill ---
     body.add(comp::section_title("MCP 与 Skill"));

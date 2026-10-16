@@ -127,17 +127,15 @@ The process of project: P0 环境搭建
   终端后端非阻塞轮询推事件（去掉手动轮询）、动画分三档（view/组件/文本）。
   详见 current.md <27>。
 
-<35>(SOLVED): 反馈第十二批 —— 设置页分区动画（settings-body 按 section 重放）、
-  外观做实（调色板×深浅两维 + 字体/字号真生效 + 旧 ui.theme 兼容）、通用页补齐
-  （界面显示/会话历史/用量保留，改 ± 步进即时保存）、清理解释性文字。
-  动画重放机制：VNode::anim_key + IDom::play_animation（挂载动画在 keyed 节点上
-  只播一次，慢加载会把动画"吞掉"）。真 bug：侧栏收起后旧拖拽监听仍生效（展开时
-  宽度被改成拖动值）、composer 按钮图标/文字切换导致抽搐、调色板 class 用字符串
-  拼装累积垃圾。详见 current.md <35>。
+<36>(SOLVED): 反馈第十三批 —— 资源打包改到 fs_ui 的 before_build（此前 CSS 改动永远
+  到不了 exe：after_build 写完头文件时 fs_ui 已判定过新旧）、工具条 flex-wrap:nowrap
+  + 发送/挂起 text-wide（高度恒定，不再换行/抽搐）、设置面归位（浏览器/电脑控制移到
+  通用、新增模型偏好、子代理模型取自供应商列表、上限改步进、关于页精简）。
+  详见 current.md <36>。
 
 ## 当前状态（更新 2026-10-16）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；160 用例 1567 断言通过。
-- 终端已是真终端（VT 解析 + ConPTY + scrollback + 搜索）；设置页与外观已做实。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；160 用例 1568 断言通过。
+- 终端已是真终端（VT 解析 + ConPTY + scrollback + 搜索）；设置/外观已做实。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。
