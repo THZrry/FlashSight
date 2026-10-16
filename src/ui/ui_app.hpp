@@ -47,11 +47,25 @@ struct ProjectCard {
   std::vector<std::pair<std::string, std::string> > sessions;  // sid, title
 };
 
-// Side panel tab (session page). Free-form: add/close.
+// Side panel tab (session page). Free-form: add/close, and a kind that supports
+// multiple instances keeps its OWN state here - two file panels are two
+// different directories, so they cannot share one set of fields.
 struct SideTab {
   std::string id;
   std::string title;
-  std::string kind;   // "usage" | "files" | "ops" | "git" | "subagents" | "calls" | "terminal"
+  std::string kind;   // "usage" | "files" | "ops" | "git" | "subagents" | "calls"
+  // per-panel state for the kinds that carry one (files today; git will need
+  // its own path/filter the same way)
+  std::string path;            // files: directory being listed ("" = project root)
+  struct FileEntry {
+    std::string name;
+    bool is_dir = false;
+    int64_t size = 0;
+  };
+  std::vector<FileEntry> entries;
+  bool loaded = false;
+  std::string preview_path;
+  std::string preview;
 };
 
 // Terminal entry for the selector.
@@ -100,17 +114,10 @@ struct AppState {
   int side_width = 320;         // side panel width (px); persisted in state
   bool side_collapsed = false;  // side panel hidden (toggle in the divider)
   // ---- side panel / 文件树 ----
+  // The file tree state lives per PANEL (SideTab::path/entries/preview), because
+  // two file panels can sit in two different directories. Only the project of
+  // the active session is shared.
   std::string active_pid;                 // project of the active session
-  std::string files_path;                 // dir being listed ("" = project root)
-  struct FileEntry {
-    std::string name;
-    bool is_dir = false;
-    int64_t size = 0;
-  };
-  std::vector<FileEntry> file_entries;
-  bool files_loaded = false;
-  std::string file_preview_path;          // file whose content is shown
-  std::string file_preview;               // preview content
   // ---- side panel / 操作记录 + 工具调用记录 ----
   struct OpRow {
     std::string op;
@@ -304,11 +311,6 @@ struct SessionView {
   bool side_collapsed = false;  // side panel hidden
 
   std::string active_pid;
-  std::string files_path;
-  std::vector<AppState::FileEntry> file_entries;
-  bool files_loaded = false;
-  std::string file_preview_path;
-  std::string file_preview;
 
   std::vector<AppState::OpRow> session_ops;
   std::vector<AppState::CallRow> session_calls;
@@ -382,10 +384,11 @@ class UiApp {
   void load_shells();
   // Load subagents for a session.
   void load_subagents(const std::string& sid);
-  // Load the side-panel file tree (project-relative dir) into AppState.
-  void load_files(const std::string& pid, const std::string& rel);
-  // Read one file for the side-panel preview.
-  void preview_file(const std::string& rel);
+  // Load a file panel's directory (the panel keeps its own path/entries).
+  void load_files(const std::string& tab_id, const std::string& pid,
+                  const std::string& rel);
+  // Read one file for a file panel's preview.
+  void preview_file(const std::string& tab_id, const std::string& rel);
   // Loaders for the settings sections.
   void load_preset_agents();
   void load_skills();
@@ -416,6 +419,13 @@ class UiApp {
   void handle_upload_reply(const std::string& reply_json);
   // create a terminal under the active session, running the shell from settings
   void start_terminal(const std::string& shell, const std::string& label);
+  // is this terminal's tab closed? (it keeps running; the overview lists it)
+  bool term_tab_closed(const std::string& tid) const {
+    for (size_t i = 0; i < st_.term_hidden.size(); ++i) {
+      if (st_.term_hidden[i] == tid) return true;
+    }
+    return false;
+  }
   // terminals matching the current filter, in display order (empty filter = all)
   std::vector<const TermItem*> filtered_terminals() const;
   // the filter row itself (only built once the strip is crowded)
@@ -431,17 +441,21 @@ class UiApp {
   // rename a terminal's tab (label is stored in the registry)
   void rename_terminal(const std::string& tid, const std::string& label);
   // Remove a terminal from the tab strip WITHOUT killing it: the process keeps
-  // running (the model may still be using it) and it reappears if it prints
-  // again. Only 停止 ends the process.
+  // running (the model may still be using it) and it stays listed in the
+  // overview, where clicking it brings the tab back. Only 停止 ends it.
   void close_terminal_tab(const std::string& tid);
-  // Bring back every tab the user closed (they are only hidden, so this is how
-  // a closed terminal is found again - otherwise closing would be a dead end).
-  void restore_closed_terminals();
+  // bring a closed terminal's tab back (the overview card does this on click)
+  void reopen_terminal_tab(const std::string& tid);
   void close_tab(const std::string& id);
+  // open a panel by kind (adds a new one; singleton kinds are opened through
+  // open_or_focus_side_tab)
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);
-  // activate the existing tab of `kind`, or create one (never defaults)
+  // activate the existing tab of `kind`, or create one. Singleton kinds focus;
+  // multi kinds (files, git) always add.
   void open_or_focus_side_tab(const std::string& kind);
+  // load one panel's own data (each panel has its own state)
+  void load_side_tab(const std::string& id);
   // ---- settings / 供应商 actions ----
   void select_provider(const std::string& id);   // load into the edit form
   void begin_new_provider(const std::string& template_id);

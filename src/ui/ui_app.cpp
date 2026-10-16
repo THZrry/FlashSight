@@ -100,17 +100,40 @@ std::string term_grid_tail(const Json& grid, int n) {
   return out;
 }
 
-const char* kSideTitles[][2] = {
-    {"usage", "用量"},   {"files", "文件"},     {"ops", "操作"},
-    {"git", "Git"},      {"subagents", "子代理"}, {"calls", "调用"},
-    {"terminal", "终端"},
+// Side-panel kinds. Terminals are NOT here: they live in the bottom terminal
+// drawer now (which shows every terminal, running or not), so a second terminal
+// panel in the sidebar was just a worse duplicate.
+//
+// `multi` says whether the kind can be opened more than once. Files and git
+// genuinely can (two directories, two diffs); a usage summary or a subagent
+// list cannot - a second copy would show the same thing, so those focus the
+// existing tab instead of adding another.
+struct SideKind {
+  const char* kind;
+  const char* title;
+  const char* desc;
+  bool multi;
 };
+const SideKind kSideKinds[] = {
+    {"usage", "用量", "上下文水位与本会话成本", false},
+    {"subagents", "子代理", "子代理运行状态与引导", false},
+    {"files", "文件", "项目文件树与预览（可多开）", true},
+    {"git", "Git", "Git 状态与变更（可多开）", true},
+    {"ops", "操作", "本会话的系统操作记录", true},
+    {"calls", "调用", "模型发起的工具调用", true},
+};
+const size_t kSideKindCount = sizeof(kSideKinds) / sizeof(kSideKinds[0]);
+
+const SideKind* side_kind(const std::string& kind) {
+  for (size_t i = 0; i < kSideKindCount; ++i) {
+    if (kind == kSideKinds[i].kind) return &kSideKinds[i];
+  }
+  return nullptr;
+}
 
 std::string side_title(const std::string& kind) {
-  for (size_t i = 0; i < sizeof(kSideTitles) / sizeof(kSideTitles[0]); ++i) {
-    if (kind == kSideTitles[i][0]) return kSideTitles[i][1];
-  }
-  return kind;
+  const SideKind* k = side_kind(kind);
+  return k ? k->title : kind;
 }
 
 // last path segment (both separators; the backend may be on another OS)
@@ -223,8 +246,9 @@ SessionView default_session_view() {
   SessionView v;
   v.side_tabs.push_back(SideTab{"usage", "用量", "usage"});
   v.side_tabs.push_back(SideTab{"subagents", "子代理", "subagents"});
-  v.side_tabs.push_back(SideTab{"terminal", "终端", "terminal"});
-  v.side_seq = 3;
+  // No terminal panel: terminals live in the bottom drawer now, so a sidebar
+  // copy would be a worse duplicate of the same thing.
+  v.side_seq = 2;
   return v;
 }
 
@@ -256,11 +280,11 @@ AppState AppState::make() {
   s.tab_ids.push_back("home");
   s.tab_ids.push_back("settings");
   // side panel starts with the panels that have real data today; others are
-  // added on demand via the "+" button
+  // added on demand via the "+" button. Terminals are not here - they live in
+  // the bottom drawer.
   s.side_tabs.push_back(SideTab{"usage", "用量", "usage"});
   s.side_tabs.push_back(SideTab{"subagents", "子代理", "subagents"});
-  s.side_tabs.push_back(SideTab{"terminal", "终端", "terminal"});
-  s.side_seq = 3;
+  s.side_seq = 2;
   // project/session/terminal/subagent lists are loaded from the backend
   return s;
 }
@@ -403,13 +427,9 @@ void UiApp::load_terminals(const std::string& sid) {
       it.shell = jsonutil::get<std::string>(t, "shell", "");
       it.label = jsonutil::get<std::string>(t, "label", "");
       it.status = jsonutil::get<std::string>(t, "status", "running");
-      // a terminal whose tab the user closed stays hidden (the process is still
-      // running; only 停止 ends it)
-      bool hidden = false;
-      for (size_t k = 0; k < st_.term_hidden.size(); ++k) {
-        if (st_.term_hidden[k] == it.tid) { hidden = true; break; }
-      }
-      if (hidden) continue;
+      // A closed terminal is still LISTED (it keeps running; closing only
+      // removed its tab), so it is not filtered out here - the tab strip skips
+      // it and the overview shows it as an inactive row.
       terms.push_back(it);
     }
     st_.terminals.swap(terms);
@@ -439,11 +459,6 @@ void UiApp::save_session_view(const std::string& sid) {
   v.side_menu_open = st_.side_menu_open;
   v.side_width = st_.side_width;
   v.active_pid = st_.active_pid;
-  v.files_path = st_.files_path;
-  v.file_entries = st_.file_entries;
-  v.files_loaded = st_.files_loaded;
-  v.file_preview_path = st_.file_preview_path;
-  v.file_preview = st_.file_preview;
   v.session_ops = st_.session_ops;
   v.session_calls = st_.session_calls;
   v.skill_menu_open = st_.skill_menu_open;
@@ -484,11 +499,6 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.side_menu_open = false;  // transient popovers never survive a switch
   st_.side_width = v.side_width;
   st_.active_pid = v.active_pid;
-  st_.files_path = v.files_path;
-  st_.file_entries = v.file_entries;
-  st_.files_loaded = v.files_loaded;
-  st_.file_preview_path = v.file_preview_path;
-  st_.file_preview = v.file_preview;
   st_.session_ops = v.session_ops;
   st_.session_calls = v.session_calls;
   st_.skill_menu_open = false;
@@ -617,7 +627,8 @@ void UiApp::load_session(const std::string& sid) {
       render();
     }
     load_terminals(sid);
-    if (!pid.empty()) load_files(pid, "");
+    // file panels load their own directory when they become active (see
+    // load_side_tab), so nothing to prefetch here
   });
 }
 
@@ -768,15 +779,19 @@ void UiApp::load_subagents(const std::string& sid) {
   });
 }
 
-void UiApp::load_files(const std::string& pid, const std::string& rel) {
+// Load a file panel's directory. The panel is identified by `tab_id` and keeps
+// its own path/entries/preview, so two file panels can sit in two different
+// directories at once.
+void UiApp::load_files(const std::string& tab_id, const std::string& pid,
+                       const std::string& rel) {
   if (pid.empty()) return;
   call_async("project.files", Json{{"pid", pid}, {"path", rel}},
-             [this, rel](const BackendResult& r) {
-    std::vector<AppState::FileEntry> rows;
+             [this, tab_id, rel](const BackendResult& r) {
+    std::vector<SideTab::FileEntry> rows;
     const Json& arr = r.ok && r.data.contains("entries") ? r.data["entries"] : Json::array();
     if (arr.is_array()) {
       for (size_t i = 0; i < arr.size(); ++i) {
-        AppState::FileEntry e;
+        SideTab::FileEntry e;
         e.name = jsonutil::get<std::string>(arr[i], "name", "");
         e.is_dir = jsonutil::get<bool>(arr[i], "isDir", false);
         e.size = jsonutil::get_int(arr[i], "size", 0);
@@ -784,24 +799,34 @@ void UiApp::load_files(const std::string& pid, const std::string& rel) {
       }
     }
     update([&](AppState& s) {
-      s.file_entries = rows;
-      s.files_path = rel;
-      s.files_loaded = true;
-      s.file_preview_path.clear();
-      s.file_preview.clear();
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id != tab_id) continue;
+        s.side_tabs[i].entries = rows;
+        s.side_tabs[i].path = rel;
+        s.side_tabs[i].loaded = true;
+        s.side_tabs[i].preview_path.clear();
+        s.side_tabs[i].preview.clear();
+        return;
+      }
     });
   });
 }
 
-void UiApp::preview_file(const std::string& rel) {
+// Preview one file inside a specific file panel.
+void UiApp::preview_file(const std::string& tab_id, const std::string& rel) {
   if (st_.active_pid.empty() || rel.empty()) return;
   std::string pid = st_.active_pid;
   call_async("project.readFile", Json{{"pid", pid}, {"path", rel}},
-             [this, rel](const BackendResult& r) {
+             [this, tab_id, rel](const BackendResult& r) {
     update([&](AppState& s) {
-      s.file_preview_path = rel;
-      s.file_preview = r.ok ? jsonutil::get<std::string>(r.data, "content", "")
-                            : ("（无法预览：" + r.message + "）");
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id != tab_id) continue;
+        s.side_tabs[i].preview_path = rel;
+        s.side_tabs[i].preview =
+            r.ok ? jsonutil::get<std::string>(r.data, "content", "")
+                 : ("（无法预览：" + r.message + "）");
+        return;
+      }
     });
   });
 }
@@ -1687,16 +1712,8 @@ VNodePtr UiApp::build_side_panel() {
   side.add(comp::panel_tabs(tabs, st_.active_side,
                             [this](const std::string& k) {
     update([&](AppState& s) { s.active_side = k; });
-    // refresh the panel's data when it becomes active
-    std::string kind = "";
-    for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
-      if (st_.side_tabs[i].id == k) kind = st_.side_tabs[i].kind;
-    }
-    if (kind == "subagents") load_subagents(active_sid());
-    if (kind == "terminal") load_terminals(active_sid());
-    if (kind == "files" && !st_.active_pid.empty()) {
-      load_files(st_.active_pid, st_.files_path);
-    }
+    // refresh that panel's own data when it becomes active
+    load_side_tab(k);
   },
                             [this](const std::string& k) { close_side_tab(k); },
                             [this](const std::string&) {
@@ -1713,37 +1730,26 @@ VNodePtr UiApp::build_side_panel() {
     H page = el("div", "side-add");
     page.anim(anim::kEnter);
     page.add(el("div", "side-add-head").text(tr("添加面板")));
-    page.add(comp::hint(tr("选一个面板加到右侧栏；已打开的直接跳过去。")));
-    struct KindInfo {
-      const char* kind;
-      const char* desc;
-    };
-    static const KindInfo kKinds[] = {
-        {"files", "项目文件树与预览"},
-        {"ops", "本会话的系统操作记录"},
-        {"calls", "模型发起的工具调用"},
-        {"subagents", "子代理运行状态与引导"},
-        {"terminal", "终端列表（含模型启动的）"},
-        {"usage", "上下文水位与本会话成本"},
-        {"git", "Git 状态与变更（待接线）"},
-    };
+    page.add(comp::hint(tr("选一个面板加到右侧栏；文件/Git 可以多开。")));
     H grid = el("div", "side-add-grid");
-    for (size_t i = 0; i < sizeof(kKinds) / sizeof(kKinds[0]); ++i) {
-      std::string kind = kKinds[i].kind;
+    for (size_t i = 0; i < kSideKindCount; ++i) {
+      std::string kind = kSideKinds[i].kind;
+      bool multi = kSideKinds[i].multi;
       H card = el("div", "side-add-card");
-      // an already-open panel is shown as such and jumps instead of duplicating
+      // a singleton kind that is already open is marked and jumps instead of
+      // duplicating; a multi kind always adds a new panel
       bool open = false;
       for (size_t k = 0; k < st_.side_tabs.size(); ++k) {
         if (st_.side_tabs[k].kind == kind) open = true;
       }
-      if (open) card.cls("open");
+      if (open && !multi) card.cls("open");
       card.on(EventKind::kClick, [this, kind](const std::string&) {
         update([&](AppState& s) { s.side_menu_open = false; });
         open_or_focus_side_tab(kind);
       });
-      card.add(el("div", "side-add-name").text(side_title(kind)));
-      card.add(el("div", "side-add-desc").text(tr(kKinds[i].desc)));
-      if (open) card.add(el("div", "side-add-tag").text(tr("已打开")));
+      card.add(el("div", "side-add-name").text(tr(kSideKinds[i].title)));
+      card.add(el("div", "side-add-desc").text(tr(kSideKinds[i].desc)));
+      if (open && !multi) card.add(el("div", "side-add-tag").text(tr("已打开")));
       grid.add(card);
     }
     page.add(grid);
@@ -1760,9 +1766,17 @@ VNodePtr UiApp::build_side_panel() {
 
   H body = el("div", "side-body");
   std::string kind = "usage";
+  // The active panel, so each panel can read ITS OWN state (two file panels sit
+  // in two different directories; sharing one set of fields would make them
+  // fight over it).
+  const SideTab* panel = nullptr;
   for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
-    if (st_.side_tabs[i].id == st_.active_side) kind = st_.side_tabs[i].kind;
+    if (st_.side_tabs[i].id == st_.active_side) {
+      kind = st_.side_tabs[i].kind;
+      panel = &st_.side_tabs[i];
+    }
   }
+  const std::string panel_id = panel ? panel->id : std::string();
 
   if (kind == "usage") {
     body.add(comp::key_value("上下文水位", itos(st_.context_pct) + "%"));
@@ -1802,64 +1816,41 @@ VNodePtr UiApp::build_side_panel() {
       card.add(acts);
       body.add(card);
     }
-  } else if (kind == "terminal") {
-    for (size_t i = 0; i < st_.terminals.size(); ++i) {
-      const TermItem& t = st_.terminals[i];
-      H row = el("div", t.tid == st_.active_term ? "term-row sel" : "term-row");
-      std::string tid = t.tid;
-      row.on(EventKind::kClick, [this, tid](const std::string&) {
-        update([&](AppState& s) {
-          s.active_term = tid;
-          s.terminal_open = true;
-        });
-      });
-      row.add(el("span", t.status == "running" ? "term-dot running" : "term-dot").text("●"));
-      row.add(el("span", "term-name").text("#" + t.tid + " " + t.shell));
-      row.add(el("span", "dim").text(t.status == "running" ? "运行中" : "已退出"));
-      body.add(row);
-    }
-    H acts = el("div", "side-actions");
-    acts.add(comp::button("刷新", [this](const std::string&) {
-      load_terminals(active_sid());
-    }, "primary"));
-    body.add(acts);
-    body.add(el("div", "hint").text(
-        "交互式用户终端需要 PTY（ConPTY/POSIX pty），reproc 不提供；"
-        "模型通过 terminal.spawn/exec 起的终端会出现在此列表。"));
   } else if (kind == "files") {
     if (st_.active_pid.empty()) {
       body.add(comp::empty_state("先打开一个会话，文件树会显示该项目的文件。", "", nullptr));
     } else {
+      const std::string& path = panel ? panel->path : std::string();
       // breadcrumb / up row
       H nav = el("div", "files-nav");
-      if (!st_.files_path.empty()) {
-        nav.add(comp::button("↑ 上级", [this](const std::string&) {
-          std::string p = st_.files_path;
-          size_t cut = p.find_last_of("/\\");
-          std::string parent = cut == std::string::npos ? "" : p.substr(0, cut);
-          load_files(st_.active_pid, parent);
+      if (!path.empty()) {
+        nav.add(comp::button("↑ 上级", [this, panel_id, path](const std::string&) {
+          size_t cut = path.find_last_of("/\\");
+          std::string parent = cut == std::string::npos ? "" : path.substr(0, cut);
+          load_files(panel_id, st_.active_pid, parent);
         }, "ghost"));
       }
-      nav.add(el("span", "files-cwd dim").text(
-          st_.files_path.empty() ? "/" : ("/" + st_.files_path)));
-      nav.add(comp::button("刷新", [this](const std::string&) {
-        load_files(st_.active_pid, st_.files_path);
+      nav.add(el("span", "files-cwd dim").text(path.empty() ? "/" : ("/" + path)));
+      nav.add(comp::button("刷新", [this, panel_id, path](const std::string&) {
+        load_files(panel_id, st_.active_pid, path);
       }, "ghost"));
       body.add(nav);
-      if (st_.file_entries.empty()) {
+      const std::vector<SideTab::FileEntry>& entries =
+          panel ? panel->entries : std::vector<SideTab::FileEntry>();
+      if (entries.empty()) {
         body.add(comp::empty_state("（空目录）", "", nullptr));
       }
-      for (size_t i = 0; i < st_.file_entries.size(); ++i) {
-        const AppState::FileEntry& e = st_.file_entries[i];
+      for (size_t i = 0; i < entries.size(); ++i) {
+        const SideTab::FileEntry& e = entries[i];
         H row = el("div", "file-row");
         std::string name = e.name;
         bool isdir = e.is_dir;
-        row.on(EventKind::kClick, [this, name, isdir](const std::string&) {
-          std::string rel = st_.files_path.empty() ? name : (st_.files_path + "/" + name);
+        row.on(EventKind::kClick, [this, panel_id, path, name, isdir](const std::string&) {
+          std::string rel = path.empty() ? name : (path + "/" + name);
           if (isdir) {
-            load_files(st_.active_pid, rel);
+            load_files(panel_id, st_.active_pid, rel);
           } else {
-            preview_file(rel);
+            preview_file(panel_id, rel);
           }
         });
         row.add(el("span", "file-ico").text(e.is_dir ? "▸" : "·"));
@@ -1871,11 +1862,11 @@ VNodePtr UiApp::build_side_panel() {
         }
         body.add(row);
       }
-      if (!st_.file_preview_path.empty()) {
+      if (panel && !panel->preview_path.empty()) {
         H pv = el("div", "file-preview");
-        pv.add(el("div", "file-preview-head").text(st_.file_preview_path));
+        pv.add(el("div", "file-preview-head").text(panel->preview_path));
         H pre = el("pre", "file-preview-body");
-        pre.text(st_.file_preview.empty() ? "（空文件）" : st_.file_preview);
+        pre.text(panel->preview.empty() ? "（空文件）" : panel->preview);
         pv.add(pre);
         body.add(pv);
       }
@@ -1990,8 +1981,12 @@ VNodePtr UiApp::build_terminal_drawer() {
     for (size_t i = 0; i < shown.size(); ++i) {
       const TermItem& t = *shown[i];
       std::string tid = t.tid;
-      H item = el("div", "td-all-item");
-      item.on(EventKind::kClick, [this, tid](const std::string&) {
+      bool closed = term_tab_closed(tid);
+      H item = el("div", closed ? "td-all-item closed" : "td-all-item");
+      // Clicking a card opens it: for a closed terminal that means bringing its
+      // tab back, so the overview IS the way to reopen one (no separate entry).
+      item.on(EventKind::kClick, [this, tid, closed](const std::string&) {
+        if (closed) reopen_terminal_tab(tid);
         update([&](AppState& s) { s.term_tab = tid; });
         term_focus_pending_ = true;
         load_terminal_grid(tid);
@@ -2001,8 +1996,11 @@ VNodePtr UiApp::build_terminal_drawer() {
                  .text("●"));
       ih.add(el("span", "td-all-name").text("#" + tid + " " + term_display_name(t)));
       ih.add(el("span", "grow"));
-      ih.add(el("span", "dim").text(t.status == "running" ? tr("运行中")
-                                                          : tr("已退出")));
+      // three states, and the tab one matters: a closed terminal keeps running,
+      // so "running" alone would not tell you why it has no tab
+      std::string state = closed ? tr("标签已关闭")
+                                 : (t.status == "running" ? tr("运行中") : tr("已退出"));
+      ih.add(el("span", "dim").text(state));
       item.add(ih);
       H pre = el("pre", "td-all-out");
       std::map<std::string, Json>::const_iterator gi = st_.term_grids.find(tid);
@@ -2118,13 +2116,15 @@ VNodePtr UiApp::build_terminal_drawer() {
   all_tab.add(el("i", "fa fa-terminal"));
   all_tab.add(el("span", "td-tab-name").text(tr("所有终端")));
   side.add(all_tab);
-  // The strip always lists EVERY terminal. The filter belongs to the overview
-  // page (that is where you search); applying it here would hide the tab of a
-  // terminal you just created whose name does not match the pattern - the tab
-  // would simply be missing.
+  // The strip lists every terminal that has a TAB. A closed terminal is not a
+  // tab - it is a row in the overview list (it keeps running; closing only
+  // removes the tab), which is where you find it again. The filter belongs to
+  // the overview page: applying it here would hide the tab of a terminal you
+  // just created whose name does not match.
   for (size_t i = 0; i < st_.terminals.size(); ++i) {
     const TermItem& t = st_.terminals[i];
     std::string tid = t.tid;
+    if (term_tab_closed(tid)) continue;
     if (st_.term_renaming == tid) {
       // renaming in place: the terminal keeps running, only the label changes.
       // Losing focus commits (the same as Enter) - a rename field that keeps
@@ -2190,20 +2190,6 @@ VNodePtr UiApp::build_terminal_drawer() {
   add.add(el("i", "fa fa-plus"));
   add.add(el("span", "td-tab-name").text(tr("新增")));
   side.add(add);
-
-  // A closed tab is only hidden (the process keeps running), so there must be a
-  // way back - otherwise closing a terminal would be a dead end.
-  if (!st_.term_hidden.empty()) {
-    H back = el("div", "td-tab td-tab-restore");
-    back.key("term-tab:restore");
-    back.on(EventKind::kClick, [this](const std::string&) {
-      restore_closed_terminals();
-    });
-    back.add(el("i", "fa fa-rotate-left"));
-    back.add(el("span", "td-tab-name").text(
-        tr("已关闭") + " (" + itos(static_cast<int>(st_.term_hidden.size())) + ")"));
-    side.add(back);
-  }
   body.add(side);
   drawer.add(body);
   return drawer.get();
@@ -3837,10 +3823,10 @@ H UiApp::build_terminal_search() {
   return box;
 }
 
-// Remove a terminal from the strip without ending it. The process keeps running
-// (the model may still be using it) - only 停止 kills it. We just stop showing
-// its tab, and it comes back if it prints again (which is what the user wants:
-// "remove the tab", not "kill the terminal").
+// Remove a terminal from the tab strip without ending it. The process keeps
+// running (the model may still be using it) - only 停止 kills it. The terminal
+// stays listed in the overview, and clicking its card there brings the tab back,
+// so closing a tab is never a dead end.
 void UiApp::close_terminal_tab(const std::string& tid) {
   if (tid.empty()) return;
   update([&](AppState& s) {
@@ -3865,12 +3851,19 @@ void UiApp::close_terminal_tab(const std::string& tid) {
   });
 }
 
-// Bring back every closed tab. Closing only hides a terminal (the process keeps
-// running), so without this a closed terminal would be unreachable - the tab is
-// the only way to see it.
-void UiApp::restore_closed_terminals() {
-  update([&](AppState& s) { s.term_hidden.clear(); });
-  load_terminals(active_sid());
+// Bring back a closed terminal's tab. Closing only hides the tab (the process
+// keeps running), and the overview card does this on click, so the tab is
+// recoverable from the list where the terminal is visible.
+void UiApp::reopen_terminal_tab(const std::string& tid) {
+  if (tid.empty()) return;
+  update([&](AppState& s) {
+    for (size_t i = 0; i < s.term_hidden.size(); ++i) {
+      if (s.term_hidden[i] == tid) {
+        s.term_hidden.erase(s.term_hidden.begin() + i);
+        break;
+      }
+    }
+  });
 }
 
 void UiApp::handle_dropped_folder(const std::string& name) {  if (name.empty()) return;
@@ -3908,8 +3901,22 @@ void UiApp::close_tab(const std::string& id) {
   });
 }
 
-void UiApp::open_side_tab(const std::string& kind) {
+void UiApp::open_or_focus_side_tab(const std::string& kind) {
   if (kind.empty()) return;  // never silently default to a tab kind
+  const SideKind* k = side_kind(kind);
+  // A singleton kind focuses its existing tab; a multi kind (files, git) always
+  // adds another, because two file panels are two directories.
+  if (k && !k->multi) {
+    for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
+      if (st_.side_tabs[i].kind == kind) {
+        std::string key = st_.side_tabs[i].id;
+        update([&](AppState& s) { s.active_side = key; });
+        load_side_tab(key);
+        return;
+      }
+    }
+  }
+  std::string id;
   update([&](AppState& s) {
     s.side_seq++;
     SideTab t;
@@ -3918,30 +3925,24 @@ void UiApp::open_side_tab(const std::string& kind) {
     t.title = side_title(t.kind);
     s.side_tabs.push_back(t);
     s.active_side = t.id;
+    id = t.id;
   });
+  load_side_tab(id);
 }
 
-void UiApp::open_or_focus_side_tab(const std::string& kind) {
-  if (kind.empty()) return;
-  // an existing tab of the same kind is activated instead of duplicated
+// Load (or reload) one panel's data. Each panel loads its OWN state, so two
+// file panels can sit in different directories without fighting.
+void UiApp::load_side_tab(const std::string& id) {
+  std::string kind;
+  std::string path;
   for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
-    if (st_.side_tabs[i].kind == kind) {
-      std::string key = st_.side_tabs[i].id;
-      update([&](AppState& s) { s.active_side = key; });
-      if (kind == "subagents") load_subagents(active_sid());
-      if (kind == "terminal") load_terminals(active_sid());
-      if (kind == "files" && !st_.active_pid.empty()) {
-        load_files(st_.active_pid, st_.files_path);
-      }
-      return;
+    if (st_.side_tabs[i].id == id) {
+      kind = st_.side_tabs[i].kind;
+      path = st_.side_tabs[i].path;
     }
   }
-  open_side_tab(kind);
   if (kind == "subagents") load_subagents(active_sid());
-  if (kind == "terminal") load_terminals(active_sid());
-  if (kind == "files" && !st_.active_pid.empty()) {
-    load_files(st_.active_pid, st_.files_path);
-  }
+  if (kind == "files" && !st_.active_pid.empty()) load_files(id, st_.active_pid, path);
 }
 
 void UiApp::close_side_tab(const std::string& id) {

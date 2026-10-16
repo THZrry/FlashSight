@@ -172,8 +172,10 @@ FS_TEST(uiapp_side_panel_switch) {
   EXPECT_TRUE(dump_has(dom, "上下文水位"));
   app.update([](AppState& s) { s.active_side = "subagents"; });
   EXPECT_TRUE(dump_has(dom, "没有子代理"));
-  app.update([](AppState& s) { s.active_side = "terminal"; });
-  EXPECT_TRUE(dump_has(dom, "刷新"));
+  // terminals are NOT a side panel any more: they live in the bottom drawer, so
+  // the panel kinds that remain are the ones with their own content
+  app.open_or_focus_side_tab("ops");
+  EXPECT_TRUE(dump_has(dom, "操作记录"));
 }
 
 FS_TEST(uiapp_side_add_shows_kind_menu) {
@@ -188,13 +190,18 @@ FS_TEST(uiapp_side_add_shows_kind_menu) {
   EXPECT_EQ(app.state().side_tabs.size(), before);
   EXPECT_TRUE(dump_has(dom, "文件"));
   EXPECT_TRUE(dump_has(dom, "Git"));
-  // choosing a kind adds/focuses that tab (no backend -> tab is created)
+  // a MULTI kind (git) always adds another panel
   app.open_or_focus_side_tab("git");
   EXPECT_EQ(app.state().side_tabs.size(), before + 1);
   EXPECT_EQ(app.state().side_tabs.back().kind, std::string("git"));
-  // focusing the same kind again reuses the tab instead of duplicating it
   app.open_or_focus_side_tab("git");
-  EXPECT_EQ(app.state().side_tabs.size(), before + 1);
+  EXPECT_EQ(app.state().side_tabs.size(), before + 2);  // two diffs at once
+  // a SINGLETON kind (usage) focuses the existing one instead of duplicating
+  size_t with_two = app.state().side_tabs.size();
+  app.open_or_focus_side_tab("usage");
+  EXPECT_EQ(app.state().side_tabs.size(), with_two);
+  app.open_or_focus_side_tab("usage");
+  EXPECT_EQ(app.state().side_tabs.size(), with_two);
 }
 
 // Each session tab keeps its own messages / input / side panel. Switching
@@ -525,9 +532,9 @@ FS_TEST(uiapp_terminal_close_tab_keeps_process) {
   for (size_t i = 0; i < dom.calls().size(); ++i) {
     EXPECT_TRUE(dom.calls()[i].detail.find("terminal.kill") == std::string::npos);
   }
-  // closing is not a dead end: the strip offers a way back
-  EXPECT_TRUE(find_by_key(app.tree_for_test(), "term-tab:restore") != nullptr);
-  app.restore_closed_terminals();
+  // closing is not a dead end: the overview card reopens it (and the terminal
+  // was never removed from the list, only its tab)
+  app.reopen_terminal_tab("1");
   EXPECT_TRUE(app.state().term_hidden.empty());
 }
 
