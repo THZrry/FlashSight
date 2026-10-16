@@ -1,5 +1,9 @@
 # build artifacts
 build/
+# scratch build dirs (`xmake f -o build_check` / `-o build_whale`): a second
+# config used to cross-check a toolchain or the WhaleUI switch. Build output, so
+# never committed - one of them once slipped in and added ~40k cache files.
+build_*/
 .xmake/
 *.o
 *.obj

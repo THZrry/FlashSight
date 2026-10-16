@@ -1,9 +1,0 @@
-{
-    errdata = "In file included from tests\\test_ui_api.cpp:3:\
-tests\\test_framework.hpp:50:75: warning: backslash-newline at end of file\
-   50 | #define ASSERT_TRUE(x)                                                    \\\
-tests\\test_ui_api.cpp:15:6: warning: 'fs::Json {anonymous}::call_api(fs::FsApi&, const std::string&, const fs::Json&)' defined but not used [-Wunused-function]\
-   15 | Json call_api(FsApi& api, const std::string& method, const Json& args) {\
-      |      ^~~~~~~~\
-"
-}

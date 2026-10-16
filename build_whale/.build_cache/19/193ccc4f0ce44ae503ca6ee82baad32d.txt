@@ -1,7 +1,0 @@
-{
-    errdata = "src\\storage\\fs_patch.cpp:32:13: warning: 'std::string fs::{anonymous}::norm_rel(const std::string&)' defined but not used [-Wunused-function]\
-   32 | std::string norm_rel(const std::string& p) {\
-      |             ^~~~~~~~\
-cc1plus.exe: note: unrecognized command-line option '-Wno-gnu-line-marker' may have been intended to silence earlier diagnostics\
-"
-}

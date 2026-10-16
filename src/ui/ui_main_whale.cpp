@@ -96,8 +96,6 @@ std::string shell_html(const std::string& css, const std::string& icons) {
   return html;
 }
 
-namespace {
-
 // FS_UI_DEBUG=1 dumps the rendered DOM once after mount; =2 keeps dumping it on
 // a timer, which is how you see what a click actually did (the native backend
 // has no devtools). See doc-internal/ui-whaleui.md.
@@ -109,11 +107,44 @@ int debug_mode() {
 }
 
 void dump_dom(whaleui_window_t* win) {
-  whaleui_dom_element_t* root =
-      whaleui_dom_get_element_by_id(whaleui_window_get_document(win), "fs-root");
+  whaleui_dom_document_t* doc = whaleui_window_get_document(win);
+  whaleui_dom_element_t* root = whaleui_dom_get_element_by_id(doc, "fs-root");
   const char* html = root ? whaleui_dom_get_outer_html(root) : nullptr;
   std::fprintf(stderr, "--- fs-root outerHTML ---\n%s\n--- end ---\n",
                html ? html : "(no root)");
+  // FS_UI_DEBUG=2 also walks the tree and prints each element's laid-out box,
+  // which separates "not laid out" (query fails) from "laid out but painted
+  // wrong" - the two look identical in a screenshot.
+  if (debug_mode() != 2 || !root) return;
+  std::fprintf(stderr, "--- layout boxes (tag.class rect) ---\n");
+  std::vector<std::pair<whaleui_dom_element_t*, int> > stack;
+  stack.push_back(std::make_pair(root, 0));
+  int shown = 0;
+  while (!stack.empty() && shown < 80) {
+    whaleui_dom_element_t* el = stack.back().first;
+    int depth = stack.back().second;
+    stack.pop_back();
+    whaleui_dom_rect_t r;
+    bool have = whaleui_dom_get_bounding_client_rect(el, &r) == 0;
+    char line[512];
+    std::snprintf(line, sizeof(line), "%*s<%s class=\"%s\"> %s %.0f,%.0f %.0fx%.0f\n",
+                  depth * 2, "", whaleui_dom_tag_name(el),
+                  whaleui_dom_get_attribute(el, "class") ? whaleui_dom_get_attribute(el, "class") : "",
+                  have ? "" : "NO-BOX",
+                  have ? r.x : 0.0f, have ? r.y : 0.0f,
+                  have ? r.width : 0.0f, have ? r.height : 0.0f);
+    std::fprintf(stderr, "%s", line);
+    ++shown;
+    std::vector<whaleui_dom_element_t*> kids;
+    for (whaleui_dom_element_t* c = whaleui_dom_last_child(el); c;
+         c = whaleui_dom_previous_sibling(c)) {
+      kids.push_back(c);
+    }
+    for (size_t i = 0; i < kids.size(); ++i) {
+      stack.push_back(std::make_pair(kids[i], depth + 1));
+    }
+  }
+  std::fprintf(stderr, "--- end layout ---\n");
 }
 
 }  // namespace
