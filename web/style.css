@@ -941,9 +941,11 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   color: #b8b8c0;
 }
 /* the overview's live filter: input + two icon-only mode toggles. The toggles
-   are icons because the strip is narrow; their title is the tooltip. */
+   are icons because the strip is narrow; their title is the tooltip. Sticky, so
+   it stays reachable while you scroll through many terminals. */
 .td-search {
   flex: none;
+  position: sticky; top: 0; z-index: 1;
   display: flex; align-items: center; gap: 4px;
   padding: 6px 8px;
   border-bottom: 1px solid #2f2f36;
