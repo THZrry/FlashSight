@@ -965,6 +965,13 @@ void UiApp::render() {
       dom_.bind_cell_size(term->dom, [this](int cols, int rows) {
         resize_terminal(cols, rows);
       });
+      // Keep the view pinned to the bottom as output arrives - but only when the
+      // user is already at the bottom. Scrolling up to read history must not be
+      // yanked away by the next line of output.
+      dom_.bind_scroll_pin(term->dom, [this](bool at_bottom) {
+        term_at_bottom_ = at_bottom;
+      });
+      if (term_at_bottom_) dom_.scroll_to_bottom(term->dom);
     }
     // rename field: focus it so the user can type immediately
     VNodePtr ren = find_by_key(tree_, "term-rename-input");
@@ -1947,10 +1954,22 @@ VNodePtr UiApp::build_terminal_drawer() {
     }
     left.add(list);
   } else {
-    // the terminal surface: focusable, gets raw keys, draws the cell grid
+    // The terminal surface: focusable, gets raw keys, draws the cell grid, and
+    // SCROLLS - a terminal you cannot scroll back through cannot show you what
+    // just went past, which is most of what you scroll for. The grid reply
+    // includes history above the live screen (backend side), so this is a plain
+    // scroll container over history + screen.
     H screen = el("div", "term-screen");
-    screen.key("term-screen");
+    screen.key("term-screen");   // stable key: the key binding must survive
     screen.attr("tabindex", "0");
+    // The rows are keyed by terminal: switching terminals then swaps the subtree
+    // (recreating it, so the entry animation fires) instead of patching text
+    // into rows that happen to have the same position. That was why switching to
+    // a terminal with MORE lines animated and switching to one with fewer did
+    // not - the rows were reused, so nothing was ever created.
+    H lines_box = el("div", "ts-lines");
+    lines_box.key("term-lines:" + st_.term_tab);
+    lines_box.anim(anim::kEnter);
     const Json* grid = nullptr;
     std::map<std::string, Json>::const_iterator gi = st_.term_grids.find(st_.term_tab);
     if (gi != st_.term_grids.end()) grid = &gi->second;
@@ -1959,6 +1978,10 @@ VNodePtr UiApp::build_terminal_drawer() {
       bool cursor_visible = jsonutil::get<bool>(*grid, "cursorVisible", false);
       int cx = static_cast<int>(jsonutil::get_int(*grid, "cursorX", 0));
       int cy = static_cast<int>(jsonutil::get_int(*grid, "cursorY", 0));
+      int from = static_cast<int>(jsonutil::get_int(*grid, "from", 0));
+      int scrollback = static_cast<int>(jsonutil::get_int(*grid, "scrollback", 0));
+      // the cursor's line in the combined buffer, then its index in `lines`
+      int cursor_line = scrollback + cy - from;
       if (lines.is_array()) {
         for (size_t y = 0; y < lines.size(); ++y) {
           H row = el("div", "ts-row");
@@ -1993,17 +2016,18 @@ VNodePtr UiApp::build_terminal_drawer() {
           // `em` in the offset is the font size, and the panel's padding is not
           // part of either. Inside the row it inherits the row's box, so it
           // lines up by construction.
-          if (cursor_visible && static_cast<int>(y) == cy) {
+          if (cursor_visible && static_cast<int>(y) == cursor_line) {
             H cur = el("div", "ts-cursor");
             cur.style("left", itos(cx) + "ch");
             row.add(cur);
           }
-          screen.add(row);
+          lines_box.add(row);
         }
       }
     } else {
-      screen.add(el("div", "ts-empty").text(tr("（暂无输出）")));
+      lines_box.add(el("div", "ts-empty").text(tr("（暂无输出）")));
     }
+    screen.add(lines_box);
     left.add(screen);
   }
   body.add(left);

@@ -93,6 +93,19 @@ class Screen {
   int cols() const { return cols_; }
   int rows() const { return rows_; }
   const Cell& cell(int x, int y) const;
+
+  // ---- scrollback ----
+  // Lines that scrolled off the TOP of the main screen. A terminal without
+  // scrollback cannot show you what just went past, which is most of what you
+  // scroll back for. Only the main screen keeps history (the alternate screen is
+  // a full-screen program's own canvas and has nothing to scroll back to).
+  int scrollback_size() const { return static_cast<int>(scrollback_.size()); }
+  // Total addressable lines: history followed by the visible screen.
+  int total_lines() const { return static_cast<int>(scrollback_.size()) + rows_; }
+  // A cell in the combined buffer: line 0 is the oldest history line, and the
+  // visible screen starts at scrollback_size().
+  const Cell& line_cell(int line, int x) const;
+  void clear_scrollback() { scrollback_.clear(); }
   int cursor_x() const { return cur_.x; }
   int cursor_y() const { return cur_.y; }
   bool cursor_visible() const { return cursor_visible_; }
@@ -147,6 +160,8 @@ class Screen {
   std::vector<Cell> cells_;
   Cursor cur_;
   Cursor saved_;
+  // history: one vector<Cell> per line that scrolled off the top
+  std::vector<std::vector<Cell> > scrollback_;
 
   // alternate screen (vim/less/top): full second buffer + cursor
   std::vector<Cell> alt_cells_;

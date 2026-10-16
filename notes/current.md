@@ -536,3 +536,26 @@ The process of project: P0 环境搭建 + P1 AppCore
     文件上传接线、加号页面、概览 tail）。浏览器实测：连敲 8 字符逐个出现且顺序
     正确、× 关闭后进程仍 running、上传落盘（重名得 -1）、概览两卡各显示 tail、
     加号页面 7 张卡 + 3 个「已打开」标记。
+
+
+<31>(SOLVED): 反馈第八批 —— 终端可滚动（scrollback）+ 切换终端动画补齐。
+  - 终端 scrollback：Screen 新增历史缓冲（每行一个 Cell 向量，上限 2000 行），
+    滚出顶部的行进历史；只有「滚动区从第 0 行开始」才记历史（DECSTBM 从第 2 行
+    开始是程序在窗口里画东西，不算历史），备用屏幕不记（全屏程序自己的画布）。
+    total_lines()/line_cell() 把历史 + 可见屏幕拼成一个可寻址缓冲，UI 直接当
+    滚动容器用。grid 接口加 from/scrollback/totalLines（可只取一段历史，
+    上限 1200 行，避免 50ms 轮询时每次传 2000 行）。UI：.term-screen 改
+    overflow:auto，行放进 .ts-lines（keyed by tid）。
+    之前终端根本不能滚（overflow:hidden），看不到刚过去的输出。
+  - 滚动跟随：新增 IDom::bind_scroll_pin/scroll_to_bottom —— 视图在底部时新输出
+    自动跟随，用户往上翻看历史时绝不被拽回底部（实测翻到顶后继续输出 scrollTop
+    仍为 0；在底部时跟随成功）。
+  - 切换终端动画补齐（用户指出的"切第二个有动画、第一个没有"）：根因是行节点
+    被 diff 复用 —— 切换后若新终端行数不更少，节点全部匹配上、没有任何节点被
+    创建，挂载动画自然不触发（这是"挂载时才播"的正确行为，但切换场景需要显式
+    声明）。修法：给行容器一个按 tid 的 key（term-lines:<tid>），切终端即换子树
+    从而重建、动画必然触发。实测 #1/#2 切换后都是 ts-lines anim-enter。
+  - 验证：152 用例 1543 断言通过（新增 4 例：scrollback 保留/上限与滚动区、
+    reset 清历史、备用屏幕无历史、UI 历史渲染+光标落在合并缓冲的正确行、
+    滚动 pin 状态）。浏览器实测：40 行输出后 scrollHeight 690 > clientHeight 307
+    可滚动、翻顶后输出不被拽回、底部时自动跟随、切换两个终端都带 anim-enter。

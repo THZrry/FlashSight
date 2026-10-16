@@ -40,9 +40,11 @@ class TerminalManager {
   FsResult write(const Json& args, Json* out);
   // args: {tid, cols, rows} -> {}；交互式终端（ConPTY）改变窗口大小
   FsResult resize(const Json& args, Json* out);
-  // args: {tid} -> {cols, rows, cursor, lines}；把屏幕网格给 UI 画
+  // args: {tid} -> {cols, rows, cursor, lines, scrollback, totalLines}
+  // `lines` covers the visible screen plus up to `scrollback` history lines
+  // ABOVE it, so the UI can scroll back; `scrollback` is how many of those
+  // leading lines are history (the rest are the live screen).
   FsResult grid(const Json& args, Json* out);
-
   // One non-blocking pass over every live terminal: drain output and detect
   // exits. Returns one entry per terminal with NEW output or that just exited,
   // so the host can push it (events/SSE) instead of the UI polling by hand.
@@ -68,8 +70,9 @@ class TerminalManager {
   static std::vector<std::string> build_argv_interactive(const ShellInfo& sh);
   // 把子进程输出喂进屏幕（VT 解析）；UTF-8 解码由调用方先做
   static void feed_screen(Proc& p, const std::string& text);
-  // 屏幕 -> UI 用的紧凑 JSON（按样式合并连续单元格）
-  static Json screen_json(const Proc& p);
+  // 屏幕 -> UI 用的紧凑 JSON（按样式合并连续单元格）。from = 起始行（0 =
+  // 最早的历史行；可见屏幕从 scrollback 处开始）。
+  static Json screen_json(const Proc& p, int from = 0);
   // 读走当前可用输出（非阻塞），追加到 proc.out
   static void drain(Proc& p);
 };

@@ -469,13 +469,21 @@ std::vector<Json> TerminalManager::tick() {
 
 // 屏幕网格 -> UI。按样式把连续单元格合并成 run，这样一屏通常只有几十个节点，
 // 而不是 cols*rows 个。
-Json TerminalManager::screen_json(const Proc& p) {
+//
+// `from`（可选，默认 0）指定从第几行开始发：UI 要回滚历史时按需请求更早的
+// 行，不必每次把 2000 行都传过去。
+Json TerminalManager::screen_json(const Proc& p, int from) {
+  const int hist = p.screen.scrollback_size();
+  const int total = p.screen.total_lines();
+  if (from < 0) from = 0;
+  if (from >= total) from = total > 0 ? total - 1 : 0;
+
   Json lines = Json::array();
-  for (int y = 0; y < p.screen.rows(); ++y) {
+  for (int y = from; y < total; ++y) {
     Json runs = Json::array();
     int x = 0;
     while (x < p.screen.cols()) {
-      const vt::Cell& c = p.screen.cell(x, y);
+      const vt::Cell& c = p.screen.line_cell(y, x);
       if (c.flags & vt::kFlagWideTail) {
         ++x;
         continue;
@@ -485,7 +493,7 @@ Json TerminalManager::screen_json(const Proc& p) {
       uint8_t attr = c.attr;
       int start = x;
       while (x < p.screen.cols()) {
-        const vt::Cell& k = p.screen.cell(x, y);
+        const vt::Cell& k = p.screen.line_cell(y, x);
         if (k.flags & vt::kFlagWideTail) {
           ++x;
           continue;
@@ -530,6 +538,9 @@ Json TerminalManager::screen_json(const Proc& p) {
   Json o = Json::object();
   o["cols"] = p.screen.cols();
   o["rows"] = p.screen.rows();
+  o["from"] = from;
+  o["scrollback"] = hist;
+  o["totalLines"] = total;
   o["lines"] = lines;
   o["cursorX"] = p.screen.cursor_x();
   o["cursorY"] = p.screen.cursor_y();
@@ -552,7 +563,13 @@ FsResult TerminalManager::grid(const Json& args, Json* out) {
   Proc& p = *it->second;
   // 取网格前先把子进程还没吐完的输出收干净，UI 看到的才是最新的
   drain(p);
-  Json o = screen_json(p);
+  int from = static_cast<int>(jsonutil::get_int(args, "from", 0));
+  // Cap the reply: the UI shows a window of history, and shipping 2000 lines of
+  // runs on every 50ms poll would be pure waste.
+  const int kMaxLines = 1200;
+  int total = p.screen.total_lines();
+  if (total - from > kMaxLines) from = total - kMaxLines;
+  Json o = screen_json(p, from);
   o["tid"] = tid;
   o["status"] = p.exited ? "exited" : "running";
   o["exitCode"] = p.exit_code;

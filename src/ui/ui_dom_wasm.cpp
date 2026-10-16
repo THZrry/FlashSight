@@ -442,6 +442,31 @@ EM_JS(void, fs_dom_file_picker, (int node_id, int cb_id, const char* pid), {
   }
 });
 
+// Terminal scroll pinning: report whether the surface is scrolled to the bottom
+// so the app knows whether new output should follow the view.
+EM_JS(void, fs_dom_scroll_pin, (int node_id, int cb_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  el.__fsScrollCb = cb_id;
+  if (el.__fsScrollInit) return;
+  el.__fsScrollInit = true;
+  function report() {
+    if (typeof Module === 'undefined' || !Module._fs_ui_scroll_pin) return;
+    // 2px of slack: sub-pixel layout means "exactly at the bottom" is rare
+    var atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+    Module._fs_ui_scroll_pin(el.__fsScrollCb, atBottom ? 1 : 0);
+  }
+  el.addEventListener('scroll', report, { passive: true });
+  // a wheel/touch gesture can also mean "stop following"
+  el.addEventListener('wheel', function () { setTimeout(report, 0); }, { passive: true });
+});
+
+EM_JS(void, fs_dom_scroll_bottom, (int node_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+});
+
 EM_JS(int, fs_dom_root, (), {
   var r = document.getElementById('fs-root');
   if (!r) {
@@ -501,6 +526,16 @@ std::map<int, std::function<void(const std::string&)> >& file_pick_cbs() {
   return m;
 }
 int& file_pick_seq() {
+  static int s = 0;
+  return s;
+}
+
+// scroll-pin callbacks (one terminal surface at a time)
+std::map<int, std::function<void(bool)> >& scroll_pin_cbs() {
+  static std::map<int, std::function<void(bool)> > m;
+  return m;
+}
+int& scroll_pin_seq() {
   static int s = 0;
   return s;
 }
@@ -725,6 +760,17 @@ class WasmDom : public IDom {
     fs_dom_file_picker(static_cast<int>(node.id), cb_id, pid.c_str());
   }
 
+  void bind_scroll_pin(Node node, std::function<void(bool)> cb) override {
+    int cb_id = ++scroll_pin_seq();
+    scroll_pin_cbs().clear();
+    scroll_pin_cbs()[cb_id] = std::move(cb);
+    fs_dom_scroll_pin(static_cast<int>(node.id), cb_id);
+  }
+
+  void scroll_to_bottom(Node node) override {
+    fs_dom_scroll_bottom(static_cast<int>(node.id));
+  }
+
  private:
   Node root() override { return Node{1}; }
 
@@ -798,6 +844,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_file_pick(int cb_id, const char* json
       file_pick_cbs().find(cb_id);
   if (it == file_pick_cbs().end() || !it->second) return;
   it->second(std::string(json ? json : "{}"));
+}
+
+// Called from JS (fs_dom_scroll_pin) when the terminal surface is scrolled.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_scroll_pin(int cb_id, int at_bottom) {
+  std::map<int, std::function<void(bool)> >::iterator it =
+      scroll_pin_cbs().find(cb_id);
+  if (it == scroll_pin_cbs().end() || !it->second) return;
+  it->second(at_bottom != 0);
 }
 
 // Called from JS (fs_dom_key_input) with a JSON key description.

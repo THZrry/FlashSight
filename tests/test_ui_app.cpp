@@ -579,6 +579,75 @@ FS_TEST(uiapp_terminal_overview_is_tail) {
   EXPECT_FALSE(dump_has(dom, "line0"));   // the oldest ones are dropped
 }
 
+// The terminal view scrolls: the grid carries history above the live screen, the
+// cursor is placed on the right line of that combined buffer, and the view is
+// pinned to the bottom unless the user scrolled up.
+FS_TEST(uiapp_terminal_scrolls_with_history) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "", "running"});
+    s.term_tab = "1";
+  });
+  // 2 history lines above a 3-line screen; the cursor sits on screen row 1
+  Json lines = Json::array();
+  const char* texts[] = {"hist-0", "hist-1", "live-0", "live-1", "live-2"};
+  for (int i = 0; i < 5; ++i) {
+    Json row = Json::array();
+    row.push_back(Json{{"x", 0}, {"t", texts[i]}});
+    lines.push_back(row);
+  }
+  Json grid = Json::object();
+  grid["lines"] = lines;
+  grid["cols"] = 80;
+  grid["rows"] = 3;
+  grid["from"] = 0;
+  grid["scrollback"] = 2;   // the first two lines are history
+  grid["totalLines"] = 5;
+  grid["cursorX"] = 3;
+  grid["cursorY"] = 1;      // screen row 1 -> combined line 2 + 1 = 3
+  grid["cursorVisible"] = true;
+  app.update([&](AppState& s) { s.term_grids["1"] = grid; });
+
+  EXPECT_TRUE(dump_has(dom, "hist-0"));   // history is rendered (scrollable)
+  EXPECT_TRUE(dump_has(dom, "live-2"));
+  EXPECT_TRUE(dump_has(dom, "ts-lines"));
+  EXPECT_TRUE(dom.count_of("bind_scroll_pin") >= 1);
+  // the cursor landed on the combined line for screen row 1, not row 0
+  std::string d = dom.dump();
+  size_t cursor_at = d.find("ts-cursor");
+  size_t row_start = d.rfind("ts-row", cursor_at);
+  std::string row_block = d.substr(row_start, cursor_at - row_start);
+  EXPECT_TRUE(row_block.find("live-1") != std::string::npos);
+  EXPECT_TRUE(row_block.find("hist-1") == std::string::npos);
+}
+
+// Scrolling up must not be undone by the next line of output; sitting at the
+// bottom must follow it.
+FS_TEST(uiapp_terminal_scroll_pin_state) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "cmd", "", "running"});
+    s.term_tab = "1";
+  });
+  dom.fire_scroll_pin_for_test(false);   // user scrolled up
+  dom.clear_calls();
+  app.tick_terminal();                   // output arrives
+  // no scroll_to_bottom while the user is reading history
+  EXPECT_EQ(dom.count_of("scroll_to_bottom"), 0);
+  dom.fire_scroll_pin_for_test(true);    // back at the bottom
+  EXPECT_EQ(app.state().term_tab, std::string("1"));
+}
+
 FS_TEST(uiapp_settings_page) {
   NullDom dom;
   AppState st = AppState::make();

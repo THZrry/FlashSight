@@ -247,6 +247,15 @@ void NullDom::bind_file_picker(Node node, const std::string& pid,
   calls_.push_back(Call{"bind_file_picker", node.id, pid});
 }
 
+void NullDom::bind_scroll_pin(Node node, std::function<void(bool)> cb) {
+  scroll_pin_cb_ = cb;
+  calls_.push_back(Call{"bind_scroll_pin", node.id, ""});
+}
+
+void NullDom::scroll_to_bottom(Node node) {
+  calls_.push_back(Call{"scroll_to_bottom", node.id, ""});
+}
+
 std::string NullDom::dump() const {
   std::ostringstream os;
   impl_->dump_rec(os, 1, 0);

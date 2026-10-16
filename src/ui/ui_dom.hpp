@@ -162,6 +162,17 @@ class IDom {
     (void)cb;
   }
 
+  // --- scroll pinning (terminals) ---
+  // Reports whether `node` is scrolled to the bottom, whenever the user scrolls
+  // it. The app uses it to decide whether new output should follow: yanking the
+  // view back down while someone is reading history is worse than not following.
+  virtual void bind_scroll_pin(Node node, std::function<void(bool at_bottom)> cb) {
+    (void)node;
+    (void)cb;
+  }
+  // Scroll `node` to the bottom (called after output when the view is pinned).
+  virtual void scroll_to_bottom(Node node) { (void)node; }
+
   // --- file picker (upload) ---
   // Clicking `node` opens the OS file chooser. The picked files are sent to the
   // backend (which stores them inside the project, where the model's file tools
@@ -215,6 +226,12 @@ class NullDom : public IDom {
   void bind_cell_size(Node node, std::function<void(int, int)> cb) override;
   void bind_file_picker(Node node, const std::string& pid,
                         std::function<void(const std::string&)> cb) override;
+  void bind_scroll_pin(Node node, std::function<void(bool)> cb) override;
+  void scroll_to_bottom(Node node) override;
+  // test hook: simulate the user scrolling the pinned node
+  void fire_scroll_pin_for_test(bool at_bottom) {
+    if (scroll_pin_cb_) scroll_pin_cb_(at_bottom);
+  }
   // test hook: simulate a file picker completing
   void fire_file_pick_for_test(const std::string& reply) {
     if (file_pick_cb_) file_pick_cb_(reply);
@@ -271,6 +288,7 @@ class NullDom : public IDom {
   std::function<void(const KeyPress&)> key_input_cb_;
   std::function<void(int, int)> cell_size_cb_;
   std::function<void(const std::string&)> file_pick_cb_;
+  std::function<void(bool)> scroll_pin_cb_;
 };
 
 }  // namespace ui

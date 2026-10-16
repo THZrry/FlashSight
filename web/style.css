@@ -873,8 +873,7 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
    engine's columns; the engine measures the same font via a probe span. */
 .term-screen {
   flex: 1; min-height: 0; min-width: 0;
-  position: relative;
-  overflow: hidden;
+  overflow: auto;          /* scrollback: history above the live screen */
   padding: 6px 8px;
   background: #14141a;
   color: #d8d8d8;
@@ -883,8 +882,12 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   line-height: 1.28;
   cursor: text;
   outline: none;
+  /* a terminal's grid must not wrap: a wrapped row would break the column
+     alignment that the whole rendering is built on */
+  white-space: pre;
 }
 .term-screen:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+.ts-lines { display: block; min-width: max-content; }
 .ts-row {
   position: relative;
   white-space: pre;

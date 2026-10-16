@@ -13,6 +13,10 @@ namespace vt {
 
 namespace {
 
+// How much history a terminal keeps. 2000 lines is what most terminal emulators
+// default to and is plenty to scroll back through a build log.
+const size_t kScrollbackMax = 2000;
+
 // ANSI colors 0-15: the VS Code dark palette (readable on a dark terminal,
 // which is what a terminal panel is regardless of the app theme).
 const uint32_t kAnsi16[16] = {
@@ -255,6 +259,7 @@ Screen::Screen(int cols, int rows) {
 
 void Screen::reset() {
   cells_.assign(static_cast<size_t>(cols_) * rows_, Cell());
+  scrollback_.clear();
   alt_cells_.clear();
   alt_ = false;
   cur_ = Cursor();
@@ -304,6 +309,18 @@ const Cell& Screen::cell(int x, int y) const {
   return c ? *c : kBlank;
 }
 
+const Cell& Screen::line_cell(int line, int x) const {
+  static const Cell kBlank;
+  int hist = static_cast<int>(scrollback_.size());
+  if (x < 0 || x >= cols_) return kBlank;
+  if (line < 0 || line >= hist + rows_) return kBlank;
+  if (line < hist) {
+    const std::vector<Cell>& l = scrollback_[static_cast<size_t>(line)];
+    return x < static_cast<int>(l.size()) ? l[static_cast<size_t>(x)] : kBlank;
+  }
+  return cell(x, line - hist);
+}
+
 Cell* Screen::at(int x, int y) {
   if (x < 0 || y < 0 || x >= cols_ || y >= rows_) return nullptr;
   return &cells_[static_cast<size_t>(y) * cols_ + x];
@@ -340,6 +357,22 @@ void Screen::scroll_up(int top, int bot, int n) {
   if (bot > rows_ - 1) bot = rows_ - 1;
   int height = bot - top + 1;
   if (n > height) n = height;
+  // Lines leaving the top of the FULL screen become history (a scroll region
+  // that starts below row 0 is a program drawing inside a window, so its lines
+  // are not history - they are still on screen).
+  if (top == 0 && !alt_) {
+    for (int y = 0; y < n; ++y) {
+      std::vector<Cell> line;
+      line.reserve(static_cast<size_t>(cols_));
+      for (int x = 0; x < cols_; ++x) line.push_back(*at(x, y));
+      scrollback_.push_back(line);
+    }
+    if (scrollback_.size() > kScrollbackMax) {
+      scrollback_.erase(scrollback_.begin(),
+                        scrollback_.begin() +
+                            static_cast<long>(scrollback_.size() - kScrollbackMax));
+    }
+  }
   for (int y = top; y <= bot - n; ++y) {
     for (int x = 0; x < cols_; ++x) {
       *at(x, y) = *at(x, y + n);

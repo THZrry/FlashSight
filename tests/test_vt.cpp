@@ -260,6 +260,64 @@ FS_TEST(vt_text_dump_trims_trailing_blanks) {
   EXPECT_EQ(s.text(), std::string("a\n\nbb"));
 }
 
+// Scrolling off the top keeps the line as history: a terminal that cannot show
+// you what just went past cannot be scrolled back through.
+FS_TEST(vt_scrollback_keeps_lines_that_scrolled_off) {
+  Screen s(20, 2);
+  EXPECT_EQ(s.scrollback_size(), 0);
+  s.feed("one\r\ntwo\r\nthree");
+  // "one" scrolled off the 2-row screen into history
+  EXPECT_EQ(s.scrollback_size(), 1);
+  EXPECT_EQ(s.total_lines(), 3);
+  // the combined buffer: line 0 is the oldest history, then the live screen
+  std::string l0;
+  for (int x = 0; x < s.cols(); ++x) {
+    const Cell& c = s.line_cell(0, x);
+    if (c.ch && c.ch != ' ') l0.push_back(static_cast<char>(c.ch));
+  }
+  EXPECT_EQ(l0, std::string("one"));
+  std::string l2;
+  for (int x = 0; x < s.cols(); ++x) {
+    const Cell& c = s.line_cell(2, x);
+    if (c.ch && c.ch != ' ') l2.push_back(static_cast<char>(c.ch));
+  }
+  EXPECT_EQ(l2, std::string("three"));  // last line = bottom of the live screen
+}
+
+// History is bounded (a runaway build log must not grow without limit) and a
+// scroll REGION below row 0 is a program drawing in a window, not history.
+FS_TEST(vt_scrollback_bounds_and_regions) {
+  Screen s(10, 3);
+  for (int i = 0; i < 20; ++i) s.feed("line\r\n");
+  EXPECT_TRUE(s.scrollback_size() > 0);
+  EXPECT_TRUE(s.scrollback_size() <= 2000);
+  // a region that does not start at row 0 scrolls inside the screen only
+  Screen s2(10, 4);
+  s2.feed("keep\r\nr1\r\nr2\r\nr3");
+  int before = s2.scrollback_size();
+  s2.feed("\x1b[2;3r\x1b[2;1H\x1b[M");
+  EXPECT_EQ(s2.scrollback_size(), before);
+}
+
+// A reset clears history (ESC c starts a fresh terminal).
+FS_TEST(vt_scrollback_cleared_on_reset) {
+  Screen s(10, 2);
+  s.feed("a\r\nb\r\nc");
+  EXPECT_TRUE(s.scrollback_size() > 0);
+  s.feed("\x1b" "c");
+  EXPECT_EQ(s.scrollback_size(), 0);
+}
+
+// The alternate screen has no history to scroll back to (it is a full-screen
+// program's own canvas).
+FS_TEST(vt_alt_screen_has_no_scrollback) {
+  Screen s(10, 2);
+  s.feed("\x1b[?1049h");
+  int before = s.scrollback_size();
+  s.feed("x\r\ny\r\nz\r\nw");
+  EXPECT_EQ(s.scrollback_size(), before);
+}
+
 FS_TEST(vt_escape_reset) {
   Screen s(10, 3);
   s.feed("abc\x1b[31m");

@@ -472,6 +472,10 @@ class UiApp {
   // round-robin cursor for the overview's grid refresh (one terminal per tick,
   // so the request rate stays bounded however many terminals are open)
   size_t term_grid_rr_ = 0;
+  // is the terminal view scrolled to the bottom? New output only follows the
+  // view when it is (yanking the view down while someone reads history is worse
+  // than not following).
+  bool term_at_bottom_ = true;
   // Keys are bytes and their ORDER is the meaning. Writes go over an async
   // transport, so two keystrokes could otherwise land out of order (a fast
   // typist's "d" arriving after the Enter). Keystrokes therefore queue here and
