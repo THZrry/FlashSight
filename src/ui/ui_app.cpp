@@ -12,6 +12,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cctype>
+#include <regex>
 
 #include "fs_i18n.hpp"
 #include "term/fs_vt.hpp"
@@ -52,8 +54,7 @@ std::string color_css(int32_t rgb) {
 // A terminal grid (terminal.grid reply) as plain text: one line per row, the
 // runs concatenated. This is what the overview shows, so escape sequences are
 // already resolved by the engine and never reach the screen.
-std::string term_grid_text(const Json& grid) {
-  if (!grid.is_object()) return std::string();
+std::string term_grid_text(const Json& grid) {  if (!grid.is_object()) return std::string();
   const Json& lines = grid["lines"];
   if (!lines.is_array()) return std::string();
   std::string out;
@@ -158,6 +159,64 @@ int64_t now_ms() {
 }
 
 const int64_t kToastMs = 3200;  // how long a toast stays on screen
+
+// The strip shows a search box only once terminals are numerous enough to get
+// lost in; below that it is just noise.
+const size_t kTermSearchThreshold = 10;
+
+std::string lower_ascii(const std::string& s) {
+  std::string o = s;
+  for (size_t i = 0; i < o.size(); ++i) {
+    o[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(o[i])));
+  }
+  return o;
+}
+
+// Does `pat` contain regex syntax? If it does the user means a pattern; if not,
+// a plain/fuzzy substring match is what they want ("bld" should still find
+// "build-log").
+bool looks_like_regex(const std::string& pat) {
+  return pat.find_first_of(".^$*+?()[]{}|\\") != std::string::npos;
+}
+
+// Fuzzy subsequence match: every character of the pattern appears in order.
+bool fuzzy_match(const std::string& hay_lower, const std::string& pat_lower) {
+  if (pat_lower.empty()) return true;
+  size_t p = 0;
+  for (size_t i = 0; i < hay_lower.size() && p < pat_lower.size(); ++i) {
+    if (hay_lower[i] == pat_lower[p]) ++p;
+  }
+  return p == pat_lower.size();
+}
+
+// Match `pat` against one haystack.
+//   * looks like a regex -> case-insensitive regex search
+//   * a regex that does not compile (the user is mid-typing "foo[") -> the
+//     metacharacters are dropped and the rest is fuzzy-matched. Blanking the
+//     list on a half-typed pattern is the most annoying possible behavior, and
+//     "foo[" clearly means "foo".
+//   * anything else -> fuzzy subsequence, so "bld" finds "build-log"
+bool term_match_one(const std::string& hay, const std::string& pat) {
+  if (pat.empty()) return true;
+  std::string hp = lower_ascii(hay);
+  std::string pp = lower_ascii(pat);
+  if (looks_like_regex(pat)) {
+    try {
+      std::regex re(pat, std::regex::icase);
+      return std::regex_search(hay, re);
+    } catch (...) {
+      std::string stripped;
+      for (size_t i = 0; i < pp.size(); ++i) {
+        if (std::string(".^$*+?()[]{}|\\").find(pp[i]) == std::string::npos) {
+          stripped.push_back(pp[i]);
+        }
+      }
+      if (stripped.empty()) return true;  // only metacharacters so far
+      return fuzzy_match(hp, stripped);
+    }
+  }
+  return fuzzy_match(hp, pp);
+}
 
 // a session that has never been opened starts from these defaults
 SessionView default_session_view() {
@@ -1918,8 +1977,18 @@ VNodePtr UiApp::build_terminal_drawer() {
     // per terminal would make the list unusable once there are several) and,
     // when clicked, jumping to that terminal. Nothing here is a dead end.
     H list = el("div", "td-all");
-    for (size_t i = 0; i < st_.terminals.size(); ++i) {
-      const TermItem& t = st_.terminals[i];
+    // With enough terminals to get lost in, the overview grows a live filter
+    // (see build_terminal_search) - this is the page you come to in order to
+    // find one.
+    if (st_.terminals.size() >= kTermSearchThreshold) {
+      list.add(build_terminal_search());
+    }
+    std::vector<const TermItem*> shown = filtered_terminals();
+    if (!st_.term_filter.empty() && shown.empty()) {
+      list.add(comp::empty_state(tr("无匹配终端"), "", nullptr));
+    }
+    for (size_t i = 0; i < shown.size(); ++i) {
+      const TermItem& t = *shown[i];
       std::string tid = t.tid;
       H item = el("div", "td-all-item");
       item.on(EventKind::kClick, [this, tid](const std::string&) {
@@ -2033,23 +2102,33 @@ VNodePtr UiApp::build_terminal_drawer() {
   body.add(left);
 
   // ---- right: vertical tab strip ----
+  // Every entry is KEYED. Unkeyed list items are matched positionally by the
+  // diff, so removing one tab made its DOM node get reused for the next item -
+  // and the click that was still propagating then landed on a DIFFERENT
+  // element's handler. That is what made closing the last terminal instantly
+  // spawn a new one (the click reached the 新增 entry after the diff had
+  // recycled the node into it).
   H side = el("div", "td-tabs");
   // fixed first entry: aggregate view
   H all_tab = el("div", st_.term_tab == "all" ? "td-tab active" : "td-tab");
+  all_tab.key("term-tab:all");
   all_tab.on(EventKind::kClick, [this](const std::string&) {
     update([&](AppState& s) { s.term_tab = "all"; });
   });
   all_tab.add(el("i", "fa fa-terminal"));
   all_tab.add(el("span", "td-tab-name").text(tr("所有终端")));
   side.add(all_tab);
-  for (size_t i = 0; i < st_.terminals.size(); ++i) {
-    const TermItem& t = st_.terminals[i];
+  // (the search box lives on the 所有终端 page itself, where the cards are)
+  std::vector<const TermItem*> shown = filtered_terminals();
+  for (size_t i = 0; i < shown.size(); ++i) {
+    const TermItem& t = *shown[i];
     std::string tid = t.tid;
     if (st_.term_renaming == tid) {
       // renaming in place: the terminal keeps running, only the label changes.
       // Losing focus commits (the same as Enter) - a rename field that keeps
       // eating keystrokes after you click elsewhere is a trap.
       H form = el("div", "td-tab td-tab-rename");
+      form.key("term-tab:" + tid);
       H inp = comp::text_input(st_.term_rename_text, term_display_name(t),
                                [this](const std::string& v) { st_.term_rename_text = v; },
                                [this, tid](const std::string&) {
@@ -2065,6 +2144,7 @@ VNodePtr UiApp::build_terminal_drawer() {
       continue;
     }
     H tb = el("div", t.tid == st_.term_tab ? "td-tab active" : "td-tab");
+    tb.key("term-tab:" + tid);
     tb.on(EventKind::kClick, [this, tid](const std::string&) {
       update([&](AppState& s) { s.term_tab = tid; });
       term_focus_pending_ = true;  // switching to a terminal focuses it
@@ -2099,8 +2179,9 @@ VNodePtr UiApp::build_terminal_drawer() {
   }
   // 新增: one click. The shell comes from settings (that is what "a terminal"
   // means here) and the name is edited on the tab afterwards, so there is
-  // nothing to fill in.
+  // nothing to fill in. Keyed like the rest of the strip (see above).
   H add = el("div", "td-tab td-tab-add");
+  add.key("term-tab:add");
   add.on(EventKind::kClick, [this](const std::string&) {
     start_terminal("", "");
   });
@@ -3516,6 +3597,22 @@ void UiApp::send_terminal_key(const KeyPress& k) {
     bytes = vt::encode_key(k.key, k.ctrl, k.alt, k.shift, app_keys);
   }
   if (bytes.empty()) return;
+  // Remember what was typed into this terminal. "输入匹配" searches these, and
+  // a terminal's commands are not visible in its name or (once the screen has
+  // scrolled) necessarily on it either. Enter starts a new line of input.
+  {
+    std::string& log = st_.term_input_log[tid];
+    if (bytes == "\r") {
+      log += "\n";
+    } else if (bytes.size() == 1 && bytes[0] == 0x7f) {
+      if (!log.empty() && log[log.size() - 1] != '\n') log.erase(log.size() - 1);
+    } else if (bytes.size() == 1 && bytes[0] >= 0x20) {
+      log += bytes;
+    } else if (bytes.size() > 1 && bytes[0] >= 0x20) {
+      log += bytes;  // pasted text
+    }
+    if (log.size() > 8192) log.erase(0, log.size() - 8192);
+  }
   // Queue and flush: keystrokes are bytes whose ORDER carries the meaning, and
   // the transport is async, so writing them in parallel lets a fast typist's
   // last character overtake the Enter. One write in flight at a time.
@@ -3657,6 +3754,67 @@ void UiApp::handle_upload_reply(const std::string& reply_json) {
   VNodePtr ta = find_by_key(tree_, "session-input");
   if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
   toast(tr("已添加附件") + "（" + itos(static_cast<int>(files.size())) + "）");
+}
+
+// Terminals matching the current filter, in display order. An empty filter means
+// "everything", so the strip and the overview both go through here.
+//
+// Three haystacks, because "find that terminal" means different things:
+//   name  (always)  the tab label, the shell, and the #id
+//   input (opt-in)  the commands typed into it
+//   text  (opt-in)  its whole screen, output included
+std::vector<const TermItem*> UiApp::filtered_terminals() const {
+  std::vector<const TermItem*> out;
+  const std::string& pat = st_.term_filter;
+  for (size_t i = 0; i < st_.terminals.size(); ++i) {
+    const TermItem& t = st_.terminals[i];
+    if (pat.empty()) {
+      out.push_back(&t);
+      continue;
+    }
+    std::string name = "#" + t.tid + " " + term_display_name(t) + " " + t.shell;
+    bool hit = term_match_one(name, pat);
+    if (!hit && st_.term_filter_input) {
+      std::map<std::string, std::string>::const_iterator it =
+          st_.term_input_log.find(t.tid);
+      if (it != st_.term_input_log.end()) hit = term_match_one(it->second, pat);
+    }
+    if (!hit && st_.term_filter_text) {
+      std::map<std::string, Json>::const_iterator it = st_.term_grids.find(t.tid);
+      if (it != st_.term_grids.end()) hit = term_match_one(term_grid_text(it->second), pat);
+    }
+    if (hit) out.push_back(&t);
+  }
+  return out;
+}
+
+// Search row for the terminal overview, shown once there are enough terminals to
+// get lost in. Matching is live (every keystroke re-filters) and the two toggles
+// widen it; they are icon-only because the strip is narrow, and their titles
+// carry the explanation.
+H UiApp::build_terminal_search() {
+  H box = el("div", "td-search");
+  box.key("term-search");
+  // update() (not a bare assignment): the filter must re-render the list as you
+  // type. The input keeps focus because patch only rewrites `value` when it
+  // actually changed, and it now matches what the user typed.
+  H inp = comp::text_input(st_.term_filter, tr("筛选终端…"),
+                           [this](const std::string& v) {
+    update([&](AppState& s) { s.term_filter = v; });
+  });
+  inp.key("term-filter-input");
+  box.add(inp);
+  // Icon-only toggles: the strip is narrow, so labels would not fit. The title
+  // (tooltip) carries the full meaning.
+  box.add(comp::icon_button("\u2318", tr("输入匹配：也匹配该终端执行过的命令"),
+                            [this](const std::string&) {
+    update([&](AppState& s) { s.term_filter_input = !s.term_filter_input; });
+  }).cls(st_.term_filter_input ? "on" : ""));
+  box.add(comp::icon_button("\u2261", tr("全文匹配：也匹配终端屏幕上的全部内容（含输出）"),
+                            [this](const std::string&) {
+    update([&](AppState& s) { s.term_filter_text = !s.term_filter_text; });
+  }).cls(st_.term_filter_text ? "on" : ""));
+  return box;
 }
 
 // Remove a terminal from the strip without ending it. The process keeps running

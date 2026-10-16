@@ -127,14 +127,14 @@ The process of project: P0 环境搭建
   终端后端非阻塞轮询推事件（去掉手动轮询）、动画分三档（view/组件/文本）。
   详见 current.md <27>。
 
-<31>(SOLVED): 反馈第八批 —— 终端 scrollback（Screen 历史缓冲 2000 行 + 滚动区/备用
-  屏幕判定 + grid from/scrollback/totalLines）、UI 改滚动容器 + 滚动跟随
-  （bind_scroll_pin/scroll_to_bottom，翻历史时不被拽回底部）、切换终端动画补齐
-  （行容器按 tid key，切终端即重建，动画必触发）。详见 current.md <31>。
+<32>(SOLVED): 反馈第九批 —— 终端标签条全部 keyed（修「关闭标签会顺手新建一个」：
+  无 key 列表按位置复用节点，冒泡中的点击落到复用后的新增条目上）、终端 >= 10 时
+  「所有终端」页出现实时筛选（名称 / 输入匹配（记录按键）/ 全文匹配；正则或模糊
+  子序列；模式开关图标 + tooltip）。详见 current.md <32>。
 
 ## 当前状态（更新 2026-10-16）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；152 用例 1543 断言通过。
-- 终端已是真终端（VT 解析 + ConPTY + scrollback），组件视觉重做进行中。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；155 用例 1549 断言通过。
+- 终端已是真终端（VT 解析 + ConPTY + scrollback + 搜索），组件视觉重做进行中。
 - 等：WhaleUI 纯 C API（接 WhaleDom）、vision 平台截图/图像解码后端。

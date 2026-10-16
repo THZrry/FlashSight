@@ -648,6 +648,125 @@ FS_TEST(uiapp_terminal_scroll_pin_state) {
   EXPECT_EQ(app.state().term_tab, std::string("1"));
 }
 
+// The terminal strip filters live once it gets crowded. Name matching is always
+// on; the two toggles widen it to the commands typed in and to the whole screen.
+FS_TEST(uiapp_terminal_filter_modes) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    // 10 terminals: the threshold for the search box to appear
+    for (int i = 1; i <= 10; ++i) {
+      s.terminals.push_back(
+          TermItem{std::to_string(i), "pwsh", i == 3 ? "构建日志" : "", "running"});
+    }
+    s.term_tab = "all";
+  });
+  // the search row only exists past the threshold
+  EXPECT_TRUE(dump_has(dom, "td-search"));
+  EXPECT_TRUE(dump_has(dom, "筛选终端"));
+
+  // name match: the labelled terminal survives, the others are filtered out
+  app.update([](AppState& s) { s.term_filter = "构建"; });
+  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
+  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+
+  // fuzzy: a plain pattern is a subsequence match, so a partial name works
+  // (this is over the actual characters, not pinyin)
+  app.update([](AppState& s) { s.term_filter = "构建日"; });   // 构建日志
+  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
+  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+
+  // regex when the pattern looks like one
+  app.update([](AppState& s) { s.term_filter = "构建|pwsh"; });
+  EXPECT_TRUE(dump_has(dom, "#1 pwsh"));
+  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
+
+  // a half-typed regex must not blank the list (it falls back to fuzzy)
+  app.update([](AppState& s) { s.term_filter = "构建["; });
+  EXPECT_TRUE(dump_has(dom, "#3 构建日志"));
+
+  // no match at all -> an explicit empty state, not a blank panel
+  app.update([](AppState& s) { s.term_filter = "zzzz-no-such"; });
+  EXPECT_TRUE(dump_has(dom, "无匹配终端"));
+
+  // 输入匹配: a command that appears nowhere in the name
+  app.update([](AppState& s) {
+    s.term_filter = "npm-run-build";
+    s.term_filter_input = true;
+    s.term_input_log["7"] = "npm run build\n";
+  });
+  // the pattern is not a regex (no metacharacters), so it is a subsequence
+  // match against what was typed - "npm run build" contains "npm-run-build"
+  // only as a subsequence once the separators are ignored... which they are
+  // not, so use a pattern that really is a subsequence of the command.
+  app.update([](AppState& s) { s.term_filter = "npmbuild"; });
+  EXPECT_TRUE(dump_has(dom, "#7 pwsh"));
+  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+  // ...and off again it matches nothing
+  app.update([](AppState& s) { s.term_filter_input = false; });
+  EXPECT_TRUE(dump_has(dom, "无匹配终端"));
+
+  // 全文匹配: something only present in the terminal's output
+  app.update([](AppState& s) {
+    s.term_filter = "compiled-successfully";
+    s.term_filter_text = true;
+  });
+  Json lines = Json::array();
+  Json row = Json::array();
+  row.push_back(Json{{"x", 0}, {"t", "compiled-successfully"}});
+  lines.push_back(row);
+  Json grid = Json::object();
+  grid["lines"] = lines;
+  grid["cols"] = 80;
+  grid["rows"] = 1;
+  app.update([&](AppState& s) { s.term_grids["5"] = grid; });
+  EXPECT_TRUE(dump_has(dom, "#5 pwsh"));
+  EXPECT_FALSE(dump_has(dom, "#1 pwsh"));
+}
+
+// Below the threshold there is no search box (it would be noise).
+FS_TEST(uiapp_terminal_filter_hidden_when_few) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "pwsh", "", "running"});
+    s.term_tab = "all";
+  });
+  EXPECT_FALSE(dump_has(dom, "td-search"));
+}
+
+// Every terminal-strip entry is keyed. Unkeyed items get matched positionally by
+// the diff, so removing one made its node be reused for the next entry - and the
+// click still propagating then hit a DIFFERENT entry (closing the last terminal
+// spawned a new one). This asserts the keys are actually there.
+FS_TEST(uiapp_terminal_strip_entries_are_keyed) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"1", "pwsh", "", "running"});
+    s.terminals.push_back(TermItem{"2", "cmd", "", "running"});
+    s.term_tab = "1";
+  });
+  // the tab strip: all + one per terminal + 新增, each with its own key
+  const VNodePtr& tree = app.tree_for_test();
+  EXPECT_TRUE(find_by_key(tree, "term-tab:all") != nullptr);
+  EXPECT_TRUE(find_by_key(tree, "term-tab:1") != nullptr);
+  EXPECT_TRUE(find_by_key(tree, "term-tab:2") != nullptr);
+  EXPECT_TRUE(find_by_key(tree, "term-tab:add") != nullptr);
+}
+
 FS_TEST(uiapp_settings_page) {
   NullDom dom;
   AppState st = AppState::make();

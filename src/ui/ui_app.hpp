@@ -157,6 +157,13 @@ struct AppState {
   // per session so a closed tab does not come back on the next refresh, while a
   // terminal the model starts later still appears normally.
   std::vector<std::string> term_hidden;
+  // ---- terminal search (shown once the strip gets crowded) ----
+  std::string term_filter;         // live pattern; "" = no filtering
+  bool term_filter_input = false;  // also match the commands typed into it
+  bool term_filter_text = false;   // also match its whole screen (output)
+  // what has been typed into each terminal (tid -> command text). Kept so
+  // "输入匹配" can search commands, which are not part of the terminal's NAME.
+  std::map<std::string, std::string> term_input_log;
 
   // ---- subagents ----
   struct SubagentRow {
@@ -322,6 +329,10 @@ struct SessionView {
   int term_rows = 0;
   bool term_app_keys = false;
   std::vector<std::string> term_hidden;
+  std::string term_filter;
+  bool term_filter_input = false;
+  bool term_filter_text = false;
+  std::map<std::string, std::string> term_input_log;
 
   std::vector<AppState::SubagentRow> subagents;
 
@@ -403,9 +414,12 @@ class UiApp {
   // an upload finished: insert the saved files' paths into the composer so the
   // model can read them (the bytes never reach the UI)
   void handle_upload_reply(const std::string& reply_json);
-  // start a terminal running the shell from settings (not a typed command).
-  // shell "" = whatever settings says; label "" = rename later on the tab.
+  // create a terminal under the active session, running the shell from settings
   void start_terminal(const std::string& shell, const std::string& label);
+  // terminals matching the current filter, in display order (empty filter = all)
+  std::vector<const TermItem*> filtered_terminals() const;
+  // the filter row itself (only built once the strip is crowded)
+  H build_terminal_search();
   // send one key press to the selected terminal (VT-encoded by the term engine)
   void send_terminal_key(const KeyPress& k);
   // send the queued keystrokes in order (one write in flight at a time)
@@ -444,6 +458,9 @@ class UiApp {
   void on_backend_event_for_test(const std::string& event, const Json& payload) {
     on_backend_event(event, payload);
   }
+  // test hook: the current VNode tree. Keys are framework-level identities and
+  // deliberately do not reach the DOM, so list-keying can only be asserted here.
+  const VNodePtr& tree_for_test() const { return tree_; }
   // diagnostics
   int event_count() const { return event_count_; }
   int render_count() const { return render_count_; }
