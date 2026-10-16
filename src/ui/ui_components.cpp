@@ -3,6 +3,8 @@
 
 #include <cstdio>
 
+#include "icon_tables_gen.hpp"
+
 namespace fs {
 namespace ui {
 namespace comp {
@@ -321,6 +323,122 @@ H key_value(const std::string& k, const std::string& v) {
   r.add(el("span", "kv-k").text(k));
   r.add(el("span", "kv-v").text(v));
   return r;
+}
+
+// ---------- model / file icons ----------
+
+namespace {
+
+std::string lower_ascii(const std::string& s) {
+  std::string r = s;
+  for (size_t i = 0; i < r.size(); ++i) {
+    if (r[i] >= 'A' && r[i] <= 'Z') r[i] = static_cast<char>(r[i] - 'A' + 'a');
+  }
+  return r;
+}
+
+bool contains(const std::string& hay, const char* needle) {
+  return hay.find(needle) != std::string::npos;
+}
+
+// Brand by model name. Mirrors fs::model_icon_for (provider layer) so the UI can
+// label a model that arrived without an explicit icon; kept here as well because
+// the UI also draws models it only knows by name.
+const char* brand_for_name(const std::string& name) {
+  const std::string m = lower_ascii(name);
+  static const char* const kPairs[][2] = {
+      {"gpt-", "openai"}, {"o1", "openai"}, {"o3", "openai"}, {"o4", "openai"},
+      {"chatgpt", "openai"}, {"davinci", "openai"},
+      {"claude", "claude"}, {"anthropic", "anthropic"},
+      {"gemini", "gemini"}, {"gemma", "gemma"}, {"palm", "google"},
+      {"deepseek", "deepseek"},
+      {"qwen", "qwen"}, {"qwq", "qwen"}, {"tongyi", "qwen"}, {"dashscope", "alibaba"},
+      {"kimi", "kimi"}, {"moonshot", "moonshot"},
+      {"glm", "zhipu"}, {"zhipu", "zhipu"}, {"chatglm", "chatglm"},
+      {"llama", "meta"}, {"meta-", "meta"},
+      {"mistral", "mistral"}, {"mixtral", "mistral"}, {"codestral", "mistral"},
+      {"grok", "grok"}, {"xai", "xai"},
+      {"command-r", "cohere"}, {"cohere", "cohere"},
+      {"sonar", "perplexity"}, {"perplexity", "perplexity"},
+      {"groq", "groq"},
+      {"yi-", "yi"},
+      {"doubao", "doubao"}, {"seed-", "bytedance"},
+      {"ernie", "ernie"}, {"wenxin", "ernie"},
+      {"minimax", "minimax"}, {"abab", "minimax"},
+      {"hunyuan", "hunyuan"},
+      {"step-", "stepfun"}, {"stepfun", "stepfun"},
+      {"spark", "spark"}, {"iflytek", "iflytek"},
+      {"baichuan", "baichuan"},
+      {"internlm", "internlm"},
+      {"nemotron", "nvidia"}, {"nvidia", "nvidia"},
+      {"nova-", "aws"}, {"titan", "aws"}, {"bedrock", "bedrock"},
+      {"azure", "azure"}, {"copilot", "microsoft"},
+      {"ollama", "ollama"}, {"lmstudio", "lmstudio"}, {"lm-studio", "lmstudio"},
+      {"vllm", "vllm"}, {"opencode", "opencode"},
+      {"flux", "flux"}, {"stable-diffusion", "stability"}, {"midjourney", "midjourney"},
+      {"suno", "suno"}, {"runway", "runway"},
+  };
+  for (size_t i = 0; i < sizeof(kPairs) / sizeof(kPairs[0]); ++i) {
+    if (contains(m, kPairs[i][0])) return kPairs[i][1];
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+H model_icon(const std::string& icon_key, const std::string& model_id,
+             const std::string& extra_cls) {
+  std::string key = icon_key;
+  if (key.empty()) {
+    const char* b = brand_for_name(model_id);
+    if (b) key = b;
+  }
+  std::string cls = "mi";
+  if (!extra_cls.empty()) cls += " " + extra_cls;
+  if (key.empty()) {
+    // No brand match: a neutral dot rather than an empty box, so the row still
+    // has a left edge and the list does not look broken.
+    cls += " mi-none";
+    return el("span", cls);
+  }
+  cls += " mi-lobe-" + key;
+  return el("span", cls);
+}
+
+H file_icon(const std::string& name, bool is_dir) {
+  using namespace fs::ui::icons;
+  std::string cls = "mi";
+  if (is_dir) {
+    cls += " mi-file-";
+    cls += kFolderIcon;
+    return el("span", cls);
+  }
+  const std::string lower = lower_ascii(name);
+  // exact filename first: "Dockerfile" and "Makefile" have no extension, and
+  // "cargo.toml" should not be matched by the generic "toml" rule if a more
+  // specific name rule exists.
+  for (size_t i = 0; i < kFileName_count; ++i) {
+    if (lower == kFileName[i].key) {
+      cls += " mi-file-";
+      cls += kFileName[i].icon;
+      return el("span", cls);
+    }
+  }
+  // then the extension (last dot wins: "x.test.ts" -> ts)
+  size_t dot = lower.rfind('.');
+  if (dot != std::string::npos && dot + 1 < lower.size()) {
+    const std::string ext = lower.substr(dot + 1);
+    for (size_t i = 0; i < kFileExt_count; ++i) {
+      if (ext == kFileExt[i].key) {
+        cls += " mi-file-";
+        cls += kFileExt[i].icon;
+        return el("span", cls);
+      }
+    }
+  }
+  cls += " mi-file-";
+  cls += kFallbackFileIcon;
+  return el("span", cls);
 }
 
 // ---------- chat ----------

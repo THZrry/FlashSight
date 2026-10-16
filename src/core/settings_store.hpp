@@ -36,6 +36,10 @@ constexpr char kKeyUiLang[] = "ui.language";                     // "auto|zh|en"
 // 模型偏好（子代理/摘要模型的通用偏好）
 constexpr char kKeyModelPrefSubagent[] = "model.pref.subagent";   // {model, thinking}
 constexpr char kKeyModelPrefSummary[] = "model.pref.summary";     // {model} 空=继承会话模型
+// 逐模型设置（provider.md §4：用户自定义 > API > 预置 > 保守缺省）。
+// 形状：{providerId: [ModelEntry...]}；存的是**用户改过**的模型，
+// 所以"是否启用/能力标签/思考档位/重试"这些覆盖项都在这里，与 provider 连接分开。
+constexpr char kKeyProviderModels[] = "provider.models";
 // 子代理开关/模型（settings-子代理；预置名见 builtin_preset_agents）
 constexpr char kKeySubagents[] = "subagents";                     // {name: {enabled, model}}
 // 长期记忆（provider.md 5：用户偏好管理）

@@ -18,6 +18,11 @@ build_*/
 # temp workspace (per rules; temp/ is for throwaway data)
 temp/
 
+# The app's own per-project data dir (sessions/patches/terminals). It lands in
+# the project root, which is this repo whenever the app is pointed at itself for
+# development, so it must never be committed.
+.flashsight/
+
 # generated wasm bundle + embedded-asset header (built by xmake; fs_ui_wasm
 # after_build packs web/ into src/ui/ui_assets_gen.hpp - see rules/addon3.md)
 web/fs_ui.js

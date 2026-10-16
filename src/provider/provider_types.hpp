@@ -33,6 +33,26 @@ struct ModelCapabilities {
   bool thinking = false;
   bool tool_use = false;   // 不支持 toolUse 的模型拒绝进会话
   int64_t context_len = 0; // 0 = 未知
+  // 多模态与结构化输出：能力是模型的属性，不是供应商的，所以要逐模型标。
+  // 缺省 false = 未知/不支持（保守：UI 只把 true 当作"确定支持"）。
+  bool audio = false;
+  bool video = false;
+  bool pdf = false;
+  bool structured_output = false;
+  int64_t max_output = 0;  // 单次最大输出 token；0 = 未知
+};
+
+// 思考档位（reasoning effort）。档位**不是固定枚举**：有的模型只有开关，
+// 有的有 low/medium/high，有的还能给 token 预算，所以每个模型自己带一份档位表。
+struct ThinkingConfig {
+  std::vector<std::string> levels;  // 该模型支持的档位（空 = 不可配）
+  std::string default_level;        // 会话默认选中的档位
+};
+
+// 请求失败重试（按模型覆盖；0 = 用全局默认）
+struct RetryConfig {
+  int max = 0;           // 最大重试次数
+  int backoff_ms = 0;    // 首次退避（指数增长）
 };
 
 // 模型条目（含能力标签）
@@ -42,10 +62,18 @@ struct ModelEntry {
   ModelCapabilities caps;
   bool from_preset = false;  // 来自预置表
   bool from_api = false;      // 来自 API 一键获取
+  // 用户可改的模型设置（"模型单独高级设置"）
+  bool enabled = true;        // 是否启用（不启用的模型不出现在选择器里）
+  bool user_set = false;      // 用户显式保存过（决定能否删除）
+  ThinkingConfig thinking;
+  RetryConfig retry;
+  // 图标键（lobe-icons 的名字，如 "openai"/"claude"）；空 = 由模型名粗匹配
+  std::string icon;
 
   Json to_json() const;
   static ModelEntry from_json(const Json& j);
 };
+
 
 // provider 连接（provider.md §1/§2：密钥前期明文 600 权限）
 struct ProviderConn {

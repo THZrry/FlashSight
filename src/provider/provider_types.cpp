@@ -39,9 +39,34 @@ Json ModelEntry::to_json() const {
   c["thinking"] = caps.thinking;
   c["toolUse"] = caps.tool_use;
   c["contextLen"] = caps.context_len;
+  c["audio"] = caps.audio;
+  c["video"] = caps.video;
+  c["pdf"] = caps.pdf;
+  c["structuredOutput"] = caps.structured_output;
+  c["maxOutput"] = caps.max_output;
   j["caps"] = c;
   j["fromPreset"] = from_preset;
   j["fromApi"] = from_api;
+  j["enabled"] = enabled;
+  j["userSet"] = user_set;
+  if (!icon.empty()) j["icon"] = icon;
+  // thinking: only emit when the model actually has levels, so a model without
+  // configurable reasoning does not carry an empty array the UI would render
+  // as a control with no options.
+  if (!thinking.levels.empty()) {
+    Json t = Json::object();
+    Json lv = Json::array();
+    for (auto& l : thinking.levels) lv.push_back(l);
+    t["levels"] = lv;
+    t["default"] = thinking.default_level;
+    j["thinking"] = t;
+  }
+  if (retry.max > 0 || retry.backoff_ms > 0) {
+    Json r = Json::object();
+    r["max"] = retry.max;
+    r["backoffMs"] = retry.backoff_ms;
+    j["retry"] = r;
+  }
   return j;
 }
 
@@ -55,10 +80,33 @@ ModelEntry ModelEntry::from_json(const Json& j) {
   m.caps.thinking = jsonutil::get<bool>(c, "thinking", false);
   m.caps.tool_use = jsonutil::get<bool>(c, "toolUse", false);
   m.caps.context_len = jsonutil::get_int(c, "contextLen", 0);
+  m.caps.audio = jsonutil::get<bool>(c, "audio", false);
+  m.caps.video = jsonutil::get<bool>(c, "video", false);
+  m.caps.pdf = jsonutil::get<bool>(c, "pdf", false);
+  m.caps.structured_output = jsonutil::get<bool>(c, "structuredOutput", false);
+  m.caps.max_output = jsonutil::get_int(c, "maxOutput", 0);
   m.from_preset = jsonutil::get<bool>(j, "fromPreset", false);
   m.from_api = jsonutil::get<bool>(j, "fromApi", false);
+  m.enabled = jsonutil::get<bool>(j, "enabled", true);
+  m.user_set = jsonutil::get<bool>(j, "userSet", false);
+  m.icon = jsonutil::get<std::string>(j, "icon", "");
+  if (j.contains("thinking") && j["thinking"].is_object()) {
+    const Json& t = j["thinking"];
+    if (t.contains("levels") && t["levels"].is_array()) {
+      for (auto& l : t["levels"]) {
+        if (l.is_string()) m.thinking.levels.push_back(l.get<std::string>());
+      }
+    }
+    m.thinking.default_level = jsonutil::get<std::string>(t, "default", "");
+  }
+  if (j.contains("retry") && j["retry"].is_object()) {
+    m.retry.max = static_cast<int>(jsonutil::get_int(j["retry"], "max", 0));
+    m.retry.backoff_ms =
+        static_cast<int>(jsonutil::get_int(j["retry"], "backoffMs", 0));
+  }
   return m;
 }
+
 
 Json ProviderConn::to_json() const {
   Json j = Json::object();

@@ -70,6 +70,19 @@ H section_title(const std::string& text);
 H hint(const std::string& text);
 H key_value(const std::string& k, const std::string& v);
 
+// ---------- model icons ----------
+// Brand mark for a model. `icon_key` is a lobe-icons key (see
+// web/icons/lobe/manifest.json); when it is empty the model NAME is matched to
+// a brand here, so a model added from an API listing still gets the right mark
+// instead of a blank square. Falls back to a generic dot when nothing matches.
+H model_icon(const std::string& icon_key, const std::string& model_id,
+             const std::string& extra_cls = "");
+
+// File-type icon for a path or a bare filename, matched on the exact name first
+// (Dockerfile has no extension) and then on the extension. Falls back to the
+// generic file icon.
+H file_icon(const std::string& name, bool is_dir);
+
 // ---------- chat ----------
 
 // Foldable tool/flow block (details-like). `summary` line always visible.

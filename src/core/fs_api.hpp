@@ -187,6 +187,20 @@ class FsApi {
   FsResult provider_templates();
   FsResult provider_list_models(const std::string& providerId);
   FsResult provider_test_connection(const std::string& providerId);
+  // ----- model.*（逐模型设置：能力/档位/重试/启用/图标）-----
+  // 某 provider 的完整模型列表（用户 + API + 预置兜底，含档位与图标）
+  FsResult model_list(const std::string& providerId);
+  // 新建/更新一个模型（用户自定义，最高优先）
+  FsResult model_save(const std::string& providerId, const Json& model);
+  // 删除用户自定义模型（预置/API 模型不可删，只能停用）
+  FsResult model_remove(const std::string& providerId, const std::string& modelId);
+  // 启用/停用（停用的模型不出现在会话选择器里）
+  FsResult model_set_enabled(const std::string& providerId,
+                             const std::string& modelId, bool enabled);
+  // 测试单个模型（发一条最小请求）
+  FsResult model_test(const std::string& providerId, const std::string& modelId);
+  // 全部启用模型（会话模型选择器用；跨 provider，带 provider 归属）
+  FsResult model_all_enabled();
   // ----- skill.*（addon2：中英双语 skill，按需加载）-----
   FsResult skill_list();
   FsResult skill_load(const std::string& name);

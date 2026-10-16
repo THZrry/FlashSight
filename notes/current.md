@@ -771,3 +771,46 @@ The process of project: P0 环境搭建 + P1 AppCore
     `uiapp_settings_page` 加入 `context` 段）。
   - 注意：`.xmake` 里的 builddir 曾被改成 `build_check`，导致测试跑的是旧 exe
     （"改了没生效"）；`xmake f -o build` 复位。改动后务必确认 exe 时间戳。
+
+<41>(SOLVED): 模型一等公民（逐模型设置 + 选择器 + 本地图标集）+ 工具条阈值重测。
+  - **模型是独立对象**，不是供应商的属性：能力（视觉/音频/视频/PDF/结构化输出/
+    工具调用）、上下文与最大输出长度、思考档位、失败重试都因模型而异。新增
+    `ModelEntry` 字段（enabled/user_set/icon/thinking/retry + 多模态能力）、
+    `ModelCapabilities` 扩到 8 项、`ThinkingConfig`/`RetryConfig` 两个结构。
+  - **思考档位不是固定枚举**，取决于模型本身：`model_naming.cpp` 按家族粗匹配
+    （o 系/gpt-5/Claude/Gemini 分 off-low-medium-high，DeepSeek-R1 类只有
+    off/high，Qwen3 类 off/medium，普通对话模型**没有**档位 → UI 不渲染控件）。
+    档位表在模型设置里可增删、可指定默认；删掉默认档时会自动改指第一个，
+    避免存下一个悬空值。
+  - **模型名粗匹配品牌图标**：新模型层出不穷，精确表必然过时，所以按家族子串
+    判断（gpt-/o1/o3/o4→openai，llama→meta，glm→zhipu…）。认不出来返回空，
+    UI 回退到中性圆点（不给错的品牌）。用户显式设的 icon 优先于匹配。
+  - **图标集本地化**：Lobe Icons（`@lobehub/icons-static-svg` 1.95.1，MIT）取
+    63 个品牌 + material-icon-theme（5.39.0，MIT）取 67 个文件类型图标，三个
+    生成脚本 `tools/make_lobe_subset.py` / `make_file_icons.py` /
+    `make_icon_css.py`。后者输出 `web/icons/icons.css`（**data URI**，三个后端
+    通用，不用新增 DOM 图片 API）和 `src/ui/icon_tables_gen.hpp`（扩展名/文件名
+    → 图标类，直接取自上游主题自己的映射，避免手写猜错）。
+  - **坑：CSS 背景图不继承颜色**。monochrome 图标的 `currentColor` 会解析成黑色，
+    暗色面板上直接看不见。所以 23 个单色图标生成浅/深两套（墨色写死），暗色用
+    `[data-mode="dark"]` 与 `prefers-color-scheme` 双保险选中。
+  - **坑：逗号拼接的完整规则不是合法 CSS**。`a{...}, b{...}` 里解析器只保留第一条、
+    其余整条丢弃，暗色变体因此全部失效。必须每条规则独立一行。
+  - 供应商页右栏改成「上=可滚动模型列表（启用圆点/测试/删除/新增，点开编辑）
+    + 下=该模型高级设置」。只有列表滚动：同一面板两个滚动区会分不清滚轮打给谁。
+  - 会话输入框的模型 `<select>` 换成**真选择器**：左供应商 / 右模型，>20 个时按
+    首字母排序 + 分组（分组只有排序后才有意义），带搜索（内存过滤，不来回请求）。
+  - **工具条阈值重测**：子代理/终端去掉 + 模型 select 换按钮后，标签行只需
+    ~580px，而 940px 的旧阈值让"明显放得下"时仍是图标。新阈值 600px，并且
+    `container-type: inline-size` 用的是 composer 的内容盒（1280 窗口下 608px），
+    所以标签现在能正常展开。阈值必须跟着行内容重测，不能凭猜。
+  - 新增 FsApi：`model.list/save/remove/setEnabled/test/allEnabled`（持久化到设置
+    `provider.models`，形状 `{providerId: [ModelEntry]}`；删除必须整份替换写回，
+    逐键合并表达不了"删除"）。启动时 `load_user_models` 恢复。
+  - `model_naming.cpp` 单独成文件：后端和 wasm UI 都要用它（UI 要在用户还没保存
+    新模型时预览它的档位），而 wasm 构建不编译 provider 层，所以它只依赖
+    `<string>/<vector>` 并同时进 `ui_shared` 和 `fs_core`。
+  - 测试：183 用例 / 1682 断言（新增 6 个模型表用例 + 11 个 UI 用例）。
+  - **坑（重要）**：`.xmake` 的 builddir 又漂到 `build_check` 一次；另外有两次
+    "改了没生效"是因为 exe 被运行中的服务器占用导致链接失败（ld: cannot open
+    output file），必须先 taskkill。排查时先看 exe 时间戳。

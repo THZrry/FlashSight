@@ -238,6 +238,52 @@ struct AppState {
   std::vector<std::string> provider_models;   // listModels result
   std::string provider_models_level;          // "api" | "preset"
   std::string provider_status;                // test/connect result line
+
+  // ---- 逐模型设置（provider.models）----
+  // 模型不是供应商的一个属性：能力、思考档位、重试都因模型而异，所以模型
+  // 自己是一等对象。这里缓存当前选中 provider 的模型列表 + 正在编辑的草稿。
+  struct ModelRow {
+    std::string id;
+    std::string display;
+    std::string icon;          // lobe-icons 键（空 = 用通用图标）
+    bool enabled = true;
+    bool user_set = false;     // 用户保存过 -> 可删除
+    bool from_api = false;
+    bool from_preset = false;
+    // 能力
+    bool vision = false;
+    bool audio = false;
+    bool video = false;
+    bool pdf = false;
+    bool structured = false;
+    bool tool_use = false;
+    bool thinking_cap = false;
+    long long context_len = 0;
+    long long max_output = 0;
+    // 档位 + 重试
+    std::vector<std::string> thinking_levels;
+    std::string thinking_default;
+    int retry_max = 0;
+    int retry_backoff_ms = 0;
+  };
+  std::vector<ModelRow> models;        // 当前 provider 的模型列表
+  bool models_loaded = false;
+  std::string models_provider;         // models 属于哪个 provider
+  std::string model_selected;          // 选中要编辑的模型 id
+  bool model_creating = false;         // 新增模型草稿
+  std::string model_filter;            // 模型列表搜索
+  std::string model_status;            // 测试结果行
+  // 模型草稿（编辑中，未保存）
+  ModelRow model_draft;
+  std::string model_new_id;            // 新增时输入的模型名
+  std::string model_new_level;         // 新增思考档位的输入草稿
+  // 会话里的模型选择器（弹出层）：左供应商 / 右模型
+  bool model_picker_open = false;
+  std::string model_picker_provider;
+  std::string model_picker_query;
+  std::vector<ModelRow> model_picker_models;   // 选中 provider 的启用模型
+  bool model_picker_loaded = false;
+  std::string model_picker_status;
   std::vector<std::string> shells;  // settings.detectShells result
   int shell_index = 0;
   std::string history_recent = "20";
@@ -491,6 +537,18 @@ class UiApp {
   void delete_provider(const std::string& id);
   void test_provider(const std::string& id);
   void fetch_provider_models(const std::string& id);
+  // ---- settings / 逐模型 actions ----
+  void load_models(const std::string& provider_id);   // fill st_.models
+  void select_model(const std::string& model_id);     // load into the draft
+  void begin_new_model();
+  void save_model();
+  void delete_model(const std::string& model_id);
+  void toggle_model_enabled(const std::string& model_id, bool enabled);
+  void test_model(const std::string& model_id);
+  // ---- composer / 模型选择器 ----
+  void open_model_picker();
+  void pick_model(const std::string& provider_id, const std::string& model_id);
+  void load_picker_models(const std::string& provider_id);
   // ---- settings / MCP actions ----
   void detect_mcp();
   void add_mcp();

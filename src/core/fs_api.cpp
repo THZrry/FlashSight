@@ -167,6 +167,8 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   // MCP/外部工具注册表：从设置恢复（重启后保留）
   Json mcp = settings_->get_value(kKeyMcpEntries, Json::array());
   if (mcp.is_array()) mcp_registry_->load(mcp);
+  // 逐模型设置：从设置恢复用户覆盖（启用状态/能力/档位/重试/图标）
+  model_table_->load_user_models(settings_->get_value(kKeyProviderModels, Json::object()));
   apply_proxy_settings();  // 代理设置立即生效
   // 文件黑白名单：从设置装载（黑 > 白 > 三档默认）
   {
@@ -1296,6 +1298,149 @@ FsResult FsApi::provider_test_connection(const std::string& providerId) {
       {"latencyMs", out.latency_ms},
       {"status", out.http_status},
   });
+}
+
+// ----- model.*（逐模型设置）-----
+// 模型设置存在 settings 的 provider.models 键（用户改过的模型才在里面），
+// 与 provider 连接分离：连接是"怎么连"，模型是"这个模型能干什么"。
+namespace {
+
+Json load_model_settings(SettingsStore* settings) {
+  if (!settings) return Json::object();
+  Json v = settings->get_value(kKeyProviderModels, Json::object());
+  return v.is_object() ? v : Json::object();
+}
+
+// 写回时必须整体替换：模型删除是"从数组里消失"，逐键合并无法表达删除。
+FsResult save_model_settings(SettingsStore* settings, const Json& all) {
+  return settings->set_global(kKeyProviderModels, all);
+}
+
+}  // namespace
+
+FsResult FsApi::model_list(const std::string& providerId) {
+  ProviderConn conn = providers_->get(providerId);
+  if (conn.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  std::vector<ModelEntry> models = model_table_->list_models(providerId);
+  Json arr = Json::array();
+  for (auto& m : models) arr.push_back(m.to_json());
+  return FsResult::success(Json{{"providerId", providerId}, {"models", arr}});
+}
+
+FsResult FsApi::model_save(const std::string& providerId, const Json& model) {
+  ProviderConn conn = providers_->get(providerId);
+  if (conn.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  ModelEntry m = ModelEntry::from_json(model);
+  if (m.id.empty()) {
+    return FsResult::error(ErrCode::kInvalidArg, "model id required");
+  }
+  if (m.display.empty()) m.display = m.id;
+  m.user_set = true;
+  fill_model_defaults(&m);
+  // 用户显式保存的档位表以用户为准：只有用户没给档位时才由粗匹配补
+  if (m.thinking.levels.empty()) {
+    m.thinking.levels = thinking_levels_for(m.id);
+    m.thinking.default_level = default_thinking_for(m.id);
+  }
+  if (!m.thinking.default_level.empty()) {
+    bool ok = false;
+    for (size_t i = 0; i < m.thinking.levels.size(); ++i) {
+      if (m.thinking.levels[i] == m.thinking.default_level) ok = true;
+    }
+    if (!ok) m.thinking.default_level = m.thinking.levels[0];
+  }
+  model_table_->set_user_model(providerId, m);
+  Json all = load_model_settings(settings_.get());
+  all[providerId] = model_table_->user_models_json()[providerId];
+  FsResult w = save_model_settings(settings_.get(), all);
+  if (!w.ok()) return w;
+  return FsResult::success(m.to_json());
+}
+
+FsResult FsApi::model_remove(const std::string& providerId, const std::string& modelId) {
+  if (!model_table_->remove_user_model(providerId, modelId)) {
+    // 不是用户自定义：预置/API 模型删不掉，只能停用
+    return FsResult::error(ErrCode::kInvalidArg,
+                           "model is not user-defined; disable it instead");
+  }
+  Json all = load_model_settings(settings_.get());
+  Json um = model_table_->user_models_json();
+  if (um.contains(providerId)) all[providerId] = um[providerId];
+  else all.erase(providerId);
+  FsResult w = save_model_settings(settings_.get(), all);
+  if (!w.ok()) return w;
+  return FsResult::success(Json{{"removed", modelId}});
+}
+
+FsResult FsApi::model_set_enabled(const std::string& providerId,
+                                  const std::string& modelId, bool enabled) {
+  ProviderConn conn = providers_->get(providerId);
+  if (conn.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  // 预置/API 模型没有用户条目：启用状态要落成一条用户覆盖，否则存不下来。
+  ModelEntry m = model_table_->resolve(providerId, modelId);
+  if (m.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "model not found: " + modelId);
+  }
+  m.enabled = enabled;
+  m.user_set = true;
+  model_table_->set_user_model(providerId, m);
+  Json all = load_model_settings(settings_.get());
+  all[providerId] = model_table_->user_models_json()[providerId];
+  FsResult w = save_model_settings(settings_.get(), all);
+  if (!w.ok()) return w;
+  return FsResult::success(m.to_json());
+}
+
+FsResult FsApi::model_test(const std::string& providerId, const std::string& modelId) {
+  ProviderConn conn = providers_->get(providerId);
+  if (conn.id.empty()) {
+    return FsResult::error(ErrCode::kNotFound, "provider not found: " + providerId);
+  }
+  ProviderClient client(conn, net_.get());
+  ChatRequest req;
+  req.model = modelId;
+  Json msg = Json::object();
+  msg["role"] = "user";
+  msg["content"] = "ping";
+  req.messages.push_back(msg);
+  req.max_tokens = 1;
+  req.stream = false;
+  ChatResponse out;
+  FsResult r = client.chat(req, &out);
+  if (!r.ok() || !out.error.empty()) {
+    return FsResult::error(r.ok() ? ErrCode::kRemote : r.code,
+                           out.error.empty() ? r.message : out.error);
+  }
+  return FsResult::success(Json{
+      {"ok", true},
+      {"model", modelId},
+      {"latencyMs", out.latency_ms},
+      {"status", out.http_status},
+  });
+}
+
+FsResult FsApi::model_all_enabled() {
+  // 会话的模型选择器要的是"所有能用的模型"，跨 provider。归属必须带上：
+  // 同名模型在不同 provider 上是不同的东西（价格、能力都可能不同）。
+  Json arr = Json::array();
+  for (auto& c : providers_->list()) {
+    if (!c.enabled) continue;
+    std::vector<ModelEntry> models = model_table_->list_models(c.id);
+    for (size_t i = 0; i < models.size(); ++i) {
+      if (!models[i].enabled) continue;
+      Json j = models[i].to_json();
+      j["providerId"] = c.id;
+      j["providerName"] = c.name;
+      arr.push_back(j);
+    }
+  }
+  return FsResult::success(Json{{"models", arr}});
 }
 
 }  // namespace fs

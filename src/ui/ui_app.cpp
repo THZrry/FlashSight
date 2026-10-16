@@ -10,6 +10,7 @@
 //   * settings: roomy two-column page
 #include "ui_app.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
@@ -17,6 +18,7 @@
 
 #include "core/settings_store.hpp"
 #include "fs_i18n.hpp"
+#include "provider/model_naming.hpp"
 #include "term/fs_vt.hpp"
 
 #if defined(__EMSCRIPTEN__)
@@ -271,6 +273,15 @@ Json split_lines(const std::string& text) {
     i = e + 1;
   }
   return arr;
+}
+
+// 思考档位标签：off/low/medium/high 是协议值，界面要说人话
+std::string thinking_label(const std::string& v) {
+  if (v == "off") return "关";
+  if (v == "low") return "低";
+  if (v == "medium") return "中";
+  if (v == "high") return "高";
+  return v;
 }
 
 }  // namespace
@@ -748,11 +759,22 @@ void UiApp::load_providers() {
         rows.push_back(row);
       }
     }
+    bool picker_wants_default = false;
     update([&](AppState& s) {
       s.providers = rows;
       // set even on failure: the load is render-driven, a retry loop would hang
       s.providers_loaded = true;
+      // The model picker can be opened before providers have ever been loaded
+      // (a session page, fresh start): it then had no provider to select and
+      // showed an empty right pane. Now that the list exists, pick the first
+      // one and load its models.
+      if (s.model_picker_open && s.model_picker_provider.empty() && !rows.empty()) {
+        s.model_picker_provider = rows[0].id;
+        s.model_picker_loaded = false;
+        picker_wants_default = true;
+      }
     });
+    if (picker_wants_default) load_picker_models(rows[0].id);
   });
 }
 
@@ -1630,22 +1652,16 @@ VNodePtr UiApp::build_session() {
   // middle: session settings (selects styled compactly)
   H grow = el("span", "grow");
   tools.add(grow);
-  H model_sel = el("div", "bar-group");
-  std::vector<std::string> models;
-  models.push_back("gpt-4o-mini");
-  models.push_back("");
-  models.push_back("deepseek-v4");
-  model_sel.add(comp::select(models, st_.model_index, [this](const std::string& v) {
-    int idx = std::atoi(v.c_str());
-    std::string model = idx == 1 ? "" : idx == 2 ? "deepseek-v4" : "gpt-4o-mini";
-    update([&](AppState& s) {
-      s.model_index = idx;
-      s.model = model;
-    });
-    std::string sid = active_sid();
-    if (!sid.empty()) call_async("session.setModel", Json{{"sid", sid}, {"model", model}});
-  }));
-  tools.add(model_sel);
+  // 模型不是一个下拉列表：真实安装里有多个供应商、每个几十个模型，还有能力
+  // 和思考档位的差异，所以点开是一个真正的选择器（左供应商 / 右模型）。
+  H model_btn = el("button", "model-pick-btn");
+  model_btn.attr("type", "button");
+  model_btn.attr("title", tr("选择模型"));
+  model_btn.on(EventKind::kClick, [this](const std::string&) { open_model_picker(); });
+  model_btn.add(comp::model_icon("", st_.model));
+  model_btn.add(el("span", "mpb-name").text(st_.model.empty() ? tr("选择模型") : st_.model));
+  model_btn.add(el("span", "mpb-caret").text("\u25be"));
+  tools.add(model_btn);
   H perm_sel = el("div", "bar-group");
   std::vector<std::string> perms;
   perms.push_back("approve");
@@ -1946,7 +1962,7 @@ VNodePtr UiApp::build_side_panel() {
             preview_file(panel_id, rel);
           }
         });
-        row.add(el("span", "file-ico").text(e.is_dir ? "▸" : "·"));
+        row.add(comp::file_icon(e.name, e.is_dir));
         row.add(el("span", "file-name").text(e.name));
         if (!e.is_dir) {
           row.add(el("span", "file-size dim").text(
@@ -2774,32 +2790,276 @@ VNodePtr UiApp::build_settings() {
       cols.add(form);
 
       // ---- 模型：独立面板（宽屏在右侧，窄屏落到表单下面）----
+      // The panel is itself split in two: the scrollable model list on top
+      // (enable / test / delete / add, pick one to edit) and that model's
+      // advanced settings underneath. Two scroll regions in one panel would be
+      // confusing, so only the list scrolls.
       H mpanel = el("div", "pv-models-panel");
-      mpanel.add(comp::section_title(tr("模型")));
-      H macts = el("div", "settings-actions");
+      H mhead = el("div", "md-head");
+      mhead.add(el("span", "md-title").text(tr("模型")));
+      mhead.add(el("span", "grow"));
       if (!sel.empty()) {
-        macts.add(comp::button(tr("获取模型列表"), [this, sel](const std::string&) {
+        mhead.add(comp::icon_button("\u21bb", tr("获取模型列表"), [this, sel](const std::string&) {
           fetch_provider_models(sel);
-        }, "primary"));
+        }));
       }
-      mpanel.add(macts);
-      if (st_.provider_models.empty()) {
-        mpanel.add(el("div", "hint").text(
-            creating ? tr("保存后可获取模型列表") : tr("还没有模型列表，点上面获取")));
+      mhead.add(comp::icon_button("+", tr("新增模型"), [this](const std::string&) {
+        begin_new_model();
+      }));
+      mpanel.add(mhead);
+
+      if (creating) {
+        mpanel.add(el("div", "hint").text(tr("保存供应商后可管理模型")));
       } else {
-        // one row per model: a list reads better than a wrapped cloud of chips
-        // when the panel is a real column
-        H ml = el("div", "pv-model-list");
-        for (size_t i = 0; i < st_.provider_models.size(); ++i) {
-          H row = el("div", "pv-model-row");
-          row.add(el("i", "fa fa-bolt"));
-          row.add(el("span", "pv-model-name").text(st_.provider_models[i]));
-          ml.add(row);
+        // search only pays for itself once the list is long
+        if (st_.models.size() > 8) {
+          mpanel.add(comp::search_box(st_.model_filter, tr("筛选模型"),
+                                      [this](const std::string& v) {
+            // A filter has to re-render to have any effect (unlike the composer
+            // textarea, where suppressing the render is what keeps the caret
+            // from jumping). The input is focused, so patch_attrs leaves its
+            // value alone and the caret stays put.
+            update([&](AppState& s) { s.model_filter = v; });
+          }));
         }
-        mpanel.add(ml);
-        mpanel.add(el("div", "hint").text(
-            tr("来源") + "：" + st_.provider_models_level +
-            tr("（用户 > API > 预置 > 保守缺省）")));
+        H mlist = el("div", "md-list");
+        size_t shown = 0;
+        for (size_t i = 0; i < st_.models.size(); ++i) {
+          const AppState::ModelRow& m = st_.models[i];
+          if (!st_.model_filter.empty() &&
+              m.id.find(st_.model_filter) == std::string::npos &&
+              m.display.find(st_.model_filter) == std::string::npos) {
+            continue;
+          }
+          ++shown;
+          bool is_sel = !st_.model_creating && st_.model_selected == m.id;
+          H row = el("div", is_sel ? "md-row active" : "md-row");
+          row.key("md-" + m.id);
+          std::string mid = m.id;
+          row.on(EventKind::kClick, [this, mid](const std::string&) {
+            select_model(mid);
+          });
+          // enable toggle: the model must be switchable without opening it
+          H en = el("span", m.enabled ? "md-en on" : "md-en");
+          en.attr("title", m.enabled ? tr("已启用（点击停用）") : tr("已停用（点击启用）"));
+          en.on(EventKind::kClick, [this, mid, on = m.enabled](const std::string&) {
+            toggle_model_enabled(mid, !on);
+          });
+          row.add(en);
+          row.add(comp::model_icon(m.icon, m.id));
+          H nm = el("div", "md-name");
+          nm.add(el("span", "md-id").text(m.display.empty() ? m.id : m.display));
+          // capability badges: only the ones that are set, so the row stays short
+          H caps = el("span", "md-caps");
+          bool any_cap = false;
+          if (m.vision) { caps.add(el("i", "fa fa-eye").attr("title", tr("视觉"))); any_cap = true; }
+          if (m.audio) { caps.add(el("i", "fa fa-volume-high").attr("title", tr("音频"))); any_cap = true; }
+          if (m.video) { caps.add(el("i", "fa fa-video").attr("title", tr("视频"))); any_cap = true; }
+          if (m.pdf) { caps.add(el("i", "fa fa-file-pdf").attr("title", tr("PDF"))); any_cap = true; }
+          if (m.structured) { caps.add(el("i", "fa fa-brackets-curly").attr("title", tr("结构化输出"))); any_cap = true; }
+          if (!m.thinking_levels.empty()) { caps.add(el("i", "fa fa-brain").attr("title", tr("思考档位"))); any_cap = true; }
+          if (any_cap) nm.add(caps);
+          row.add(nm);
+          row.add(el("span", "grow"));
+          if (m.user_set) row.add(el("span", "md-tag").text(tr("自定义")));
+          H acts2 = el("span", "md-acts");
+          acts2.add(comp::icon_button("\u26a1", tr("测试"), [this, mid](const std::string&) {
+            test_model(mid);
+          }));
+          if (m.user_set) {
+            acts2.add(comp::icon_button("\u2715", tr("删除"), [this, mid](const std::string&) {
+              delete_model(mid);
+            }));
+          }
+          row.add(acts2);
+          mlist.add(row);
+        }
+        if (st_.models.empty()) {
+          mpanel.add(comp::empty_state(tr("还没有模型。点右上「↻」从 API 获取，或「+」手动新增。"),
+                                       "", nullptr));
+        } else if (shown == 0) {
+          mpanel.add(comp::empty_state(tr("没有匹配的模型。"), "", nullptr));
+        } else {
+          mpanel.add(mlist);
+        }
+      }
+
+      // ---- 下半部分：选中模型的高级设置 ----
+      if (st_.model_creating || !st_.model_selected.empty()) {
+        H adv2 = el("div", "md-adv");
+        // The replay token is the model id, EXCEPT while creating: there the
+        // "id" is whatever is being typed, so keying on it would replay the
+        // animation on every keystroke.
+        adv2.anim(anim::kEnter).anim_key(
+            st_.model_creating ? std::string("md:new") : ("md:" + st_.model_selected));
+        AppState::ModelRow& d = st_.model_draft;
+        adv2.add(el("div", "md-adv-title").text(
+            st_.model_creating ? tr("新增模型") : tr("模型设置")));
+        if (st_.model_creating) {
+          adv2.add(comp::field(tr("模型名"), comp::text_input(
+              st_.model_new_id, "如 gpt-4o-mini",
+              [this](const std::string& v) {
+          // must re-render: the thinking-level preview below is derived from
+          // this name (the focused value is not patched back, so no caret jump)
+          update([&](AppState& s) { s.model_new_id = v; });
+        }), tr("发给 API 的 model 字段")));
+        }
+        adv2.add(comp::field(tr("显示名"), comp::text_input(
+            d.display, tr("缺省 = 模型名"),
+            [this](const std::string& v) { st_.model_draft.display = v; })));
+        adv2.add(comp::field(tr("启用"), comp::toggle(d.enabled, "",
+            [this](const std::string&) {
+          update([&](AppState& s) { s.model_draft.enabled = !s.model_draft.enabled; });
+        }), tr("停用后不出现在会话的模型选择器里")));
+
+        adv2.add(comp::section_title(tr("能力")));
+        adv2.add(comp::field(tr("视觉"), comp::toggle(d.vision, "",
+            [this](const std::string&) {
+          update([&](AppState& s) { s.model_draft.vision = !s.model_draft.vision; });
+        })));
+        adv2.add(comp::field(tr("音频"), comp::toggle(d.audio, "",
+            [this](const std::string&) {
+          update([&](AppState& s) { s.model_draft.audio = !s.model_draft.audio; });
+        })));
+        adv2.add(comp::field(tr("视频"), comp::toggle(d.video, "",
+            [this](const std::string&) {
+          update([&](AppState& s) { s.model_draft.video = !s.model_draft.video; });
+        })));
+        adv2.add(comp::field(tr("PDF"), comp::toggle(d.pdf, "",
+            [this](const std::string&) {
+          update([&](AppState& s) { s.model_draft.pdf = !s.model_draft.pdf; });
+        })));
+        adv2.add(comp::field(tr("结构化输出"), comp::toggle(d.structured, "",
+            [this](const std::string&) {
+          update([&](AppState& s) { s.model_draft.structured = !s.model_draft.structured; });
+        })));
+        adv2.add(comp::field(tr("工具调用"), comp::toggle(d.tool_use, "",
+            [this](const std::string&) {
+          update([&](AppState& s) { s.model_draft.tool_use = !s.model_draft.tool_use; });
+        }), tr("不支持工具调用的模型不能进会话")));
+
+        adv2.add(comp::section_title(tr("长度")));
+        adv2.add(comp::field(tr("上下文长度"), comp::text_input(
+            d.context_len > 0 ? itos(static_cast<int>(d.context_len)) : std::string(),
+            "如 128000", [this](const std::string& v) {
+          st_.model_draft.context_len = static_cast<long long>(std::atoi(v.c_str()));
+        }), tr("0 / 空 = 未知")));
+        adv2.add(comp::field(tr("最大输出"), comp::text_input(
+            d.max_output > 0 ? itos(static_cast<int>(d.max_output)) : std::string(),
+            "如 8192", [this](const std::string& v) {
+          st_.model_draft.max_output = static_cast<long long>(std::atoi(v.c_str()));
+        })));
+
+        adv2.add(comp::section_title(tr("思考档位")));
+        // Levels are a property of the MODEL, not a fixed global enum: some
+        // models only switch reasoning on or off, some grade it. So the list is
+        // editable here rather than chosen from one hardcoded set.
+        //
+        // While creating a model, the typed name is all that is known about it,
+        // so show what the coarse match WILL produce instead of claiming "no
+        // levels" about a model that does not exist yet.
+        std::vector<std::string> shown_levels = d.thinking_levels;
+        if (st_.model_creating && shown_levels.empty() && !st_.model_new_id.empty()) {
+          shown_levels = thinking_levels_for(st_.model_new_id);
+        }
+        if (shown_levels.empty()) {
+          adv2.add(el("div", "hint").text(
+              tr("该模型没有可配档位（按模型名粗匹配；可手动添加）")));
+        }
+        for (size_t i = 0; i < shown_levels.size(); ++i) {
+          H lrow = el("div", "settings-row");
+          lrow.add(el("span", "sr-name").text(thinking_label(shown_levels[i])));
+          lrow.add(el("span", "dim grow").text(shown_levels[i]));
+          if (st_.model_creating) {
+            // not saved yet: these are a preview of the coarse match
+            lrow.add(comp::badge(tr("保存后生效")));
+            adv2.add(lrow);
+            continue;
+          }
+          size_t idx = i;
+          if (shown_levels[i] == d.thinking_default) lrow.add(comp::badge(tr("默认")));
+          lrow.add(comp::button(tr("设为默认"), [this, idx](const std::string&) {
+            update([&](AppState& s) {
+              if (idx < s.model_draft.thinking_levels.size()) {
+                s.model_draft.thinking_default = s.model_draft.thinking_levels[idx];
+              }
+            });
+          }, "ghost"));
+          lrow.add(comp::button(tr("删除"), [this, idx](const std::string&) {
+            update([&](AppState& s) {
+              if (idx < s.model_draft.thinking_levels.size()) {
+                s.model_draft.thinking_levels.erase(
+                    s.model_draft.thinking_levels.begin() + static_cast<long>(idx));
+              }
+              // the default may have just been removed, and a default naming a
+              // level that no longer exists would save as a dangling value
+              bool still = false;
+              for (size_t k = 0; k < s.model_draft.thinking_levels.size(); ++k) {
+                if (s.model_draft.thinking_levels[k] == s.model_draft.thinking_default) {
+                  still = true;
+                }
+              }
+              if (!still) {
+                s.model_draft.thinking_default = s.model_draft.thinking_levels.empty()
+                                                     ? std::string()
+                                                     : s.model_draft.thinking_levels[0];
+              }
+            });
+          }, "ghost"));
+          adv2.add(lrow);
+        }
+        H ladd = el("div", "pv-header-add");
+        ladd.add(comp::text_input(st_.model_new_level, "off / low / medium / high",
+                                  [this](const std::string& v) { st_.model_new_level = v; }));
+        ladd.add(comp::button(tr("添加档位"), [this](const std::string&) {
+          update([&](AppState& s) {
+            if (s.model_new_level.empty()) return;
+            for (size_t i = 0; i < s.model_draft.thinking_levels.size(); ++i) {
+              if (s.model_draft.thinking_levels[i] == s.model_new_level) return;
+            }
+            s.model_draft.thinking_levels.push_back(s.model_new_level);
+            if (s.model_draft.thinking_default.empty()) {
+              s.model_draft.thinking_default = s.model_new_level;
+            }
+            s.model_new_level.clear();
+          });
+        }, "ghost"));
+        adv2.add(ladd);
+
+        adv2.add(comp::section_title(tr("失败重试")));
+        adv2.add(comp::field(tr("重试次数"), comp::text_input(
+            d.retry_max > 0 ? itos(d.retry_max) : std::string(), "0 = 用全局默认",
+            [this](const std::string& v) {
+          st_.model_draft.retry_max = std::atoi(v.c_str());
+        })));
+        adv2.add(comp::field(tr("退避毫秒"), comp::text_input(
+            d.retry_backoff_ms > 0 ? itos(d.retry_backoff_ms) : std::string(), "如 500",
+            [this](const std::string& v) {
+          st_.model_draft.retry_backoff_ms = std::atoi(v.c_str());
+        }), tr("首次退避，之后指数增长")));
+
+        if (!st_.model_status.empty()) {
+          adv2.add(el("div", "pv-status").text(st_.model_status));
+        }
+        H macts2 = el("div", "settings-actions");
+        macts2.add(comp::button(tr("保存"), [this](const std::string&) { save_model(); },
+                                "primary"));
+        if (!st_.model_creating) {
+          std::string mid = st_.model_selected;
+          macts2.add(comp::button(tr("测试"), [this, mid](const std::string&) {
+            test_model(mid);
+          }));
+        }
+        macts2.add(comp::button(tr("取消"), [this](const std::string&) {
+          update([&](AppState& s) {
+            s.model_creating = false;
+            s.model_selected.clear();
+            s.model_draft = AppState::ModelRow();
+            s.model_status.clear();
+          });
+        }, "ghost"));
+        adv2.add(macts2);
+        mpanel.add(adv2);
       }
       cols.add(mpanel);
 
@@ -3525,6 +3785,154 @@ VNodePtr UiApp::build_overlays() {
     }
   }));
   }
+  // ---- 模型选择器（左供应商 / 右模型）----
+  // A real picker rather than a <select>: the choices are (provider, model)
+  // pairs, there can be hundreds of them, and each carries capabilities. A
+  // dropdown could not show any of that.
+  if (st_.model_picker_open) {
+    H back = el("div", "picker-backdrop");
+    back.on(EventKind::kClick, [this](const std::string&) {
+      update([&](AppState& s) { s.model_picker_open = false; });
+    });
+    layer.add(back);
+    H pop = el("div", "model-picker");
+    pop.anim(anim::kPop);
+    H head = el("div", "mp-head");
+    head.add(el("span", "mp-title").text(tr("选择模型")));
+    head.add(el("span", "grow"));
+    head.add(comp::icon_button("\u2715", tr("关闭"), [this](const std::string&) {
+      update([&](AppState& s) { s.model_picker_open = false; });
+    }));
+    pop.add(head);
+
+    H cols = el("div", "mp-cols");
+    // left: providers
+    H plist = el("div", "mp-providers");
+    for (size_t i = 0; i < st_.providers.size(); ++i) {
+      const AppState::ProviderRow& p = st_.providers[i];
+      bool active = p.id == st_.model_picker_provider;
+      H item = el("div", active ? "mp-prov active" : "mp-prov");
+      item.key("mp-" + p.id);
+      std::string pid = p.id;
+      item.on(EventKind::kClick, [this, pid](const std::string&) {
+        update([&](AppState& s) {
+          s.model_picker_provider = pid;
+          s.model_picker_models.clear();
+          s.model_picker_loaded = false;
+          s.model_picker_status.clear();
+          // A query typed against one provider's models should not silently
+          // filter the next provider's list down to nothing.
+          s.model_picker_query.clear();
+        });
+        load_picker_models(pid);
+      });
+      item.add(el("div", "mp-prov-name").text(p.name.empty() ? p.id : p.name));
+      item.add(el("div", "mp-prov-kind dim").text(p.kind));
+      plist.add(item);
+    }
+    if (st_.providers.empty()) {
+      plist.add(comp::empty_state(tr("还没有供应商。"), "", nullptr));
+    }
+    cols.add(plist);
+
+    // right: models of the selected provider
+    H mside = el("div", "mp-models");
+    H search = comp::search_box(st_.model_picker_query, tr("搜索模型"),
+                                [this](const std::string& v) {
+      // must re-render: the filter decides which rows exist
+      update([&](AppState& s) { s.model_picker_query = v; });
+    });
+    // Keyed by provider: switching providers clears the query, but a focused
+    // input's value is deliberately NOT patched (that is what keeps a caret
+    // from jumping mid-typing), so the cleared state would never reach the DOM.
+    // A new key recreates the node, which is the framework-level way to say
+    // "this input starts over".
+    search.key("mp-search:" + st_.model_picker_provider);
+    mside.add(search);
+    // Filtering happens here rather than in the backend: the list is already in
+    // memory and a round trip per keystroke would make typing feel laggy.
+    std::vector<const AppState::ModelRow*> vis;
+    for (size_t i = 0; i < st_.model_picker_models.size(); ++i) {
+      const AppState::ModelRow& m = st_.model_picker_models[i];
+      if (!st_.model_picker_query.empty()) {
+        std::string ql = lower_ascii(st_.model_picker_query);
+        if (lower_ascii(m.id + " " + m.display).find(ql) == std::string::npos) continue;
+      }
+      vis.push_back(&m);
+    }
+
+    // Above the threshold the list is sorted and grouped by initial, which only
+    // means anything if the order is alphabetical (grouping an arbitrary order
+    // would repeat a letter down the list).
+    const bool grouped = vis.size() > 20;
+    if (grouped) {
+      std::sort(vis.begin(), vis.end(),
+                [](const AppState::ModelRow* a, const AppState::ModelRow* b) {
+        return lower_ascii(a->display.empty() ? a->id : a->display) <
+               lower_ascii(b->display.empty() ? b->id : b->display);
+      });
+    }
+
+    if (!st_.model_picker_loaded) {
+      mside.add(el("div", "hint").text(tr("加载中…")));
+    } else if (vis.empty()) {
+      mside.add(comp::empty_state(
+          st_.model_picker_query.empty() ? tr("这个供应商还没有启用中的模型。")
+                                         : tr("没有匹配的模型。"),
+          "", nullptr));
+    } else {
+      std::string last_group;
+      H list = el("div", "mp-list");
+      for (size_t i = 0; i < vis.size(); ++i) {
+        const AppState::ModelRow& m = *vis[i];
+        std::string label = m.display.empty() ? m.id : m.display;
+        if (grouped) {
+          char c = label.empty() ? '#' : label[0];
+          std::string g;
+          if (c >= 'a' && c <= 'z') g = std::string(1, static_cast<char>(c - 'a' + 'A'));
+          else if (c >= 'A' && c <= 'Z') g = std::string(1, c);
+          else if (c >= '0' && c <= '9') g = "#";
+          else g = "·";
+          if (g != last_group) {
+            list.add(el("div", "mp-group").text(g));
+            last_group = g;
+          }
+        }
+        bool cur = m.id == st_.model;
+        H row = el("div", cur ? "mp-model active" : "mp-model");
+        row.key("mpm-" + m.id);
+        std::string mid = m.id;
+        std::string ppid = st_.model_picker_provider;
+        row.on(EventKind::kClick, [this, ppid, mid](const std::string&) {
+          pick_model(ppid, mid);
+        });
+        row.add(comp::model_icon(m.icon, m.id));
+        H nm = el("div", "mp-model-name");
+        nm.add(el("span", "mp-model-id").text(label));
+        H caps = el("span", "md-caps");
+        bool any_cap = false;
+        if (m.vision) { caps.add(el("i", "fa fa-eye").attr("title", tr("视觉"))); any_cap = true; }
+        if (m.audio) { caps.add(el("i", "fa fa-volume-high").attr("title", tr("音频"))); any_cap = true; }
+        if (m.video) { caps.add(el("i", "fa fa-video").attr("title", tr("视频"))); any_cap = true; }
+        if (m.pdf) { caps.add(el("i", "fa fa-file-pdf").attr("title", tr("PDF"))); any_cap = true; }
+        if (m.structured) { caps.add(el("i", "fa fa-brackets-curly").attr("title", tr("结构化输出"))); any_cap = true; }
+        if (any_cap) nm.add(caps);
+        row.add(nm);
+        if (m.context_len > 0) {
+          row.add(el("span", "mp-ctx dim").text(itos(static_cast<int>(m.context_len / 1000)) + "K"));
+        }
+        if (cur) row.add(el("i", "fa fa-check"));
+        list.add(row);
+      }
+      mside.add(list);
+    }
+    if (!st_.model_picker_status.empty()) {
+      mside.add(el("div", "pv-status").text(st_.model_picker_status));
+    }
+    cols.add(mside);
+    pop.add(cols);
+    layer.add(pop);
+  }
   if (!st_.toast.empty()) {
     H t = el("div", "toast");
     t.text(st_.toast);
@@ -3654,6 +4062,15 @@ void UiApp::select_provider(const std::string& id) {
       s.provider_models.clear();
       s.provider_models_level.clear();
       s.provider_status.clear();
+      // 换了供应商 -> 上一个供应商的模型列表和草稿都作废
+      s.models.clear();
+      s.models_loaded = false;
+      s.models_provider.clear();
+      s.model_selected.clear();
+      s.model_creating = false;
+      s.model_filter.clear();
+      s.model_status.clear();
+      s.model_draft = AppState::ModelRow();
       if (r.data.contains("customHeaders") && r.data["customHeaders"].is_object()) {
         const Json& h = r.data["customHeaders"];
         for (Json::const_iterator it = h.begin(); it != h.end(); ++it) {
@@ -3663,6 +4080,8 @@ void UiApp::select_provider(const std::string& id) {
         }
       }
     });
+    // 选中即加载该供应商的模型列表（列表 + 高级设置都用它）
+    load_models(id);
   });
 }
 
@@ -3696,6 +4115,14 @@ void UiApp::begin_new_provider(const std::string& template_id) {
       s.pv_advanced = false;
       s.provider_status.clear();
       s.provider_models.clear();
+      s.models.clear();
+      s.models_loaded = false;
+      s.models_provider.clear();
+      s.model_selected.clear();
+      s.model_creating = false;
+      s.model_filter.clear();
+      s.model_status.clear();
+      s.model_draft = AppState::ModelRow();
     });
     return;
   }
@@ -3765,7 +4192,7 @@ void UiApp::test_provider(const std::string& id) {
 void UiApp::fetch_provider_models(const std::string& id) {
   if (id.empty()) return;
   call_async("provider.listModels", Json{{"providerId", id}},
-             [this](const BackendResult& r) {
+             [this, id](const BackendResult& r) {
     if (!r.ok) {
       toast("获取失败：" + r.message);
       return;
@@ -3786,7 +4213,305 @@ void UiApp::fetch_provider_models(const std::string& id) {
       s.provider_status = "获取到 " + std::to_string(models.size()) + " 个模型（级别：" +
                           level + "）" + (message.empty() ? "" : ("，" + message));
     });
+    // The fetched list is now the provider's model set, so re-read it through
+    // model.list: that path merges API models with the user's own overrides and
+    // fills in thinking levels + icons, which the raw listModels reply does not.
+    load_models(id);
   });
+}
+
+// ===========================================================================
+// Settings actions: 逐模型（能力 / 档位 / 重试 / 启用 / 图标）
+// ===========================================================================
+namespace {
+
+// One ModelEntry JSON -> the flat UI row. Kept as a free function so both the
+// settings list and the session picker parse replies the same way.
+void parse_model_row(const Json& j, AppState::ModelRow* out) {
+  if (!out) return;
+  out->id = jsonutil::get<std::string>(j, "id", "");
+  out->display = jsonutil::get<std::string>(j, "display", out->id);
+  out->icon = jsonutil::get<std::string>(j, "icon", "");
+  out->enabled = jsonutil::get<bool>(j, "enabled", true);
+  out->user_set = jsonutil::get<bool>(j, "userSet", false);
+  out->from_api = jsonutil::get<bool>(j, "fromApi", false);
+  out->from_preset = jsonutil::get<bool>(j, "fromPreset", false);
+  Json c = j.contains("caps") && j["caps"].is_object() ? j["caps"] : Json::object();
+  out->vision = jsonutil::get<bool>(c, "vision", false);
+  out->audio = jsonutil::get<bool>(c, "audio", false);
+  out->video = jsonutil::get<bool>(c, "video", false);
+  out->pdf = jsonutil::get<bool>(c, "pdf", false);
+  out->structured = jsonutil::get<bool>(c, "structuredOutput", false);
+  out->tool_use = jsonutil::get<bool>(c, "toolUse", false);
+  out->thinking_cap = jsonutil::get<bool>(c, "thinking", false);
+  out->context_len = jsonutil::get_int(c, "contextLen", 0);
+  out->max_output = jsonutil::get_int(c, "maxOutput", 0);
+  out->thinking_levels.clear();
+  if (j.contains("thinking") && j["thinking"].is_object()) {
+    const Json& t = j["thinking"];
+    if (t.contains("levels") && t["levels"].is_array()) {
+      for (size_t i = 0; i < t["levels"].size(); ++i) {
+        if (t["levels"][i].is_string()) {
+          out->thinking_levels.push_back(t["levels"][i].get<std::string>());
+        }
+      }
+    }
+    out->thinking_default = jsonutil::get<std::string>(t, "default", "");
+  } else {
+    out->thinking_default.clear();
+  }
+  out->retry_max = 0;
+  out->retry_backoff_ms = 0;
+  if (j.contains("retry") && j["retry"].is_object()) {
+    out->retry_max = static_cast<int>(jsonutil::get_int(j["retry"], "max", 0));
+    out->retry_backoff_ms =
+        static_cast<int>(jsonutil::get_int(j["retry"], "backoffMs", 0));
+  }
+}
+
+Json model_row_to_json(const AppState::ModelRow& m) {
+  Json j = Json::object();
+  j["id"] = m.id;
+  j["display"] = m.display.empty() ? m.id : m.display;
+  j["enabled"] = m.enabled;
+  if (!m.icon.empty()) j["icon"] = m.icon;
+  Json c = Json::object();
+  c["vision"] = m.vision;
+  c["audio"] = m.audio;
+  c["video"] = m.video;
+  c["pdf"] = m.pdf;
+  c["structuredOutput"] = m.structured;
+  c["toolUse"] = m.tool_use;
+  c["thinking"] = m.thinking_cap || !m.thinking_levels.empty();
+  c["contextLen"] = m.context_len;
+  c["maxOutput"] = m.max_output;
+  j["caps"] = c;
+  if (!m.thinking_levels.empty()) {
+    Json t = Json::object();
+    Json lv = Json::array();
+    for (size_t i = 0; i < m.thinking_levels.size(); ++i) lv.push_back(m.thinking_levels[i]);
+    t["levels"] = lv;
+    t["default"] = m.thinking_default;
+    j["thinking"] = t;
+  }
+  if (m.retry_max > 0 || m.retry_backoff_ms > 0) {
+    Json r = Json::object();
+    r["max"] = m.retry_max;
+    r["backoffMs"] = m.retry_backoff_ms;
+    j["retry"] = r;
+  }
+  return j;
+}
+
+}  // namespace
+
+void UiApp::load_models(const std::string& provider_id) {
+  if (provider_id.empty()) return;
+  call_async("model.list", Json{{"providerId", provider_id}},
+             [this, provider_id](const BackendResult& r) {
+    if (!r.ok) return;
+    std::vector<AppState::ModelRow> rows;
+    if (r.data.contains("models") && r.data["models"].is_array()) {
+      const Json& arr = r.data["models"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        AppState::ModelRow row;
+        parse_model_row(arr[i], &row);
+        if (!row.id.empty()) rows.push_back(row);
+      }
+    }
+    update([&](AppState& s) {
+      // Only accept the reply if it is still the provider we are showing: a
+      // slow reply for provider A must not overwrite the list for B.
+      if (s.provider_selected != provider_id) return;
+      s.models = rows;
+      s.models_loaded = true;
+      s.models_provider = provider_id;
+      // keep the draft in sync with the refreshed data (it may carry new caps)
+      if (!s.model_selected.empty()) {
+        for (size_t i = 0; i < s.models.size(); ++i) {
+          if (s.models[i].id == s.model_selected) {
+            AppState::ModelRow keep = s.models[i];
+            s.models[i] = keep;
+          }
+        }
+      }
+    });
+  });
+}
+
+void UiApp::select_model(const std::string& model_id) {
+  update([&](AppState& s) {
+    s.model_creating = false;
+    s.model_status.clear();
+    s.model_selected = model_id;
+    for (size_t i = 0; i < s.models.size(); ++i) {
+      if (s.models[i].id == model_id) {
+        s.model_draft = s.models[i];
+        return;
+      }
+    }
+    s.model_draft = AppState::ModelRow();
+    s.model_draft.id = model_id;
+    s.model_draft.display = model_id;
+  });
+}
+
+void UiApp::begin_new_model() {
+  update([&](AppState& s) {
+    s.model_creating = true;
+    s.model_selected.clear();
+    s.model_status.clear();
+    s.model_draft = AppState::ModelRow();
+    s.model_new_id.clear();
+  });
+}
+
+void UiApp::save_model() {
+  std::string pid = st_.provider_selected;
+  if (pid.empty()) {
+    toast("请先保存供应商");
+    return;
+  }
+  AppState::ModelRow m = st_.model_draft;
+  if (st_.model_creating) m.id = st_.model_new_id;
+  if (m.id.empty()) {
+    toast("请填写模型名");
+    return;
+  }
+  if (m.display.empty()) m.display = m.id;
+  Json body = model_row_to_json(m);
+  call_async("model.save", Json{{"providerId", pid}, {"model", body}},
+             [this, pid, mid = m.id](const BackendResult& r) {
+    if (!r.ok) {
+      update([&](AppState& s) { s.model_status = "保存失败：" + r.message; });
+      return;
+    }
+    update([&](AppState& s) {
+      s.model_creating = false;
+      s.model_new_id.clear();
+      s.model_selected = mid;
+      s.model_status = "已保存";
+    });
+    load_models(pid);
+  });
+}
+
+void UiApp::delete_model(const std::string& model_id) {
+  std::string pid = st_.provider_selected;
+  if (pid.empty() || model_id.empty()) return;
+  call_async("model.remove", Json{{"providerId", pid}, {"modelId", model_id}},
+             [this, pid](const BackendResult& r) {
+    if (!r.ok) {
+      // Preset/API models cannot be deleted - only disabled. Say so instead of
+      // failing silently.
+      update([&](AppState& s) { s.model_status = "删除失败：" + r.message; });
+      return;
+    }
+    update([&](AppState& s) {
+      s.model_selected.clear();
+      s.model_draft = AppState::ModelRow();
+      s.model_status = "已删除";
+    });
+    load_models(pid);
+  });
+}
+
+void UiApp::toggle_model_enabled(const std::string& model_id, bool enabled) {
+  std::string pid = st_.provider_selected;
+  if (pid.empty() || model_id.empty()) return;
+  // optimistic: the checkbox should not lag a round trip
+  update([&](AppState& s) {
+    for (size_t i = 0; i < s.models.size(); ++i) {
+      if (s.models[i].id == model_id) s.models[i].enabled = enabled;
+    }
+    if (s.model_draft.id == model_id) s.model_draft.enabled = enabled;
+  });
+  call_async("model.setEnabled",
+             Json{{"providerId", pid}, {"modelId", model_id}, {"enabled", enabled}},
+             [this, pid](const BackendResult& r) {
+    if (!r.ok) load_models(pid);  // revert by re-reading
+  });
+}
+
+void UiApp::test_model(const std::string& model_id) {
+  std::string pid = st_.provider_selected;
+  if (pid.empty() || model_id.empty()) return;
+  update([&](AppState& s) { s.model_status = "测试中…（" + model_id + "）"; });
+  call_async("model.test", Json{{"providerId", pid}, {"modelId", model_id}},
+             [this](const BackendResult& r) {
+    update([&](AppState& s) {
+      if (r.ok) {
+        s.model_status = "可用（" +
+            std::to_string(jsonutil::get_int(r.data, "latencyMs", 0)) + "ms）";
+      } else {
+        s.model_status = "测试失败：" + r.message;
+      }
+    });
+  });
+}
+
+// ===========================================================================
+// Composer: 模型选择器（左供应商 / 右模型）
+// ===========================================================================
+void UiApp::open_model_picker() {
+  // The picker lists providers, so make sure they are loaded before it opens
+  // (it can be opened from the session page without ever visiting settings).
+  if (!st_.providers_loaded) load_providers();
+  update([&](AppState& s) {
+    s.model_picker_open = true;
+    s.model_picker_query.clear();
+    // Default to the provider being edited in settings, else the first one -
+    // opening onto an empty right pane would look broken.
+    if (s.model_picker_provider.empty()) {
+      s.model_picker_provider = !s.provider_selected.empty()
+                                    ? s.provider_selected
+                                    : (s.providers.empty() ? std::string()
+                                                           : s.providers[0].id);
+    }
+    s.model_picker_models.clear();
+    s.model_picker_loaded = false;
+    s.model_picker_status.clear();
+  });
+  load_picker_models(st_.model_picker_provider);
+}
+
+void UiApp::load_picker_models(const std::string& provider_id) {
+  if (provider_id.empty()) return;
+  call_async("model.list", Json{{"providerId", provider_id}},
+             [this, provider_id](const BackendResult& r) {
+    if (!r.ok) {
+      update([&](AppState& s) { s.model_picker_status = "加载失败：" + r.message; });
+      return;
+    }
+    std::vector<AppState::ModelRow> rows;
+    if (r.data.contains("models") && r.data["models"].is_array()) {
+      const Json& arr = r.data["models"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        AppState::ModelRow row;
+        parse_model_row(arr[i], &row);
+        if (!row.id.empty() && row.enabled) rows.push_back(row);
+      }
+    }
+    update([&](AppState& s) {
+      if (s.model_picker_provider != provider_id) return;
+      s.model_picker_models = rows;
+      s.model_picker_loaded = true;
+      s.model_picker_status.clear();
+    });
+  });
+}
+
+void UiApp::pick_model(const std::string& provider_id, const std::string& model_id) {
+  if (model_id.empty()) return;
+  std::string sid = active_sid();
+  update([&](AppState& s) {
+    s.model = model_id;
+    s.model_picker_open = false;
+  });
+  if (!sid.empty()) {
+    call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}});
+  }
+  toast("已切换到 " + model_id);
 }
 
 // ===========================================================================

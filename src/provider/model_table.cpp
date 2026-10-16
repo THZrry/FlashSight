@@ -1,6 +1,8 @@
 // model_table.cpp - 模型表四级回退实现
 #include "model_table.hpp"
 
+#include "model_naming.hpp"
+
 #include "fs_net.hpp"
 
 namespace fs {
@@ -48,23 +50,107 @@ void ModelTable::set_user_model(const std::string& provider_id, const ModelEntry
   v->push_back(m);
 }
 
+bool ModelTable::remove_user_model(const std::string& provider_id,
+                                   const std::string& model_id) {
+  auto* v = find_in_mut(user_, provider_id);
+  if (!v) return false;
+  for (size_t i = 0; i < v->size(); ++i) {
+    if ((*v)[i].id == model_id) {
+      v->erase(v->begin() + static_cast<long>(i));
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<ModelEntry> ModelTable::user_models(const std::string& provider_id) const {
+  if (auto* v = find_in(user_, provider_id)) return *v;
+  return std::vector<ModelEntry>();
+}
+
+Json ModelTable::user_models_json() const {
+  Json out = Json::object();
+  for (auto& kv : user_) {
+    if (kv.second.empty()) continue;
+    Json arr = Json::array();
+    for (auto& m : kv.second) arr.push_back(m.to_json());
+    out[kv.first] = arr;
+  }
+  return out;
+}
+
+void ModelTable::load_user_models(const Json& j) {
+  user_.clear();
+  if (!j.is_object()) return;
+  for (auto it = j.begin(); it != j.end(); ++it) {
+    if (!it.value().is_array()) continue;
+    std::vector<ModelEntry> v;
+    for (auto& e : it.value()) {
+      if (!e.is_object()) continue;
+      ModelEntry m = ModelEntry::from_json(e);
+      if (m.id.empty()) continue;
+      fill_model_defaults(&m);
+      v.push_back(m);
+    }
+    if (!v.empty()) user_.push_back({it.key(), v});
+  }
+}
+
+std::vector<ModelEntry> ModelTable::list_models(const std::string& provider_id) const {
+  std::vector<ModelEntry> out;
+  // 用户自定义优先，并记住哪些 id 已经占位
+  if (auto* u = find_in(user_, provider_id)) {
+    for (auto& m : *u) out.push_back(m);
+  }
+  if (auto* a = find_in(api_, provider_id)) {
+    for (auto& m : *a) {
+      bool dup = false;
+      for (size_t i = 0; i < out.size(); ++i) {
+        if (out[i].id == m.id) { dup = true; break; }
+      }
+      if (!dup) out.push_back(m);
+    }
+  }
+  // 全新 provider 还没有任何模型：给出预置表当起步名单（否则列表是空的，
+  // 用户连"能选什么"都不知道）。一旦有用户/API 模型就以它们为准。
+  if (out.empty()) {
+    for (auto& m : preset_) {
+      if (!m.id.empty()) out.push_back(m);
+    }
+  }
+  for (size_t i = 0; i < out.size(); ++i) fill_model_defaults(&out[i]);
+  return out;
+}
+
 ModelEntry ModelTable::resolve(const std::string& provider_id,
                                const std::string& model_id) const {
   // 1) 用户自定义
   if (auto* u = find_in(user_, provider_id)) {
     for (auto& m : *u) {
-      if (m.id == model_id) return m;
+      if (m.id == model_id) {
+        ModelEntry r = m;
+        fill_model_defaults(&r);
+        return r;
+      }
     }
   }
   // 2) API 获取
   if (auto* a = find_in(api_, provider_id)) {
     for (auto& m : *a) {
-      if (m.id == model_id) return m;
+      if (m.id == model_id) {
+        ModelEntry r = m;
+        fill_model_defaults(&r);
+        return r;
+      }
     }
   }
   // 3) 预置
   for (auto& m : preset_) {
-    if (m.id == model_id) return m;
+    if (m.id == model_id) {
+      ModelEntry r = m;
+      fill_model_defaults(&r);
+      return r;
+    }
   }
   // 4) 保守缺省（tool_use 恒 false）
   return conservative_default(model_id);
@@ -155,6 +241,7 @@ std::vector<ModelEntry> builtin_models_preset() {
     m.caps.tool_use = tool_use;
     m.caps.context_len = ctx;
     m.from_preset = true;
+    fill_model_defaults(&m);
     v.push_back(m);
   };
   add("gpt-4o", true, false, true, 128000);
@@ -162,10 +249,26 @@ std::vector<ModelEntry> builtin_models_preset() {
   add("gpt-4.1", true, false, true, 1000000);
   add("gpt-4.1-mini", true, false, true, 1000000);
   add("o4-mini", true, true, true, 200000);
-  add("claude-sonnet-4-20250514", true, true, true, 200000);
-  add("claude-3-5-sonnet-20241022", true, false, true, 200000);
-  add("claude-3-5-haiku-20241022", true, false, true, 200000);
+  add("", true, true, true, 200000);
+  add("", true, false, true, 200000);
+  add("", true, false, true, 200000);
   return v;
+}
+
+// 补齐默认值：图标与思考档位由模型名粗匹配得出（实现见 model_naming.cpp）。
+void fill_model_defaults(ModelEntry* m) {
+  if (!m) return;
+  if (m->icon.empty()) m->icon = model_icon_for(m->id);
+  // Only fill the thinking config when there is none. A model that already
+  // carries levels (or a deliberate empty one) has been set by the user, and
+  // the capability flag is theirs too: caps.thinking and the level list are not
+  // the same thing (a model can reason without offering a ladder), so deriving
+  // one from the other would overwrite a considered answer with a guess.
+  if (m->thinking.levels.empty() && m->thinking.default_level.empty()) {
+    m->thinking.levels = thinking_levels_for(m->id);
+    m->thinking.default_level = default_thinking_for(m->id);
+    if (!m->thinking.levels.empty()) m->caps.thinking = true;
+  }
 }
 
 }  // namespace fs

@@ -836,7 +836,7 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   outline: none; border-color: transparent; box-shadow: none;
 }
 .composer-tools {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 6px;
   /* NEVER wraps. The row has two modes (labelled / icon-only, chosen by the
      container query below) and both are sized to fit; a wrapping flex container
      only ever produced accidental second lines - including the spacer, which as
@@ -850,7 +850,8 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .composer-tools .btn { white-space: nowrap; flex: none; height: 28px; }
 /* selects shrink before anything wraps, so the row stays on one line longer */
-.composer-tools .select { min-width: 0; max-width: 130px; height: 28px; }
+.composer-tools .select { min-width: 0; max-width: 116px; height: 28px; }
+
 .composer-hint { color: var(--text-faint); font-size: 11.5px; }
 
 /* icon + label buttons (comp::icon_text_button). The label collapses to
@@ -867,12 +868,16 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
    label alone is wide). So the icon is hidden while the label fits. */
 .composer-tools .btn.text-wide .fa { display: none; }
 
-/* The threshold is the width the LABELLED row actually needs, not a guess: 5
-   icon+label buttons + 2 selects + 2 more buttons + gaps is ~940px. A lower
-   value left a band where the row was supposed to be labelled but did not fit,
-   so it wrapped - which is exactly the boundary glitch. Below it everything is
-   icon-only, which fits from ~420px, so the two modes never overlap. */
-@container (max-width: 940px) {
+/* The threshold is the width the LABELLED row actually needs, not a guess. It
+   has to be re-measured whenever the row's contents change: after 子代理/终端
+   were dropped and the model <select> became a picker button the row needs
+   ~580px. The composer is capped at 50% of the window, so on a 1280px window it
+   gets a 608px content box - a threshold above that meant the labels NEVER
+   showed on an ordinary screen even though they fit, which is exactly the
+   "it clearly has room but stays collapsed" complaint. Below the threshold
+   everything is icon-only, which fits from ~420px, so the two modes never
+   overlap. */
+@container (max-width: 600px) {
   /* Icon-only mode has to FIT, not just be narrower. At the roomier spacing the
      row needed 449px inside a 451px container - a 2px margin, which sub-pixel
      rounding turns into a wrap (the row folded onto a second line right at the
@@ -887,6 +892,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
      truncate without losing the control's meaning) */
   .composer-tools .select { max-width: 78px; }
   .composer-tools .bar-group { min-width: 0; }
+  /* the model button is the widest item in the row and its label is the least
+     essential (the icon already identifies the brand) */
+  .model-pick-btn { max-width: 74px; padding: 0 6px; }
   .composer-tools .btn { padding-left: 7px; padding-right: 7px; }
   /* the spacer has no room to spare in this mode */
   .composer-tools .grow { display: none; }
@@ -1292,12 +1300,141 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .pv-detail-cols { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
 .pv-form { flex: 1 1 340px; min-width: 0; }
 .pv-models-panel {
-  flex: 1 1 260px; min-width: 0;
+  flex: 1 1 380px; min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--panel);
   padding: 12px 14px;
 }
+
+/* ---- 模型面板：上=可滚动列表，下=该模型的高级设置 ---- */
+.md-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.md-title { font-weight: 600; }
+/* Only the LIST scrolls. Two scroll regions stacked in one panel would be
+   ambiguous (which one does the wheel target?), so the settings below simply
+   extend the panel. */
+.md-list {
+  display: flex; flex-direction: column; gap: 1px;
+  max-height: 300px; overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+.md-row {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 6px; border-radius: var(--radius-sm);
+  cursor: pointer; min-width: 0;
+}
+.md-row:hover { background: var(--hover); }
+.md-row.active { background: var(--accent-soft); }
+.md-row .grow { flex: 1; }
+/* Enable dot: a model is switched on/off without opening it, so it has to be
+   clickable on its own and must not look like the row's own selection. */
+.md-en {
+  flex: none; width: 9px; height: 9px; border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: transparent; cursor: pointer;
+}
+.md-en.on { background: var(--ok, #2ea043); border-color: transparent; }
+.md-en:hover { box-shadow: 0 0 0 3px var(--hover); }
+.md-name { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.md-id {
+  font-family: var(--mono); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.md-caps { display: inline-flex; gap: 5px; color: var(--text-faint); font-size: 10px; }
+.md-tag {
+  flex: none; font-size: 10px; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 0 4px;
+}
+/* Row actions stay hidden until hover: a list of 40 models must not read as 80
+   buttons. */
+.md-acts { display: none; gap: 2px; flex: none; }
+.md-row:hover .md-acts, .md-row.active .md-acts { display: inline-flex; }
+.md-adv {
+  margin-top: 14px; padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.md-adv-title { font-weight: 600; margin-bottom: 10px; }
+
+/* ---- 会话输入框：模型选择按钮 ---- */
+.model-pick-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; max-width: 180px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text); font: inherit; font-size: 12px;
+  cursor: pointer;
+}
+.model-pick-btn:hover { border-color: var(--border-strong); }
+.mpb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); }
+.mpb-caret { color: var(--text-faint); font-size: 10px; }
+
+/* ---- 模型选择器（浮层：左供应商 / 右模型）---- */
+.picker-backdrop { position: fixed; inset: 0; z-index: 45; }
+.model-picker {
+  position: fixed; z-index: 46;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(760px, 92vw); height: min(520px, 80vh);
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--pop);
+  overflow: hidden;
+}
+.mp-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+.mp-title { font-weight: 600; }
+.mp-cols { flex: 1; display: flex; min-height: 0; }
+.mp-providers {
+  width: 220px; flex: none; overflow: auto;
+  border-right: 1px solid var(--border);
+  padding: 6px;
+}
+.mp-prov {
+  padding: 7px 9px; border-radius: var(--radius-sm);
+  cursor: pointer; min-width: 0;
+}
+.mp-prov:hover { background: var(--hover); }
+.mp-prov.active { background: var(--accent-soft); }
+.mp-prov-name {
+  font-weight: 600; font-size: 12.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-prov-kind { font-size: 11px; margin-top: 1px; }
+.mp-models {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  padding: 8px 10px; overflow: hidden;
+}
+.mp-list { flex: 1; overflow: auto; margin-top: 8px; }
+.mp-group {
+  position: sticky; top: 0;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .06em;
+  color: var(--text-faint); text-transform: uppercase;
+  background: var(--panel);
+  padding: 4px 6px;
+}
+.mp-model {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: var(--radius-sm);
+  cursor: pointer; min-width: 0;
+}
+.mp-model:hover { background: var(--hover); }
+.mp-model.active { background: var(--accent-soft); }
+.mp-model .fa-check { color: var(--accent); font-size: 11px; }
+.mp-model-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.mp-model-id {
+  font-family: var(--mono); font-size: 12.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-ctx { font-size: 11px; flex: none; }
 .pv-model-list { display: flex; flex-direction: column; gap: 1px; margin-top: 10px; }
 .pv-model-row {
   display: flex; align-items: center; gap: 8px;

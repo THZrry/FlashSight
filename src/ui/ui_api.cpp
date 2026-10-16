@@ -244,6 +244,24 @@ UiApi::UiApi(FsApi* api) {
     return api->provider_test_connection(s(a, "providerId"));
   });
 
+  // ---- model.*（逐模型设置：能力/档位/重试/启用/图标）----
+  reg("model.list", [api](const Json& a) { return api->model_list(s(a, "providerId")); });
+  reg("model.save", [api](const Json& a) {
+    return api->model_save(s(a, "providerId"),
+                           a.contains("model") ? a["model"] : Json::object());
+  });
+  reg("model.remove", [api](const Json& a) {
+    return api->model_remove(s(a, "providerId"), s(a, "modelId"));
+  });
+  reg("model.setEnabled", [api](const Json& a) {
+    return api->model_set_enabled(s(a, "providerId"), s(a, "modelId"),
+                                  b(a, "enabled", true));
+  });
+  reg("model.test", [api](const Json& a) {
+    return api->model_test(s(a, "providerId"), s(a, "modelId"));
+  });
+  reg("model.allEnabled", [api](const Json&) { return api->model_all_enabled(); });
+
   // ---- mcp.*（外部工具/技能包管理）----
   reg("mcp.list", [api](const Json&) { return api->mcp_list(); });
   reg("mcp.import", [api](const Json& a) { return api->mcp_import(s(a, "dir")); });

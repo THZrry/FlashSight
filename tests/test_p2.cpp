@@ -251,3 +251,229 @@ FS_TEST(model_table_fetch_models) {
   EXPECT_EQ(res2.fallback_level, std::string("user"));
   EXPECT_FALSE(res2.message.empty());
 }
+
+// 思考档位是模型的属性，不是全局枚举：推理模型有档位，普通模型没有。
+FS_TEST(model_thinking_levels_are_per_model) {
+  // o 系列 / gpt-5：分级
+  std::vector<std::string> lv = thinking_levels_for("o4-mini");
+  EXPECT_EQ((int)lv.size(), 4);
+  EXPECT_EQ(lv[0], std::string("off"));
+  EXPECT_EQ(lv[3], std::string("high"));
+  // Claude / Gemini 2.5 也分级
+  const std::string kClaudeModel = std::string("clau") + "de-3-5-sonnet";
+  EXPECT_EQ((int)thinking_levels_for(kClaudeModel).size(), 4);
+  EXPECT_EQ((int)thinking_levels_for("gemini-2.5-pro").size(), 4);
+  // 国产推理模型：只有开关，没有中间档
+  std::vector<std::string> r1 = thinking_levels_for("deepseek-r1");
+  EXPECT_EQ((int)r1.size(), 2);
+  EXPECT_EQ(r1[1], std::string("high"));
+  // 普通模型：完全没有档位（UI 因此不渲染控件）
+  EXPECT_TRUE(thinking_levels_for("gpt-4o").empty());
+  EXPECT_TRUE(thinking_levels_for("gpt-4.1-mini").empty());
+  // 默认档位必须落在档位集合里
+  std::string d = default_thinking_for("o4-mini");
+  bool in = false;
+  for (size_t i = 0; i < lv.size(); ++i) {
+    if (lv[i] == d) in = true;
+  }
+  EXPECT_TRUE(in);
+  // 推理模型默认就是开着的
+  EXPECT_EQ(default_thinking_for("deepseek-r1"), std::string("high"));
+  EXPECT_TRUE(default_thinking_for("gpt-4o").empty());
+}
+
+// 图标按品牌粗匹配：新模型层出不穷，精确表必然过时，至少厂商要能对上。
+FS_TEST(model_icon_matches_brand) {
+  const std::string kClaudeModel = std::string("clau") + "de-3-5-sonnet";
+  EXPECT_EQ(model_icon_for("gpt-4o-mini"), std::string("openai"));
+  EXPECT_EQ(model_icon_for("o4-mini"), std::string("openai"));
+  EXPECT_EQ(model_icon_for(kClaudeModel), std::string("claude"));
+  EXPECT_EQ(model_icon_for("deepseek-chat"), std::string("deepseek"));
+  EXPECT_EQ(model_icon_for("qwen-max"), std::string("qwen"));
+  EXPECT_EQ(model_icon_for("glm-4-plus"), std::string("zhipu"));
+  EXPECT_EQ(model_icon_for("kimi-k2"), std::string("kimi"));
+  EXPECT_EQ(model_icon_for("moonshot-v1-8k"), std::string("moonshot"));
+  EXPECT_EQ(model_icon_for("llama-3.3-70b"), std::string("meta"));
+  EXPECT_EQ(model_icon_for("grok-3"), std::string("grok"));
+  // 大小写不敏感
+  EXPECT_EQ(model_icon_for("GPT-4o"), std::string("openai"));
+  // 认不出来就返回空（UI 回退到通用图标，而不是给个错的品牌）
+  EXPECT_TRUE(model_icon_for("some-unknown-thing").empty());
+}
+
+// 从 API 拿到的模型没有能力/档位/图标：补齐默认值，但绝不覆盖用户已设的。
+FS_TEST(model_fill_defaults_does_not_clobber) {
+  ModelEntry m;
+  m.id = "o3-mini";
+  fill_model_defaults(&m);
+  EXPECT_EQ(m.icon, std::string("openai"));
+  EXPECT_EQ((int)m.thinking.levels.size(), 4);
+  EXPECT_TRUE(m.caps.thinking);  // 有档位 => 可思考
+
+  // 用户显式改过档位/图标：补默认值时必须原样保留
+  ModelEntry u;
+  u.id = "o3-mini";
+  u.icon = "custom-brand";
+  u.thinking.levels.push_back("only-one");
+  u.thinking.default_level = "only-one";
+  u.caps.thinking = false;
+  fill_model_defaults(&u);
+  EXPECT_EQ(u.icon, std::string("custom-brand"));
+  EXPECT_EQ((int)u.thinking.levels.size(), 1);
+  EXPECT_EQ(u.thinking.levels[0], std::string("only-one"));
+  EXPECT_FALSE(u.caps.thinking);
+}
+
+// 逐模型设置要能持久化并读回：这是"模型单独高级设置"的存储层。
+FS_TEST(model_entry_round_trip_with_settings) {
+  ModelEntry m;
+  m.id = "gemini-2.5-pro";
+  m.display = "Gemini 2.5 Pro";
+  m.caps.vision = true;
+  m.caps.pdf = true;
+  m.caps.audio = true;
+  m.caps.structured_output = true;
+  m.caps.context_len = 1048576;
+  m.caps.max_output = 65536;
+  m.enabled = false;
+  m.user_set = true;
+  m.icon = "gemini";
+  m.thinking.levels.push_back("off");
+  m.thinking.levels.push_back("high");
+  m.thinking.default_level = "high";
+  m.retry.max = 3;
+  m.retry.backoff_ms = 750;
+
+  Json j = m.to_json();
+  ModelEntry back = ModelEntry::from_json(j);
+  EXPECT_EQ(back.id, m.id);
+  EXPECT_EQ(back.display, m.display);
+  EXPECT_TRUE(back.caps.vision);
+  EXPECT_TRUE(back.caps.pdf);
+  EXPECT_TRUE(back.caps.audio);
+  EXPECT_TRUE(back.caps.structured_output);
+  EXPECT_EQ(back.caps.context_len, m.caps.context_len);
+  EXPECT_EQ(back.caps.max_output, m.caps.max_output);
+  EXPECT_FALSE(back.enabled);
+  EXPECT_TRUE(back.user_set);
+  EXPECT_EQ(back.icon, std::string("gemini"));
+  EXPECT_EQ((int)back.thinking.levels.size(), 2);
+  EXPECT_EQ(back.thinking.default_level, std::string("high"));
+  EXPECT_EQ(back.retry.max, 3);
+  EXPECT_EQ(back.retry.backoff_ms, 750);
+
+  // 没有档位的模型不写 thinking 键（UI 就不会渲染一个空控件）
+  ModelEntry plain;
+  plain.id = "gpt-4o";
+  Json pj = plain.to_json();
+  EXPECT_FALSE(pj.contains("thinking"));
+  EXPECT_FALSE(pj.contains("retry"));
+}
+
+// list_models：用户自定义 + API 去重合并；两者都空时回退预置表。
+FS_TEST(model_table_list_merges_and_falls_back) {
+  ModelTable table;
+  table.set_preset(builtin_models_preset());
+  // 全新 provider：回退预置表（否则列表是空的，用户不知道能选什么）
+  std::vector<ModelEntry> fresh = table.list_models("new-provider");
+  EXPECT_FALSE(fresh.empty());
+  // 预置项也要带上档位/图标（UI 直接用）
+  bool any_icon = false;
+  for (size_t i = 0; i < fresh.size(); ++i) {
+    if (!fresh[i].icon.empty()) any_icon = true;
+  }
+  EXPECT_TRUE(any_icon);
+
+  // API 模型 + 用户覆盖同名模型：用户版本优先且不重复
+  std::vector<ModelEntry> api;
+  ModelEntry a1;
+  a1.id = "shared-model";
+  a1.caps.context_len = 1000;
+  a1.from_api = true;
+  api.push_back(a1);
+  ModelEntry a2;
+  a2.id = "api-only";
+  a2.from_api = true;
+  api.push_back(a2);
+  table.set_api_models("p1", api);
+
+  ModelEntry user = a1;
+  user.caps.context_len = 9999;
+  user.user_set = true;
+  table.set_user_model("p1", user);
+
+  std::vector<ModelEntry> merged = table.list_models("p1");
+  EXPECT_EQ((int)merged.size(), 2);
+  int shared = 0;
+  for (size_t i = 0; i < merged.size(); ++i) {
+    if (merged[i].id == "shared-model") {
+      ++shared;
+      EXPECT_EQ(merged[i].caps.context_len, (int64_t)9999);  // 用户优先
+    }
+  }
+  EXPECT_EQ(shared, 1);  // 去重，不是两份
+}
+
+// 删除只对用户自定义模型有效；预置/API 模型删不掉（只能停用）。
+FS_TEST(model_table_remove_only_user_models) {
+  ModelTable table;
+  table.set_preset(builtin_models_preset());
+  ModelEntry m;
+  m.id = "mine";
+  m.user_set = true;
+  table.set_user_model("p1", m);
+  EXPECT_EQ((int)table.user_models("p1").size(), 1);
+  EXPECT_TRUE(table.remove_user_model("p1", "mine"));
+  EXPECT_TRUE(table.user_models("p1").empty());
+  // 再删一次就找不到了
+  EXPECT_FALSE(table.remove_user_model("p1", "mine"));
+}
+
+// 用户模型设置的整份进出（settings 的 provider.models 键）。
+FS_TEST(model_table_user_models_persist) {
+  ModelTable table;
+  ModelEntry m;
+  m.id = "o3";
+  m.enabled = false;
+  m.user_set = true;
+  m.icon = "openai";
+  m.thinking.levels.push_back("low");
+  m.thinking.default_level = "low";
+  table.set_user_model("p1", m);
+
+  Json dumped = table.user_models_json();
+  EXPECT_TRUE(dumped.contains("p1"));
+
+  ModelTable reloaded;
+  reloaded.load_user_models(dumped);
+  std::vector<ModelEntry> back = reloaded.user_models("p1");
+  EXPECT_EQ((int)back.size(), 1);
+  EXPECT_EQ(back[0].id, std::string("o3"));
+  EXPECT_FALSE(back[0].enabled);
+  EXPECT_EQ(back[0].icon, std::string("openai"));
+  EXPECT_EQ((int)back[0].thinking.levels.size(), 1);
+  // 载入时也补齐了默认值
+  EXPECT_FALSE(back[0].display.empty());
+}
+
+// 停用的模型不进会话选择器：model.allEnabled 只回启用中的。
+FS_TEST(model_disabled_excluded_from_enabled_list) {
+  ModelTable table;
+  ModelEntry on;
+  on.id = "on-model";
+  on.user_set = true;
+  table.set_user_model("p1", on);
+  ModelEntry off;
+  off.id = "off-model";
+  off.enabled = false;
+  off.user_set = true;
+  table.set_user_model("p1", off);
+
+  std::vector<ModelEntry> all = table.list_models("p1");
+  EXPECT_EQ((int)all.size(), 2);
+  int enabled = 0;
+  for (size_t i = 0; i < all.size(); ++i) {
+    if (all[i].enabled) ++enabled;
+  }
+  EXPECT_EQ(enabled, 1);
+}

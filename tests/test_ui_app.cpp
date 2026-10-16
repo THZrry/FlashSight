@@ -1126,3 +1126,406 @@ FS_TEST(uiapp_permission_prompt_opens_modal) {
   EXPECT_TRUE(app.state().ask_modal);
   EXPECT_TRUE(dump_has(dom, "file.write"));
 }
+
+// ---------------------------------------------------------------------------
+// 逐模型设置
+// ---------------------------------------------------------------------------
+
+namespace {
+
+AppState::ModelRow mk_model(const std::string& id, bool enabled = true) {
+  AppState::ModelRow m;
+  m.id = id;
+  m.display = id;
+  m.enabled = enabled;
+  return m;
+}
+
+}  // namespace
+
+// The provider detail is two stacked regions: a scrollable model list on top
+// (enable / test / delete / add) and the selected model's settings below.
+FS_TEST(uiapp_model_panel_lists_and_edits) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    p.name = "zen";
+    p.kind = "openai-chat";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    s.pv_base_url = "https://api.test/v1";
+    s.models.push_back(mk_model("gpt-4o"));
+    s.models.push_back(mk_model("gpt-4o-mini"));
+    s.models.push_back(mk_model("o4-mini"));
+    s.models_loaded = true;
+  });
+  EXPECT_TRUE(dump_has(dom, "md-list"));
+  EXPECT_TRUE(dump_has(dom, "gpt-4o-mini"));
+  // nothing selected yet -> no settings pane
+  EXPECT_FALSE(dump_has(dom, "md-adv"));
+
+  // selecting a model opens its advanced settings
+  app.select_model("o4-mini");
+  EXPECT_EQ(app.state().model_selected, std::string("o4-mini"));
+  EXPECT_TRUE(dump_has(dom, "md-adv"));
+  EXPECT_TRUE(dump_has(dom, "能力"));
+  EXPECT_TRUE(dump_has(dom, "上下文长度"));
+  EXPECT_TRUE(dump_has(dom, "最大输出"));
+  EXPECT_TRUE(dump_has(dom, "思考档位"));
+  EXPECT_TRUE(dump_has(dom, "失败重试"));
+  // the row is marked selected
+  EXPECT_TRUE(dump_has(dom, "md-row active"));
+}
+
+// The enable dot toggles without opening the model, and a disabled model is
+// still listed (so it can be turned back on).
+FS_TEST(uiapp_model_enable_toggle) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    s.models.push_back(mk_model("m1", true));
+    s.models_loaded = true;
+  });
+  EXPECT_TRUE(dump_has(dom, "md-en on"));
+  app.toggle_model_enabled("m1", false);
+  // optimistic: the row reflects it immediately (no round trip to wait for)
+  EXPECT_FALSE(app.state().models[0].enabled);
+  EXPECT_TRUE(dump_has(dom, "md-en\""));  // the plain (off) class
+}
+
+// 新增: a new model starts as an empty draft, and the name field is the id.
+FS_TEST(uiapp_model_add_starts_empty_draft) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    s.models_loaded = true;
+  });
+  app.begin_new_model();
+  EXPECT_TRUE(app.state().model_creating);
+  EXPECT_TRUE(app.state().model_draft.id.empty());
+  EXPECT_TRUE(dump_has(dom, "新增模型"));
+  EXPECT_TRUE(dump_has(dom, "模型名"));
+  // the draft is NOT saved by opening it
+  EXPECT_TRUE(app.state().models.empty());
+}
+
+// 思考档位 is edited per model: levels can be added and removed, and the
+// default always names a level that still exists.
+FS_TEST(uiapp_model_thinking_levels_editable) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    AppState::ModelRow m = mk_model("o4-mini");
+    m.thinking_levels.push_back("off");
+    m.thinking_levels.push_back("low");
+    m.thinking_levels.push_back("high");
+    m.thinking_default = "low";
+    s.models.push_back(m);
+    s.models_loaded = true;
+  });
+  app.select_model("o4-mini");
+  EXPECT_EQ(app.state().model_draft.thinking_levels.size(), size_t(3));
+  // levels render with their human labels and a 默认 badge
+  EXPECT_TRUE(dump_has(dom, "默认"));
+  EXPECT_TRUE(dump_has(dom, "添加档位"));
+}
+
+// 没有档位的模型：UI 明确说明而不是渲染一个空控件。
+FS_TEST(uiapp_model_without_levels_says_so) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    s.models.push_back(mk_model("gpt-4o"));  // no thinking levels
+    s.models_loaded = true;
+  });
+  app.select_model("gpt-4o");
+  EXPECT_TRUE(dump_has(dom, "该模型没有可配档位"));
+}
+
+// A long model list gets a filter; a short one does not (a search box over
+// three rows is noise).
+FS_TEST(uiapp_model_filter_threshold) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    for (int i = 0; i < 4; ++i) s.models.push_back(mk_model("m" + std::to_string(i)));
+    s.models_loaded = true;
+  });
+  EXPECT_FALSE(dump_has(dom, "筛选模型"));
+  app.update([](AppState& s) {
+    for (int i = 4; i < 12; ++i) s.models.push_back(mk_model("m" + std::to_string(i)));
+  });
+  EXPECT_TRUE(dump_has(dom, "筛选模型"));
+  // filtering narrows the list
+  app.update([](AppState& s) { s.model_filter = "m11"; });
+  EXPECT_TRUE(dump_has(dom, "m11"));
+  EXPECT_FALSE(dump_has(dom, "m3\""));
+}
+
+// ---------------------------------------------------------------------------
+// 会话里的模型选择器
+// ---------------------------------------------------------------------------
+
+FS_TEST(uiapp_model_picker_two_pane) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    AppState::ProviderRow p1;
+    p1.id = "p1";
+    p1.name = "zen";
+    p1.kind = "openai-chat";
+    AppState::ProviderRow p2;
+    p2.id = "p2";
+    p2.name = "anthropic";
+    p2.kind = "anthropic";
+    s.providers.push_back(p1);
+    s.providers.push_back(p2);
+    s.providers_loaded = true;
+    s.model_picker_open = true;
+    s.model_picker_provider = "p1";
+    s.model_picker_loaded = true;
+    s.model_picker_models.push_back(mk_model("gpt-4o"));
+    s.model_picker_models.push_back(mk_model("gpt-4o-mini"));
+  });
+  // left: every provider (so you can switch), right: that provider's models
+  EXPECT_TRUE(dump_has(dom, "mp-providers"));
+  EXPECT_TRUE(dump_has(dom, "zen"));
+  EXPECT_TRUE(dump_has(dom, "anthropic"));
+  EXPECT_TRUE(dump_has(dom, "mp-models"));
+  EXPECT_TRUE(dump_has(dom, "gpt-4o-mini"));
+  // the composer button shows the current model, not a <select>
+  EXPECT_TRUE(dump_has(dom, "model-pick-btn"));
+}
+
+// Above 20 models the list is sorted and grouped by initial; below it the
+// headers would just be noise between every few rows.
+FS_TEST(uiapp_model_picker_groups_only_when_long) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  auto seed_n = [](AppState& s, int n, bool reverse) {
+    for (int i = 0; i < n; ++i) {
+      std::string id = "model-" + std::to_string(reverse ? (n - i) : i);
+      s.model_picker_models.push_back(mk_model(id));
+    }
+  };
+  app.update([&](AppState& s) {
+    seed_session(s);
+    s.model_picker_open = true;
+    s.model_picker_provider = "p1";
+    s.model_picker_loaded = true;
+    seed_n(s, 5, false);
+  });
+  EXPECT_FALSE(dump_has(dom, "mp-group"));
+  app.update([&](AppState& s) {
+    s.model_picker_models.clear();
+    seed_n(s, 25, true);
+  });
+  EXPECT_TRUE(dump_has(dom, "mp-group"));
+  // sorted: model-10 must appear before model-2 (string order, not numeric)
+  const std::string& d = dom.dump();
+  size_t a = d.find("model-10");
+  size_t b = d.find("model-2\"");
+  EXPECT_TRUE(a != std::string::npos && b != std::string::npos && a < b);
+}
+
+// A disabled model is not offered for a session (that is the point of the
+// enable switch in settings).
+FS_TEST(uiapp_model_picker_skips_disabled) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    s.model_picker_open = true;
+    s.model_picker_provider = "p1";
+    s.model_picker_loaded = true;
+    s.model_picker_models.push_back(mk_model("enabled-one", true));
+  });
+  EXPECT_TRUE(dump_has(dom, "enabled-one"));
+  // a disabled model never makes it into the picker's model list at all
+  EXPECT_FALSE(dump_has(dom, "disabled-one"));
+}
+
+// The picker search filters on the query (and re-renders to do it).
+FS_TEST(uiapp_model_picker_search) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    s.model_picker_open = true;
+    s.model_picker_provider = "p1";
+    s.model_picker_loaded = true;
+    s.model_picker_models.push_back(mk_model("gpt-4o"));
+    s.model_picker_models.push_back(mk_model("deepseek-chat"));
+    s.model_picker_models.push_back(mk_model("qwen-max"));
+  });
+  EXPECT_TRUE(dump_has(dom, "gpt-4o"));
+  EXPECT_TRUE(dump_has(dom, "deepseek-chat"));
+  app.update([](AppState& s) { s.model_picker_query = "deep"; });
+  EXPECT_TRUE(dump_has(dom, "deepseek-chat"));
+  EXPECT_FALSE(dump_has(dom, "qwen-max"));
+  // case-insensitive
+  app.update([](AppState& s) { s.model_picker_query = "QWEN"; });
+  EXPECT_TRUE(dump_has(dom, "qwen-max"));
+  EXPECT_FALSE(dump_has(dom, "deepseek-chat"));
+  // no match -> explicit empty state, not a blank pane
+  app.update([](AppState& s) { s.model_picker_query = "zzz-nope"; });
+  EXPECT_TRUE(dump_has(dom, "没有匹配的模型"));
+}
+
+// ---------------------------------------------------------------------------
+// 图标
+// ---------------------------------------------------------------------------
+
+// Brand marks resolve from the model NAME when no explicit icon is set, so a
+// model added from an API listing still gets the right mark.
+FS_TEST(uiapp_model_icon_by_name) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    s.models.push_back(mk_model("gpt-4o-mini"));       // -> openai
+    s.models.push_back(mk_model("claude-3-5-sonnet")); // -> claude
+    s.models.push_back(mk_model("zzz-unknown"));       // -> neutral
+    s.models_loaded = true;
+  });
+  EXPECT_TRUE(dump_has(dom, "mi-lobe-openai"));
+  EXPECT_TRUE(dump_has(dom, "mi-lobe-claude"));
+  // no brand match -> a neutral dot, not a wrong logo and not an empty box
+  EXPECT_TRUE(dump_has(dom, "mi-none"));
+  EXPECT_FALSE(dump_has(dom, "mi-lobe-zzz"));
+}
+
+// An explicit icon key wins over name matching.
+FS_TEST(uiapp_model_icon_explicit_wins) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.show("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "providers";
+    AppState::ProviderRow p;
+    p.id = "p1";
+    s.providers.push_back(p);
+    s.provider_selected = "p1";
+    AppState::ModelRow m = mk_model("gpt-4o");  // name says openai
+    m.icon = "mistral";                          // but the user said mistral
+    s.models.push_back(m);
+    s.models_loaded = true;
+  });
+  EXPECT_TRUE(dump_has(dom, "mi-lobe-mistral"));
+  EXPECT_FALSE(dump_has(dom, "mi-lobe-openai"));
+}
+
+// File-type icons come from the extension, and from the exact filename first
+// (Dockerfile has no extension; cargo.toml is more specific than "toml").
+FS_TEST(uiapp_file_icons_by_type) {
+  H a = comp::file_icon("main.cpp", false);
+  H b = comp::file_icon("app.tsx", false);
+  H c = comp::file_icon("Dockerfile", false);
+  H d = comp::file_icon("cargo.toml", false);
+  H e = comp::file_icon("mystery.zzz", false);
+  H f = comp::file_icon("src", true);
+  auto cls = [](const H& h) {
+    const std::vector<VAttr>& at = h.get()->attrs;
+    for (size_t i = 0; i < at.size(); ++i) {
+      if (at[i].key == "class") return at[i].value;
+    }
+    return std::string();
+  };
+  EXPECT_TRUE(cls(a).find("mi-file-cpp") != std::string::npos);
+  EXPECT_TRUE(cls(b).find("mi-file-react_ts") != std::string::npos);
+  EXPECT_TRUE(cls(c).find("mi-file-docker") != std::string::npos);
+  EXPECT_TRUE(cls(d).find("mi-file-toml") != std::string::npos);
+  // unknown extension -> generic file icon, not a blank
+  EXPECT_TRUE(cls(e).find("mi-file-file") != std::string::npos);
+  // directories use the folder icon
+  EXPECT_TRUE(cls(f).find("mi-file-folder") != std::string::npos);
+}
+
+// The file tree renders the icon element (it used to be a text glyph).
+FS_TEST(uiapp_file_tree_uses_icons) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    s.active_pid = "p1";
+    s.side_tabs.clear();
+    SideTab t;
+    t.id = "files1";
+    t.title = "文件";
+    t.kind = "files";
+    t.loaded = true;
+    t.entries.push_back(SideTab::FileEntry{"src", true, 0});
+    t.entries.push_back(SideTab::FileEntry{"main.cpp", false, 1234});
+    s.side_tabs.push_back(t);
+    s.active_side = "files1";
+  });
+  EXPECT_TRUE(dump_has(dom, "mi-file-folder"));
+  EXPECT_TRUE(dump_has(dom, "mi-file-cpp"));
+  EXPECT_TRUE(dump_has(dom, "main.cpp"));
+}
