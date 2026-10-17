@@ -916,6 +916,7 @@ FsResult FsApi::usage_query(const Json& filter) {
     e["out"] = kv.second.out;
     e["cache"] = kv.second.cache;
     e["cost"] = kv.second.cost;
+    e["calls"] = kv.second.calls;
     pm[kv.first] = e;
   }
   out["byProviderModel"] = pm;
@@ -926,6 +927,7 @@ FsResult FsApi::usage_query(const Json& filter) {
     e["out"] = kv.second.out;
     e["cache"] = kv.second.cache;
     e["cost"] = kv.second.cost;
+    e["calls"] = kv.second.calls;
     days[std::to_string(kv.first)] = e;
   }
   out["byDay"] = days;

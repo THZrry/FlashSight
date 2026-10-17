@@ -29,6 +29,9 @@ struct UsageRow {
   std::string cost_kind;  // "money"|"quota"|"unknown"
   int64_t latency_ms = 0;
   int64_t tool_calls = 0;
+  // 聚合时按天/按模型计的行数。token 为 0（供应商没回报 usage）时，调用次数
+  // 仍然是真实的，图表要用它，否则整张图全是 0 高度。
+  int64_t calls = 0;
   std::string error;
 };
 

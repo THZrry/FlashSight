@@ -737,7 +737,15 @@ class WasmDom : public IDom {
   void set_style(Node node, const std::string& key, const std::string& value) override {
     val n = at(node);
     if (n.isNull() || n.isUndefined()) return;
-    n["style"].set(key, value);
+    // A CSS custom property (`--x`) is NOT reachable through the indexed
+    // CSSStyleDeclaration: `style['--grow'] = '50%'` silently does nothing, and
+    // `style.set(...)` becomes that same assignment. Only setProperty() takes
+    // custom properties, which is exactly what the chart's --grow relies on.
+    if (key.size() > 2 && key[0] == '-' && key[1] == '-') {
+      n["style"].call<void>("setProperty", key, value);
+    } else {
+      n["style"].set(key, value);
+    }
   }
 
   void set_visible(Node node, bool visible) override {

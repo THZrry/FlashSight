@@ -79,11 +79,13 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
     e.model = r.model;
     e.in += r.in; e.out += r.out; e.cache += r.cache;
     e.cost += r.cost;
+    e.calls += 1;
     if (e.cost_kind.empty()) e.cost_kind = r.cost_kind;
     int64_t day = r.ts / 86400000;
     UsageRow& d = sum.by_day[day];
     d.in += r.in; d.out += r.out; d.cache += r.cache;
     d.cost += r.cost;
+    d.calls += 1;
     if (d.cost_kind.empty()) d.cost_kind = r.cost_kind;
     d.ts = r.ts;
   }

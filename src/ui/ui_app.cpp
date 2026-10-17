@@ -1982,6 +1982,7 @@ VNodePtr UiApp::build_home_usage() {
   for (Json::const_iterator it = pm.begin(); it != pm.end(); ++it) {
     int64_t n = jsonutil::get_int(it.value(), "in", 0) +
                 jsonutil::get_int(it.value(), "out", 0);
+    if (n <= 0) n = jsonutil::get_int(it.value(), "calls", 0);  // tokens 未知时按次数
     if (n <= 0) continue;
     std::string model = jsonutil::get<std::string>(it.value(), "model", "");
     std::string prov = jsonutil::get<std::string>(it.value(), "provider", "");
@@ -2003,11 +2004,19 @@ VNodePtr UiApp::build_home_usage() {
                   ? st_.usage["byDay"]
                   : Json::object();
     std::map<int64_t, int64_t> by_day;
+    std::map<int64_t, int64_t> by_day_calls;
+    int64_t any_tokens = 0;
     for (Json::const_iterator it = bd.begin(); it != bd.end(); ++it) {
       int64_t day = std::strtoll(it.key().c_str(), nullptr, 10);
-      by_day[day] = jsonutil::get_int(it.value(), "in", 0) +
-                    jsonutil::get_int(it.value(), "out", 0);
+      int64_t n = jsonutil::get_int(it.value(), "in", 0) +
+                  jsonutil::get_int(it.value(), "out", 0);
+      by_day[day] = n;
+      by_day_calls[day] = jsonutil::get_int(it.value(), "calls", 0);
+      any_tokens += n;
     }
+    // 供应商没回报 usage 时 token 全是 0。此时按调用次数画图，而不是画一排
+    // 0 高度的柱子——"有 7 次调用"和"什么都没发生"是两件事。
+    bool by_tokens = any_tokens > 0;
     static const int kDays2[4] = {1, 7, 30, 0};
     int win = kDays2[st_.usage_range < 0 || st_.usage_range > 3 ? 1 : st_.usage_range];
     int64_t today = static_cast<int64_t>(
@@ -2028,15 +2037,21 @@ VNodePtr UiApp::build_home_usage() {
     for (size_t i = 0; i < days.size(); ++i) {
       std::map<int64_t, int64_t>::const_iterator f = by_day.find(days[i]);
       int64_t n = f == by_day.end() ? 0 : f->second;
+      if (!by_tokens) {
+        std::map<int64_t, int64_t>::const_iterator c = by_day_calls.find(days[i]);
+        n = c == by_day_calls.end() ? 0 : c->second;
+      }
       if (n > peak) peak = n;
       sum += n;
     }
     H chart = el("div", "usage-chart usage-byday");
     H ctop = el("div", "chart-head");
-    ctop.add(el("div", "chart-title").text(tr("按天（输入 + 输出 tokens）")));
+    ctop.add(el("div", "chart-title").text(
+        by_tokens ? tr("按天（输入 + 输出 tokens）") : tr("按天（调用次数）")));
     ctop.add(el("span", "grow"));
     ctop.add(el("span", "chart-total dim").text(
-        sum > 0 ? (tr("合计 ") + itos(static_cast<int>(sum))) : std::string()));
+        sum > 0 ? (tr("合计 ") + itos(static_cast<int>(sum)) +
+                   (by_tokens ? tr(" tokens") : tr(" 次"))) : std::string()));
     chart.add(ctop);
     H plot = el("div", "bar-chart");
     // The plot is keyed by the filters: changing the range or the provider
@@ -2049,6 +2064,10 @@ VNodePtr UiApp::build_home_usage() {
     for (size_t i = 0; i < days.size(); ++i) {
       std::map<int64_t, int64_t>::const_iterator f = by_day.find(days[i]);
       int64_t n = f == by_day.end() ? 0 : f->second;
+      if (!by_tokens) {
+        std::map<int64_t, int64_t>::const_iterator c = by_day_calls.find(days[i]);
+        n = c == by_day_calls.end() ? 0 : c->second;
+      }
       int pct = peak > 0 ? static_cast<int>(n * 100 / peak) : 0;
       if (n > 0 && pct < 2) pct = 2;  // a non-zero day must stay visible
       H bar = el("div", n > 0 ? "bar" : "bar zero");
@@ -2057,13 +2076,14 @@ VNodePtr UiApp::build_home_usage() {
       // 日期 + 数值：柱状图没有数值就只剩形状，读不出量
       time_t t = static_cast<time_t>(days[i] * 86400);
       struct tm* g = localtime(&t);
-      char buf[64];
+      char buf[80];
       if (g) {
-        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d · %ld tokens",
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d · %ld %s",
                       g->tm_year + 1900, g->tm_mon + 1, g->tm_mday,
-                      static_cast<long>(n));
+                      static_cast<long>(n), by_tokens ? "tokens" : "calls");
       } else {
-        std::snprintf(buf, sizeof(buf), "%ld tokens", static_cast<long>(n));
+        std::snprintf(buf, sizeof(buf), "%ld %s", static_cast<long>(n),
+                      by_tokens ? "tokens" : "calls");
       }
       bar.attr("title", buf);
       plot.add(bar);

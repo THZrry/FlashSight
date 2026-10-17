@@ -969,5 +969,14 @@ The process of project: P0 环境搭建 + P1 AppCore
     栈顶（刚离开的那一页）就是"后退"，播 `anim-slide-right`（从左进）；其余都是
     前进，播 `anim-slide-left`。关闭标签时栈已 pop，显式传 `dir=-1`，所以关标签
     永远是后退动画。`open_modal_page/close_modal_page` 清掉方向，modal 不参与。
-  - 测试 201 用例 / 1819 断言（新增：贴边水位、自动挡顺序、方向感知、设置覆盖
-    标签栏、按天图表；`model_table_list_merges_and_falls_back` 改为断言空列表）。
+  - **两个图表 bug（自测发现）**：
+    * `IDom::set_style` 在 wasm 后端用 `style[key] = value`，**CSS 自定义属性
+      （`--grow`）用这种方式赋不进去**（CSSStyleDeclaration 不暴露 `--x`），于是
+      柱子宽度/高度永远是 0，动画等于没跑。改成检测 `--` 前缀走 `setProperty()`。
+      这个坑对以后所有自定义属性都适用。
+    * 用量行里 `in/out` 全是 0（供应商没回报 usage）时，按天图会是一排 0 高度柱。
+      聚合层 `UsageRow` 新增 `calls`，`usage.query` 的 byDay/byProviderModel 带上
+      它；前端在 token 全为 0 时改画"调用次数"并在标题里说明。
+  - 测试 201 用例 / 1822 断言（新增：贴边水位、自动挡顺序、方向感知、设置覆盖
+    标签栏、按天图表、聚合 calls；`model_table_list_merges_and_falls_back` 改为
+    断言空列表）。

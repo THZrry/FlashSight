@@ -405,6 +405,12 @@ FS_TEST(usage_store_flow) {
   EXPECT_EQ((int)sum.total_in, 15);
   EXPECT_EQ((int)sum.total_out, 25);
   EXPECT_EQ((int)sum.by_provider_model.size(), 2);
+  // 聚合行要带调用次数：供应商没回报 usage（token 全 0）时，图表只能靠它，
+  // 否则"有调用"会画成"什么都没发生"。
+  for (auto& kv : sum.by_provider_model) EXPECT_EQ((int)kv.second.calls, 1);
+  int day_calls = 0;
+  for (auto& kv : sum.by_day) day_calls += (int)kv.second.calls;
+  EXPECT_EQ(day_calls, 2);  // both rows fall in the same day bucket
 
   // 筛选
   f.model = "m1";
