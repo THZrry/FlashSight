@@ -309,11 +309,18 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
 
   // 5) reorder: walk back-to-front so each node's successor anchor is already
   //    in place (this is what makes insertBefore valid rather than a no-op).
+  //
+  // NOTE: neu->dom must be set FIRST. The reorder loop uses neu->dom as the
+  // parent to insert into; assigning it after the loop (which is what this did)
+  // meant every reorder inserted into Node{0} - a no-op - so a subtree whose
+  // child list was fully replaced (home page section swap, tab page swap) was
+  // created but never attached. The keyed fast path above hid it: it returns
+  // early whenever the order already matches.
+  neu->dom = oldv->dom;
   for (size_t i = desired.size(); i-- > 0;) {
     Node anchor = (i + 1 < desired.size()) ? desired[i + 1] : Node{0};
     dom.insert_before(neu->dom, desired[i], anchor);
   }
-  neu->dom = oldv->dom;
 }
 
 void patch_node(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {

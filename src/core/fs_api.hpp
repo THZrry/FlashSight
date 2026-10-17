@@ -80,6 +80,8 @@ class FsApi {
   FsResult session_list(const std::string& pid);
   // 删除会话（连同 patches/terminals）；不可恢复，UI 负责确认
   FsResult session_delete(const std::string& sid);
+  // 重命名会话（写 meta.title）
+  FsResult session_rename(const std::string& sid, const std::string& title);
   FsResult session_set_model(const std::string& sid, const std::string& model);
   FsResult session_set_thinking(const std::string& sid, const std::string& thinking);
   FsResult session_set_permission(const std::string& sid, const std::string& perm);
@@ -93,8 +95,12 @@ class FsApi {
   FsResult session_append_turn(const std::string& sid, const Json& turn);
   FsResult session_get(const std::string& sid);
   // P3: send/append/suspend/resume/cancelWake（AgentHost）
+  // model / thinking: the composer's current selection. Passing them with the
+  // message means a send is never routed with a stale model just because the
+  // separate setModel call did not land (or the session was just created).
   FsResult session_send(const std::string& sid, const std::string& text,
-                        const Json& attachments);
+                        const Json& attachments, const std::string& model = "",
+                        const std::string& thinking = "");
   FsResult session_append(const std::string& sid, const std::string& text);
   FsResult session_suspend(const std::string& sid);
   FsResult session_resume(const std::string& sid);

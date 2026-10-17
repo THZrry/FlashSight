@@ -37,6 +37,8 @@ class SessionManager {
   // 删除会话（连同 patches/terminals 一起移除）。不可恢复：UI 负责先确认。
   // 会先释放锁，否则删完还留着一条锁记录，下次同名 sid 会被误判为占用。
   FsResult delete_session(const std::string& sid);
+  // 重命名会话（写 meta.title；列表页读的就是它）
+  FsResult rename_session(const std::string& sid, const std::string& title);
 
   // ----- 会话设置（即时生效 + 记 systemOps）-----
   FsResult set_model(const std::string& sid, const std::string& model);

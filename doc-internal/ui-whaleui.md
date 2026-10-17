@@ -101,6 +101,10 @@ user (ui_app)  →  components / vdom (diff)  →  IDom  →  ┬ WasmDom（浏�
 | # | 现象 | 原因 / 现状 | 需要 WhaleUI 提供 |
 |---|---|---|---|
 | ~~0~~ | ~~界面只画出 40px 顶部标签条，页面主体全空~~ | **已修**：WhaleUI `e87979c`（flex 主轴视口单位塌 1px）。WhaleUI 重新构建后，本文 §4 的验收 1/2/6/7 已通过：界面完整渲染、标签可切换、设置页双栏正常。复现程序与根因留在 WhaleUI `temp/incorrect1/`（15 个变体现已全部 ok） | — |
+| **H** | **flex 项带 `overflow:hidden` 时塌成 1px**（探索页所有描述不可见） | WhaleUI `layout_flex` 把 `overflow` 非 visible 的项 min-content 地板降到 0，又把这个 0 当作 hypothetical main size（应为内容宽度，只作收缩下界），最后被 1px 地板兜住。与 `min-width` 无关、与样式表无关。复现：WhaleUI `temp/incorrect2/` 的 `overflow-span-flex`（1x342）vs `plain-span-flex`（228x18） | 修正 flex-basis:auto 的初始尺寸语义（`temp/incorrect2/README.md` §3） |
+| **I** | **`<button>` 的显式 `height` 被 UA `min-height` 压掉**（开关 knob 脱轨、按钮偏高） | WhaleUI UA 主题给 `button` 设了 `min-height: var(--btn-h)`（fluent 32px，`theme_css.cpp:179`），而 `min-height` 恒优先于 `height`；浏览器 UA 没有这条。复现：`button-explicit-size` 34x32 vs `div-explicit-size` 34x19 | 去掉 `min-height` 或仅在无显式高度时生效（§4） |
+| **J** | **grid `auto-fill minmax(400px,1fr)` 列宽算成 122px**（设置页挤成一列、label 折行、toggle 8px） | `layout_grid` 的 `auto-fill` 未把 `minmax` 下限计入列数，`1fr` 也没分剩余空间，列宽退化成内容宽度。复现：`settings-grid` field 122x64（应 ~510），对照 `settings-block` 正常 | 修 `repeat(auto-fill, minmax(...))`（§5） |
+| **K** | flex 行含 `select` 时可用宽度少 52px | 同一 DOM 换成 div 就正确（918 vs 866），嫌疑是控件 UA 外边距在 flex 分配里重复计入 | 见 `temp/incorrect2/README.md` §6 |
 | A | 程序化 focus 后按键不生效（终端新建后要先点一下） | `whaleui_dom_focus` 只写 activeElement 镜像；引擎的 `focus_el`（决定 keydown 派发和 `:focus` 样式）只在鼠标按下时设置 | 一个"设置引擎焦点"的 API（或在 `whaleui_dom_focus` 里同步） |
 | B | 终端滚动跟随不工作 | 没有读滚动位置的 API（scrollTop/scrollHeight/clientHeight） | 元素滚动读数 + `scrollTo` |
 | C | 文件上传按钮点了没反应 | 需要原生文件选择器；`folder_picker` 目前只有选目录 | FsApi 增加"选文件"入口（或在适配层用 Win32 对话框） |
@@ -111,6 +115,11 @@ user (ui_app)  →  components / vdom (diff)  →  IDom  →  ┬ WasmDom（浏�
 
 以上 A/B/C/E 会在打开开关后第一次运行时暴露，属"接入后要修"的清单；
 `doc-internal/ui-events.md` 的界面规划不受影响。
+
+**H/I/J/K 是 2026-10-17 首次在真实页面上跑出来的新缺口**，复现程序与根因在
+WhaleUI `temp/incorrect2/`（`incorrect2.cpp` + `README.md`）。它们不影响
+浏览器/wasm 路径，只影响 WhaleUI 桌面后端；当前界面能正常渲染和交互，
+但这几处视觉不对。
 
 ### 缺口 0 的临时规避（仅在 WhaleUI 修复前使用，勿改应用代码）
 

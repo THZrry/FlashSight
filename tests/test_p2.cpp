@@ -370,17 +370,19 @@ FS_TEST(model_entry_round_trip_with_settings) {
   EXPECT_FALSE(pj.contains("retry"));
 }
 
-// list_models：用户自定义 + API 去重合并；两者都空时回退预置表。
+// list_models：用户自定义 + API 去重合并；两者都空时返回空列表（不塞预置表）。
 FS_TEST(model_table_list_merges_and_falls_back) {
   ModelTable table;
   table.set_preset(builtin_models_preset());
-  // 全新 provider：回退预置表（否则列表是空的，用户不知道能选什么）
+  // 全新 provider：没有用户/API 模型就是空列表。预置表里的 gpt-4o 之类并没有
+  // 真的从这台供应商拿到过，列出来只会让人以为配好了。
   std::vector<ModelEntry> fresh = table.list_models("new-provider");
-  EXPECT_FALSE(fresh.empty());
-  // 预置项也要带上档位/图标（UI 直接用）
+  EXPECT_TRUE(fresh.empty());
+  // 预置表本身仍然可用（resolve 时给已知 id 补能力标签）
+  EXPECT_FALSE(builtin_models_preset().empty());
   bool any_icon = false;
-  for (size_t i = 0; i < fresh.size(); ++i) {
-    if (!fresh[i].icon.empty()) any_icon = true;
+  for (auto& m : builtin_models_preset()) {
+    if (!m.icon.empty()) any_icon = true;
   }
   EXPECT_TRUE(any_icon);
 

@@ -204,7 +204,10 @@
   .anim-slide-left, .anim-slide-right, .anim-drawer,
   .msg, .proj-card, .proj-session, .file-row, .settings-row,
   .subagent-card, .op-row, .call-row, .term-row, .pv-item, .pv-tpl,
-  .plan-step, .side-panel, .td-all-item, .ts-row { animation: none; }
+  .plan-step, .side-panel, .td-all-item, .ts-row,
+  .usage-chart, .ub-row, .ub-fill, .ub-val, .bar { animation: none; }
+  .bar { height: var(--grow); }
+  .ub-fill { width: var(--grow); }
 }
 
 html, body {
@@ -369,47 +372,123 @@ html, body {
   background: var(--panel);
 }
 
-/* explore */
-.explore { flex: 1; display: flex; justify-content: center; padding-top: 40px; }
-.explore-box { width: 520px; max-width: 90%; }
+/* explore：这台机器上的能力（MCP + Skill），不是一张空白搜索页 */
+.explore {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  padding: 28px 20px 20px; min-height: 0; overflow: auto;
+}
+.explore-box { width: 720px; max-width: 94%; flex: none; }
 .explore-title { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
 .explore-sub { color: var(--text-dim); margin-bottom: 14px; }
+.explore-list {
+  width: 720px; max-width: 94%;
+  display: flex; flex-direction: column; gap: 18px;
+  margin-top: 22px;
+}
+.explore-sec {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+.explore-sec-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 13px;
+}
+.explore-sec-head .fa { color: var(--text-faint); font-size: 12px; }
+.explore-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.explore-row:last-child { border-bottom: none; }
+.explore-row:hover { background: var(--hover); }
+.explore-row.off { opacity: .6; }
+.er-name { font-weight: 600; flex: none; }
+.er-slash { font-family: var(--mono); color: var(--accent); font-size: 11.5px; flex: none; }
+.er-desc {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.explore-empty { padding: 10px 12px; color: var(--text-faint); font-size: 12.5px; }
 
 /* project cards.
    Two layouts, switched by width (container query so it reacts to the card's
    own width, not just the viewport):
      * narrow  : identity row on top, session list stacked below (compact)
      * wide    : info column left ~1/3, session list right ~2/3 (default) */
-.projects { display: flex; flex-direction: column; gap: 12px; padding: 8px 16px 16px; }
+.projects { display: flex; flex-direction: column; gap: 14px; padding: 10px 18px 18px; }
 .proj-card {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr);
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
   grid-template-areas: "info sessions";
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: calc(var(--radius) + 2px);
   background: var(--panel-2);
   overflow: hidden;
-  transition: border-color .12s ease, box-shadow .12s ease;
+  position: relative;
+  transition: border-color .14s ease, box-shadow .14s ease, transform .14s ease;
 }
-.proj-card:hover { border-color: var(--border-strong); box-shadow: var(--pop); }
+/* A hairline accent on the leading edge instead of a heavy border: it marks the
+   card's identity without turning the page into a table. */
+.proj-card::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--accent);
+  opacity: .0;
+  transition: opacity .14s ease;
+}
+.proj-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-2); }
+.proj-card:hover::before { opacity: .85; }
+
 .proj-top {
   grid-area: info;
-  display: flex; flex-direction: column; justify-content: flex-start; gap: 8px;
-  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 14px 16px 14px 18px;
   min-width: 0;
 }
-.proj-left { min-width: 0; }
-.proj-name { font-size: 15px; font-weight: 600; }
+
+/* identity: monogram tile + name/path */
+.proj-id { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.proj-mono {
+  flex: none;
+  width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700; font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+}
+.proj-idtext { min-width: 0; flex: 1; }
+.proj-name { font-size: 14.5px; font-weight: 600; line-height: 1.35; }
 .proj-path {
-  color: var(--text-dim); font-size: 12.5px; margin-top: 2px;
+  color: var(--text-faint); font-size: 11.5px; margin-top: 2px;
   font-family: var(--mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.proj-meta { display: flex; gap: 6px; margin-top: 5px; font-size: 12px; }
-/* Icon + label actions stay on one line: as full-width labelled buttons they
-   were most of what made this column look empty and noisy. */
-.proj-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; }
-.proj-actions .it-btn { height: 26px; font-size: 12px; }
+
+/* stats: number over label, so the number is the thing you read */
+.proj-stats { display: flex; gap: 26px; }
+.proj-stat { display: flex; align-items: baseline; gap: 6px; line-height: 1.2; }
+.proj-stat .psv { font-size: 15px; font-weight: 600; }
+.proj-stat .psl {
+  font-size: 11px; color: var(--text-faint);
+}
+
+/* actions: one primary button plus a quiet icon group, all on one baseline */
+.proj-actions {
+  display: flex; align-items: center; gap: 4px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+.proj-actions .proj-new { height: 28px; padding: 0 13px; font-size: 12.5px; }
+.proj-actions .icon-btn { width: 26px; height: 26px; }
+
 /* sessions area: the dominant part of the card */
 .proj-right {
   grid-area: sessions;
@@ -427,10 +506,14 @@ html, body {
   color: var(--text-dim);
 }
 .proj-right-head:hover { background: var(--hover); color: var(--text); }
-.prh-title { font-weight: 600; }
+.prh-title {
+  font-weight: 600; font-size: 11.5px;
+  text-transform: uppercase; letter-spacing: .05em;
+}
 .prh-count {
   min-width: 18px; text-align: center; font-size: 11px;
-  border: 1px solid var(--border-strong); border-radius: 9px; padding: 0 5px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  padding: 0 5px; color: var(--text-faint);
 }
 .prh-toggle { font-size: 12px; color: var(--text-faint); }
 .proj-sessions { display: flex; flex-direction: column; }
@@ -454,11 +537,21 @@ html, body {
 }
 .ps-dot.running { background: var(--ok, #2ea043); border-color: transparent; }
 .ps-time { flex: none; font-size: 11.5px; }
-/* Delete stays hidden until the row is hovered: a column of ✕ buttons reads as
-   a toolbar and makes every row look dangerous. */
-.ps-del { display: none; }
-.proj-session:hover .ps-del { display: inline-flex; }
+/* Row actions (rename / delete) stay hidden until hover: a column of icon
+   buttons reads as a toolbar and makes every row look dangerous. */
+.ps-acts { display: none; align-items: center; gap: 2px; flex: none; }
+.proj-session:hover .ps-acts { display: inline-flex; }
 .proj-session:hover .ps-time { display: none; }
+
+/* inline rename: the row becomes an input, keeping its dot so the row does not
+   jump while you type */
+.proj-session.renaming { background: var(--panel-2); cursor: default; }
+.ps-rename-input {
+  flex: 1; min-width: 0;
+  height: 24px;
+  font-size: 12.5px;
+  padding: 0 7px;
+}
 
 /* Two layouts, chosen by the card's own width (container query, so it reacts to
    the panel, not just the window):
@@ -509,20 +602,36 @@ html, body {
 /* usage page */
 .usage-page { flex: 1; display: flex; min-height: 0; }
 .usage-scopes {
-  width: 230px; flex: none;
+  width: 200px; flex: none;
   border-right: 1px solid var(--border);
   background: var(--panel);
   overflow: auto;
+  padding: 6px;
 }
 .scope {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--border);
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.scope:hover { background: var(--hover); color: var(--text); }
+.scope.sel { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.usage-panel { flex: 1; padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+
+/* range tabs: they actually filter the query (from=now-N days) */
+.usage-ranges { display: flex; gap: 2px; }
+.usage-range {
+  padding: 4px 11px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-dim);
   cursor: pointer;
 }
-.scope:hover { background: var(--panel-2); }
-.scope.sel { background: var(--sel); }
-.usage-panel { flex: 1; padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+.usage-range:hover { background: var(--hover); color: var(--text); }
+.usage-range.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
 .usage-head {
   display: flex; flex-wrap: wrap; gap: 18px 28px;
   padding: 10px 14px;
@@ -532,6 +641,14 @@ html, body {
 }
 .usage-head .kv { flex-direction: column; align-items: flex-start; gap: 2px; }
 .usage-head .kv-v { font-size: 15px; font-weight: 600; }
+/* the four totals enter one after another instead of as one block */
+.usage-head .kv {
+  animation: anim-enter .2s cubic-bezier(.22,.61,.36,1) backwards;
+}
+.usage-head .kv:nth-child(2) { animation-delay: 40ms; }
+.usage-head .kv:nth-child(3) { animation-delay: 80ms; }
+.usage-head .kv:nth-child(4) { animation-delay: 120ms; }
+.scope { animation: anim-list .16s cubic-bezier(.22,.61,.36,1) backwards; }
 .chart-row { display: flex; gap: 14px; }
 .chart {
   flex: 1;
@@ -542,24 +659,90 @@ html, body {
   min-width: 0;
 }
 .chart-title { color: var(--text-dim); font-size: 12px; margin-bottom: 10px; }
-.bars { display: flex; align-items: flex-end; gap: 6px; height: 130px; }
+/* ---- 图表：柱状图从底部"长出来"，进度条从左侧铺开 ----
+   Bars/rows animate on MOUNT only (the diff creates them once), so switching the
+   range or scope re-runs the growth - which is what makes the page feel alive
+   instead of a static picture. --grow is the final value; the keyframes walk
+   from 0 to it. */
+@keyframes grow-y { from { height: 0; } to { height: var(--grow); } }
+@keyframes grow-x { from { width: 0; } to { width: var(--grow); } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.usage-chart {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 12px;
+  animation: anim-enter .18s cubic-bezier(.22,.61,.36,1);
+}
+.chart-head { display: flex; align-items: center; gap: 8px; }
+.chart-head .chart-title { margin-bottom: 0; }
+.chart-max { font-size: 11.5px; font-family: var(--mono); }
+.chart-total { font-size: 11.5px; font-family: var(--mono); }
+.chart-foot { font-size: 11.5px; margin-top: 6px; }
+.bar-chart {
+  display: flex; align-items: flex-end; gap: 6px;
+  /* Bars grow up to a readable width and the GROUP is centred; the leftover
+     space goes to both ends instead of leaving seven sticks at the left edge of
+     a 1000px plot. The axis below uses the same flex rules, so labels stay
+     under their bars. */
+  justify-content: center;
+  height: 132px;
+  margin-top: 12px;
+  padding-bottom: 1px;
+  border-bottom: 1px solid var(--border);
+}
 .bar {
-  flex: 1;
-  background: linear-gradient(var(--accent), var(--accent-hover));
+  flex: 1 1 0; min-width: 3px;
+  max-width: 72px;
+  height: var(--grow);
   border-radius: 2px 2px 0 0;
-  min-height: 4px;
-  opacity: .85;
+  background: linear-gradient(180deg, var(--accent), var(--accent-soft));
+  transform-origin: bottom;
+  animation: grow-y .42s cubic-bezier(.22,.61,.36,1) backwards;
 }
-.pie {
-  width: 130px; height: 130px; margin: 0 auto;
-  border-radius: 50%;
-  background: conic-gradient(var(--accent) 0 40%, #7fb2f0 40% 70%, var(--border-strong) 70% 100%);
-  position: relative;
+.bar:hover { filter: brightness(1.12); }
+.bar.zero { background: var(--panel-3); }
+.bar-axis {
+  display: flex; gap: 6px;
+  justify-content: center;
+  margin-top: 5px;
 }
-.pie::after {
-  content: ""; position: absolute; inset: 26px;
-  background: var(--panel-2); border-radius: 50%;
+.ba-lab {
+  flex: 1 1 0; min-width: 3px; max-width: 72px;
+  font-size: 10px; font-family: var(--mono);
+  color: var(--text-faint);
+  text-align: center;
+  white-space: nowrap; overflow: hidden;
 }
+.ba-lab.off { color: transparent; }
+/* a bar chart with three bars should not stretch them into slabs */
+.bar-chart .hint { align-self: center; margin: 0 auto; }
+/* by model: proportional bars. A pie could not carry a value next to each slice,
+   and with more than three models it stopped meaning anything. */
+.usage-bymodel { padding: 12px; }
+.ub-row {
+  display: flex; align-items: center; gap: 10px; padding: 3px 0;
+  animation: anim-list .16s cubic-bezier(.22,.61,.36,1) backwards;
+}
+.ub-name {
+  width: 220px; flex: none;
+  font-size: 12px; font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ub-track {
+  flex: 1; min-width: 0; height: 8px;
+  background: var(--panel-3);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ub-fill {
+  height: 100%; width: var(--grow);
+  background: var(--accent); border-radius: var(--radius-sm);
+  animation: grow-x .5s cubic-bezier(.22,.61,.36,1) backwards;
+}
+.ub-val { width: 40px; flex: none; text-align: right; font-size: 11.5px;
+  animation: fade-in .4s ease-out backwards; }
 table.stat-table { border-collapse: collapse; width: 100%; background: var(--panel-2); }
 table.stat-table th, table.stat-table td {
   border: 1px solid var(--border); padding: 5px 10px; text-align: left;
@@ -712,13 +895,23 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 
 /* side panel: free-form tabs */
 .side-panel {
-  width: 320px; flex: none;
+  width: 360px; flex: none;
   border-left: 1px solid var(--border);
   background: var(--panel);
   display: flex; flex-direction: column;
   min-height: 0;
   position: relative;  /* anchor for the "+" page */
+  /* The panel slides in when it appears and the divider/chat column animates its
+     width back when it goes. Without this only the terminal drawer animated, so
+     collapsing the side panel was a jump cut. */
+  animation: anim-slide-left .16s ease-out;
 }
+/* the center column follows the panel's width instead of snapping */
+.session-center { transition: flex-basis .16s ease, width .16s ease; }
+/* the side-panel toggle lives at the far right of the tab strip: it is a
+   window-level control, not a hairline handle between two content columns */
+.tabbar-side-toggle { margin-left: auto; }
+:root[data-tabs="left"] .tabbar-side-toggle { margin-left: 0; }
 /* drag divider between the chat history and the side panel.
    When the panel is collapsed the divider stays as a thin handle strip. */
 .side-splitter {
@@ -738,13 +931,13 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   position: absolute;
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
-  width: 16px; height: 34px;
+  width: 22px; height: 44px;
   display: flex; align-items: center; justify-content: center;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--panel-2);
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
   z-index: 2;
 }
@@ -885,13 +1078,63 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
    box already shows focus, so both lighting up would double the outline */
 .composer textarea.text-area {
   border: none; background: transparent; resize: none;
-  min-height: 54px; max-height: 200px;
+  /* grows with the text, from 3 lines up to 6 (the max-height is 6 lines at
+     this font/line-height); JS-free: field-sizing does it where supported and
+     the min/max keep it sane everywhere else */
+  min-height: 54px; max-height: 132px;
+  field-sizing: content;
+  overflow-y: auto;
   outline: none; box-shadow: none; padding: 0;
   font-family: var(--font); font-size: 13.5px; color: var(--text);
 }
 .composer textarea.text-area:focus {
   outline: none; border-color: transparent; box-shadow: none;
 }
+
+/* ---- attachments: chips ABOVE the input ---- */
+.composer-attach { display: flex; flex-wrap: wrap; gap: 6px; }
+.att-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 220px;
+  padding: 2px 2px 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: 12px;
+}
+.att-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 11.5px;
+}
+.att-chip .icon-btn { width: 20px; height: 20px; font-size: 11px; }
+
+/* ---- 上下文水位：贴边小指示器 ----
+   It hugs the BOTTOM EDGE of the model button (2px, the button's own width), not
+   a full-width bar under the input: the water level describes the model's
+   context, so it belongs to the model control. At low levels it is a faint
+   hairline; only 60%+ starts to colour, 85%+ goes red. */
+.model-btn-wrap { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
+.model-level {
+  position: absolute;
+  left: 3px; right: 3px; bottom: -1px;
+  height: 2px;
+  border-radius: 0 0 3px 3px;
+  background: var(--panel-3);
+  overflow: hidden;
+  pointer-events: none;
+}
+.model-level-fill {
+  height: 100%;
+  background: var(--text-faint);
+  opacity: .55;
+  transition: width .3s ease, background .3s ease, opacity .3s ease;
+}
+.model-level-fill.warm { background: #d9a400; opacity: 1; }
+.model-level-fill.hot { background: var(--err); opacity: 1; }
+
+/* toolbar halves: what the message does (left) / what it is sent with (right) */
+.ct-left, .ct-right { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.ct-right { flex: none; }
 .composer-tools {
   display: flex; align-items: center; gap: 6px;
   /* NEVER wraps. The row has two modes (labelled / icon-only, chosen by the
@@ -919,21 +1162,32 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .it-btn { display: inline-flex; align-items: center; gap: 6px; }
 .it-btn .fa { font-size: 13px; line-height: 1; }
 .it-label { white-space: nowrap; }
+/* the auto-mode button is a state, not a command: keep it tinted while on */
+.composer-tools .btn.ghost.on { color: var(--accent); background: var(--accent-soft); }
 
 /* Some buttons read better as a WORD when there is room and as an icon when
    there is not (发送/挂起 are the obvious ones: an icon alone is ambiguous, a
    label alone is wide). So the icon is hidden while the label fits. */
 .composer-tools .btn.text-wide .fa { display: none; }
 
-/* The threshold is the width the LABELLED row actually needs, not a guess. It
-   has to be re-measured whenever the row's contents change: after 子代理/终端
-   were dropped and the model <select> became a picker button the row needs
-   ~580px. The composer is capped at 50% of the window, so on a 1280px window it
-   gets a 608px content box - a threshold above that meant the labels NEVER
-   showed on an ordinary screen even though they fit, which is exactly the
-   "it clearly has room but stays collapsed" complaint. Below the threshold
-   everything is icon-only, which fits from ~420px, so the two modes never
-   overlap. */
+/* Progressive icon-ification, in three steps (the user asked for this order:
+   left side first, then suspend/send, then the selects).
+     >= 700px : everything labelled
+     600..700 : the LEFT half goes icon-only, the right half keeps its words
+                (model / thinking / suspend / send are the ones you actually read)
+     < 600px  : everything icon-only
+   One all-or-nothing breakpoint could not fit: the fully labelled row needs
+   ~657px, so on a 1280px window (composer capped at 50% = 611px content) the
+   labels never appeared even though the left half alone clearly had room. */
+@container (max-width: 665px) {
+  .ct-left .it-btn .it-label { display: none; }
+  .ct-left .it-btn { padding-left: 6px; padding-right: 6px; }
+  .ct-left .it-btn .fa { font-size: 14px; }
+  /* the permission select is the widest thing on the left; truncate it rather
+     than let it push the row over */
+  .ct-left .select { max-width: 88px; }
+}
+
 @container (max-width: 600px) {
   /* Icon-only mode has to FIT, not just be narrower. At the roomier spacing the
      row needed 449px inside a 451px container - a 2px margin, which sub-pixel
@@ -1731,10 +1985,13 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   color: var(--text-dim);
   cursor: pointer;
   font-size: 13px;
+  flex: none;
   transition: background .12s ease, color .12s ease;
 }
 .icon-btn:hover { background: var(--hover); color: var(--text); }
 .icon-btn:active { background: var(--active); }
+/* Font Awesome glyph inside an icon button: same box, no baseline drift */
+.icon-btn .fa { font-size: 12px; line-height: 1; }
 
 input.text-input, input.search-input, select.select, textarea.text-area {
   font-family: var(--font);

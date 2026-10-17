@@ -182,3 +182,15 @@ The process of project: P0 环境搭建
   供应商页自动选中+品牌图标+模型全选+能力两列+档位逗号输入、修"获取模型列表"
   结果没入库导致永远显示预置模型、新增 dialog.pickFile 与 CLI 工具探测。
   197 用例 1724 断言。详见 current.md <43>。
+
+<44>(SOLVED): WhaleUI 二次验收 —— 上游修掉 flex 主轴视口单位塌 1px 后，桌面 UI
+  完整渲染并可交互；逐屏对比浏览器版又发现 4 个缺陷（flex 项 overflow:hidden 塌
+  1px、button 的 height 被 UA min-height 压掉、grid auto-fill minmax 列宽错、
+  flex 行含 select 少 52px），复现交上游 WhaleUI temp/incorrect2/。
+  详见 current.md <44> 与 doc-internal/ui-whaleui.md §5（H/I/J/K）。
+
+<45>(SOLVED): 上下文水位改成贴在模型按钮底边的细线（删掉整行进度条）+ 自动挡与
+  批准模式互换 + 不再预置 GPT 模型（默认模型也不写死，发送时带上当前模型/档位）+
+  设置整窗覆盖标签栏 + 用量统计动画（新增真实按天柱状图，柱子从 0 长出来）+
+  切页方向感知（回到刚离开的页面播反向动画，关标签恒为后退）。
+  201 用例 1819 断言。详见 current.md <45>。

@@ -14,6 +14,9 @@
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
 #include <regex>
 
 #include "core/settings_store.hpp"
@@ -579,6 +582,8 @@ void UiApp::save_session_view(const std::string& sid) {
   v.permission = st_.permission;
   v.perm_index = st_.perm_index;
   v.auto_mode = st_.auto_mode;
+  v.thinking = st_.thinking;
+  v.attachments = st_.attachments;
   v.suspended = st_.suspended;
   v.context_pct = st_.context_pct;
   v.session_cost = st_.session_cost;
@@ -618,10 +623,22 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.session_loaded = v.session_loaded;
   st_.session_input = v.session_input;
   st_.model = v.model;
+  // 会话自己还没选过模型时，用设置里的会话默认模型（如果配了）。仍然为空就
+  // 保持为空，按钮显示"选择模型"——不再凭空塞一个 gpt-4o-mini。
+  if (st_.model.empty() && st_.settings_values.is_object() &&
+      st_.settings_values.contains("session.default.model")) {
+    const Json& dv = st_.settings_values["session.default.model"];
+    if (dv.is_string()) st_.model = dv.get<std::string>();
+    else if (dv.is_object() && dv.contains("value") && dv["value"].is_string()) {
+      st_.model = dv["value"].get<std::string>();
+    }
+  }
   st_.model_index = v.model_index;
   st_.permission = v.permission;
   st_.perm_index = v.perm_index;
   st_.auto_mode = v.auto_mode;
+  st_.thinking = v.thinking;
+  st_.attachments = v.attachments;
   st_.suspended = v.suspended;
   st_.context_pct = v.context_pct;
   st_.session_cost = v.session_cost;
@@ -654,7 +671,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.plan_steps = v.plan_steps;
 }
 
-void UiApp::switch_tab(const std::string& id) {
+void UiApp::switch_tab(const std::string& id, int dir) {
   // The flat session fields belong to the tab we are leaving. Prefer the
   // tracked key, but fall back to active_tab: if something set active_tab
   // directly, the fields still have to be stashed under the right session or
@@ -673,10 +690,21 @@ void UiApp::switch_tab(const std::string& id) {
   // Switching tabs also dismisses a modal page: it was opened ON TOP of a tab,
   // so navigating away means it is done with.
   st_.modal_page.clear();
-  // Record where we came from so closing this tab can return here.
+  // Record where we came from so closing this tab can return here. The SAME
+  // stack tells us the direction of this navigation: if the target is exactly
+  // the page we just came FROM (the stack's top), this is an undo of the last
+  // move, so the page slides in from the left. Any other move - including going
+  // back to a tab visited long ago - is forward and comes from the right.
+  // Closing a tab pops the stack before calling us, so it passes dir=-1.
   if (!st_.active_tab.empty() && st_.active_tab != id) {
+    if (dir == 0) {
+      dir = (!st_.tab_history.empty() && st_.tab_history.back() == id) ? -1 : 1;
+    }
     st_.tab_history.push_back(st_.active_tab);
     if (st_.tab_history.size() > 64) st_.tab_history.erase(st_.tab_history.begin());
+    page_dir_ = dir < 0 ? "-1" : "1";
+  } else {
+    page_dir_.clear();
   }
   st_.active_tab = id;
   // Only a session tab carries a per-session view; the home page has none.
@@ -811,6 +839,24 @@ void UiApp::load_sessions(size_t project_index) {
     });
     update([&](AppState& st) {
       if (project_index < st.projects.size()) {
+        // Keep an in-progress rename alive: a refresh (which happens after a
+        // rename of ANOTHER row, or on any project reload) must not yank the
+        // input out from under the user.
+        std::string renaming_sid;
+        std::string rename_text;
+        for (size_t k = 0; k < st.projects[project_index].sessions.size(); ++k) {
+          const ProjectCard::SessionRow& old = st.projects[project_index].sessions[k];
+          if (old.renaming) {
+            renaming_sid = old.sid;
+            rename_text = old.rename_text;
+          }
+        }
+        for (size_t k = 0; k < rows.size() && !renaming_sid.empty(); ++k) {
+          if (rows[k].sid == renaming_sid) {
+            rows[k].renaming = true;
+            rows[k].rename_text = rename_text;
+          }
+        }
         st.projects[project_index].sessions = rows;
         st.projects[project_index].session_count = static_cast<int>(rows.size());
         st.projects[project_index].sessions_loaded = true;
@@ -820,7 +866,19 @@ void UiApp::load_sessions(size_t project_index) {
 }
 
 void UiApp::load_usage() {
-  call_async("usage.query", Json{{"filter", Json::object()}}, [this](const BackendResult& r) {
+  // The filter is real: a provider scope and a time range both narrow the query,
+  // so the numbers on the page are the numbers that were asked for.
+  Json filter = Json::object();
+  if (!st_.usage_scope.empty()) filter["provider"] = st_.usage_scope;
+  static const int kDays[4] = {1, 7, 30, 0};
+  int days = kDays[st_.usage_range < 0 || st_.usage_range > 3 ? 1 : st_.usage_range];
+  if (days > 0) {
+    int64_t now = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    filter["from"] = now - static_cast<int64_t>(days) * 86400 * 1000;
+  }
+  call_async("usage.query", Json{{"filter", filter}}, [this](const BackendResult& r) {
     if (!r.ok) return;
     update([&](AppState& s) {
       s.usage = r.data;
@@ -905,7 +963,14 @@ void UiApp::load_provider_templates() {
 }
 
 void UiApp::load_mcp_tools() {
+  // In-flight guard: this is called from a BUILD (the explore page needs the
+  // list), so without it every render fired another request until the first
+  // reply landed - a request storm that starved the event loop and made every
+  // click look dead.
+  if (mcp_inflight_) return;
+  mcp_inflight_ = true;
   call_async("mcp.list", Json::object(), [this](const BackendResult& r) {
+    mcp_inflight_ = false;
     std::vector<AppState::McpRow> rows;
     const Json& arr = r.ok && r.data.contains("tools") ? r.data["tools"] : Json::array();
     if (arr.is_array()) {
@@ -914,6 +979,7 @@ void UiApp::load_mcp_tools() {
         AppState::McpRow row;
         row.name = jsonutil::get<std::string>(t, "name", "");
         row.dir = jsonutil::get<std::string>(t, "dir", "");
+        row.description = jsonutil::get<std::string>(t, "description", "");
         row.enabled = jsonutil::get<bool>(t, "enabled", true);
         rows.push_back(row);
       }
@@ -1301,6 +1367,15 @@ void UiApp::render() {
     // rename field: focus it so the user can type immediately
     VNodePtr ren = find_by_key(tree_, "term-rename-input");
     if (ren && ren->dom.valid()) dom_.focus(ren->dom);
+    // inline session rename: same treatment, but only on the render that
+    // started it (see session_rename_focus_)
+    if (session_rename_focus_) {
+      VNodePtr sren = find_by_key(tree_, "session-rename-input");
+      if (sren && sren->dom.valid()) {
+        dom_.focus(sren->dom);
+        session_rename_focus_ = false;
+      }
+    }
     // the 文件 button opens the OS file chooser (only the browser can do that),
     // and the adapter hands back the saved paths
     VNodePtr up = find_by_key(tree_, "upload-btn");
@@ -1356,6 +1431,20 @@ VNodePtr UiApp::build_shell() {
   H win = el("div", "window");
   win.key("drop-zone");  // drag & drop a folder anywhere on the window
 
+  // 设置是"整窗"级别的页面：它覆盖标签栏，而不是缩在标签栏下面。设置里改的
+  // 是整窗的东西（外观、标签位置、语言），标签栏在它旁边既没用又会诱导用户
+  // 以为还能切走。所以这里直接跳过标签条，让设置占满整个窗口。
+  if (st_.modal_page == "settings") {
+    VNodePtr page = build_settings();
+    page->key = "page:settings";
+    add_anim(page, page_anim_for("settings") ? page_anim_for("settings")
+                                             : anim::kView);
+    page->anim_key = "settings";
+    win.add(page);
+    win.add(build_overlays());
+    return win.get();
+  }
+
   // ---- top tab strip ----
   std::vector<TabSpec> tabs;
   for (size_t i = 0; i < st_.tab_ids.size(); ++i) {
@@ -1382,6 +1471,19 @@ VNodePtr UiApp::build_shell() {
       [this](const std::string& k) { show(k); },
       [this](const std::string& k) { close_tab(k); },
       [this](const std::string&) { open_new_tab(); });
+  // 侧栏开关放在标签条最右端：这是"整窗"级别的控制，属于标题栏区域，而不是
+  // 夹在会话内容中间的那条细缝。原来只有分隔条上那个小箭头，太难点。
+  if (st_.active_tab != "home") {
+    H side_toggle = comp::icon_button(
+        st_.side_collapsed ? "chevron-left" : "chevron-right",
+        st_.side_collapsed ? tr("展开侧栏") : tr("收起侧栏"),
+        [this](const std::string&) {
+      update([&](AppState& s) { s.side_collapsed = !s.side_collapsed; });
+    });
+    side_toggle.cls("tabbar-side-toggle");
+    side_toggle.key("tabbar-side-toggle");
+    strip.add(side_toggle);
+  }
   win.add(strip);
 
   // ---- page ----
@@ -1415,7 +1517,15 @@ VNodePtr UiApp::build_shell() {
   // The token also carries the load state: a session page whose history has
   // arrived animates again, so a slow load does not spend the animation on an
   // empty page (which is how an animation could look like it never ran).
-  add_anim(page, page_anim_for(page_id) ? page_anim_for(page_id) : anim::kView);
+  //
+  // Direction: a backward move (back into the tab we came from) slides in from
+  // the LEFT, a forward one from the right, so the motion matches the navigation
+  // instead of always coming from the same side.
+  const char* pg_anim = page_anim_for(page_id);
+  if (pg_anim && std::strcmp(pg_anim, anim::kView) == 0 && !page_dir_.empty()) {
+    pg_anim = (page_dir_ == "-1") ? anim::kSlideRight : anim::kSlideLeft;
+  }
+  add_anim(page, pg_anim ? pg_anim : anim::kView);
   {
     std::string token = page_id;
     if (page_id == "session" && st_.session_loaded) token += ":loaded";
@@ -1430,6 +1540,7 @@ VNodePtr UiApp::build_shell() {
 // ===========================================================================
 VNodePtr UiApp::build_home() {
   H wrap = el("div", "page home-page");
+  wrap.attr("data-home-tab", itos(st_.home_tab));  // diagnostics + tests
   // centered title buttons: 探索 / 项目 / 用量统计
   std::vector<std::string> items;
   items.push_back("探索");
@@ -1446,6 +1557,10 @@ VNodePtr UiApp::build_home() {
   H body = el("div", "home-body");
   switch (st_.home_tab) {
     case 0: {
+      // The explore page lists MCP + skills, so make sure they are loaded
+      // (they are normally fetched by the settings pages).
+      if (!st_.skills_loaded) load_skills();
+      if (!st_.mcp_loaded) load_mcp_tools();
       VNodePtr p = build_home_explore();
       p->key = "home:explore";
       body.add(p);
@@ -1520,15 +1635,103 @@ VNodePtr UiApp::build_new_tab() {
   return wrap.get();
 }
 
+// 探索（goal.md：未来作为 MCP / Skill / 插件的浏览器）。
+// It is the "what can this agent do" page: everything the model can invoke, in
+// one searchable list. MCP entries are model-invoked only; skills are the one
+// kind the USER can type as /name, so they are marked differently.
 VNodePtr UiApp::build_home_explore() {
   H wrap = el("div", "explore");
   H box = el("div", "explore-box");
-  box.add(el("div", "explore-title").text("探索"));
-  box.add(el("div", "explore-sub").text("搜索项目、会话与文档（原型）"));
-  box.add(comp::search_box(st_.explore_query, "输入关键词…", [this](const std::string& v) {
+  box.add(el("div", "explore-title").text(tr("探索")));
+  box.add(el("div", "explore-sub").text(
+      tr("这台机器上的能力：MCP 工具与 Skill。")));
+  H search = comp::search_box(st_.explore_query, tr("搜索名称或说明…"),
+                              [this](const std::string& v) {
+    // must re-render: the filter decides which rows exist
     update([&](AppState& s) { s.explore_query = v; });
-  }));
+  });
+  box.add(search);
   wrap.add(box);
+
+  const std::string q = lower_ascii(st_.explore_query);
+  auto hit = [&q](const std::string& a, const std::string& b) {
+    if (q.empty()) return true;
+    return lower_ascii(a + " " + b).find(q) != std::string::npos;
+  };
+
+  size_t shown = 0;
+  H list = el("div", "explore-list");
+
+  // --- MCP ---
+  H mcp_sec = el("div", "explore-sec");
+  H mcp_head = el("div", "explore-sec-head");
+  mcp_head.add(el("i", "fa fa-plug"));
+  mcp_head.add(el("span").text(tr("MCP")));
+  mcp_head.add(comp::badge(tr("模型调用")));
+  mcp_sec.add(mcp_head);
+  size_t mcp_shown = 0;
+  for (size_t i = 0; i < st_.mcp_tools.size(); ++i) {
+    const AppState::McpRow& m = st_.mcp_tools[i];
+    if (!hit(m.name, m.description + " " + m.dir)) continue;
+    ++mcp_shown;
+    ++shown;
+    H row = el("div", m.enabled ? "explore-row" : "explore-row off");
+    row.add(el("span", "er-name").text(m.name));
+    row.add(el("span", "er-desc dim").text(m.description));
+    row.add(el("span", "grow"));
+    if (!m.enabled) row.add(comp::badge(tr("已停用")));
+    row.add(comp::icon_button("sliders", tr("在设置中管理"), [this](const std::string&) {
+      update([&](AppState& s) { s.settings_nav = "mcp"; });
+      open_modal_page("settings");
+    }));
+    mcp_sec.add(row);
+  }
+  if (mcp_shown == 0) {
+    mcp_sec.add(el("div", "explore-empty").text(
+        st_.mcp_tools.empty() ? tr("还没有 MCP。可在设置里探测或导入。")
+                              : tr("没有匹配的 MCP。")));
+  }
+  list.add(mcp_sec);
+
+  // --- Skill ---
+  H sk_sec = el("div", "explore-sec");
+  H sk_head = el("div", "explore-sec-head");
+  sk_head.add(el("i", "fa fa-wand-magic-sparkles"));
+  sk_head.add(el("span").text(tr("Skill")));
+  sk_head.add(comp::badge(tr("可 /调用")));
+  sk_sec.add(sk_head);
+  size_t sk_shown = 0;
+  for (size_t i = 0; i < st_.skills.size(); ++i) {
+    const AppState::SkillRow& s = st_.skills[i];
+    std::string label = s.title.empty() ? s.name : s.title;
+    if (!hit(label, s.name + " " + s.description)) continue;
+    ++sk_shown;
+    ++shown;
+    H row = el("div", "explore-row");
+    row.add(el("span", "er-name").text(label));
+    row.add(el("span", "er-slash").text("/" + s.name));
+    row.add(el("span", "er-desc dim").text(s.description));
+    row.add(el("span", "grow"));
+    std::string name = s.name;
+    row.add(comp::icon_button("eye", tr("查看内容"), [this, name](const std::string&) {
+      call_async("skill.load", Json{{"name", name}}, [this, name](const BackendResult& r) {
+        toast(r.ok ? (tr("已加载 skill：") + name) : (tr("加载失败：") + r.message));
+      });
+    }));
+    sk_sec.add(row);
+  }
+  if (sk_shown == 0) {
+    sk_sec.add(el("div", "explore-empty").text(
+        st_.skills.empty() ? tr("还没有 Skill。可在设置里探测或导入。")
+                           : tr("没有匹配的 Skill。")));
+  }
+  list.add(sk_sec);
+
+  if (shown == 0 && !q.empty()) {
+    wrap.add(comp::empty_state(tr("没有匹配的能力。"), "", nullptr));
+  } else {
+    wrap.add(list);
+  }
   return wrap.get();
 }
 
@@ -1543,35 +1746,55 @@ VNodePtr UiApp::build_home_projects() {
   for (size_t i = 0; i < st_.projects.size(); ++i) {
     ProjectCard& p = st_.projects[i];
     H card = el("div", "proj-card");
-    // top row: project identity + actions
+
+    // ---- left: identity block ----
+    // A monogram + name + path, then the numbers that matter, then the primary
+    // action. The old version stacked two full-width labelled buttons here,
+    // which is what made the column look like a form.
     H top = el("div", "proj-top");
-    H left = el("div", "proj-left");
-    left.add(el("div", "proj-name").text(p.name));
-    left.add(el("div", "proj-path").text(p.path));
-    H meta = el("div", "proj-meta");
-    meta.add(el("span", "dim").text(itos(p.session_count) + tr(" 个会话")));
+    H idrow = el("div", "proj-id");
+    H mono = el("span", "proj-mono");
+    // Two letters at most; a path-like name otherwise collapses to one glyph.
+    mono.text(p.name.empty() ? "?" : p.name.substr(0, p.name.size() > 1 ? 2 : 1));
+    idrow.add(mono);
+    H idtext = el("div", "proj-idtext");
+    idtext.add(el("div", "proj-name").text(p.name));
+    idtext.add(el("div", "proj-path").text(p.path));
+    idrow.add(idtext);
+    top.add(idrow);
+
+    H stats = el("div", "proj-stats");
+    H st1 = el("div", "proj-stat");
+    st1.add(el("span", "psv").text(itos(p.session_count)));
+    st1.add(el("span", "psl").text(tr("会话")));
+    stats.add(st1);
     if (!p.updated.empty()) {
-      meta.add(el("span", "dot-sep").text("·"));
-      meta.add(el("span", "dim").text(p.updated));
+      H st2 = el("div", "proj-stat");
+      st2.add(el("span", "psv").text(p.updated));
+      st2.add(el("span", "psl").text(tr("最近")));
+      stats.add(st2);
     }
-    left.add(meta);
-    top.add(left);
+    top.add(stats);
+
     H actions = el("div", "proj-actions");
     std::string pid = p.pid;
+    // 新建会话 is the reason you open this page, so it is a real button in the
+    // identity block rather than the last row of a list you have to scroll to.
+    H mk = comp::button(tr("新建会话"), [this, pid](const std::string&) {
+      new_session_in_project(pid);
+    }, "primary");
+    mk.cls("proj-new");
+    actions.add(mk);
     if (!pid.empty()) {
-      // Icon + tooltip rather than a labelled button: two full-width labels per
-      // card were most of what made the left column feel empty and noisy.
-      H reveal = comp::icon_text_button("folder-open", tr("打开"), nullptr, "ghost");
-      reveal.attr("title", tr("在资源管理器中打开"));
-      reveal.on(EventKind::kClick, [this, pid](const std::string&) {
+      H reveal = comp::icon_button("folder-open", tr("在资源管理器中打开"),
+                                   [this, pid](const std::string&) {
         call_async("project.reveal", Json{{"pid", pid}}, [this](const BackendResult& r) {
           if (!r.ok) toast(tr("无法打开文件管理器"));
         });
       });
       actions.add(reveal);
-      H rm = comp::icon_text_button("trash", tr("移出"), nullptr, "ghost");
-      rm.attr("title", tr("移出列表（不删除文件）"));
-      rm.on(EventKind::kClick, [this, pid](const std::string&) {
+      H rm = comp::icon_button("trash", tr("移出列表（不删除文件）"),
+                               [this, pid](const std::string&) {
         call_async("project.remove", Json{{"pid", pid}}, [this](const BackendResult&) {
           load_projects();
         });
@@ -1581,22 +1804,19 @@ VNodePtr UiApp::build_home_projects() {
     top.add(actions);
     card.add(top);
 
-    // Sessions area: the dominant half. The list is ALWAYS built - CSS decides
-    // how it is shown (wide: directly, with its own height and scroll; narrow:
-    // stacked below and collapsed until the header is clicked). Building it
-    // conditionally would mean the wide layout could not show it at all.
+    // ---- right: session list ----
+    // The list is ALWAYS built - CSS decides how it is shown (wide: directly,
+    // with its own height and scroll; narrow: stacked below and collapsed until
+    // the header is clicked).
     H right = el("div", p.expanded ? "proj-right open" : "proj-right");
     H rhead = el("div", "proj-right-head");
     rhead.on(EventKind::kClick, [this, i](const std::string&) {
-      // Wide layout ignores this (CSS shows the list and hides the toggle); in
-      // the narrow layout it reveals/collapses the stacked list.
       update([&](AppState& s) {
         if (i < s.projects.size()) s.projects[i].expanded = !s.projects[i].expanded;
       });
     });
     rhead.add(el("span", "prh-title").text(tr("会话")));
-    rhead.add(el("span", "prh-count").text(itos(p.expanded ? static_cast<int>(p.sessions.size())
-                                                           : p.session_count)));
+    rhead.add(el("span", "prh-count").text(itos(p.session_count)));
     rhead.add(el("span", "grow"));
     rhead.add(el("span", "prh-toggle").text(p.expanded ? tr("收起 \u25be")
                                                        : tr("展开 \u25b8")));
@@ -1604,13 +1824,41 @@ VNodePtr UiApp::build_home_projects() {
     H list = el("div", "proj-sessions");
     for (size_t k = 0; k < p.sessions.size(); ++k) {
       const ProjectCard::SessionRow& s = p.sessions[k];
-      H row = el("div", "proj-session");
       std::string sid = s.sid;
+      if (s.renaming) {
+        // Inline rename: the row turns into an input. Enter commits, blur also
+        // commits (clicking away is the normal way to finish), Esc cancels.
+        H rrow = el("div", "proj-session renaming");
+        rrow.add(el("span", s.running ? "ps-dot running" : "ps-dot"));
+        H inp = comp::text_input(s.rename_text, tr("会话名称"),
+                                 [this, sid](const std::string& v) {
+          update([&](AppState& st2) {
+            for (size_t a = 0; a < st2.projects.size(); ++a) {
+              for (size_t b = 0; b < st2.projects[a].sessions.size(); ++b) {
+                if (st2.projects[a].sessions[b].sid == sid) {
+                  st2.projects[a].sessions[b].rename_text = v;
+                }
+              }
+            }
+          });
+        }, [this, sid](const std::string&) { commit_rename_session(sid); });
+        inp.cls("ps-rename-input");
+        inp.key("session-rename-input");
+        // Enter commits; so does losing focus (clicking away is the normal way
+        // to finish a rename). Esc is not bound here - the adapter's text input
+        // has no per-node Esc, and committing is the safer default.
+        inp.on(EventKind::kBlur, [this, sid](const std::string&) {
+          commit_rename_session(sid);
+        });
+        rrow.add(inp);
+        list.add(rrow);
+        continue;
+      }
+      H row = el("div", "proj-session");
       std::string title = s.title;
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      // status dot: a running turn is a fact about NOW, so it is shown as one
       H dot = el("span", s.running ? "ps-dot running" : "ps-dot");
       dot.attr("title", s.running ? tr("正在运行") : tr("空闲"));
       row.add(dot);
@@ -1619,14 +1867,19 @@ VNodePtr UiApp::build_home_projects() {
       if (s.updated_ms > 0) {
         row.add(el("span", "ps-time dim").text(rel_time(s.updated_ms)));
       }
-      // Delete: hidden until hover (a row of delete buttons reads as a toolbar,
-      // and the click has to be unmistakably the row's own).
+      // Hover actions: rename + delete. Hidden until hover so a long list does
+      // not read as a toolbar; the click must not open the session either.
+      H acts = el("span", "ps-acts");
+      H ren = comp::icon_button("pen", tr("重命名"), [this, sid](const std::string&) {
+        begin_rename_session(sid);
+      });
+      acts.add(ren);
       H del = comp::icon_button("\u2715", tr("删除会话（不可恢复）"),
                                 [this, sid, title](const std::string&) {
         confirm_delete_session(sid, title);
       });
-      del.cls("ps-del");
-      row.add(del);
+      acts.add(del);
+      row.add(acts);
       list.add(row);
     }
     if (p.sessions.empty()) {
@@ -1650,20 +1903,54 @@ VNodePtr UiApp::build_home_projects() {
 
 VNodePtr UiApp::build_home_usage() {
   H wrap = el("div", "usage-page");
-  // left: scope list
+  // 每个区块整块滑入，行/柱子在下面再各自生长。原来整个页面渲染完就"啪"地全
+  // 出现，图表尤其像是静态图片：现在柱子和进度条从 0 长出来，数字行错开进场。
+  wrap.anim(anim::kEnter).anim_key("usage:" + itos(st_.usage_range) + ":" +
+                                   st_.usage_scope + (st_.usage_loaded ? ":1" : ":0"));
+
+  // ---- left: real scopes (总计 + one per provider) ----
+  // The old list was a hardcoded array of three strings, one of which was
+  // literally "自定义" - it could not select anything.
   H left = el("div", "usage-scopes");
-  const char* scopes[3] = {"总计", "opencode-zen", "自定义"};
-  for (int i = 0; i < 3; ++i) {
-    H it = el("div", i == 0 ? "scope sel" : "scope");
-    it.add(el("span").text(scopes[i]));
-    it.add(el("span", "dim").text("›"));
+  H tot = el("div", st_.usage_scope.empty() ? "scope sel" : "scope");
+  tot.on(EventKind::kClick, [this](const std::string&) {
+    update([&](AppState& s) { s.usage_scope.clear(); });
+    load_usage();
+  });
+  tot.add(el("span").text(tr("总计")));
+  left.add(tot);
+  for (size_t i = 0; i < st_.providers.size(); ++i) {
+    const AppState::ProviderRow& p = st_.providers[i];
+    bool sel = st_.usage_scope == p.id;
+    H it = el("div", sel ? "scope sel" : "scope");
+    std::string pid = p.id;
+    it.on(EventKind::kClick, [this, pid](const std::string&) {
+      update([&](AppState& s) { s.usage_scope = pid; });
+      load_usage();
+    });
+    it.add(el("span").text(p.name.empty() ? p.id : p.name));
     left.add(it);
   }
   wrap.add(left);
 
   H panel = el("div", "usage-panel");
 
-  // header: totals from usage.query (falls back to placeholders when empty)
+  // ---- range tabs: the query is filtered by `from`, not by a fake bar chart ----
+  H ranges = el("div", "usage-ranges");
+  const char* kRangeLabels[4] = {"1 天", "7 天", "30 天", "全部"};
+  for (int i = 0; i < 4; ++i) {
+    int idx = i;
+    H b = el("div", i == st_.usage_range ? "usage-range active" : "usage-range");
+    b.on(EventKind::kClick, [this, idx](const std::string&) {
+      update([&](AppState& s) { s.usage_range = idx; });
+      load_usage();
+    });
+    b.add(el("span").text(tr(kRangeLabels[i])));
+    ranges.add(b);
+  }
+  panel.add(ranges);
+
+  // ---- totals ----
   H head = el("div", "usage-head");
   std::string calls = "0";
   std::string cost = "—";
@@ -1679,71 +1966,176 @@ VNodePtr UiApp::build_home_usage() {
     std::snprintf(buf, sizeof(buf), kind == "money" ? "%.4f" : "%.0f", c);
     cost = std::string(buf) + (kind == "quota" ? " (额度)" : "");
   }
-  head.add(comp::key_value("调用次数", calls));
-  head.add(comp::key_value("输入 tokens", in_tok));
-  head.add(comp::key_value("输出 tokens", out_tok));
-  head.add(comp::key_value("总成本", cost));
+  head.add(comp::key_value(tr("调用次数"), calls));
+  head.add(comp::key_value(tr("输入 tokens"), in_tok));
+  head.add(comp::key_value(tr("输出 tokens"), out_tok));
+  head.add(comp::key_value(tr("总成本"), cost));
   panel.add(head);
 
-  H row1 = el("div", "chart-row");
-  H c1 = el("div", "chart");
-  c1.add(el("div", "chart-title").text("按时间（12h / 1天 / 7天 / 30天）"));
-  H bars = el("div", "bars");
-  int heights[12] = {30, 55, 40, 70, 62, 85, 48, 66, 74, 52, 80, 58};
-  if (st_.usage_loaded && st_.usage.contains("byDay")) {
-    const Json& byDay = st_.usage["byDay"];
-    std::vector<int> hs;
-    for (Json::const_iterator it = byDay.begin(); it != byDay.end(); ++it) {
-      int64_t n = jsonutil::get_int(it.value(), "in", 0) +
-                  jsonutil::get_int(it.value(), "out", 0);
-      hs.push_back(static_cast<int>(n > 1000 ? 100 : (n / 10)));
-    }
-    for (size_t i = 0; i < hs.size() && i < 12; ++i) heights[i] = hs[i] > 4 ? hs[i] : 4;
+  // ---- by model: a proportional bar per model (the pie could not show values) ----
+  Json pm = st_.usage_loaded && st_.usage.contains("byProviderModel") &&
+                    st_.usage["byProviderModel"].is_object()
+                ? st_.usage["byProviderModel"]
+                : Json::object();
+  std::vector<std::pair<std::string, int64_t> > rows;
+  int64_t total_tok = 0;
+  for (Json::const_iterator it = pm.begin(); it != pm.end(); ++it) {
+    int64_t n = jsonutil::get_int(it.value(), "in", 0) +
+                jsonutil::get_int(it.value(), "out", 0);
+    if (n <= 0) continue;
+    std::string model = jsonutil::get<std::string>(it.value(), "model", "");
+    std::string prov = jsonutil::get<std::string>(it.value(), "provider", "");
+    rows.push_back(std::make_pair(prov.empty() ? model : (prov + " / " + model), n));
+    total_tok += n;
   }
-  for (int i = 0; i < 12; ++i) {
-    H b = el("div", "bar");
-    b.style("height", itos(heights[i]) + "%");
-    bars.add(b);
-  }
-  c1.add(bars);
-  row1.add(c1);
-  H c2 = el("div", "chart");
-  c2.add(el("div", "chart-title").text("按模型"));
-  H pie = el("div", "pie");
-  pie.add(el("div", "pie-slice s1"));
-  pie.add(el("div", "pie-slice s2"));
-  pie.add(el("div", "pie-slice s3"));
-  c2.add(pie);
-  row1.add(c2);
-  panel.add(row1);
+  std::sort(rows.begin(), rows.end(),
+            [](const std::pair<std::string, int64_t>& a,
+               const std::pair<std::string, int64_t>& b) { return a.second > b.second; });
 
-  // table: real byProviderModel rows, else a placeholder
+  // ---- by day: a real column chart over byDay ----
+  // The backend has always returned byDay; nobody drew it. It is the one view
+  // that shows WHEN the tokens went out, and it reads as a shape rather than
+  // another table. Empty days inside the selected window are kept as zero
+  // columns - dropping them would compress the time axis and lie about usage.
+  {
+    Json bd = st_.usage_loaded && st_.usage.contains("byDay") &&
+                      st_.usage["byDay"].is_object()
+                  ? st_.usage["byDay"]
+                  : Json::object();
+    std::map<int64_t, int64_t> by_day;
+    for (Json::const_iterator it = bd.begin(); it != bd.end(); ++it) {
+      int64_t day = std::strtoll(it.key().c_str(), nullptr, 10);
+      by_day[day] = jsonutil::get_int(it.value(), "in", 0) +
+                    jsonutil::get_int(it.value(), "out", 0);
+    }
+    static const int kDays2[4] = {1, 7, 30, 0};
+    int win = kDays2[st_.usage_range < 0 || st_.usage_range > 3 ? 1 : st_.usage_range];
+    int64_t today = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()) / 86400000;
+    std::vector<int64_t> days;
+    if (win > 0) {
+      for (int i = win - 1; i >= 0; --i) days.push_back(today - i);
+    } else {
+      for (std::map<int64_t, int64_t>::const_iterator it = by_day.begin();
+           it != by_day.end(); ++it) {
+        days.push_back(it->first);
+      }
+      // 全部 can span years; keep the recent tail, which is what is read
+      if (days.size() > 60) days.erase(days.begin(), days.end() - 60);
+    }
+    int64_t peak = 0, sum = 0;
+    for (size_t i = 0; i < days.size(); ++i) {
+      std::map<int64_t, int64_t>::const_iterator f = by_day.find(days[i]);
+      int64_t n = f == by_day.end() ? 0 : f->second;
+      if (n > peak) peak = n;
+      sum += n;
+    }
+    H chart = el("div", "usage-chart usage-byday");
+    H ctop = el("div", "chart-head");
+    ctop.add(el("div", "chart-title").text(tr("按天（输入 + 输出 tokens）")));
+    ctop.add(el("span", "grow"));
+    ctop.add(el("span", "chart-total dim").text(
+        sum > 0 ? (tr("合计 ") + itos(static_cast<int>(sum))) : std::string()));
+    chart.add(ctop);
+    H plot = el("div", "bar-chart");
+    // The plot is keyed by the filters: changing the range or the provider
+    // recreates the bars, which is what replays the growth animation.
+    plot.key("ud:" + st_.usage_scope + ":" + itos(st_.usage_range) + ":" +
+             itos(static_cast<int>(sum)));
+    if (days.empty()) {
+      plot.add(el("div", "hint").text(tr("暂无用量记录")));
+    }
+    for (size_t i = 0; i < days.size(); ++i) {
+      std::map<int64_t, int64_t>::const_iterator f = by_day.find(days[i]);
+      int64_t n = f == by_day.end() ? 0 : f->second;
+      int pct = peak > 0 ? static_cast<int>(n * 100 / peak) : 0;
+      if (n > 0 && pct < 2) pct = 2;  // a non-zero day must stay visible
+      H bar = el("div", n > 0 ? "bar" : "bar zero");
+      bar.style("--grow", itos(pct) + "%");
+      bar.style("animation-delay", itos(static_cast<int>(i) * 16) + "ms");
+      // 日期 + 数值：柱状图没有数值就只剩形状，读不出量
+      time_t t = static_cast<time_t>(days[i] * 86400);
+      struct tm* g = localtime(&t);
+      char buf[64];
+      if (g) {
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d · %ld tokens",
+                      g->tm_year + 1900, g->tm_mon + 1, g->tm_mday,
+                      static_cast<long>(n));
+      } else {
+        std::snprintf(buf, sizeof(buf), "%ld tokens", static_cast<long>(n));
+      }
+      bar.attr("title", buf);
+      plot.add(bar);
+    }
+    chart.add(plot);
+    // date labels under the columns (only when they do not collide)
+    if (!days.empty()) {
+      H axis = el("div", "bar-axis");
+      bool dense = days.size() <= 12;
+      for (size_t i = 0; i < days.size(); ++i) {
+        time_t t = static_cast<time_t>(days[i] * 86400);
+        struct tm* g = localtime(&t);
+        char lab[16] = "";
+        if (g) std::snprintf(lab, sizeof(lab), "%d/%d", g->tm_mon + 1, g->tm_mday);
+        bool show = dense || i == 0 || i + 1 == days.size() || (i % 5 == 0);
+        H sp = el("span", show ? "ba-lab" : "ba-lab off");
+        sp.text(show ? lab : std::string());
+        axis.add(sp);
+      }
+      chart.add(axis);
+    }
+    panel.add(chart);
+  }
+
+  H bymodel = el("div", "usage-chart usage-bymodel");
+  bymodel.add(el("div", "chart-title").text(tr("按模型")));
+  if (rows.empty()) {
+    bymodel.add(el("div", "hint").text(tr("暂无用量记录")));
+  } else {
+    for (size_t i = 0; i < rows.size() && i < 8; ++i) {
+      int pct = total_tok > 0 ? static_cast<int>(rows[i].second * 100 / total_tok) : 0;
+      H r = el("div", "ub-row");
+      r.style("animation-delay", itos(static_cast<int>(i) * 30) + "ms");
+      r.add(el("span", "ub-name").text(rows[i].first));
+      H track = el("div", "ub-track");
+      H fill = el("div", "ub-fill");
+      // 从 0 长出来：--grow 是终值，动画从 width:0 走到它
+      fill.style("--grow", itos(pct) + "%");
+      fill.style("animation-delay", itos(120 + static_cast<int>(i) * 55) + "ms");
+      track.add(fill);
+      r.add(track);
+      r.add(el("span", "ub-val dim").text(itos(pct) + "%"));
+      bymodel.add(r);
+    }
+  }
+  panel.add(bymodel);
+
+  // ---- table: real byProviderModel rows, else an explicit empty state ----
   H tbl = el("table", "stat-table");
   H thead = el("tr");
   const char* hd[5] = {"模型", "输入", "输出", "缓存", "成本"};
-  for (int i = 0; i < 5; ++i) thead.add(el("th").text(hd[i]));
+  for (int i = 0; i < 5; ++i) thead.add(el("th").text(tr(hd[i])));
   tbl.add(thead);
   bool any = false;
-  if (st_.usage_loaded && st_.usage.contains("byProviderModel") &&
-      st_.usage["byProviderModel"].is_object()) {
-    const Json& pm = st_.usage["byProviderModel"];
-    for (Json::const_iterator it = pm.begin(); it != pm.end(); ++it) {
-      const Json& e = it.value();
-      H tr = el("tr");
-      std::string model = jsonutil::get<std::string>(e, "model", "");
-      std::string prov = jsonutil::get<std::string>(e, "provider", "");
-      tr.add(el("td").text(prov.empty() ? model : (prov + " / " + model)));
-      tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "in", 0))));
-      tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "out", 0))));
-      tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "cache", 0))));
-      tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "cost", 0))));
-      tbl.add(tr);
-      any = true;
-    }
+  for (Json::const_iterator it = pm.begin(); it != pm.end(); ++it) {
+    const Json& e = it.value();
+    H tr = el("tr");
+    std::string model = jsonutil::get<std::string>(e, "model", "");
+    std::string prov = jsonutil::get<std::string>(e, "provider", "");
+    tr.add(el("td").text(prov.empty() ? model : (prov + " / " + model)));
+    tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "in", 0))));
+    tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "out", 0))));
+    tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "cache", 0))));
+    tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "cost", 0))));
+    tbl.add(tr);
+    any = true;
   }
   if (!any) {
     H tr = el("tr");
-    for (int c = 0; c < 5; ++c) tr.add(el("td").text(c == 0 ? "（暂无用量记录）" : ""));
+    for (int c = 0; c < 5; ++c) {
+      tr.add(el("td").text(c == 0 ? std::string("（暂无用量记录）") : std::string()));
+    }
     tbl.add(tr);
   }
   panel.add(tbl);
@@ -1789,23 +2181,46 @@ VNodePtr UiApp::build_session() {
 
   // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");
-  H ta = comp::textarea(st_.session_input, "输入消息…（Enter 发送，Shift+Enter 换行）",
+  // ---- attachments: ABOVE the input, never inside it ----
+  // An attachment is not text: mixing @paths into the textarea meant you could
+  // not tell what was typed from what was attached, and the "/" menu had to
+  // compete with a line of @-references.
+  if (!st_.attachments.empty()) {
+    H att = el("div", "composer-attach");
+    for (size_t i = 0; i < st_.attachments.size(); ++i) {
+      H chip = el("span", "att-chip");
+      chip.add(comp::file_icon(st_.attachments[i], false));
+      chip.add(el("span", "att-name").text(folder_basename(st_.attachments[i])));
+      size_t idx = i;
+      chip.add(comp::icon_button("\u2715", tr("移除附件"), [this, idx](const std::string&) {
+        update([&](AppState& s) {
+          if (idx < s.attachments.size()) s.attachments.erase(s.attachments.begin() + idx);
+        });
+      }));
+      att.add(chip);
+    }
+    comp_box.add(att);
+  }
+
+  H ta = comp::textarea(st_.session_input, tr("输入消息…（Enter 发送，Shift+Enter 换行）"),
                         [this](const std::string& v) {
     st_.session_input = v;  // no re-render while typing (avoid caret jumps)
   },
                         [this](const std::string&) { send_message(); });
   ta.key("session-input");  // send_message() clears it directly after sending
   comp_box.add(ta);
+
   H tools = el("div", "composer-tools");
-  // left: session functions, compact buttons (icon + label; label collapses
-  // to icon-only when the toolbar is crowded, per user feedback)
+  // LEFT: what this message does (attach / command / plan / auto / permission).
+  H left_tools = el("div", "ct-left");
   // 文件 = upload an attachment. The click is handled by the DOM adapter
   // (bind_file_picker, wired in render()) because only the browser can open a
   // file chooser; there is no app-side click handler here on purpose.
   H upload = comp::icon_text_button("paperclip", tr("文件"), nullptr, "ghost");
   upload.key("upload-btn");
-  tools.add(upload);
-  tools.add(comp::icon_text_button("wand-magic-sparkles", "命令", [this](const std::string&) {
+  left_tools.add(upload);
+  left_tools.add(comp::icon_text_button("wand-magic-sparkles", tr("命令"),
+                                        [this](const std::string&) {
     // list skills; picking one inserts "/<name>" into the composer
     call_async("skill.list", Json::object(), [this](const BackendResult& r) {
       if (!r.ok) return;
@@ -1825,11 +2240,8 @@ VNodePtr UiApp::build_session() {
       });
     });
   }, "ghost"));
-  // 子代理 and 终端 used to sit here as well. Both were duplicates: the subagent
-  // list is a side panel (opened from the panel "+"), and terminals have their
-  // own drawer at the bottom of the page with a toggle of their own. Two ways in
-  // to the same place is noise in a row this narrow.
-  tools.add(comp::icon_text_button("diagram-project", "规划", [this](const std::string&) {
+  left_tools.add(comp::icon_text_button("diagram-project", tr("规划"),
+                                        [this](const std::string&) {
     bool open = !st_.plan_open;
     std::string sid = active_sid();
     update([&](AppState& s) { s.plan_open = open; });
@@ -1849,76 +2261,162 @@ VNodePtr UiApp::build_session() {
       });
     }
   }, "ghost"));
-  // middle: session settings (selects styled compactly)
+  // 自动挡: a toggle button, not a select - it is one bit and it is switched
+  // often. The label says which mode is active.
+  // 顺序：自动挡 在 批准模式 前面。先决定"谁来做"（人/AI），再决定"做到什么
+  // 程度能自己动手"（权限级别），读起来是从粗到细；反过来就成了"先定权限再定
+  // 谁来跑"，很别扭。批准模式也因此在最外侧——它点开的下拉朝外展开。
+  {
+    H auto_btn = comp::icon_text_button(st_.auto_mode ? "robot" : "hand",
+                                        st_.auto_mode ? tr("自动") : tr("手动"),
+                                        [this](const std::string&) {
+      bool next = !st_.auto_mode;
+      std::string sid = active_sid();
+      update([&](AppState& s) { s.auto_mode = next; });
+      if (!sid.empty()) {
+        call_async("session.setAutoMode", Json{{"sid", sid}, {"autoMode", next}});
+      }
+    }, st_.auto_mode ? "ghost on" : "ghost");
+    auto_btn.attr("title", st_.auto_mode ? tr("自动模式（点击切到手动）")
+                                        : tr("手动模式（点击切到自动）"));
+    left_tools.add(auto_btn);
+  }
+  // 权限: a compact select, but with the three levels spelled out (the values
+  // alone - approve/permissive/full - mean nothing).
+  {
+    H perm_sel = el("div", "bar-group");
+    std::vector<std::string> perms;
+    perms.push_back(tr("逐次批准"));
+    perms.push_back(tr("宽松"));
+    perms.push_back(tr("完全放行"));
+    H sel = comp::select(perms, st_.perm_index, [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      std::string perm = idx == 0 ? "approve" : idx == 2 ? "full" : "permissive";
+      std::string sid = active_sid();
+      update([&](AppState& s) {
+        s.perm_index = idx;
+        s.permission = perm;
+      });
+      if (!sid.empty()) {
+        call_async("session.setPermission", Json{{"sid", sid}, {"permission", perm}},
+                   [this, sid, perm](const BackendResult& r) {
+          if (r.ok) return;
+          if (r.code == "confirm-required") {
+            call_async("session.requestPermissionToken",
+                       Json{{"sid", sid}, {"newPermission", perm}},
+                       [this, sid, perm](const BackendResult& t) {
+              std::string token = jsonutil::get<std::string>(t.data, "token", "");
+              if (token.empty()) return;
+              call_async("session.setPermissionConfirm",
+                         Json{{"sid", sid}, {"permission", perm}, {"token", token}});
+            });
+          }
+        });
+      }
+    });
+    sel.attr("title", tr("文件权限"));
+    perm_sel.add(sel);
+    left_tools.add(perm_sel);
+  }
+  tools.add(left_tools);
   H grow = el("span", "grow");
   tools.add(grow);
+
+  // RIGHT: what the message is sent with (model / thinking / suspend / send).
+  H right_tools = el("div", "ct-right");
   // 模型不是一个下拉列表：真实安装里有多个供应商、每个几十个模型，还有能力
   // 和思考档位的差异，所以点开是一个真正的选择器（左供应商 / 右模型）。
   H model_btn = el("button", "model-pick-btn");
   model_btn.attr("type", "button");
-  model_btn.attr("title", tr("选择模型"));
+  model_btn.attr("title", st_.model.empty() ? tr("还没有选择模型")
+                                            : tr("选择模型"));
   model_btn.on(EventKind::kClick, [this](const std::string&) {
     open_model_picker("composer", "");
   });
   model_btn.add(comp::model_icon("", st_.model));
   model_btn.add(el("span", "mpb-name").text(st_.model.empty() ? tr("选择模型") : st_.model));
   model_btn.add(el("span", "mpb-caret").text("\u25be"));
-  tools.add(model_btn);
-  H perm_sel = el("div", "bar-group");
-  std::vector<std::string> perms;
-  perms.push_back("approve");
-  perms.push_back("permissive");
-  perms.push_back("full");
-  perm_sel.add(comp::select(perms, st_.perm_index, [this](const std::string& v) {
-    int idx = std::atoi(v.c_str());
-    std::string perm = idx == 0 ? "approve" : idx == 2 ? "full" : "permissive";
-    std::string sid = active_sid();
-    update([&](AppState& s) {
-      s.perm_index = idx;
-      s.permission = perm;
-    });
-    if (!sid.empty()) {
-      call_async("session.setPermission", Json{{"sid", sid}, {"permission", perm}},
-                 [this, sid, perm](const BackendResult& r) {
-        if (r.ok) return;
-        // low->high needs an explicit token confirmation; surface it
-        if (r.code == "confirm-required") {
-          call_async("session.requestPermissionToken",
-                     Json{{"sid", sid}, {"newPermission", perm}},
-                     [this, sid, perm](const BackendResult& t) {
-            std::string token = jsonutil::get<std::string>(t.data, "token", "");
-            if (token.empty()) return;
-            call_async("session.setPermissionConfirm",
-                       Json{{"sid", sid}, {"permission", perm}, {"token", token}});
-          });
+  // 上下文水位：贴在模型按钮底边的一小段线，而不是输入框下面横贯整行的一条
+  // （那是"进度条"的语汇，放在这里既抢眼又和发送按钮没有关系）。它是按钮
+  // 自身的装饰，宽度跟着按钮走，水位高了颜色才变，所以平时几乎看不见。
+  {
+    H mb = el("div", "model-btn-wrap");
+    mb.key("model-btn-wrap");
+    mb.add(model_btn);
+    int pct = st_.context_pct < 0 ? 0 : (st_.context_pct > 100 ? 100 : st_.context_pct);
+    H lvl = el("div", "model-level");
+    H lvl_fill = el("div", "model-level-fill");
+    lvl_fill.style("width", itos(pct) + "%");
+    if (st_.context_pct >= 85) lvl_fill.cls("hot");
+    else if (st_.context_pct >= 60) lvl_fill.cls("warm");
+    lvl.add(lvl_fill);
+    lvl.attr("title", tr("上下文水位 ") + itos(st_.context_pct) + "%");
+    mb.add(lvl);
+    right_tools.add(mb);
+  }
+  // 思考档位: only shown when the current model actually has levels - a control
+  // with no options is worse than no control.
+  {
+    std::vector<std::string> levels = thinking_levels_for(st_.model);
+    if (!levels.empty()) {
+      std::vector<std::string> opts;
+      opts.push_back(tr("默认"));
+      int sel = 0;
+      for (size_t i = 0; i < levels.size(); ++i) {
+        opts.push_back(thinking_label(levels[i]));
+        if (levels[i] == st_.thinking) sel = static_cast<int>(i) + 1;
+      }
+      H th = el("div", "bar-group");
+      H thsel = comp::select(opts, sel, [this, levels](const std::string& v) {
+        int idx = std::atoi(v.c_str());
+        std::string val = (idx <= 0 || idx > static_cast<int>(levels.size()))
+                              ? std::string() : levels[idx - 1];
+        std::string sid = active_sid();
+        update([&](AppState& s) { s.thinking = val; });
+        if (!sid.empty()) {
+          call_async("session.setThinking", Json{{"sid", sid}, {"thinking", val}});
         }
       });
+      thsel.attr("title", tr("思考档位"));
+      th.add(thsel);
+      right_tools.add(th);
     }
-  }));
-  tools.add(perm_sel);
+  }
   // 挂起 sits right next to 发送. Both read as a WORD when there is room and as
-  // an icon when there is not (an icon alone is ambiguous; a label alone is
-  // wide), so they carry the "text-wide" variant: icon hidden while the label
-  // fits. Their height never changes, so crossing the threshold cannot reflow
-  // the row.
+  // an icon when there is not. Their height never changes, so crossing the
+  // threshold cannot reflow the row.
+  //
+  // NOTE: 挂起 no longer flips optimistically. The backend owns the state (the
+  // loop may already be parked), so the button waits for its reply and only then
+  // changes label - a button that says "paused" before anything paused is a lie.
   H suspend = comp::icon_text_button(
       st_.suspended ? "play" : "pause", st_.suspended ? tr("恢复") : tr("挂起"),
       [this](const std::string&) {
     bool next = !st_.suspended;
     std::string sid = active_sid();
-    update([&](AppState& s) { s.suspended = next; });
-    if (!sid.empty()) {
-      call_async(next ? "session.suspend" : "session.resume", Json{{"sid", sid}});
+    if (sid.empty()) {
+      update([&](AppState& s) { s.suspended = next; });
+      return;
     }
+    call_async(next ? "session.suspend" : "session.resume", Json{{"sid", sid}},
+               [this, next](const BackendResult& r) {
+      if (!r.ok) {
+        toast(tr("操作失败：") + r.message);
+        return;
+      }
+      update([&](AppState& s) { s.suspended = next; });
+    });
   }, "ghost");
   suspend.key("suspend-btn").cls("text-wide");
-  tools.add(suspend);
+  right_tools.add(suspend);
   H send = comp::icon_text_button("paper-plane", tr("发送"),
                                   [this](const std::string&) { send_message(); },
                                   "primary");
   send.key("send-btn").cls("text-wide");
-  tools.add(send);
+  right_tools.add(send);
+  tools.add(right_tools);
   comp_box.add(tools);
+
   // "/" skill picker: an overlay floating ABOVE the composer (it must not
   // push the input around), dismissed by picking / clicking outside / Esc
   if (st_.skill_menu_open) {
@@ -2058,8 +2556,15 @@ VNodePtr UiApp::build_side_panel() {
                             [this](const std::string& k) { close_side_tab(k); },
                             [this](const std::string&) {
     // "+" opens a temporary page that aggregates every panel kind (with a
-    // description); it must never silently default to one page
-    update([&](AppState& s) { s.side_menu_open = !s.side_menu_open; });
+    // description); it must never silently default to one page.
+    //
+    // Opening it also EXPANDS the side panel: the "+" lives inside the panel, so
+    // if the panel were collapsed the click would look like it did nothing (and
+    // with a stale patch it once opened this page behind a hidden panel).
+    update([&](AppState& s) {
+      s.side_collapsed = false;
+      s.side_menu_open = !s.side_menu_open;
+    });
   }));
 
   // ---- the "+" page: pick a panel to add ----
@@ -2824,7 +3329,11 @@ void UiApp::load_preset_agents() {
 }
 
 void UiApp::load_skills() {
+  // Same in-flight guard as load_mcp_tools: this is called from a build.
+  if (skills_inflight_) return;
+  skills_inflight_ = true;
   call_async("skill.list", Json::object(), [this](const BackendResult& r) {
+    skills_inflight_ = false;
     std::vector<AppState::SkillRow> rows;
     if (r.ok) {
       const Json& arr = r.data.contains("skills") ? r.data["skills"] : r.data;
@@ -2838,6 +3347,7 @@ void UiApp::load_skills() {
             row.name = jsonutil::get<std::string>(s, "name", "");
             row.title = jsonutil::get<std::string>(s, "title", "");
             row.description = jsonutil::get<std::string>(s, "description", "");
+            row.dir = jsonutil::get<std::string>(s, "dir", "");
             row.loadable = jsonutil::get<bool>(s, "loadable", true);
           }
           if (!row.name.empty()) rows.push_back(row);
@@ -4250,17 +4760,28 @@ VNodePtr UiApp::build_overlays() {
 // Actions
 // ===========================================================================
 void UiApp::send_message() {
-  if (st_.session_input.empty()) return;
+  // A message may be attachments only (dropping a file and hitting send).
+  if (st_.session_input.empty() && st_.attachments.empty()) return;
   std::string text = st_.session_input;
+  // Attachments travel with the message as explicit paths. The model reads them
+  // with its file tools, so the text carries the list rather than a mystery
+  // "@file" token the UI cannot show after sending.
+  std::string shown = text;
+  for (size_t i = 0; i < st_.attachments.size(); ++i) {
+    if (!shown.empty()) shown += "\n";
+    shown += "@" + st_.attachments[i];
+  }
+  if (text.empty()) text = shown;   // attachments only: the paths are the message
   std::string sid = active_sid();
   // echo the user's message immediately (optimistic; the assistant text streams in)
   update([&](AppState& s) {
     comp::ChatMsg m;
     m.role = "user";
-    m.text = text;
+    m.text = shown;
     m.time = "刚刚";
     s.messages.push_back(m);
     s.session_input.clear();
+    s.attachments.clear();
   });
   // The DOM textarea still holds the typed text: no re-render happens while
   // typing, so both the old and new trees say value="". Write the cleared
@@ -4278,7 +4799,17 @@ void UiApp::send_message() {
     });
     return;
   }
-  call_async("session.send", Json{{"sid", sid}, {"text", text}});
+  Json attachments = Json::array();
+  for (size_t i = 0; i < st_.attachments.size(); ++i) attachments.push_back(st_.attachments[i]);
+  // 发送时把当前模型一起带上：会话页上换过的模型必须真的用于这次请求，而不是
+  // 只改了按钮上的字。
+  Json args = Json{{"sid", sid}, {"text", text}, {"attachments", attachments}};
+  if (!st_.model.empty()) args["model"] = st_.model;
+  if (!st_.thinking.empty()) args["thinking"] = st_.thinking;
+  call_async("session.send", args,
+             [this](const BackendResult& r) {
+    if (!r.ok) toast(tr("发送失败：") + r.message);
+  });
 }
 
 std::string UiApp::rel_time_for_test(int64_t ms) { return rel_time(ms); }
@@ -4315,12 +4846,16 @@ void UiApp::open_modal_page(const std::string& page) {
   st_.skill_menu_open = false;
   st_.side_menu_open = false;
   st_.modal_page = page;
+  // A modal is not a tab navigation: it always enters the same way, regardless
+  // of what the tab stack says about the page underneath.
+  page_dir_.clear();
   render();
 }
 
 void UiApp::close_modal_page() {
   if (st_.modal_page.empty()) return;
   st_.modal_page.clear();
+  page_dir_.clear();
   render();
 }
 
@@ -4394,6 +4929,64 @@ void UiApp::delete_session(const std::string& sid) {
       views_.erase(sid);
     }
     load_projects();  // refresh counts + lists
+  });
+}
+
+// 重命名：行内编辑。开始编辑时把当前标题放进草稿，Enter/失焦提交。
+void UiApp::begin_rename_session(const std::string& sid) {
+  update([&](AppState& s) {
+    for (size_t i = 0; i < s.projects.size(); ++i) {
+      for (size_t k = 0; k < s.projects[i].sessions.size(); ++k) {
+        ProjectCard::SessionRow& r = s.projects[i].sessions[k];
+        // only one row is ever renaming; clear the others so two inputs cannot
+        // both hold focus state
+        if (r.sid == sid) {
+          r.renaming = true;
+          r.rename_text = r.title;
+        } else {
+          r.renaming = false;
+        }
+      }
+    }
+  });
+  session_rename_focus_ = true;
+  render();
+}
+
+void UiApp::commit_rename_session(const std::string& sid) {
+  std::string title;
+  update([&](AppState& s) {
+    for (size_t i = 0; i < s.projects.size(); ++i) {
+      for (size_t k = 0; k < s.projects[i].sessions.size(); ++k) {
+        ProjectCard::SessionRow& r = s.projects[i].sessions[k];
+        if (r.sid != sid) continue;
+        title = r.rename_text;
+        r.renaming = false;
+      }
+    }
+  });
+  if (sid.empty() || title.empty()) return;
+  // optimistic: the row shows the new name immediately; the reply only decides
+  // whether we have to revert.
+  update([&](AppState& s) {
+    for (size_t i = 0; i < s.projects.size(); ++i) {
+      for (size_t k = 0; k < s.projects[i].sessions.size(); ++k) {
+        if (s.projects[i].sessions[k].sid == sid) {
+          s.projects[i].sessions[k].title = title;
+        }
+      }
+    }
+    // the open tab's title comes from `sessions`, not from the project card
+    for (size_t i = 0; i < s.sessions.size(); ++i) {
+      if (s.sessions[i].id == sid) s.sessions[i].title = title;
+    }
+  });
+  call_async("session.rename", Json{{"sid", sid}, {"title", title}},
+             [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("重命名失败：") + r.message);
+      load_projects();
+    }
   });
 }
 
@@ -5440,27 +6033,32 @@ void UiApp::handle_drop(const std::string& kind, const std::string& value) {
     handle_dropped_folder(value);
     return;
   }
-  std::string insert;
-  if (kind == "url") {
-    insert = value;
-    toast(tr("已插入链接"));
-  } else {
-    // a bare file name: keep it as an attachment reference the model can read
-    insert = "@" + value;
-    toast(tr("已插入文件名"));
-  }
-  if (st_.active_tab == "home" || st_.active_tab == "settings") {
-    // nothing to insert into yet: say so instead of silently doing nothing
-    toast(st_.active_tab == "home" ? tr("请先打开一个会话") : tr("设置页无法插入"));
+  if (st_.active_tab == "home") {
+    toast(tr("请先打开一个会话"));
     return;
   }
+  if (kind == "url") {
+    // A link IS text: it belongs in the message, where it can be read in context.
+    update([&](AppState& s) {
+      if (!s.session_input.empty() && s.session_input.back() != ' ') s.session_input += ' ';
+      s.session_input += value;
+    });
+    VNodePtr ta = find_by_key(tree_, "session-input");
+    if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
+    toast(tr("已插入链接"));
+    return;
+  }
+  // A dropped FILE is an attachment, not text: it becomes a chip like an
+  // uploaded one, so the model still gets a readable path but the input stays
+  // clean.
   update([&](AppState& s) {
-    if (!s.session_input.empty() && s.session_input.back() != ' ') s.session_input += ' ';
-    s.session_input += insert;
+    bool dup = false;
+    for (size_t k = 0; k < s.attachments.size(); ++k) {
+      if (s.attachments[k] == value) dup = true;
+    }
+    if (!dup) s.attachments.push_back(value);
   });
-  // keep the caret in the composer so the user can keep typing
-  VNodePtr ta = find_by_key(tree_, "session-input");
-  if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
+  toast(tr("已添加附件"));
 }
 
 // An upload finished. The files were stored inside the project by the backend,
@@ -5481,25 +6079,28 @@ void UiApp::handle_upload_reply(const std::string& reply_json) {
     toast(err.empty() ? tr("未选择文件") : (tr("上传失败") + "：" + err));
     return;
   }
-  if (st_.active_tab == "home" || st_.active_tab == "settings") {
+  if (st_.active_tab == "home") {
     toast(tr("请先打开一个会话"));
     return;
   }
-  std::string insert;
-  for (size_t i = 0; i < files.size(); ++i) {
-    std::string rel = jsonutil::get<std::string>(files[i], "rel", "");
-    if (rel.empty()) continue;
-    if (!insert.empty()) insert += " ";
-    insert += "@" + rel;
-  }
-  if (insert.empty()) return;
+  // Attachments become chips above the input, NOT @paths in the text: a path is
+  // not text, and mixing the two made it impossible to see what was attached.
+  size_t added = 0;
   update([&](AppState& s) {
-    if (!s.session_input.empty() && s.session_input.back() != ' ') s.session_input += ' ';
-    s.session_input += insert;
+    for (size_t i = 0; i < files.size(); ++i) {
+      std::string rel = jsonutil::get<std::string>(files[i], "rel", "");
+      if (rel.empty()) continue;
+      bool dup = false;
+      for (size_t k = 0; k < s.attachments.size(); ++k) {
+        if (s.attachments[k] == rel) dup = true;
+      }
+      if (dup) continue;
+      s.attachments.push_back(rel);
+      ++added;
+    }
   });
-  VNodePtr ta = find_by_key(tree_, "session-input");
-  if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
-  toast(tr("已添加附件") + "（" + itos(static_cast<int>(files.size())) + "）");
+  if (added == 0) return;
+  toast(tr("已添加附件") + "（" + itos(static_cast<int>(added)) + "）");
 }
 
 // Terminals matching the current filter, in display order. An empty filter means
@@ -5672,7 +6273,7 @@ void UiApp::close_tab(const std::string& id) {
     // reused), so drop it.
     views_.erase(id);
     if (last_session_key_ == id) last_session_key_.clear();
-    switch_tab(next);
+    switch_tab(next, -1);  // closing always retraces: animate as a "back"
   }
 }
 
@@ -5743,6 +6344,9 @@ void UiApp::close_side_tab(const std::string& id) {
         break;
       }
     }
+    // Closing a panel while the "+" page is open must not leave that page
+    // standing over the panel you just closed: the page belongs to the panel.
+    s.side_menu_open = false;
     if (!closing_active) return;
     // Same rule as the top strip: go back to the panel you came from, skipping
     // ones that are gone. Only fall back to the first tab when nothing is left.

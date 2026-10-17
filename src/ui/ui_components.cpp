@@ -88,12 +88,33 @@ H button(const std::string& label, EventFn on_click, const std::string& variant)
   return b;
 }
 
+// An icon-button's glyph argument is either a literal character ("✕", "+", "↻")
+// or a Font Awesome name ("folder-open", "trash", "pen"). Rendering an FA name
+// as text is what put the word "folder-open" on a project card, so detect the
+// shape: an all-[a-z0-9-] string is an FA name and becomes an <i class="fa ...">.
+static bool looks_like_fa_name(const std::string& s) {
+  if (s.empty()) return false;
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+    if (!ok) return false;
+  }
+  return true;
+}
+
 H icon_button(const std::string& glyph, const std::string& tip, EventFn on_click) {
   H b = el("button", "icon-btn");
   b.attr("type", "button");
   b.attr("title", tip);
+  b.attr("aria-label", tip);
   b.on(EventKind::kClick, on_click);
-  b.text(glyph);
+  if (looks_like_fa_name(glyph)) {
+    H i = el("i", "fa fa-" + glyph);
+    i.attr("aria-hidden", "true");
+    b.add(i);
+  } else {
+    b.text(glyph);
+  }
   return b;
 }
 

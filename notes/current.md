@@ -914,3 +914,60 @@ The process of project: P0 环境搭建 + P1 AppCore
     * 修一处历史遗留：`agent_loop.cpp` 里一条注释被写成了占位符文本，已改回
       通顺描述。
   - 测试 197 用例 / 1726 断言。
+
+<44>(SOLVED): WhaleUI 二次验收（0243808）—— 布局修好后跑真实 UI，发现 4 个新缺陷。
+  - 上游 `e87979c` 修掉 flex 主轴视口单位塌 1px 后，重新拉头文件、重建库、
+    `--whaleui=y` 重编，桌面 UI **完整渲染并可交互**（主页/探索/设置、标签切换）。
+  - 逐屏对比浏览器版发现 4 处不对，已写成复现交上游：WhaleUI `temp/incorrect2/`
+    （`incorrect2.cpp` + `README.md`，用例直接加载 `web/style.css`）：
+    * H. flex 项带 `overflow:hidden` 就塌成 1px（1x342 vs 228x18）。触发条件是
+      `overflow != visible`，与 `min-width`、样式表都无关。根因：`layout_flex`
+      把"可收缩到 0"当成"初始尺寸 0"（`layout.cpp:3550` 地板 + `:3631` 的 1px 兜底）。
+      影响：探索页所有描述不可见。
+    * I. `<button>` 的显式 `height` 被 UA `min-height` 压掉（34x32 vs 34x19）。
+      根因：`theme_css.cpp:179` 的 `min-height: var(--btn-h)`（fluent 32px），
+      而 `min-height` 恒优先于 `height`；浏览器 UA 没这条。影响：开关 knob 脱轨、
+      所有按钮偏高。
+    * J. grid `repeat(auto-fill, minmax(400px,1fr))` 列宽算成 122px（应 ~510）：
+      `minmax` 下限未参与列数、`1fr` 没分剩余空间。连带 label 折行、toggle 只剩 8px。
+      影响：设置页挤成一列。对照 `display:block` 正常。
+    * K. flex 行含 `select` 时可用宽度少 52px（866 vs 918，换成 div 就正常）。
+  - 关键方法：复现用例**必须加载真实 style.css**——最初用简化 HTML 测不出来，
+    换成真实样式表 + 真实 DOM 结构才复现（grid 缺陷尤其如此）。
+  - 详细清单与规避见 `doc-internal/ui-whaleui.md` §5（H/I/J/K）。
+
+<45>(SOLVED): 会话页/主页细节 + 设置整窗 + 图表动画 + 方向感知切换。
+  - **上下文水位贴边**：删掉输入框下方那条横贯整行的 3px 进度条（用户说"太丑"），
+    改成贴在模型选择按钮**底边**的 2px 细线（`.model-btn-wrap` + `.model-level`，
+    absolute 定位，左右各缩进 3px，`pointer-events:none`）。低水位是 55% 透明度的
+    中性色，60%+ 变琥珀、85%+ 变红——平时几乎看不见，只在需要时提示。侧栏用量页
+    仍保留完整数字。
+  - **自动挡 ↔ 批准模式互换**：工具栏左半顺序改为 文件/命令/规划/**自动**/**批准**。
+    理由是"先决定谁来做（人/AI），再决定它能自己动手到什么程度"；下拉放在最外侧
+    也让它朝外展开。
+  - **不再预置 GPT 模型**：`ModelTable::list_models` 删掉"空列表就回退预置表"的
+    分支——一个从没连过 API 的供应商下面列着 gpt-4o/claude 会让人以为已经配好，
+    实际一个都调不通。`provider.listModels` 失败时也只返回本地已知模型（用户自定义
+    + 上次成功获取的），level 从 `preset` 改成 `local`。预置表仍用于 `resolve()`
+    （用户手写一个已知 id 时补能力标签）。
+  - **默认模型不再写死**：`SessionView::model` / `AppState::model` 的默认值从
+    `gpt-4o-mini` 改成空。空值 → 按钮显示"选择模型"，若设置里配了
+    `session.default.model` 则用它。同时 `session.send` 现在把当前 model/thinking
+    一起带上（后端先 `set_model`/`set_thinking` 再发），修掉"换了模型立刻发送仍用
+    旧模型"的竞态。
+  - **设置整窗覆盖**：`build_shell` 在 `modal_page=="settings"` 时**不渲染标签条**，
+    直接把设置页作为 window 的唯一子节点。设置里改的是整窗的东西（外观/标签位置/
+    语言），标签栏在旁边既没用又诱导用户以为能切走。
+  - **用量统计动画 + 真实按天柱状图**：后端一直在返回 `byDay` 但没人画。新增
+    `.usage-byday` 柱状图：按时间窗补齐空白日（0 高度柱也占位，否则时间轴会骗人），
+    按峰值归一化，`grow-y` 从 0 长到 `--grow`，逐根 16ms 错开；窗口/供应商变化时
+    整个 plot 重新 key，动画重播。日期轴用同一套 flex 规则（柱子与标签逐列对齐）。
+    按模型的 `ub-fill` 改成 `grow-x` 从左铺开 + 行错开进场；总计四项依次淡入；
+    左侧 scope 列表用 `anim-list`。柱子最大宽度 72px 且整组居中（7 天窗口不会变成
+    1000px 里七根细棍）。
+  - **方向感知切页**：`switch_tab(id, dir)`。默认按 `tab_history` 判定——目标正好是
+    栈顶（刚离开的那一页）就是"后退"，播 `anim-slide-right`（从左进）；其余都是
+    前进，播 `anim-slide-left`。关闭标签时栈已 pop，显式传 `dir=-1`，所以关标签
+    永远是后退动画。`open_modal_page/close_modal_page` 清掉方向，modal 不参与。
+  - 测试 201 用例 / 1819 断言（新增：贴边水位、自动挡顺序、方向感知、设置覆盖
+    标签栏、按天图表；`model_table_list_merges_and_falls_back` 改为断言空列表）。

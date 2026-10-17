@@ -100,8 +100,13 @@ FS_TEST(uiapp_switch_home_tabs) {
   app.mount();
   app.update([](AppState& s) { s.home_tab = 2; });  // 用量统计
   EXPECT_TRUE(dump_has(dom, "按模型"));
+  EXPECT_TRUE(dump_has(dom, "按天"));   // the real byDay chart, not a second table
+  EXPECT_TRUE(dump_has(dom, "bar-chart"));
   app.update([](AppState& s) { s.home_tab = 0; });  // 探索
-  EXPECT_TRUE(dump_has(dom, "输入关键词"));
+  // 探索 is the capability browser: MCP + Skill, searchable
+  EXPECT_TRUE(dump_has(dom, "搜索名称或说明"));
+  EXPECT_TRUE(dump_has(dom, "MCP"));
+  EXPECT_TRUE(dump_has(dom, "Skill"));
 }
 
 // The session list is always in the tree: CSS picks how to show it (wide shows
@@ -231,7 +236,7 @@ FS_TEST(uiapp_session_tabs_keep_their_own_state) {
   // open session B: its own (empty) view, its own default panel width
   app.open_session("sess_b", "会话B");
   EXPECT_EQ(app.state().messages.size(), size_t(0));
-  EXPECT_EQ(app.state().side_width, 320);
+  EXPECT_EQ(app.state().side_width, 360);  // the new default width
   app.update([](AppState& s) {
     comp::ChatMsg m;
     m.role = "user";
@@ -247,7 +252,7 @@ FS_TEST(uiapp_session_tabs_keep_their_own_state) {
   app.show("sess_b");
   ASSERT_TRUE(app.state().messages.size() == 1);
   EXPECT_EQ(app.state().messages[0].text, std::string("BBB"));
-  EXPECT_EQ(app.state().side_width, 320);  // B keeps its own default
+  EXPECT_EQ(app.state().side_width, 360);  // the new default width  // B keeps its own default
 }
 
 // The side-panel divider reports the final width, which must land in state.
@@ -388,7 +393,11 @@ FS_TEST(uiapp_drop_routes_by_kind) {
 
   app.update([](AppState& s) { s.session_input.clear(); });
   dom.fire_drop_for_test("file", "notes.md");
-  EXPECT_TRUE(app.state().session_input.find("@notes.md") != std::string::npos);
+  // A dropped file is an ATTACHMENT, not text: it becomes a chip above the
+  // input, so the textarea keeps only what was typed.
+  EXPECT_TRUE(app.state().session_input.empty());
+  ASSERT_TRUE(app.state().attachments.size() == 1);
+  EXPECT_EQ(app.state().attachments[0], std::string("notes.md"));
 
   // a folder is not text: it is resolved+opened through the backend instead
   app.update([](AppState& s) { s.session_input.clear(); });
@@ -515,7 +524,50 @@ FS_TEST(uiapp_every_page_declares_an_animation) {
   EXPECT_TRUE(d2.find("anim-view") != std::string::npos);
   app.show("home");
   std::string d3 = dom.dump();
-  EXPECT_TRUE(d3.find("anim-view") != std::string::npos);
+  // home is reached by a tab switch, so it carries a DIRECTIONAL slide rather
+  // than the neutral view animation; any anim-* class means it is declared.
+  EXPECT_TRUE(d3.find("anim-") != std::string::npos);
+}
+
+// 前进/后退方向感知：去一个新标签从右滑入；回到"上一页"（刚离开的那一页）
+// 时播放反向动画，从左滑入。动画方向与实际导航方向一致，而不是永远从同一侧
+// 出现。注意"上一个"是字面意思：只有目标 == 栈顶（刚来的地方）才算后退，
+// 回到很久以前访问过的标签仍然是前进。
+FS_TEST(uiapp_tab_switch_direction_aware) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    // seed both tabs but stay on home, so the first show() is a real navigation
+    SessionTab a;
+    a.id = "sess_a";
+    s.sessions.push_back(a);
+    s.tab_ids.push_back("sess_a");
+    SessionTab b;
+    b.id = "sess_b";
+    s.sessions.push_back(b);
+    s.tab_ids.push_back("sess_b");
+  });
+  // home -> sess_a: forward (from the right)
+  app.show("sess_a");
+  EXPECT_TRUE(dom.dump().find("anim-slide-left") != std::string::npos);
+  // sess_a -> sess_b: forward
+  app.show("sess_b");
+  EXPECT_TRUE(dom.dump().find("anim-slide-left") != std::string::npos);
+  // sess_b -> sess_a: sess_a is exactly the previous page, so this is a retrace
+  app.show("sess_a");
+  EXPECT_TRUE(dom.dump().find("anim-slide-right") != std::string::npos);
+  // sess_a -> sess_b is a retrace again (we just came from it)
+  app.show("sess_b");
+  EXPECT_TRUE(dom.dump().find("anim-slide-right") != std::string::npos);
+  // closing sess_b returns to sess_a: closing is always a backward move
+  app.close_tab("sess_b");
+  EXPECT_EQ(app.state().active_tab, std::string("sess_a"));
+  EXPECT_TRUE(dom.dump().find("anim-slide-right") != std::string::npos);
+  // home is not the page we just left, so this is forward, not a retrace
+  app.show("home");
+  EXPECT_TRUE(dom.dump().find("anim-slide-left") != std::string::npos);
 }
 
 // Creating a terminal is one click, and the tab strip offers a close that does
@@ -574,7 +626,7 @@ FS_TEST(uiapp_reopened_tab_appends) {
 }
 
 // The 文件 button uploads (a DOM-adapter binding opens the chooser) instead of
-// opening the file panel; the reply inserts the saved paths into the composer.
+// opening the file panel; the reply adds ATTACHMENTS above the composer.
 FS_TEST(uiapp_file_button_uploads) {
   NullDom dom;
   AppState st = AppState::make();
@@ -589,10 +641,59 @@ FS_TEST(uiapp_file_button_uploads) {
       "{\"files\":[{\"rel\":\".flashsight/uploads/a.png\",\"name\":\"a.png\","
       "\"size\":10},{\"rel\":\".flashsight/uploads/b.pdf\",\"name\":\"b.pdf\","
       "\"size\":20}]}");
-  const std::string& in = app.state().session_input;
-  EXPECT_TRUE(in.find("@.flashsight/uploads/a.png") != std::string::npos);
-  EXPECT_TRUE(in.find("@.flashsight/uploads/b.pdf") != std::string::npos);
+  // chips, not text: the message box stays clean
+  EXPECT_TRUE(app.state().session_input.empty());
+  ASSERT_TRUE(app.state().attachments.size() == 2);
+  EXPECT_EQ(app.state().attachments[0], std::string(".flashsight/uploads/a.png"));
+  EXPECT_EQ(app.state().attachments[1], std::string(".flashsight/uploads/b.pdf"));
+  EXPECT_TRUE(dump_has(dom, "composer-attach"));
+  EXPECT_TRUE(dump_has(dom, "a.png"));
   EXPECT_FALSE(app.state().toast.empty());
+}
+
+// 上下文水位贴在模型按钮的底边上（模型按钮的装饰），不再是输入框下方横贯整行
+// 的一条进度条；颜色/宽度仍由 context_pct 驱动。
+FS_TEST(uiapp_context_level_hugs_model_button) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.context_pct = 92;
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("model-btn-wrap") != std::string::npos);
+  EXPECT_TRUE(d.find("model-level") != std::string::npos);
+  EXPECT_TRUE(d.find("model-level-fill hot") != std::string::npos);
+  // the old full-width bar is gone
+  EXPECT_TRUE(d.find("composer-level") == std::string::npos);
+  // and it lives inside the right-hand group, right next to the model button
+  size_t wrap = d.find("model-btn-wrap");
+  size_t btn = d.find("model-pick-btn");
+  ASSERT_TRUE(wrap != std::string::npos && btn != std::string::npos);
+  EXPECT_TRUE(wrap < btn);
+  // level colours are thresholds: 42% is neutral, 70% warm
+  app.update([](AppState& s) { s.context_pct = 70; });
+  EXPECT_TRUE(dom.dump().find("model-level-fill warm") != std::string::npos);
+  app.update([](AppState& s) { s.context_pct = 20; });
+  std::string d2 = dom.dump();
+  EXPECT_TRUE(d2.find("model-level-fill warm") == std::string::npos);
+  EXPECT_TRUE(d2.find("model-level-fill hot") == std::string::npos);
+}
+
+// 工具栏顺序：自动挡在批准模式之前（先定谁来做，再定能自己动到什么程度）。
+FS_TEST(uiapp_auto_mode_before_permission) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  std::string d = dom.dump();
+  size_t auto_pos = d.find("自动");
+  size_t perm_pos = d.find("逐次批准");
+  ASSERT_TRUE(auto_pos != std::string::npos && perm_pos != std::string::npos);
+  EXPECT_TRUE(auto_pos < perm_pos);
 }
 
 // The side panel "+" opens a page listing every panel kind (with a reason to
@@ -1859,6 +1960,10 @@ FS_TEST(uiapp_settings_is_modal_page) {
   EXPECT_EQ(app.state().modal_page, std::string("settings"));
   EXPECT_TRUE(dump_has(dom, "设置"));
   EXPECT_TRUE(dump_has(dom, "常规"));
+  // 设置是整窗页面：它覆盖标签栏，而不是缩在标签栏下面
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("class=\"tabs\"") == std::string::npos);
+  EXPECT_TRUE(d.find("tab-title") == std::string::npos);
   // switching tabs dismisses it (it belongs to the tab it was opened over)
   app.update([](AppState& s) {
     seed_session(s, "sess_a");
@@ -1894,11 +1999,43 @@ FS_TEST(uiapp_project_card_session_rows) {
     p.sessions.push_back(r2);
     p.session_count = 2;
   });
-  // a running turn is marked as such, and both rows carry a delete affordance
+  // a running turn is marked as such, and both rows carry hover actions
+  // (rename + delete) as one group
   EXPECT_TRUE(dump_has(dom, "ps-dot running"));
-  EXPECT_TRUE(dump_has(dom, "ps-del"));
+  EXPECT_TRUE(dump_has(dom, "ps-acts"));
   EXPECT_TRUE(dump_has(dom, "在跑的那个"));
   EXPECT_TRUE(dump_has(dom, "闲着的那个"));
+  // the identity column offers the primary action directly
+  EXPECT_TRUE(dump_has(dom, "proj-new"));
+  EXPECT_TRUE(dump_has(dom, "新建会话"));
+}
+
+// Renaming is inline: the row becomes an input, Enter (or blur) commits.
+FS_TEST(uiapp_session_inline_rename) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    ProjectCard& p = s.projects[0];
+    p.sessions.clear();
+    ProjectCard::SessionRow r;
+    r.sid = "s1";
+    r.title = "旧名字";
+    p.sessions.push_back(r);
+    p.session_count = 1;
+  });
+  app.begin_rename_session("s1");
+  EXPECT_TRUE(app.state().projects[0].sessions[0].renaming);
+  // the row turned into an input seeded with the current title
+  EXPECT_TRUE(dump_has(dom, "ps-rename-input"));
+  EXPECT_TRUE(dump_has(dom, "旧名字"));
+  app.update([](AppState& s) { s.projects[0].sessions[0].rename_text = "新名字"; });
+  app.commit_rename_session("s1");
+  EXPECT_FALSE(app.state().projects[0].sessions[0].renaming);
+  EXPECT_EQ(app.state().projects[0].sessions[0].title, std::string("新名字"));
+  EXPECT_TRUE(dump_has(dom, "新名字"));
 }
 
 // Deleting a session is destructive, so it goes through a confirm modal.

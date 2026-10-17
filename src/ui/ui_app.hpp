@@ -51,6 +51,8 @@ struct ProjectCard {
     std::string title;
     int64_t updated_ms = 0;  // full.json mtime; 0 = unknown
     bool running = false;    // a turn is in flight right now
+    bool renaming = false;   // inline rename in progress
+    std::string rename_text; // draft while renaming
   };
   std::vector<SessionRow> sessions;
 };
@@ -107,22 +109,30 @@ struct AppState {
   std::string explore_query;
   Json usage;              // usage.query result (empty => show placeholders)
   bool usage_loaded = false;
+  std::string usage_scope;  // provider id filter ("" = 总计)
+  int usage_range = 1;      // index into 1天/7天/30天/全部
 
   // ---- session (active one) ----
   std::string session_input;
+  // Attached files/images shown as chips ABOVE the input (a path is not text:
+  // mixing it into the message made it impossible to tell what was attached).
+  std::vector<std::string> attachments;
   std::vector<comp::ChatMsg> messages;
   // the active session's history has been fetched. Used as the page animation's
   // replay token: the page animates when it is created, and again when the
   // history actually arrives - otherwise a slow load plays the animation over
   // an empty page and it is gone before there is anything to see.
   bool session_loaded = false;
-  std::string model = "gpt-4o-mini";
+  std::string model;
   int model_index = 0;
   std::string permission = "permissive";
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
   int context_pct = 42;
+  // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
+  // （粗匹配 + 用户在模型设置里的覆盖），不是全局固定枚举。
+  std::string thinking;
   std::string session_cost = "¥0.21";
 
   // ---- side panel ----
@@ -136,7 +146,7 @@ struct AppState {
   // explanation), not a small popup: it is where new panels are discovered, and
   // a menu could not carry the descriptions. Picking one opens that panel.
   bool side_menu_open = false;
-  int side_width = 320;         // side panel width (px); persisted in state
+  int side_width = 360;         // side panel width (px); persisted in state
   bool side_collapsed = false;  // side panel hidden (toggle in the divider)
   // ---- side panel / 文件树 ----
   // The file tree state lives per PANEL (SideTab::path/entries/preview), because
@@ -344,6 +354,7 @@ struct AppState {
   };
   std::vector<SkillRow> skills;            // skill.list result
   bool skills_loaded = false;
+  bool skills_inflight = false;            // request in flight (build-driven load)
   std::string skill_filter;                // 本地搜索（列表可能很长）
   std::string skill_new_dir;
   // ---- settings / MCP 与外部工具 ----
@@ -355,6 +366,7 @@ struct AppState {
   };
   std::vector<McpRow> mcp_tools;
   bool mcp_loaded = false;
+  bool mcp_inflight = false;  // request in flight (build-driven load)
   std::string mcp_new_name;
   std::string mcp_new_dir;
   std::string mcp_filter;   // 本地搜索
@@ -401,20 +413,27 @@ struct SessionView {
   std::vector<comp::ChatMsg> messages;
   bool session_loaded = false;
   std::string session_input;
-  std::string model = "gpt-4o-mini";
+  std::vector<std::string> attachments;
+  // 空 = 还没选模型。凭空给一个 gpt-4o-mini 会让人以为它已经配好且能用，而
+  // 实际供应商可能一个模型都没连；按钮显示"选择模型"，或在设置里配了会话
+  // 默认模型时用那一个（见 build_session / send_message）。
+  std::string model;
   int model_index = 0;
   std::string permission = "permissive";
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
   int context_pct = 42;
+  // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
+  // （粗匹配 + 用户在模型设置里的覆盖），不是全局固定枚举。
+  std::string thinking;
   std::string session_cost = "¥0.21";
 
   std::vector<SideTab> side_tabs;
   std::string active_side = "usage";
   int side_seq = 0;
   bool side_menu_open = false;
-  int side_width = 320;      // side panel width (px); persisted across switches
+  int side_width = 360;      // side panel width (px); persisted across switches
   bool side_collapsed = false;  // side panel hidden
 
   std::string active_pid;
@@ -528,6 +547,9 @@ class UiApp {
   // 删除会话（先确认；不可恢复）
   void confirm_delete_session(const std::string& sid, const std::string& title);
   void delete_session(const std::string& sid);
+  // 重命名会话：行内编辑，失焦/Enter 提交
+  void begin_rename_session(const std::string& sid);
+  void commit_rename_session(const std::string& sid);
   // handle a drop anywhere on the window. kind: "dir" | "file" | "url" | "text"
   // (a folder is opened as a project; a file name / url / text goes to the
   // composer as an attachment reference)
@@ -660,6 +682,15 @@ class UiApp {
   // switch / click - focusing every render would fight the composer, since
   // pump() re-renders several times a second)
   bool term_focus_pending_ = false;
+  // Build-driven loads (the explore page needs the skill/MCP lists) must not
+  // re-request on every render while the first reply is still in flight - that
+  // request storm starved the event loop and made clicks look dead.
+  bool skills_inflight_ = false;
+  bool mcp_inflight_ = false;
+  // same idea for the inline session-rename input: focus it on the render that
+  // starts the rename, not on every render (pump re-renders ~4x/sec and would
+  // steal focus back from whatever the user clicked).
+  bool session_rename_focus_ = false;
   // a grid fetch is in flight (pump re-reads the visible terminal's screen; the
   // guard keeps a slow reply from stacking up requests)
   bool term_grid_inflight_ = false;
@@ -680,6 +711,11 @@ class UiApp {
   // on AppState are the live copy of whichever scope is active.
   KeyedStore<SessionView> views_;
   std::string last_session_key_;  // sid whose view the flat fields currently hold
+  // 方向感知：这次切页是"前进"还是"后退"。前进（去了一个不在访问栈里的页）
+  // 从右侧滑入，后退（回到栈顶那一页，比如关掉标签回到来处）从左侧滑入，方向
+  // 与实际导航方向一致。在 switch_tab 里按 tab_history 判定，build_shell 读它
+  // 选动画意图。"1"=前进，"-1"=后退，空=默认。
+  std::string page_dir_;
 
   // backend event handler (bound in mount)
   void on_backend_event(const std::string& event, const Json& payload);
@@ -697,7 +733,7 @@ class UiApp {
   // load views_[sid] into the flat session fields (fresh defaults when absent)
   void load_session_view(const std::string& sid);
   // switch to `id`, saving the current tab's view and restoring the target's
-  void switch_tab(const std::string& id);
+  void switch_tab(const std::string& id, int dir = 0);
   // pull history + system ops + tool calls for a session into its view
   void load_session(const std::string& sid);
 

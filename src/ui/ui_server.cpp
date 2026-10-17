@@ -174,6 +174,11 @@ FsResult UiServer::start(int port) {
   impl_->svr->Get("/(.*)", [](const httplib::Request& req, httplib::Response& res) {
     std::string path = req.matches.size() > 1 ? req.matches[1].str() : "";
     if (path.empty() || path == "/") path = "index.html";
+    // The bundle is rebuilt constantly during development, but the filenames
+    // never change (fs_ui.wasm, style.css). Without no-store the browser serves
+    // its cached copy after a rebuild and the app behaves like the fix was never
+    // made - which is exactly how a framework patch "did not work".
+    res.set_header("Cache-Control", "no-store, max-age=0");
     for (size_t i = 0; i < assets::kFiles().size(); ++i) {
       const assets::Asset& a = assets::kFiles()[i];
       if (path == a.name) {

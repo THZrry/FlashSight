@@ -232,6 +232,23 @@ FsResult SessionManager::update_session_settings(const std::string& sid,
   return ok ? FsResult::success() : FsResult::error(ErrCode::kIo, err);
 }
 
+// 重命名会话：title 存在 meta 里（不是 sessionSettings —— 它是身份的一部分，
+// 不是模型调用的参数），列表页读的就是它。
+FsResult SessionManager::rename_session(const std::string& sid, const std::string& title) {
+  if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty sid");
+  Json full;
+  FsResult r = load_full_checked(sid, &full);
+  if (!r.ok()) return r;
+  if (!full.contains("meta") || !full["meta"].is_object()) {
+    full["meta"] = Json::object();
+  }
+  full["meta"]["title"] = title;
+  std::string err;
+  bool ok = jsonutil::write_atomic(project_store_of(sid).full_json(sid).string(), full, &err);
+  if (!ok) return FsResult::error(ErrCode::kIo, err);
+  return FsResult::success(Json{{"sid", sid}, {"title", title}});
+}
+
 FsResult SessionManager::set_model(const std::string& sid, const std::string& model) {
   return update_session_settings(sid, Json{{"model", model}});
 }

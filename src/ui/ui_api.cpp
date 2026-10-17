@@ -58,6 +58,9 @@ UiApi::UiApi(FsApi* api) {
   reg("session.delete", [api](const Json& a) {
     return api->session_delete(s(a, "sid"));
   });
+  reg("session.rename", [api](const Json& a) {
+    return api->session_rename(s(a, "sid"), s(a, "title"));
+  });
   reg("session.get", [api](const Json& a) { return api->session_get(s(a, "sid")); });
   reg("session.fork", [api](const Json& a) {
     return api->session_fork(s(a, "sid"), s(a, "turnId"));
@@ -70,7 +73,8 @@ UiApi::UiApi(FsApi* api) {
   });
   reg("session.send", [api](const Json& a) {
     return api->session_send(s(a, "sid"), s(a, "text"),
-                             a.contains("attachments") ? a["attachments"] : Json::array());
+                             a.contains("attachments") ? a["attachments"] : Json::array(),
+                             s(a, "model"), s(a, "thinking"));
   });
   reg("session.append", [api](const Json& a) {
     return api->session_append(s(a, "sid"), s(a, "text"));

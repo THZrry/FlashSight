@@ -450,6 +450,9 @@ FsResult FsApi::session_list(const std::string& pid) {
 FsResult FsApi::session_delete(const std::string& sid) {
   return sessions_->delete_session(sid);
 }
+FsResult FsApi::session_rename(const std::string& sid, const std::string& title) {
+  return sessions_->rename_session(sid, title);
+}
 FsResult FsApi::session_set_model(const std::string& sid, const std::string& model) {
   FsResult r = sessions_->set_model(sid, model);
   if (r.ok()) sessions_->append_system_op(sid, "setModel", Json{{"model", model}});
@@ -516,7 +519,12 @@ FsResult FsApi::session_get(const std::string& sid) {
 
 // ----- P3: send/append/suspend/resume/cancelWake -----
 FsResult FsApi::session_send(const std::string& sid, const std::string& text,
-                             const Json& attachments) {
+                             const Json& attachments, const std::string& model,
+                             const std::string& thinking) {
+  // 会话页上选的模型/档位随消息一起到达：先落盘再发。不这样做的话，用户换了
+  // 模型立刻发送时，请求可能还带着旧模型（setModel 是另一个异步调用）。
+  if (!model.empty()) sessions_->set_model(sid, model);
+  if (!thinking.empty()) sessions_->set_thinking(sid, thinking);
   Json full;
   FsResult r = sessions_->load_full(sid, &full);
   if (!r.ok()) return r;
@@ -1367,10 +1375,11 @@ FsResult FsApi::provider_list_models(const std::string& providerId) {
     // kept returning the same few fake models.
     model_table_->set_api_models(providerId, models);
   } else {
-    level = "preset";
+    level = "local";
     message = res.message;
-    // 回退预置：只返回该 provider 未知的常见模型（用户自定义 > API > 预置 > 保守缺省）
-    for (auto& m : builtin_models_preset()) models.push_back(m);
+    // 获取失败时返回本地已知的模型（用户自定义 + 上次成功获取的），而不是
+    // 塞一整张预置表进去：那些条目既没有真的从这台供应商拿到，也调不通。
+    models = model_table_->list_models(providerId);
   }
   Json arr = Json::array();
   for (auto& m : models) arr.push_back(m.to_json());

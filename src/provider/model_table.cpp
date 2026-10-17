@@ -111,13 +111,10 @@ std::vector<ModelEntry> ModelTable::list_models(const std::string& provider_id) 
       if (!dup) out.push_back(m);
     }
   }
-  // 全新 provider 还没有任何模型：给出预置表当起步名单（否则列表是空的，
-  // 用户连"能选什么"都不知道）。一旦有用户/API 模型就以它们为准。
-  if (out.empty()) {
-    for (auto& m : preset_) {
-      if (!m.id.empty()) out.push_back(m);
-    }
-  }
+  // 全新 provider 还没有任何模型时**不**回退预置表：一个从没连过 API 的供应商
+  // 下面列出 gpt-4o、claude 之类凭空出现的条目，看起来像是已经配置好了，实际
+  // 一个都调不通。空列表 + "从 API 获取 / 新增"才是真实状态。预置表仍然用于
+  // resolve()：用户明确写下一个已知模型 id 时，它的能力标签是可信的。
   for (size_t i = 0; i < out.size(); ++i) fill_model_defaults(&out[i]);
   return out;
 }
