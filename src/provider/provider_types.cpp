@@ -124,6 +124,9 @@ Json ProviderConn::to_json() const {
   Json h = Json::object();
   for (auto& kv : custom_headers) h[kv.first] = kv.second;
   j["customHeaders"] = h;
+  if (body_override.is_object() && !body_override.empty()) {
+    j["bodyOverride"] = body_override;
+  }
   return j;
 }
 
@@ -147,6 +150,9 @@ ProviderConn ProviderConn::from_json(const Json& j) {
     for (auto it = j["customHeaders"].begin(); it != j["customHeaders"].end(); ++it) {
       if (it.value().is_string()) p.custom_headers[it.key()] = it.value().get<std::string>();
     }
+  }
+  if (j.contains("bodyOverride") && j["bodyOverride"].is_object()) {
+    p.body_override = j["bodyOverride"];
   }
   return p;
 }

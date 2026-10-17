@@ -40,6 +40,22 @@ FsResult ProviderClient::chat(const ChatRequest& req, ChatResponse* out,
 }
 
 // ----- OpenAI Chat Completions -----
+// 自定义头的值里可以写 {{SESSION}}，替换成当前会话 id。这样 opencode 系的
+// 会话亲和头和 Azure 的 api-key 走同一条路径：都是"模板预填的一条普通头"，
+// 没有"某种供应商才有的隐藏开关"。
+namespace {
+std::string subst_session(const std::string& v, const std::string& sid) {
+  std::string out = v;
+  const std::string k = "{{SESSION}}";
+  size_t p = 0;
+  while ((p = out.find(k, p)) != std::string::npos) {
+    out.replace(p, k.size(), sid);
+    p += sid.size();
+  }
+  return out;
+}
+}  // namespace
+
 FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* out,
                                           const StreamDeltaFn& on_delta) const {
   Json body = Json::object();
@@ -49,6 +65,13 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
   body["temperature"] = req.temperature;
   body["max_tokens"] = req.max_tokens;
   body["stream"] = req.stream;
+  // 供应商特有的请求体字段（浅合并；不覆盖上面构造好的标准字段，除非用户
+  // 明确写了同名字段——那正是"自定义 body"的意义）
+  if (conn_.body_override.is_object()) {
+    for (auto it = conn_.body_override.begin(); it != conn_.body_override.end(); ++it) {
+      body[it.key()] = it.value();
+    }
+  }
 
   HttpRequest http;
   http.method = "POST";
@@ -63,7 +86,9 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
     }
     http.headers["x-opencode-client"] = "flashsight";
   }
-  for (auto& kv : conn_.custom_headers) http.headers[kv.first] = kv.second;
+  for (auto& kv : conn_.custom_headers) {
+    http.headers[kv.first] = subst_session(kv.second, req.session_id);
+  }
   http.body = body.dump();
   http.timeout_ms = 120000;
 
@@ -145,7 +170,9 @@ FsResult ProviderClient::chat_openai_response(const ChatRequest& req, ChatRespon
   http.url = conn_.base_url + "/responses";
   http.headers["Content-Type"] = "application/json";
   http.headers["Authorization"] = "Bearer " + conn_.api_key;
-  for (auto& kv : conn_.custom_headers) http.headers[kv.first] = kv.second;
+  for (auto& kv : conn_.custom_headers) {
+    http.headers[kv.first] = subst_session(kv.second, req.session_id);
+  }
   http.body = body.dump();
   http.timeout_ms = 120000;
 
@@ -205,7 +232,9 @@ FsResult ProviderClient::chat_anthropic(const ChatRequest& req, ChatResponse* ou
   http.headers["Content-Type"] = "application/json";
   http.headers["x-api-key"] = conn_.api_key;
   http.headers["anthropic-version"] = "2023-06-01";
-  for (auto& kv : conn_.custom_headers) http.headers[kv.first] = kv.second;
+  for (auto& kv : conn_.custom_headers) {
+    http.headers[kv.first] = subst_session(kv.second, req.session_id);
+  }
   http.body = body.dump();
   http.timeout_ms = 120000;
 

@@ -1294,13 +1294,16 @@ FsResult FsApi::provider_templates() {
     t["headers"] = headers;
     arr.push_back(t);
   };
-  // 套餐/聚合服务：endpoint 不同 + 需要会话亲和头
+  // 套餐/聚合服务：endpoint 不同 + 模板预填一条会话亲和头（{{SESSION}} 由后端
+  // 替换成会话 id）。它和其它自定义头走同一条路径，没有单独的隐藏开关。
   add("opencode-zen", "opencode zen", "https://opencode.ai/zen/v1",
-      "套餐服务：自动带 x-opencode-session 会话亲和头，按额度计费。",
-      Json{{"x-opencode-client", "flashsight"}});
+      "套餐服务：预填 x-opencode-session 会话亲和头，按额度计费。",
+      Json{{"x-opencode-client", "flashsight"},
+           {"x-opencode-session", "{{SESSION}}"}});
   add("opencode-go", "opencode go", "https://opencode.ai/go/v1",
-      "opencode go 端点：需要 x-opencode-session。",
-      Json{{"x-opencode-client", "flashsight"}});
+      "opencode go 端点：预填 x-opencode-session。",
+      Json{{"x-opencode-client", "flashsight"},
+           {"x-opencode-session", "{{SESSION}}"}});
   // 官方直连
   add("openai", "OpenAI", "https://api.openai.com/v1",
       "OpenAI 官方端点（Chat 或 Response 形态）。", Json::object());

@@ -84,8 +84,14 @@ struct ProviderConn {
   std::string api_key;   // 前期明文；TODO 迁钥匙串
   std::map<std::string, std::string> custom_headers;  // 自定义 header（provider.md §5）
   bool enabled = true;
-  // 发送会话亲和头 x-opencode-session（opencode 系套餐端点需要；与形态无关）
+  // 发送会话亲和头 x-opencode-session（opencode 系套餐端点需要；与形态无关）。
+  // 保留这个布尔值是为了兼容旧配置；新建的供应商不再用它，而是把它当成一条
+  // 普通自定义头（模板预填 x-opencode-session: {{SESSION}}），因为"opencode"
+  // 从来不是一种请求形态，只是多一个头。
   bool send_session = false;
+  // 请求体覆盖（JSON 对象）：与默认构造出来的 body 做**浅合并**，让用户能加
+  // 供应商特有的字段（如某些网关要求的 extra_body）。留空 = 不改。
+  Json body_override = Json::object();
 
   // 套餐（quota）字段：三态（钱/额度/unknown），用量页成本表依赖（provider.md §1）
   bool has_quota = false;
@@ -95,5 +101,6 @@ struct ProviderConn {
   Json to_json() const;
   static ProviderConn from_json(const Json& j);
 };
+
 
 }  // namespace fs

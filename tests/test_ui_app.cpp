@@ -1037,11 +1037,15 @@ FS_TEST(uiapp_settings_page) {
     s.provider_selected = "p1";
     s.pv_kind = "openai-chat";
     s.pv_base_url = "https://opencode.ai/zen/v1";
-    s.pv_send_session = true;  // x-opencode-session toggle lives in 高级
+    // the session-affinity header is now an ordinary custom header
+    s.pv_headers.push_back(std::make_pair(std::string("x-opencode-session"),
+                                          std::string("{{SESSION}}")));
     s.pv_advanced = true;
   });
   EXPECT_TRUE(dump_has(dom, "Endpoint"));
-  EXPECT_TRUE(dump_has(dom, "发送会话亲和头"));
+  EXPECT_TRUE(dump_has(dom, "x-opencode-session"));
+  EXPECT_TRUE(dump_has(dom, "{{SESSION}}"));
+  EXPECT_TRUE(dump_has(dom, "请求体覆盖"));
   // every nav entry must render its own body (nav key == body branch).
   // 常规 is 界面显示 + 会话行为 (UI behaviour); 上下文 was dropped entirely and
   // MCP/Skill are two pages now.

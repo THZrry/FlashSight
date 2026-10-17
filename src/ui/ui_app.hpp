@@ -253,7 +253,8 @@ struct AppState {
   std::vector<std::pair<std::string, std::string> > pv_headers;  // custom headers
   std::string pv_new_header_k;
   std::string pv_new_header_v;
-  bool pv_send_session = false;  // send x-opencode-session (opencode-style endpoints)
+  bool pv_send_session = false;  // legacy: 兼容旧配置（新配置走 {{SESSION}} 头）
+  std::string pv_body_text;      // 请求体覆盖（JSON 文本草稿）
   bool pv_advanced = false;                   // "高级" section expanded
   std::vector<std::string> provider_models;   // listModels result
   std::string provider_models_level;          // "api" | "preset"

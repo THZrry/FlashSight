@@ -291,7 +291,7 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
   int max_iters = 20;  // 防止死循环
   while (!result.tool_calls.empty() && max_iters-- > 0) {
     state_ = LoopState::kToolCalling;
-    // 记录 assistant 的 tool_calls 消息（[OI] 协议要求回填前有对应 assistant 消息）
+    // 记录 assistant 的 tool_calls 消息（协议要求回填 tool 结果前先有对应的 assistant 消息）
     Json asst = Json::object();
     asst["role"] = "assistant";
     asst["content"] = result.text;

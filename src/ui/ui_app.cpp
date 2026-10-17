@@ -2968,22 +2968,23 @@ VNodePtr UiApp::build_settings() {
         st_.pv_key = v;
       }), creating ? "" : "回显为脱敏值；不改动则留空"));
 
-      // ---- 高级（折叠）：自定义 header + 会话亲和头 ----
+      // ---- 高级（折叠）：自定义请求头 + 自定义 body ----
       H adv = el("div", "pv-advanced");
       H ahead = el("div", "pv-adv-head");
       ahead.on(EventKind::kClick, [this](const std::string&) {
         update([&](AppState& s) { s.pv_advanced = !s.pv_advanced; });
       });
       ahead.add(el("span", "pv-adv-caret").text(st_.pv_advanced ? "\u25be" : "\u25b8"));
-      ahead.add(el("span").text(tr("高级（自定义请求头）")));
+      ahead.add(el("span").text(tr("高级（请求头 / 请求体）")));
       adv.add(ahead);
       if (st_.pv_advanced) {
         H abody = el("div", "pv-adv-body");
-        // 会话亲和头：opencode 系端点需要，与"格式"无关
-        abody.add(comp::field(tr("发送会话亲和头"), comp::toggle(st_.pv_send_session, "",
-                                                                 [this](const std::string&) {
-          update([&](AppState& s) { s.pv_send_session = !s.pv_send_session; });
-        }), tr("opencode 系端点需要 x-opencode-session（会话 id）")));
+        // 自定义请求头。opencode 的会话亲和头不再是一个特殊开关：它只是模板
+        // 预填的一条普通头（x-opencode-session: {{SESSION}}），后端把
+        // {{SESSION}} 换成会话 id。这样 Azure 的 api-key 和 opencode 的亲和头
+        // 走的是同一条路径，没有"某种供应商才有的隐藏开关"。
+        abody.add(comp::hint(
+            tr("{{SESSION}} 会被替换成当前会话 id（opencode 系端点需要）")));
         for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
           H row = el("div", "settings-row");
           row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
@@ -3010,6 +3011,12 @@ VNodePtr UiApp::build_settings() {
           });
         }, "ghost"));
         abody.add(addh);
+        // 自定义 body：浅合并进默认请求体。有些网关要求供应商特有的字段，
+        // 没有这个就只能改代码。
+        abody.add(comp::field(tr("请求体覆盖（JSON）"), comp::textarea(
+            st_.pv_body_text, tr("{\"key\": \"value\"}"), [this](const std::string& v) {
+          st_.pv_body_text = v;
+        }, nullptr), tr("与默认请求体浅合并；留空 = 不改")));
         adv.add(abody);
       }
       form.add(adv);
@@ -3038,6 +3045,7 @@ VNodePtr UiApp::build_settings() {
           s.pv_base_url.clear();
           s.pv_key.clear();
           s.pv_headers.clear();
+          s.pv_body_text.clear();
           s.provider_status.clear();
           s.provider_models.clear();
         });
@@ -4443,6 +4451,12 @@ void UiApp::select_provider(const std::string& id) {
           }
         }
       }
+      // 请求体覆盖：回显成可编辑的 JSON 文本
+      s.pv_body_text.clear();
+      if (r.data.contains("bodyOverride") && r.data["bodyOverride"].is_object() &&
+          !r.data["bodyOverride"].empty()) {
+        s.pv_body_text = r.data["bodyOverride"].dump(2);
+      }
     });
     // 选中即加载该供应商的模型列表（列表 + 高级设置都用它）
     load_models(id);
@@ -4468,12 +4482,10 @@ void UiApp::begin_new_provider(const std::string& template_id) {
       s.pv_key.clear();
       s.pv_headers.clear();
       s.pv_send_session = false;
+      s.pv_body_text.clear();
+      // 模板的 header 原样进表。opencode 的会话亲和头不再是特殊开关：模板给的
+      // 就是一条普通头（x-opencode-session: {{SESSION}}），后端替换占位符。
       for (size_t k = 0; k < t.headers.size(); ++k) {
-        const std::string& hk = t.headers[k].first;
-        if (hk == "x-opencode-client" || hk == "x-opencode-session") {
-          s.pv_send_session = true;
-          continue;
-        }
         s.pv_headers.push_back(t.headers[k]);
       }
       s.pv_advanced = false;
@@ -4510,6 +4522,21 @@ void UiApp::save_provider() {
     h[st_.pv_headers[i].first] = st_.pv_headers[i].second;
   }
   conn["customHeaders"] = h;
+  // 请求体覆盖：必须是合法 JSON 对象，否则后端会静默丢掉它（比报错更糟）。
+  if (!st_.pv_body_text.empty()) {
+    Json body;
+    bool parsed = true;
+    try {
+      body = Json::parse(st_.pv_body_text);
+    } catch (...) {
+      parsed = false;
+    }
+    if (!parsed || !body.is_object()) {
+      toast(tr("请求体覆盖必须是 JSON 对象"));
+      return;
+    }
+    conn["bodyOverride"] = body;
+  }
   call_async("provider.addProvider", Json{{"conn", conn}}, [this](const BackendResult& r) {
     if (!r.ok) return;
     toast("已保存供应商");

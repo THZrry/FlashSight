@@ -903,4 +903,14 @@ The process of project: P0 环境搭建 + P1 AppCore
     看起来永远只有那几个固定模型。现在会 `set_api_models` 存下来。
   - 新增 `dialog.pickFile`（`pick_file_dialog`：同一个 IFileDialog，不带
     FOS_PICKFOLDERS）+ `environment.detectCliTools`。
-  - 测试 197 用例 / 1724 断言。
+
+  - 补充（同一批收尾）：
+    * **opencode 的会话亲和头不再是特殊开关**：模板预填一条普通自定义头
+      `x-opencode-session: {{SESSION}}`，`ProviderClient` 在发请求前把
+      `{{SESSION}}` 换成会话 id（三种形态都替换）。Azure 的 api-key 走同一条路径
+      ——"某种供应商才有的隐藏开关"这个概念被彻底去掉了。
+    * 高级里新增**请求体覆盖（JSON）**：与默认请求体浅合并，供应商特有的字段
+      （extra_body 之类）不用改代码；保存时校验必须是 JSON 对象。
+    * 修一处历史遗留：`agent_loop.cpp` 里一条注释被写成了占位符文本，已改回
+      通顺描述。
+  - 测试 197 用例 / 1726 断言。
