@@ -285,6 +285,25 @@ H search_box(const std::string& value, const std::string& placeholder, EventFn o
   return w;
 }
 
+H choice_list(const std::vector<ChoiceOption>& options, const std::string& selected,
+              EventFn on_pick) {
+  H wrap = el("div", "choice-list");
+  for (size_t i = 0; i < options.size(); ++i) {
+    const ChoiceOption& o = options[i];
+    H row = el("div", o.value == selected ? "choice active" : "choice");
+    std::string v = o.value;
+    row.on(EventKind::kClick, [on_pick, v](const std::string&) { on_pick(v); });
+    if (!o.icon.empty()) row.add(el("i", "fa fa-" + o.icon));
+    H body = el("div", "choice-body");
+    body.add(el("div", "choice-title").text(o.title));
+    if (!o.desc.empty()) body.add(el("div", "choice-desc").text(o.desc));
+    row.add(body);
+    if (o.value == selected) row.add(el("i", "fa fa-check choice-mark"));
+    wrap.add(row);
+  }
+  return wrap;
+}
+
 // ---------- display ----------
 
 H badge(const std::string& text, const std::string& variant) {

@@ -516,6 +516,11 @@ class WhaleDom : public IDom {
     }
     whaleui_dom_set_attribute(root, "class", classes.c_str());
     whaleui_dom_set_attribute(root, "data-mode", mode.c_str());
+    // Tab placement is a layout switch (horizontal strip vs vertical side
+    // strip), so it is an attribute on the root, like the mode.
+    if (!a.tabs.empty()) {
+      whaleui_dom_set_attribute(root, "data-tabs", a.tabs.c_str());
+    }
     whaleui_dom_set_attribute(root, "data-code-highlight",
                               a.code_highlight ? "1" : "0");
     set_root_var(root, "--font-user", a.font, "--font-base");

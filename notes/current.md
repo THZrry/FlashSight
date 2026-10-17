@@ -723,7 +723,7 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 详细说明与验收清单：`doc-internal/ui-whaleui.md`（含 7 项已知缺口 A-G）。
   - 首次运行发现 WhaleUI 布局缺陷（界面只出标签条）：见 <39>。
 
-<39>(UNRESOLVED): WhaleUI 布局缺陷 —— flex 项的"主轴"尺寸用视口单位时塌成 1px。
+<39>(SOLVED): WhaleUI 布局缺陷 —— flex 项的"主轴"尺寸用视口单位时塌成 1px。
   - 现象：桌面 UI 只画出 40px 顶部标签条，页面主体全空；布局 dump 显示应用根容器
     `.window`（`height:100vh;display:flex;flex-direction:column`）被算成 1280x1，
     所有 `flex:1` 后代跟着塌成 0。
@@ -740,8 +740,13 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 复现与报告已交上游：`C:/aaa/WhaleUI/temp/incorrect1/`（`incorrect1.cpp` 15 个变体
     + `README.md`）。实测：单层 flex column + `height:100vh` 即触发；交叉轴不受影响；
     rem/px 正常；`min-height:100vh` 或 `height:100%` 可规避。
-  - 影响：**当前 WhaleUI 构建下桌面 UI 无法正常渲染**。决定先记录、等上游修复，
-    不改应用代码（规避方案已记在 doc-internal/ui-whaleui.md §5）。
+  - **2026-10-17 上游已修**（WhaleUI `e87979c` "fix-css-from-api-flex-main-axis-web-api-cpp-facade"）：
+    flex 主轴尺寸改走 `len_or_auto_vp`，百分比基数按主轴取（column 用高度），
+    `est_node_height` 同步修。重跑 `temp/incorrect1` 15 个变体**全部 ok**
+    （app 1280x820、flex-col-vh 1280x820、flex-row-vw 1280x50、flex-col-pct 1280x410）。
+  - FlashSight 侧动作：刷新 `3rdparty/whaleui/include/` 头文件、重建 WhaleUI 库、
+    `xmake f --whaleui=y` 重编，桌面 UI **完整渲染且可交互**（标签切换、设置页双栏均正常）。
+    不需要改应用代码。
 
 <40>(SOLVED): 终端标签与"所有"解耦 + 空间利用 + 常规/上下文归位。
   - 关闭标签 ≠ 移除终端：`close_terminal_tab` 只把 tid 记进 `term_hidden`，
@@ -849,3 +854,53 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 测试：195 用例 / 1732 断言（新增 8 个：访问栈回退/跳过死条目、切标签关弹层、
     侧栏访问栈、预览标签页复用与回退、顶层"+"页、卡片会话行、删除确认、
     相对时间格式、面板标签 keyed）。
+
+<43>(SOLVED): 设置页按 temp/settings1.md 全面返工 + 设置/新建改为非标签页。
+  - **设置与新建不再是标签页**：`AppState::modal_page`（""/"settings"/"new"）盖在
+    当前标签页之上，点开即显示、关掉即销毁、**不进访问栈**。否则"关掉一个会话
+    标签"会回退到设置页。`switch_tab` 里清空它（导航走了就是不再需要）。设置页
+    因此自带标题栏 + ✕；`open_new_tab` 改为 `open_modal_page("new")`。
+  - **标签位置真正实现**：`Appearance::tabs` → `data-tabs="left"`（wasm/whale 两个
+    适配器都写根元素），CSS `:root[data-tabs="left"] .window{flex-direction:row}` +
+    `.tabs{flex-direction:column;width:190px;height:100vh}`。切设置立即生效。
+  - **标签条可滚动**：删掉 `ui.maxTabs`（上限只会藏起用户已经打开的标签），
+    `.tabs{overflow-x:auto}` 且 tab `flex:none`。
+  - 常规：界面显示（标签位置/会话名提示）+ 会话行为（过拟合检测，从原"上下文"
+    移来）+ 数据保留。
+  - 外观：只留界面语言（思考语言移到模型偏好——它是给模型的指令，不是界面外观）。
+  - **删除整个"上下文"段**：短视图轮数/token 预算/防过拟合三项按反馈取消
+    （防过拟合改名"过拟合检测"并入常规）。
+  - 会话默认：模型改用**共享模型选择器组件**；思考档位取自该模型粗匹配的档位表；
+    文件权限/自动模式改为"图标+标题+说明"的 `choice_list`（原来只有 approve/
+    permissive/full 三个英文词，没人看得懂），并加"记忆上次"；删除 Enter 行为
+    （无实际效果且与快捷键页冲突）。
+  - 模型偏好：输出语言（不指定/中文/English，默认不指定）+ 思考语言 + 自动压缩
+    阈值（60/70/80/90/关闭）+ 摘要模型（模型选择器）。去掉"子代理默认模型"
+    （子代理页每个代理自己选）。
+  - 子代理：每行改用共享模型选择器（原来是从 provider_models 拼的下拉，数据还是
+    假的）。
+  - **MCP 与 Skill 拆成两页**：各自有"自动探测/手动导入/本地搜索 + 卡片列表
+    （名称/路径/简介/启用）"，空列表只显示"暂无"提示，不再在下面挂一个表单。
+    Skill 页明确写出"Skill 是唯一可以由你输入 /名称 调用的命令"。
+    后端新增 `skill.import/create/setEnabled/remove`（`SkillRegistry` 加
+    `import_dir` 读 SKILL.md frontmatter、`add/set_enabled/remove/user_json/
+    load_user`），持久化到 `skills.entries`；内置 skill 删不掉只能停用。
+  - 长期记忆：改成**便签卡片**（模型自己写的提醒），不再是用户维护的 KV 表。
+  - 浏览器控制：驱动路径加"选文件"图标按钮；删掉"加载 skill 说明"（加载 skill
+    是模型按需决定的事，不是用户动作）。
+  - 网络：代理改三态（跟随系统/自定义/关闭），只有"自定义"才显示主机与端口。
+  - 终端：探测结果做成可选列表（显示解析到的路径，两个都叫 pwsh 的安装才分得清）
+    + "重新探测"。
+  - 环境：合并成一张 CLI 工具表 + "自动探测"（`ShellDetector::detect_cli_tools_json`
+    在 PATH 上找 100+ 常见工具，只返回找到的）+ 每行/新增行都能"选文件"。
+  - 供应商：进入页面自动选中第一个供应商；模板徽标改用本地 Lobe Icons（
+    `provider_brand_for_template` 映射模板 id → 品牌键）；模型面板加"全选/全不选"
+    与来源标记（内置预置 ≠ API）；能力开关改两列网格、去掉"工具调用"（默认都支持）；
+    上下文长度改为必填并在保存时校验；思考档位改成**逗号分隔单行输入** + 默认档
+    下拉（off/low/high/xhigh/max 等预置中文翻译，未知档位原样显示）。
+  - **修"获取模型列表是假的"**：`provider_list_models` 拿到 API 结果后没存进
+    ModelTable，于是 `model.list`（模型面板读的那条路径）每次都回退到内置预置，
+    看起来永远只有那几个固定模型。现在会 `set_api_models` 存下来。
+  - 新增 `dialog.pickFile`（`pick_file_dialog`：同一个 IFileDialog，不带
+    FOS_PICKFOLDERS）+ `environment.detectCliTools`。
+  - 测试 197 用例 / 1724 断言。

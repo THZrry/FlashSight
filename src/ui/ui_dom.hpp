@@ -217,6 +217,10 @@ class IDom {
     std::string mono;        // monospace family ("" = built-in stack)
     int font_size = 0;       // px (0 = built-in size)
     bool code_highlight = true;
+    // Where the top-level tabs live. This is a LAYOUT switch (the strip becomes
+    // a vertical side strip), so it has to reach the root element as a data
+    // attribute rather than being a class on one container.
+    std::string tabs;        // "top" | "left"
   };
   virtual void set_appearance(const Appearance& a) { (void)a; }
 

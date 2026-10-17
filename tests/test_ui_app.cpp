@@ -507,7 +507,7 @@ FS_TEST(uiapp_every_page_declares_an_animation) {
   UiApp app(dom, st, nullptr);
   app.mount();
   // the three page shapes: home, settings, and a session
-  app.show("settings");
+  app.open_modal_page("settings");
   std::string d1 = dom.dump();
   EXPECT_TRUE(d1.find("anim-view") != std::string::npos);
   app.update([](AppState& s) { seed_session(s, "sess_a"); });
@@ -955,7 +955,7 @@ FS_TEST(uiapp_appearance_applies_to_dom) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   // a fresh app pushes the defaults (so a page that never set anything still
   // gets a defined mode instead of relying on the CSS media query)
   EXPECT_EQ(dom.appearance_for_test().mode, std::string("auto"));
@@ -984,7 +984,7 @@ FS_TEST(uiapp_settings_sections_animate) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   dom.clear_calls();
   app.update([](AppState& s) { s.settings_nav = "appearance"; });
   app.update([](AppState& s) { s.settings_nav = "network"; });
@@ -1020,7 +1020,7 @@ FS_TEST(uiapp_settings_page) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   EXPECT_TRUE(dump_has(dom, "常规"));
   EXPECT_TRUE(dump_has(dom, "供应商"));
   app.update([](AppState& s) { s.settings_nav = "providers"; });
@@ -1043,18 +1043,18 @@ FS_TEST(uiapp_settings_page) {
   EXPECT_TRUE(dump_has(dom, "Endpoint"));
   EXPECT_TRUE(dump_has(dom, "发送会话亲和头"));
   // every nav entry must render its own body (nav key == body branch).
-  // 常规 is 界面显示 (UI behaviour); the context-window knobs live under 模型 ·
-  // 上下文 because they decide what the model sees, not what is stored.
+  // 常规 is 界面显示 + 会话行为 (UI behaviour); 上下文 was dropped entirely and
+  // MCP/Skill are two pages now.
   const char* sec_keys[] = {"general", "appearance", "browser", "computer",
-                            "providers", "session_defaults", "context",
-                            "model_prefs", "subagents", "skills", "memory",
+                            "providers", "session_defaults",
+                            "model_prefs", "subagents", "mcp", "skills", "memory",
                             "network", "terminal", "files", "environment",
                             "shortcuts", "about"};
   const char* sec_text[] = {"界面显示", "主题", "浏览器控制", "电脑控制",
-                            "Endpoint", "会话默认", "保留最近",
-                            "摘要模型", "并行上限", "外部工具包", "长期记忆",
-                            "网络总开关", "默认 shell", "自动 git init",
-                            "CLI 工具路径", "发送消息", "版本"};
+                            "Endpoint", "会话默认",
+                            "输出语言", "并行上限", "手动导入", "搜索 Skill", "长期记忆",
+                            "网络总开关", "重新探测", "自动 git init",
+                            "自动探测", "发送消息", "版本"};
   for (size_t i = 0; i < sizeof(sec_keys) / sizeof(sec_keys[0]); ++i) {
     std::string key = sec_keys[i];
     app.update([&](AppState& s) { s.settings_nav = key; });
@@ -1067,7 +1067,7 @@ FS_TEST(uiapp_provider_create_wizard) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) { s.settings_nav = "providers"; });
   // step 1: templates drive the wizard
   app.update([](AppState& s) {
@@ -1106,16 +1106,54 @@ FS_TEST(uiapp_mcp_section_lists_and_adds) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
+  app.update([](AppState& s) {
+    // MCP has its own page now (Skill is separate: they are both long lists and
+    // their import flows differ).
+    s.settings_nav = "mcp";
+    s.mcp_tools.push_back(AppState::McpRow{"my-tools", "C:/tools/skills", "本地工具", true});
+    s.mcp_tools.push_back(AppState::McpRow{"other", "C:/other", "", false});
+  });
+  EXPECT_TRUE(dump_has(dom, "my-tools"));
+  EXPECT_TRUE(dump_has(dom, "C:/tools/skills"));
+  EXPECT_TRUE(dump_has(dom, "本地工具"));   // the card carries a description
+  EXPECT_TRUE(dump_has(dom, "自动探测"));
+  EXPECT_TRUE(dump_has(dom, "手动导入"));
+  EXPECT_TRUE(dump_has(dom, "移除"));
+}
+
+// Skill is its own page, with search (the list can be long) and a card layout.
+FS_TEST(uiapp_skill_section_separate_from_mcp) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "skills";
-    s.mcp_tools.push_back(AppState::McpRow{"my-tools", "C:/tools/skills", true});
-    s.mcp_tools.push_back(AppState::McpRow{"other", "C:/other", false});
+    AppState::SkillRow a;
+    a.name = "browser-control";
+    a.title = "浏览器驱动技能";
+    a.description = "驱动外部浏览器";
+    a.loadable = true;
+    s.skills.push_back(a);
+    AppState::SkillRow b;
+    b.name = "my-skill";
+    b.title = "我的技能";
+    b.description = "本地导入的";
+    b.dir = "C:/skills/my-skill";
+    s.skills.push_back(b);
+    s.skills_loaded = true;
   });
-  EXPECT_TRUE(dump_has(dom, "外部工具包"));
-  EXPECT_TRUE(dump_has(dom, "my-tools"));
-  EXPECT_TRUE(dump_has(dom, "自动探测"));
-  EXPECT_TRUE(dump_has(dom, "移除"));
+  EXPECT_TRUE(dump_has(dom, "浏览器驱动技能"));
+  EXPECT_TRUE(dump_has(dom, "我的技能"));
+  EXPECT_TRUE(dump_has(dom, "搜索 Skill"));
+  // the page explains that a skill is the one /command the user can type
+  EXPECT_TRUE(dump_has(dom, "/名称"));
+  // filtering narrows the list
+  app.update([](AppState& s) { s.skill_filter = "my-skill"; });
+  EXPECT_TRUE(dump_has(dom, "我的技能"));
+  EXPECT_FALSE(dump_has(dom, "浏览器驱动技能"));
 }
 
 FS_TEST(uiapp_toast_has_deadline) {
@@ -1211,7 +1249,7 @@ FS_TEST(uiapp_model_panel_lists_and_edits) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1251,7 +1289,7 @@ FS_TEST(uiapp_model_enable_toggle) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1274,7 +1312,7 @@ FS_TEST(uiapp_model_add_starts_empty_draft) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1299,7 +1337,7 @@ FS_TEST(uiapp_model_thinking_levels_editable) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1316,9 +1354,12 @@ FS_TEST(uiapp_model_thinking_levels_editable) {
   });
   app.select_model("o4-mini");
   EXPECT_EQ(app.state().model_draft.thinking_levels.size(), size_t(3));
-  // levels render with their human labels and a 默认 badge
-  EXPECT_TRUE(dump_has(dom, "默认"));
-  EXPECT_TRUE(dump_has(dom, "添加档位"));
+  // Levels are edited as one comma-separated line (the protocol values), and
+  // the default is a dropdown over the Chinese preset names.
+  EXPECT_TRUE(dump_has(dom, "档位"));
+  EXPECT_TRUE(dump_has(dom, "off, low, high"));
+  EXPECT_TRUE(dump_has(dom, "默认档位"));
+  EXPECT_TRUE(dump_has(dom, "低"));   // thinking_label("low")
 }
 
 // 没有档位的模型：UI 明确说明而不是渲染一个空控件。
@@ -1327,7 +1368,7 @@ FS_TEST(uiapp_model_without_levels_says_so) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1338,7 +1379,8 @@ FS_TEST(uiapp_model_without_levels_says_so) {
     s.models_loaded = true;
   });
   app.select_model("gpt-4o");
-  EXPECT_TRUE(dump_has(dom, "该模型没有可配档位"));
+  // no levels -> the field says so instead of showing an empty control
+  EXPECT_TRUE(dump_has(dom, "留空 = 不可配思考档"));
 }
 
 // A long model list gets a filter; a short one does not (a search box over
@@ -1348,7 +1390,7 @@ FS_TEST(uiapp_model_filter_threshold) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1392,6 +1434,7 @@ FS_TEST(uiapp_model_picker_two_pane) {
     s.providers.push_back(p2);
     s.providers_loaded = true;
     s.model_picker_open = true;
+    s.model_picker_owner = "composer";
     s.model_picker_provider = "p1";
     s.model_picker_loaded = true;
     s.model_picker_models.push_back(mk_model("gpt-4o"));
@@ -1423,6 +1466,7 @@ FS_TEST(uiapp_model_picker_groups_only_when_long) {
   app.update([&](AppState& s) {
     seed_session(s);
     s.model_picker_open = true;
+    s.model_picker_owner = "composer";
     s.model_picker_provider = "p1";
     s.model_picker_loaded = true;
     seed_n(s, 5, false);
@@ -1450,6 +1494,7 @@ FS_TEST(uiapp_model_picker_skips_disabled) {
   app.update([](AppState& s) {
     seed_session(s);
     s.model_picker_open = true;
+    s.model_picker_owner = "composer";
     s.model_picker_provider = "p1";
     s.model_picker_loaded = true;
     s.model_picker_models.push_back(mk_model("enabled-one", true));
@@ -1468,6 +1513,7 @@ FS_TEST(uiapp_model_picker_search) {
   app.update([](AppState& s) {
     seed_session(s);
     s.model_picker_open = true;
+    s.model_picker_owner = "composer";
     s.model_picker_provider = "p1";
     s.model_picker_loaded = true;
     s.model_picker_models.push_back(mk_model("gpt-4o"));
@@ -1499,7 +1545,7 @@ FS_TEST(uiapp_model_icon_by_name) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1524,7 +1570,7 @@ FS_TEST(uiapp_model_icon_explicit_wins) {
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.show("settings");
+  app.open_modal_page("settings");
   app.update([](AppState& s) {
     s.settings_nav = "providers";
     AppState::ProviderRow p;
@@ -1742,6 +1788,7 @@ FS_TEST(uiapp_switching_tab_closes_popups) {
     s.sessions.push_back(b);
     s.tab_ids.push_back("sess_b");
     s.model_picker_open = true;
+    s.model_picker_owner = "composer";
     s.skill_menu_open = true;
     s.side_menu_open = true;
   });
@@ -1770,25 +1817,50 @@ FS_TEST(uiapp_side_panel_history) {
 }
 
 // ---------------------------------------------------------------------------
-// 顶层 "+" 打开"新建"标签页
+// 顶层 "+" 打开"新建"页面（不是标签页）
 // ---------------------------------------------------------------------------
 
-FS_TEST(uiapp_plus_opens_new_tab_page) {
+FS_TEST(uiapp_plus_opens_new_page) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
   app.update([](AppState& s) { seed_project(s); });
   app.open_new_tab();
-  EXPECT_EQ(app.state().active_tab, std::string("new"));
+  // it covers the current tab instead of becoming one of its own
+  EXPECT_EQ(app.state().modal_page, std::string("new"));
+  EXPECT_EQ(app.state().active_tab, std::string("home"));
   EXPECT_TRUE(dump_has(dom, "新建"));
   // the page lists the projects (so you pick one) instead of opening a session
   EXPECT_TRUE(dump_has(dom, "FlashSight"));
   EXPECT_TRUE(dump_has(dom, "新建会话"));
-  // pressing "+" again focuses the same tab rather than stacking duplicates
-  size_t n = app.state().tab_ids.size();
-  app.open_new_tab();
-  EXPECT_EQ(app.state().tab_ids.size(), n);
+  // no new tab was created, and it is not on the visit stack either (closing a
+  // tab must never fall back INTO a settings/new page)
+  EXPECT_EQ(app.state().tab_ids.size(), size_t(1));
+  for (size_t i = 0; i < app.state().tab_history.size(); ++i) {
+    EXPECT_NE(app.state().tab_history[i], std::string("new"));
+  }
+  app.close_modal_page();
+  EXPECT_TRUE(app.state().modal_page.empty());
+}
+
+// 设置也是同样的"盖在上面"的页面：点开就显示，关掉就销毁，不入栈。
+FS_TEST(uiapp_settings_is_modal_page) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  EXPECT_EQ(app.state().tab_ids.size(), size_t(1));  // only 主页
+  app.open_modal_page("settings");
+  EXPECT_EQ(app.state().modal_page, std::string("settings"));
+  EXPECT_TRUE(dump_has(dom, "设置"));
+  EXPECT_TRUE(dump_has(dom, "常规"));
+  // switching tabs dismisses it (it belongs to the tab it was opened over)
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+  });
+  app.show("sess_a");
+  EXPECT_TRUE(app.state().modal_page.empty());
 }
 
 // ---------------------------------------------------------------------------

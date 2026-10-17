@@ -17,6 +17,13 @@ namespace fs {
 // or when the platform has no picker.
 bool pick_folder_dialog(std::string* out);
 
+// Shows a FILE chooser (same dialog, no FOS_PICKFOLDERS). `filter_desc` /
+// `filter_spec` are an optional Windows filter pair, e.g. ("可执行文件",
+// "*.exe;*.cmd;*.bat") - needed for the browser driver and CLI tool paths, where
+// a folder picker is simply the wrong control.
+bool pick_file_dialog(std::string* out, const std::string& filter_desc = "",
+                      const std::string& filter_spec = "");
+
 // Opens `path` in the OS file manager. Returns false on failure.
 bool reveal_in_file_manager(const std::string& path);
 

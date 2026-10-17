@@ -113,4 +113,35 @@ Json ShellDetector::detect_all_json() {
   return arr;
 }
 
+Json ShellDetector::detect_cli_tools_json() {
+  // 常见的开发 CLI 工具。列表本身是"预置百种"的起点：只有真的在 PATH 上找到的
+  // 才会被返回，用户再按需补自己项目用的那些。
+  static const char* const kTools[] = {
+      // 版本控制
+      "git", "gh", "svn", "hg",
+      // 语言运行时
+      "node", "npm", "pnpm", "yarn", "bun", "deno",
+      "python", "python3", "pip", "pip3", "uv", "poetry", "conda",
+      "go", "cargo", "rustc", "java", "javac", "mvn", "gradle", "kotlin",
+      "dotnet", "ruby", "gem", "php", "composer", "perl", "lua", "luajit",
+      "dart", "flutter", "swift", "scala", "elixir", "mix", "erl", "r",
+      // 构建 / 打包
+      "cmake", "ninja", "make", "gcc", "g++", "clang", "clang++", "msbuild",
+      "xmake", "bazel", "meson", "vcpkg", "conan",
+      // 容器 / 云
+      "docker", "podman", "kubectl", "helm", "terraform", "aws", "az", "gcloud",
+      // 前端 / 编辑器 / 工具
+      "eslint", "prettier", "tsc", "vite", "webpack", "playwright", "puppeteer",
+      "rg", "fd", "fzf", "jq", "yq", "curl", "wget", "ssh", "scp", "rsync",
+      "tar", "zip", "unzip", "7z", "ffmpeg", "imagemagick", "magick",
+      nullptr,
+  };
+  Json out = Json::object();
+  for (size_t i = 0; kTools[i]; ++i) {
+    std::string p = which(kTools[i]);
+    if (!p.empty()) out[kTools[i]] = p;
+  }
+  return out;
+}
+
 }  // namespace fs

@@ -506,12 +506,14 @@ EM_JS(void, fs_dom_play_animation, (int node_id, const char* cls), {
 // appended to whatever was already there.
 EM_JS(void, fs_dom_appearance, (const char* palette, const char* mode,
                                const char* font, const char* mono,
-                               int font_size, int code_highlight), {
+                               int font_size, int code_highlight,
+                               const char* tabs), {
   var root = document.documentElement;
   var pal = UTF8ToString(palette);
   var m = UTF8ToString(mode);
   var f = UTF8ToString(font);
   var mo = UTF8ToString(mono);
+  var tb = UTF8ToString(tabs);
   if (m === 'auto' || !m) {
     m = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
         ? 'dark' : 'light';
@@ -526,6 +528,8 @@ EM_JS(void, fs_dom_appearance, (const char* palette, const char* mode,
   for (var k = 0; k < stale.length; k++) root.classList.remove(stale[k]);
   if (pal && pal !== 'default') root.classList.add('palette-' + pal);
   root.setAttribute('data-mode', m);
+  // Tab placement is a layout switch driven by CSS (see [data-tabs="left"]).
+  if (tb) root.setAttribute('data-tabs', tb); else root.removeAttribute('data-tabs');
   root.style.setProperty('--font-user', f ? ('"' + f + '", var(--font-base)') : '');
   root.style.setProperty('--mono-user', mo ? ('"' + mo + '", var(--mono-base)') : '');
   root.style.setProperty('--font-size-user', font_size > 0 ? (font_size + 'px') : '');
@@ -849,7 +853,8 @@ class WasmDom : public IDom {
 
   void set_appearance(const Appearance& a) override {
     fs_dom_appearance(a.palette.c_str(), a.mode.c_str(), a.font.c_str(),
-                      a.mono.c_str(), a.font_size, a.code_highlight ? 1 : 0);
+                      a.mono.c_str(), a.font_size, a.code_highlight ? 1 : 0,
+                      a.tabs.c_str());
   }
 
  private:

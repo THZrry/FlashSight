@@ -100,7 +100,7 @@ user (ui_app)  →  components / vdom (diff)  →  IDom  →  ┬ WasmDom（浏�
 
 | # | 现象 | 原因 / 现状 | 需要 WhaleUI 提供 |
 |---|---|---|---|
-| **0** | **界面只画出 40px 顶部标签条，页面主体全空** | **WhaleUI 布局缺陷：flex 项的"主轴"尺寸若写成视口单位（`vh`/`vw`），在 flex 主轴尺寸解析里按 0 处理，再被"避免 0 尺寸"的 1px 地板兜成 1px——应用根容器 `height:100vh;display:flex` 于是变成 1280x1，所有 `flex:1` 后代跟着塌成 0。已定位到 `layout.cpp:3471`（`len_or_auto` → `len_px` → `len_px_impl(...,0,0)`）与 `layout.cpp:3515`（1px 地板）。完整复现与根因见 WhaleUI `temp/incorrect1/`（`incorrect1.cpp` + `README.md`），已交上游** | 修复：flex 主轴尺寸解析改用 `len_or_auto_vp(...,vw,vh,...)`（该函数已存在，元素自身尺寸已在用），并把百分比基数按主轴取（column 用高度）。在此之前桌面 UI 无法正常渲染 |
+| ~~0~~ | ~~界面只画出 40px 顶部标签条，页面主体全空~~ | **已修**：WhaleUI `e87979c`（flex 主轴视口单位塌 1px）。WhaleUI 重新构建后，本文 §4 的验收 1/2/6/7 已通过：界面完整渲染、标签可切换、设置页双栏正常。复现程序与根因留在 WhaleUI `temp/incorrect1/`（15 个变体现已全部 ok） | — |
 | A | 程序化 focus 后按键不生效（终端新建后要先点一下） | `whaleui_dom_focus` 只写 activeElement 镜像；引擎的 `focus_el`（决定 keydown 派发和 `:focus` 样式）只在鼠标按下时设置 | 一个"设置引擎焦点"的 API（或在 `whaleui_dom_focus` 里同步） |
 | B | 终端滚动跟随不工作 | 没有读滚动位置的 API（scrollTop/scrollHeight/clientHeight） | 元素滚动读数 + `scrollTo` |
 | C | 文件上传按钮点了没反应 | 需要原生文件选择器；`folder_picker` 目前只有选目录 | FsApi 增加"选文件"入口（或在适配层用 Win32 对话框） |
@@ -109,8 +109,8 @@ user (ui_app)  →  components / vdom (diff)  →  IDom  →  ┬ WasmDom（浏�
 | F | 终端概览的 `ch` 单位定位可能不准 | `ch` 单位在 WhaleUI 的 `len_px` 里没有专门处理（`max-content` 有） | 确认/补齐 `ch` 单位 |
 | G | 自定义标题栏（无边框 + 最大化/最小化）未接 | 目前用系统边框；无边框需要 HitTest + 拖拽区 | 已有 `set_hit_test`，接入即可 |
 
-以上 **0** 是当前唯一阻塞项（界面渲染不出主体），A/B/C/E 会在打开开关后第一次
-运行时暴露，属"接入后要修"的清单；`doc-internal/ui-events.md` 的界面规划不受影响。
+以上 A/B/C/E 会在打开开关后第一次运行时暴露，属"接入后要修"的清单；
+`doc-internal/ui-events.md` 的界面规划不受影响。
 
 ### 缺口 0 的临时规避（仅在 WhaleUI 修复前使用，勿改应用代码）
 
@@ -118,6 +118,7 @@ user (ui_app)  →  components / vdom (diff)  →  IDom  →  ┬ WasmDom（浏�
 把**内层**容器从 `height:100vh` 改成 `min-height:100vh` 或 `height:100%`
 （外层保持 100vh），或让外层容器不是 flex 容器。三种都只影响 WhaleUI 后端，
 浏览器/wasm 路径不受影响。当前决定是**先记录、等上游修复**，不改应用代码。
+（2026-10-17 上游已修，本节仅留作记录。）
 
 ## 6. 回退
 

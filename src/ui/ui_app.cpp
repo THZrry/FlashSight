@@ -143,6 +143,28 @@ std::string side_title(const std::string& kind) {
   return k ? k->title : kind;
 }
 
+// Template id -> Lobe Icons brand key. The backend's template ids are endpoint
+// presets ("opencode-zen", "openai", "gemini", ...); the icon set uses its own
+// keys, so map the few that differ and pass the rest through (the icon simply
+// does not exist for a name that has no brand, which the caller handles).
+std::string provider_brand_for_template(const std::string& id) {
+  if (id == "opencode-zen" || id == "opencode-go") return "opencode";
+  if (id == "openai") return "openai";
+  if (id == "anthropic") return "anthropic";
+  if (id == "gemini") return "gemini";
+  if (id == "deepseek") return "deepseek";
+  if (id == "moonshot") return "moonshot";
+  if (id == "zhipu") return "zhipu";
+  if (id == "dashscope") return "alibaba";
+  if (id == "siliconflow") return "siliconcloud";
+  if (id == "openrouter") return "openrouter";
+  if (id == "ollama") return "ollama";
+  if (id == "lmstudio") return "lmstudio";
+  if (id == "vllm") return "vllm";
+  if (id == "azure") return "azure";
+  return std::string();  // "custom" and anything unknown: letter fallback
+}
+
 // last path segment (both separators; the backend may be on another OS)
 std::string folder_basename(const std::string& path) {
   size_t end = path.size();
@@ -195,11 +217,6 @@ const int64_t kToastMs = 3200;  // how long a toast stays on screen
 // The strip shows a search box only once terminals are numerous enough to get
 // lost in; below that it is just noise.
 const size_t kTermSearchThreshold = 10;
-
-// The "+" tab's id. It is a real TAB (closable, and you can have one open while
-// a session runs in another) rather than "start a session somewhere": what you
-// want after pressing "+" is a place to decide what to open.
-const char* const kNewTabId = "new";
 
 std::string lower_ascii(const std::string& s) {
   std::string o = s;
@@ -284,12 +301,18 @@ Json split_lines(const std::string& text) {
   return arr;
 }
 
-// 思考档位标签：off/low/medium/high 是协议值，界面要说人话
+// 思考档位标签：协议值 → 界面中文。这些是**预置翻译**，未知档位原样显示，
+// 所以模型可以有自己的档位名而不被这里限制住。
 std::string thinking_label(const std::string& v) {
-  if (v == "off") return "关";
+  if (v == "off" || v == "disable" || v == "disabled") return "关";
+  if (v == "on" || v == "enable" || v == "enabled") return "开";
+  if (v == "minimal") return "最低";
   if (v == "low") return "低";
   if (v == "medium") return "中";
   if (v == "high") return "高";
+  if (v == "xhigh" || v == "extra-high" || v == "extra_high") return "超高";
+  if (v == "max") return "最大";
+  if (v == "auto") return "自动";
   return v;
 }
 
@@ -332,7 +355,7 @@ std::string rel_time(int64_t ms) {
 AppState AppState::make() {
   AppState s;
   s.tab_ids.push_back("home");
-  s.tab_ids.push_back("settings");
+  // 设置不是标签页（见 modal_page 的说明）：它点开就显示、关掉就销毁。
   // side panel starts with the panels that have real data today; others are
   // added on demand via the "+" button. Terminals are not here - they live in
   // the bottom drawer.
@@ -444,7 +467,7 @@ void UiApp::tick_terminal() {
 }
 
 std::string UiApp::active_sid() const {
-  if (st_.active_tab == "home" || st_.active_tab == "settings") return "";
+  if (st_.active_tab == "home") return "";
   return st_.active_tab;
 }
 
@@ -637,7 +660,7 @@ void UiApp::switch_tab(const std::string& id) {
   // directly, the fields still have to be stashed under the right session or
   // its history would be lost on the way back.
   std::string leaving = last_session_key_;
-  if (leaving.empty() && st_.active_tab != "home" && st_.active_tab != "settings") {
+  if (leaving.empty() && st_.active_tab != "home") {
     leaving = st_.active_tab;
   }
   if (id == st_.active_tab && last_session_key_ == leaving && leaving == id) return;
@@ -647,15 +670,17 @@ void UiApp::switch_tab(const std::string& id) {
   st_.model_picker_open = false;
   st_.skill_menu_open = false;
   st_.side_menu_open = false;
+  // Switching tabs also dismisses a modal page: it was opened ON TOP of a tab,
+  // so navigating away means it is done with.
+  st_.modal_page.clear();
   // Record where we came from so closing this tab can return here.
   if (!st_.active_tab.empty() && st_.active_tab != id) {
     st_.tab_history.push_back(st_.active_tab);
     if (st_.tab_history.size() > 64) st_.tab_history.erase(st_.tab_history.begin());
   }
   st_.active_tab = id;
-  // A "新建"/session tab is only meaningful with a session key; the pages
-  // (home/settings/new) have no per-session view to restore.
-  std::string sid = (id == "home" || id == "settings" || id == kNewTabId) ? "" : id;
+  // Only a session tab carries a per-session view; the home page has none.
+  std::string sid = (id == "home") ? "" : id;
   if (sid.empty()) {
     last_session_key_.clear();
     render();
@@ -823,6 +848,7 @@ void UiApp::load_providers() {
       }
     }
     bool picker_wants_default = false;
+    std::string select_default;
     update([&](AppState& s) {
       s.providers = rows;
       // set even on failure: the load is render-driven, a retry loop would hang
@@ -836,8 +862,14 @@ void UiApp::load_providers() {
         s.model_picker_loaded = false;
         picker_wants_default = true;
       }
+      // Opening 供应商 with nothing selected showed an empty right pane and made
+      // you click the only item in the list. Select the first provider instead.
+      if (!s.provider_creating && s.provider_selected.empty() && !rows.empty()) {
+        select_default = rows[0].id;
+      }
     });
     if (picker_wants_default) load_picker_models(rows[0].id);
+    if (!select_default.empty()) select_provider(select_default);
   });
 }
 
@@ -895,18 +927,19 @@ void UiApp::load_mcp_tools() {
 
 void UiApp::load_shells() {
   call_async("settings.detectShells", Json::object(), [this](const BackendResult& r) {
-    std::vector<std::string> names;
-    names.push_back("自动探测");
+    std::vector<AppState::ShellRow> rows;
     const Json& arr = r.ok ? (r.data.contains("shells") ? r.data["shells"] : r.data)
                            : Json::array();
     if (arr.is_array()) {
       for (size_t i = 0; i < arr.size(); ++i) {
-        std::string n = jsonutil::get<std::string>(arr[i], "name", "");
-        if (!n.empty()) names.push_back(n);
+        AppState::ShellRow row;
+        row.name = jsonutil::get<std::string>(arr[i], "name", "");
+        row.path = jsonutil::get<std::string>(arr[i], "path", "");
+        if (!row.name.empty()) rows.push_back(row);
       }
     }
-    // always non-empty afterwards -> the render-driven guard stops retrying
-    update([&](AppState& s) { s.shells = names; });
+    // set even when empty: the render-driven guard stops retrying either way
+    update([&](AppState& s) { s.shell_rows = rows; });
   });
 }
 
@@ -1331,10 +1364,6 @@ VNodePtr UiApp::build_shell() {
     t.key = id;
     if (id == "home") {
       t.title = "主页";
-    } else if (id == "settings") {
-      t.title = "设置";
-    } else if (id == kNewTabId) {
-      t.title = "新建";
     } else {
       t.title = id;
       for (size_t k = 0; k < st_.sessions.size(); ++k) {
@@ -1358,22 +1387,26 @@ VNodePtr UiApp::build_shell() {
   // ---- page ----
   // keyed by tab so switching pages replaces the subtree instead of patching
   // unrelated content into it
+  //
+  // A modal page (设置 / 新建) covers whatever tab is underneath instead of
+  // becoming a tab of its own: it is opened, used, and closed, and having it in
+  // the strip (and in the visit stack) made closing tabs fall back into settings.
   std::string page_id;
   VNodePtr page;
-  if (st_.active_tab == "home") {
-    page_id = "home";
-    page = build_home();
-  } else if (st_.active_tab == "settings") {
+  if (st_.modal_page == "settings") {
     page_id = "settings";
     page = build_settings();
-  } else if (st_.active_tab == kNewTabId) {
+  } else if (st_.modal_page == "new") {
     page_id = "new";
     page = build_new_tab();
+  } else if (st_.active_tab == "home") {
+    page_id = "home";
+    page = build_home();
   } else {
     page_id = "session";
     page = build_session();
   }
-  page->key = "page:" + st_.active_tab;
+  page->key = "page:" + page_id + (st_.modal_page.empty() ? st_.active_tab : "");
   // The framework applies the animation, looked up from the page's declaration
   // above - so a page switch animates because it is DECLARED, not because a
   // builder remembered to add a class. The key change makes the diff recreate
@@ -1451,14 +1484,15 @@ VNodePtr UiApp::build_home() {
   }));
   H grow = el("span", "grow");
   foot.add(grow);
-  foot.add(comp::button("设置", [this](const std::string&) { show("settings"); }, "ghost"));
+  foot.add(comp::button("设置", [this](const std::string&) {
+    open_modal_page("settings");
+  }, "ghost"));
   wrap.add(foot);
   return wrap.get();
 }
 
-// 顶层 "+" 打开的页面：就是"项目"这一页（项目卡片 + 每个项目的会话列表，
-// 点会话即打开、点"新建会话"即建）。它是一个**普通标签页**，可以关掉、可以
-// 和别的标签页并存；内容不另造一套，直接复用项目卡片。
+// 顶层 "+" 打开的页面：项目卡片 + 每个项目的会话列表（点会话即打开、点
+// "新建会话"即建）。它**不是标签页**：盖在当前标签页之上，关掉就消失。
 VNodePtr UiApp::build_new_tab() {
   H wrap = el("div", "page new-page");
   H head = el("div", "new-head");
@@ -1470,8 +1504,12 @@ VNodePtr UiApp::build_new_tab() {
     pick_and_open_folder();
   }, "primary"));
   acts.add(comp::button(tr("设置"), [this](const std::string&) {
-    show("settings");
+    open_modal_page("settings");
   }, "ghost"));
+  acts.add(el("span", "grow"));
+  acts.add(comp::icon_button("\u2715", tr("关闭"), [this](const std::string&) {
+    close_modal_page();
+  }));
   head.add(acts);
   wrap.add(head);
   H body = el("div", "new-body");
@@ -1819,7 +1857,9 @@ VNodePtr UiApp::build_session() {
   H model_btn = el("button", "model-pick-btn");
   model_btn.attr("type", "button");
   model_btn.attr("title", tr("选择模型"));
-  model_btn.on(EventKind::kClick, [this](const std::string&) { open_model_picker(); });
+  model_btn.on(EventKind::kClick, [this](const std::string&) {
+    open_model_picker("composer", "");
+  });
   model_btn.add(comp::model_icon("", st_.model));
   model_btn.add(el("span", "mpb-name").text(st_.model.empty() ? tr("选择模型") : st_.model));
   model_btn.add(el("span", "mpb-caret").text("\u25be"));
@@ -1923,149 +1963,20 @@ VNodePtr UiApp::build_session() {
   // in the overlay layer, which is `pointer-events: none` - a backdrop placed
   // there cannot receive the click that is supposed to dismiss it, which is why
   // the picker used to stay glued open.
-  if (st_.model_picker_open) {
+  //
+  // The popup itself is a shared component (build_model_picker): the same one is
+  // used by the settings fields, so "which model" is answered identically
+  // everywhere and there is only one copy to keep working.
+  if (st_.model_picker_open && st_.model_picker_owner == "composer") {
     H back = el("div", "picker-backdrop");
     back.on(EventKind::kClick, [this](const std::string&) {
-      update([&](AppState& s) { s.model_picker_open = false; });
+      update([&](AppState& s) {
+        s.model_picker_open = false;
+        s.model_picker_owner.clear();
+      });
     });
     comp_box.add(back);
-    H pop = el("div", "model-picker");
-    pop.key("model-picker");
-    pop.anim(anim::kPop);
-    H head = el("div", "mp-head");
-    head.add(el("span", "mp-title").text(tr("选择模型")));
-    head.add(el("span", "grow"));
-    head.add(comp::icon_button("\u2715", tr("关闭"), [this](const std::string&) {
-      update([&](AppState& s) { s.model_picker_open = false; });
-    }));
-    pop.add(head);
-
-    H cols = el("div", "mp-cols");
-    // left: providers
-    H plist = el("div", "mp-providers");
-    for (size_t i = 0; i < st_.providers.size(); ++i) {
-      const AppState::ProviderRow& p = st_.providers[i];
-      bool active = p.id == st_.model_picker_provider;
-      H item = el("div", active ? "mp-prov active" : "mp-prov");
-      item.key("mp-" + p.id);
-      std::string pid = p.id;
-      item.on(EventKind::kClick, [this, pid](const std::string&) {
-        update([&](AppState& s) {
-          s.model_picker_provider = pid;
-          s.model_picker_models.clear();
-          s.model_picker_loaded = false;
-          s.model_picker_status.clear();
-          // A query typed against one provider's models should not silently
-          // filter the next provider's list down to nothing.
-          s.model_picker_query.clear();
-        });
-        load_picker_models(pid);
-      });
-      item.add(el("div", "mp-prov-name").text(p.name.empty() ? p.id : p.name));
-      item.add(el("div", "mp-prov-kind dim").text(p.kind));
-      plist.add(item);
-    }
-    if (st_.providers.empty()) {
-      plist.add(comp::empty_state(tr("还没有供应商。"), "", nullptr));
-    }
-    cols.add(plist);
-
-    // right: models of the selected provider
-    H mside = el("div", "mp-models");
-    H search = comp::search_box(st_.model_picker_query, tr("搜索模型"),
-                                [this](const std::string& v) {
-      // must re-render: the filter decides which rows exist
-      update([&](AppState& s) { s.model_picker_query = v; });
-    });
-    // Keyed by provider: switching providers clears the query, but a focused
-    // input's value is deliberately NOT patched (that is what keeps a caret
-    // from jumping mid-typing), so the cleared state would never reach the DOM.
-    // A new key recreates the node, which is the framework-level way to say
-    // "this input starts over".
-    search.key("mp-search:" + st_.model_picker_provider);
-    mside.add(search);
-    // Filtering happens here rather than in the backend: the list is already in
-    // memory and a round trip per keystroke would make typing feel laggy.
-    std::vector<const AppState::ModelRow*> vis;
-    for (size_t i = 0; i < st_.model_picker_models.size(); ++i) {
-      const AppState::ModelRow& m = st_.model_picker_models[i];
-      if (!st_.model_picker_query.empty()) {
-        std::string ql = lower_ascii(st_.model_picker_query);
-        if (lower_ascii(m.id + " " + m.display).find(ql) == std::string::npos) continue;
-      }
-      vis.push_back(&m);
-    }
-    // Above the threshold the list is sorted and grouped by initial, which only
-    // means anything if the order is alphabetical (grouping an arbitrary order
-    // would repeat a letter down the list).
-    const bool grouped = vis.size() > 20;
-    if (grouped) {
-      std::sort(vis.begin(), vis.end(),
-                [](const AppState::ModelRow* a, const AppState::ModelRow* b) {
-        return lower_ascii(a->display.empty() ? a->id : a->display) <
-               lower_ascii(b->display.empty() ? b->id : b->display);
-      });
-    }
-    if (!st_.model_picker_loaded) {
-      mside.add(el("div", "hint").text(tr("加载中…")));
-    } else if (vis.empty()) {
-      mside.add(comp::empty_state(
-          st_.model_picker_query.empty() ? tr("这个供应商还没有启用中的模型。")
-                                         : tr("没有匹配的模型。"),
-          "", nullptr));
-    } else {
-      std::string last_group;
-      H list = el("div", "mp-list");
-      for (size_t i = 0; i < vis.size(); ++i) {
-        const AppState::ModelRow& m = *vis[i];
-        std::string label = m.display.empty() ? m.id : m.display;
-        if (grouped) {
-          char c = label.empty() ? '#' : label[0];
-          std::string g;
-          if (c >= 'a' && c <= 'z') g = std::string(1, static_cast<char>(c - 'a' + 'A'));
-          else if (c >= 'A' && c <= 'Z') g = std::string(1, c);
-          else if (c >= '0' && c <= '9') g = "#";
-          else g = "·";
-          if (g != last_group) {
-            list.add(el("div", "mp-group").text(g));
-            last_group = g;
-          }
-        }
-        bool cur = m.id == st_.model;
-        H row = el("div", cur ? "mp-model active" : "mp-model");
-        row.key("mpm-" + m.id);
-        std::string mid = m.id;
-        std::string ppid = st_.model_picker_provider;
-        row.on(EventKind::kClick, [this, ppid, mid](const std::string&) {
-          pick_model(ppid, mid);
-        });
-        row.add(comp::model_icon(m.icon, m.id));
-        H nm = el("div", "mp-model-name");
-        nm.add(el("span", "mp-model-id").text(label));
-        H caps = el("span", "md-caps");
-        bool any_cap = false;
-        if (m.vision) { caps.add(el("i", "fa fa-eye").attr("title", tr("视觉"))); any_cap = true; }
-        if (m.audio) { caps.add(el("i", "fa fa-volume-high").attr("title", tr("音频"))); any_cap = true; }
-        if (m.video) { caps.add(el("i", "fa fa-video").attr("title", tr("视频"))); any_cap = true; }
-        if (m.pdf) { caps.add(el("i", "fa fa-file-pdf").attr("title", tr("PDF"))); any_cap = true; }
-        if (m.structured) { caps.add(el("i", "fa fa-brackets-curly").attr("title", tr("结构化输出"))); any_cap = true; }
-        if (any_cap) nm.add(caps);
-        row.add(nm);
-        if (m.context_len > 0) {
-          row.add(el("span", "mp-ctx dim").text(
-              itos(static_cast<int>(m.context_len / 1000)) + "K"));
-        }
-        if (cur) row.add(el("i", "fa fa-check"));
-        list.add(row);
-      }
-      mside.add(list);
-    }
-    if (!st_.model_picker_status.empty()) {
-      mside.add(el("div", "pv-status").text(st_.model_picker_status));
-    }
-    cols.add(mside);
-    pop.add(cols);
-    comp_box.add(pop);
+    comp_box.add(build_model_picker("composer", st_.model));
   }
   center.add(comp_box);
 
@@ -2663,10 +2574,12 @@ const SettingsItem kSettingsNav[] = {
     {"通用", "computer", "电脑控制"},
     {"模型", "providers", "供应商"},
     {"模型", "session_defaults", "会话默认"},
-    {"模型", "context", "上下文"},
     {"模型", "model_prefs", "模型偏好"},
     {"模型", "subagents", "子代理"},
-    {"模型", "skills", "MCP 与 Skill"},
+    // MCP 与 Skill 分开：两者都是"可能有大量条目"的列表，各自的探测/导入/
+    // 新建流程也不一样，塞在一页里只会让两边都挤。
+    {"模型", "mcp", "MCP"},
+    {"模型", "skills", "Skill"},
     {"模型", "memory", "长期记忆"},
     {"权限", "network", "网络"},
     {"权限", "terminal", "终端"},
@@ -2849,6 +2762,7 @@ void UiApp::apply_appearance() {
   a.mono = st_.ui_mono;
   a.font_size = st_.ui_font_size;
   a.code_highlight = sv_bool(st_.settings_values, "ui.codeHighlight", true);
+  a.tabs = sv_str(st_.settings_values, "ui.tabs", "top");
   dom_.set_appearance(a);
 }
 
@@ -2879,10 +2793,10 @@ void UiApp::load_settings_section(const std::string& section) {
   if (section == "skills" && !st_.skills_loaded) {
     load_skills();
   }
-  if (section == "skills" && !st_.mcp_loaded) {
+  if (section == "mcp" && !st_.mcp_loaded) {
     load_mcp_tools();
   }
-  if (section == "terminal" && st_.shells.empty()) {
+  if (section == "terminal" && st_.shell_rows.empty()) {
     load_shells();
   }
 }
@@ -2939,6 +2853,15 @@ void UiApp::load_skills() {
 
 VNodePtr UiApp::build_settings() {
   H wrap = el("div", "page settings-page");
+  // 设置不是标签页，所以它需要一个明确的关闭出口（没有标签可点 ×）。
+  H head = el("div", "settings-head");
+  head.add(el("div", "settings-head-title").text(tr("设置")));
+  head.add(el("span", "grow"));
+  head.add(comp::icon_button("\u2715", tr("关闭设置"), [this](const std::string&) {
+    close_modal_page();
+  }));
+  wrap.add(head);
+  H cols = el("div", "settings-cols");
   H nav = el("div", "settings-nav");
   std::string last_group;
   for (size_t i = 0; i < kSettingsNavCount; ++i) {
@@ -2956,7 +2879,7 @@ VNodePtr UiApp::build_settings() {
     n.add(el("span").text(tr(it.title)));
     nav.add(n);
   }
-  wrap.add(nav);
+  cols.add(nav);
 
   H body = el("div", "settings-body");
   const std::string& sec = st_.settings_nav;
@@ -3034,7 +2957,7 @@ VNodePtr UiApp::build_settings() {
         int i = std::atoi(v.c_str());
         const char* ids[4] = {"openai-chat", "openai-response", "anthropic", "custom"};
         st_.pv_kind = ids[i < 0 || i > 3 ? 0 : i];
-      }), "请求长什么样（endpoint 由模板/下面的地址决定）"));
+      })));
       form.add(comp::field("Endpoint", comp::text_input(st_.pv_base_url, "",
                                                         [this](const std::string& v) {
         st_.pv_base_url = v;
@@ -3140,6 +3063,32 @@ VNodePtr UiApp::build_settings() {
         begin_new_model();
       }));
       mpanel.add(mhead);
+      // Bulk enable/disable: with dozens of models, flipping them one dot at a
+      // time is the wrong unit of work.
+      if (!creating && !st_.models.empty()) {
+        H bulk = el("div", "md-bulk");
+        bulk.add(comp::button(tr("全选"), [this](const std::string&) {
+          for (size_t i = 0; i < st_.models.size(); ++i) {
+            if (!st_.models[i].enabled) toggle_model_enabled(st_.models[i].id, true);
+          }
+        }, "ghost"));
+        bulk.add(comp::button(tr("全不选"), [this](const std::string&) {
+          for (size_t i = 0; i < st_.models.size(); ++i) {
+            if (st_.models[i].enabled) toggle_model_enabled(st_.models[i].id, false);
+          }
+        }, "ghost"));
+        // Where the list came from matters: preset entries are a guess, not
+        // what the endpoint actually serves.
+        bool any_api = false, any_preset = false;
+        for (size_t i = 0; i < st_.models.size(); ++i) {
+          if (st_.models[i].from_api) any_api = true;
+          if (st_.models[i].from_preset) any_preset = true;
+        }
+        bulk.add(el("span", "grow"));
+        if (any_api) bulk.add(el("span", "md-src").text(tr("来自 API")));
+        else if (any_preset) bulk.add(el("span", "md-src warn").text(tr("内置预置（非 API）")));
+        mpanel.add(bulk);
+      }
 
       if (creating) {
         mpanel.add(el("div", "hint").text(tr("保存供应商后可管理模型")));
@@ -3246,37 +3195,44 @@ VNodePtr UiApp::build_settings() {
         }), tr("停用后不出现在会话的模型选择器里")));
 
         adv2.add(comp::section_title(tr("能力")));
-        adv2.add(comp::field(tr("视觉"), comp::toggle(d.vision, "",
-            [this](const std::string&) {
+        // Two per row: five full-width toggle rows made this block needlessly
+        // tall, and the panel is already the taller of the two columns.
+        // 工具调用 is NOT here: every model this app can use supports it, so a
+        // per-model switch for it was a decision nobody makes.
+        H caps_grid = el("div", "md-cap-grid");
+        auto cap = [&](const char* label, bool value, const char* icon,
+                       std::function<void()> flip) {
+          H c = el("div", "md-cap");
+          c.add(el("i", "fa fa-" + std::string(icon)));
+          c.add(el("span", "md-cap-name").text(tr(label)));
+          c.add(comp::toggle(value, "", [flip](const std::string&) { flip(); }));
+          caps_grid.add(c);
+        };
+        cap("视觉", d.vision, "eye", [this]() {
           update([&](AppState& s) { s.model_draft.vision = !s.model_draft.vision; });
-        })));
-        adv2.add(comp::field(tr("音频"), comp::toggle(d.audio, "",
-            [this](const std::string&) {
+        });
+        cap("音频", d.audio, "volume-high", [this]() {
           update([&](AppState& s) { s.model_draft.audio = !s.model_draft.audio; });
-        })));
-        adv2.add(comp::field(tr("视频"), comp::toggle(d.video, "",
-            [this](const std::string&) {
+        });
+        cap("视频", d.video, "video", [this]() {
           update([&](AppState& s) { s.model_draft.video = !s.model_draft.video; });
-        })));
-        adv2.add(comp::field(tr("PDF"), comp::toggle(d.pdf, "",
-            [this](const std::string&) {
+        });
+        cap("PDF", d.pdf, "file-pdf", [this]() {
           update([&](AppState& s) { s.model_draft.pdf = !s.model_draft.pdf; });
-        })));
-        adv2.add(comp::field(tr("结构化输出"), comp::toggle(d.structured, "",
-            [this](const std::string&) {
+        });
+        cap("结构化输出", d.structured, "brackets-curly", [this]() {
           update([&](AppState& s) { s.model_draft.structured = !s.model_draft.structured; });
-        })));
-        adv2.add(comp::field(tr("工具调用"), comp::toggle(d.tool_use, "",
-            [this](const std::string&) {
-          update([&](AppState& s) { s.model_draft.tool_use = !s.model_draft.tool_use; });
-        }), tr("不支持工具调用的模型不能进会话")));
+        });
+        adv2.add(caps_grid);
 
         adv2.add(comp::section_title(tr("长度")));
+        // 上下文长度必填：0/空会让压缩与水位都算不出来（除以零或永远 0%），
+        // 所以这里要求一个数，保存时再校验一次。
         adv2.add(comp::field(tr("上下文长度"), comp::text_input(
             d.context_len > 0 ? itos(static_cast<int>(d.context_len)) : std::string(),
-            "如 128000", [this](const std::string& v) {
+            tr("必填，如 128000"), [this](const std::string& v) {
           st_.model_draft.context_len = static_cast<long long>(std::atoi(v.c_str()));
-        }), tr("0 / 空 = 未知")));
+        }), tr("必填：上下文窗口大小（token）")));
         adv2.add(comp::field(tr("最大输出"), comp::text_input(
             d.max_output > 0 ? itos(static_cast<int>(d.max_output)) : std::string(),
             "如 8192", [this](const std::string& v) {
@@ -3284,48 +3240,48 @@ VNodePtr UiApp::build_settings() {
         })));
 
         adv2.add(comp::section_title(tr("思考档位")));
-        // Levels are a property of the MODEL, not a fixed global enum: some
-        // models only switch reasoning on or off, some grade it. So the list is
-        // editable here rather than chosen from one hardcoded set.
-        //
-        // While creating a model, the typed name is all that is known about it,
-        // so show what the coarse match WILL produce instead of claiming "no
-        // levels" about a model that does not exist yet.
+        // Levels are a property of the MODEL, not a fixed global enum. Editing
+        // them as one comma-separated line matches how people think about it
+        // ("off, low, high") and is far less clicking than add-one-at-a-time.
+        // The protocol values stay as typed; the Chinese names are only a
+        // display translation used by the dropdowns elsewhere.
         std::vector<std::string> shown_levels = d.thinking_levels;
         if (st_.model_creating && shown_levels.empty() && !st_.model_new_id.empty()) {
           shown_levels = thinking_levels_for(st_.model_new_id);
         }
-        if (shown_levels.empty()) {
-          adv2.add(el("div", "hint").text(
-              tr("该模型没有可配档位（按模型名粗匹配；可手动添加）")));
-        }
+        std::string levels_text;
         for (size_t i = 0; i < shown_levels.size(); ++i) {
-          H lrow = el("div", "settings-row");
-          lrow.add(el("span", "sr-name").text(thinking_label(shown_levels[i])));
-          lrow.add(el("span", "dim grow").text(shown_levels[i]));
-          if (st_.model_creating) {
-            // not saved yet: these are a preview of the coarse match
-            lrow.add(comp::badge(tr("保存后生效")));
-            adv2.add(lrow);
-            continue;
-          }
-          size_t idx = i;
-          if (shown_levels[i] == d.thinking_default) lrow.add(comp::badge(tr("默认")));
-          lrow.add(comp::button(tr("设为默认"), [this, idx](const std::string&) {
+          if (!levels_text.empty()) levels_text += ", ";
+          levels_text += shown_levels[i];
+        }
+        if (st_.model_creating) {
+          // not saved yet: show what the coarse match will produce
+          adv2.add(comp::field(tr("档位"), el("div", "hint").text(
+              levels_text.empty() ? tr("该模型名没有匹配到档位")
+                                  : (levels_text + tr("（保存后生效）")))));
+        } else {
+          adv2.add(comp::field(tr("档位"), comp::text_input(
+              levels_text, tr("以逗号分隔，如 off, low, medium, high"),
+              [this](const std::string& v) {
+            // Parse on every keystroke: the text is the source of truth, and a
+            // half-typed line ("off, lo") is still a valid list of one level.
             update([&](AppState& s) {
-              if (idx < s.model_draft.thinking_levels.size()) {
-                s.model_draft.thinking_default = s.model_draft.thinking_levels[idx];
+              s.model_draft.thinking_levels.clear();
+              size_t i = 0;
+              while (i <= v.size()) {
+                size_t e = v.find(',', i);
+                if (e == std::string::npos) e = v.size();
+                std::string part = v.substr(i, e - i);
+                size_t a = 0, b = part.size();
+                while (a < b && (part[a] == ' ' || part[a] == '\t')) ++a;
+                while (b > a && (part[b - 1] == ' ' || part[b - 1] == '\t')) --b;
+                part = part.substr(a, b - a);
+                if (!part.empty()) s.model_draft.thinking_levels.push_back(part);
+                if (e == v.size()) break;
+                i = e + 1;
               }
-            });
-          }, "ghost"));
-          lrow.add(comp::button(tr("删除"), [this, idx](const std::string&) {
-            update([&](AppState& s) {
-              if (idx < s.model_draft.thinking_levels.size()) {
-                s.model_draft.thinking_levels.erase(
-                    s.model_draft.thinking_levels.begin() + static_cast<long>(idx));
-              }
-              // the default may have just been removed, and a default naming a
-              // level that no longer exists would save as a dangling value
+              // keep the default valid: if it vanished from the list, fall back
+              // to the first level so saving cannot write a dangling value
               bool still = false;
               for (size_t k = 0; k < s.model_draft.thinking_levels.size(); ++k) {
                 if (s.model_draft.thinking_levels[k] == s.model_draft.thinking_default) {
@@ -3338,26 +3294,27 @@ VNodePtr UiApp::build_settings() {
                                                      : s.model_draft.thinking_levels[0];
               }
             });
-          }, "ghost"));
-          adv2.add(lrow);
+          }), levels_text.empty() ? tr("留空 = 不可配思考档") : ""));
+          // Default level: a dropdown over the levels that actually exist, with
+          // the Chinese preset names (off/low/high/xhigh/max ...).
+          if (!d.thinking_levels.empty()) {
+            std::vector<std::string> opts;
+            int sel = 0;
+            for (size_t i = 0; i < d.thinking_levels.size(); ++i) {
+              opts.push_back(thinking_label(d.thinking_levels[i]));
+              if (d.thinking_levels[i] == d.thinking_default) sel = static_cast<int>(i);
+            }
+            adv2.add(comp::field(tr("默认档位"), comp::select(
+                opts, sel, [this](const std::string& v) {
+              int idx = std::atoi(v.c_str());
+              update([&](AppState& s) {
+                if (idx >= 0 && idx < static_cast<int>(s.model_draft.thinking_levels.size())) {
+                  s.model_draft.thinking_default = s.model_draft.thinking_levels[idx];
+                }
+              });
+            })));
+          }
         }
-        H ladd = el("div", "pv-header-add");
-        ladd.add(comp::text_input(st_.model_new_level, "off / low / medium / high",
-                                  [this](const std::string& v) { st_.model_new_level = v; }));
-        ladd.add(comp::button(tr("添加档位"), [this](const std::string&) {
-          update([&](AppState& s) {
-            if (s.model_new_level.empty()) return;
-            for (size_t i = 0; i < s.model_draft.thinking_levels.size(); ++i) {
-              if (s.model_draft.thinking_levels[i] == s.model_new_level) return;
-            }
-            s.model_draft.thinking_levels.push_back(s.model_new_level);
-            if (s.model_draft.thinking_default.empty()) {
-              s.model_draft.thinking_default = s.model_new_level;
-            }
-            s.model_new_level.clear();
-          });
-        }, "ghost"));
-        adv2.add(ladd);
 
         adv2.add(comp::section_title(tr("失败重试")));
         adv2.add(comp::field(tr("重试次数"), comp::text_input(
@@ -3413,11 +3370,18 @@ VNodePtr UiApp::build_settings() {
         c.on(EventKind::kClick, [this, tid](const std::string&) {
           begin_new_provider(tid);
         });
-        // The mark is a letter drawn in CSS (no network, no extra assets): the
-        // first letter of the template, tinted per template so the grid is
-        // scannable by shape+color rather than by reading every name.
+        // A brand mark from the local Lobe Icons set: the template id is the
+        // brand key (openai/anthropic/gemini/...), so a grid of templates is
+        // scannable by logo instead of by reading every name. Unknown ids fall
+        // back to the first letter.
         H mark = el("span", "pv-tpl-mark");
-        mark.text(t.name.empty() ? "?" : t.name.substr(0, 1));
+        std::string brand = provider_brand_for_template(t.id);
+        if (!brand.empty()) {
+          mark = el("span", "pv-tpl-mark brand");
+          mark.add(comp::model_icon(brand, t.name, "mi-lg"));
+        } else {
+          mark.text(t.name.empty() ? "?" : t.name.substr(0, 1));
+        }
         c.add(mark);
         H body = el("div", "pv-tpl-body");
         body.add(el("div", "pv-tpl-name").text(t.name));
@@ -3445,14 +3409,6 @@ VNodePtr UiApp::build_settings() {
   } else if (sec == "subagents") {
     // --- 子代理 ---
     body.add(comp::section_title(tr("子代理")));
-    // The model choices come from the configured providers, not a hardcoded
-    // list: "which model runs this subagent" can only be answered by the models
-    // this install actually has.
-    std::vector<std::string> model_opts;
-    model_opts.push_back(tr("继承会话"));
-    for (size_t i = 0; i < st_.provider_models.size(); ++i) {
-      model_opts.push_back(st_.provider_models[i]);
-    }
     for (size_t i = 0; i < st_.preset_agents.size(); ++i) {
       const AppState::PresetRow& a = st_.preset_agents[i];
       H row = el("div", "settings-row");
@@ -3474,18 +3430,13 @@ VNodePtr UiApp::build_settings() {
           });
         });
       }));
-      // which model this agent uses (empty = inherit the session's)
+      // Which model this agent uses. Same picker component as everywhere else,
+      // plus "inherit the session's model" as an explicit choice - a text field
+      // here let a typo look like a valid model name.
       std::string cur = sv_str(st_.settings_values, "subagents." + name + ".model", "");
-      int sel = 0;
-      for (size_t k = 0; k < model_opts.size(); ++k) {
-        if (model_opts[k] == cur) sel = static_cast<int>(k);
-      }
-      row.add(comp::select(model_opts, sel, [this, name, model_opts](const std::string& v) {
-        int idx = std::atoi(v.c_str());
-        std::string model = (idx <= 0 || idx >= static_cast<int>(model_opts.size()))
-                                ? "" : model_opts[idx];
-        set_setting("subagents." + name + ".model", model);
-      }));
+      std::string owner = "subagent_" + name;
+      row.add(build_model_field(owner, "subagents." + name + ".model", cur,
+                                tr("继承会话")));
       body.add(row);
     }
     body.add(comp::section_title(tr("上限")));
@@ -3513,169 +3464,210 @@ VNodePtr UiApp::build_settings() {
       set_setting("subagents.maxDepth", n < 8 ? n + 1 : 8);
     }));
     body.add(comp::field(tr("嵌套深度"), dep_row));
-  } else if (sec == "context") {
-    // --- 上下文（session-history.md §3：短视图 + 外层压缩摘要）---
-    // These are the knobs the HistoryBuilder reads: how much recent history goes
-    // to the model verbatim, and the token budget above which the oldest turns
-    // get compressed into a summary. They used to sit in 常规 under the heading
-    // "会话历史", which described them as storage settings - they are not: they
-    // decide what the MODEL sees each turn.
-    body.add(comp::section_title(tr("短视图")));
-    H hist_row = el("div", "stepper");
-    hist_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
-      int n = std::atoi(st_.history_recent.c_str());
-      n = n > 4 ? n - 1 : 4;
-      st_.history_recent = itos(n);
-      set_setting("history.recentTurns", n);
-    }));
-    hist_row.add(el("span", "stepper-value").text(
-        (st_.history_recent.empty() ? std::string("20") : st_.history_recent) +
-        tr(" 轮")));
-    hist_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
-      int n = std::atoi(st_.history_recent.c_str());
-      n = n < 100 ? n + 1 : 100;
-      st_.history_recent = itos(n);
-      set_setting("history.recentTurns", n);
-    }));
-    body.add(comp::field(tr("保留最近"), hist_row));
+} else if (sec == "model_prefs") {
+    // --- 模型偏好 ---
+    // NOTE: 子代理's own model lives on the 子代理 page (each agent picks its
+    // own); a second, global "subagent default" here just duplicated it.
+    body.add(comp::section_title(tr("语言")));
+    // 模型输出语言：默认"不指定"，让模型自己决定。以前是"跟随系统"，但那等于
+    // 把界面语言当成模型指令，用户并没有这么要求过。
+    body.add(comp::field(tr("输出语言"), comp::select(
+        std::vector<std::string>{tr("不指定"), "中文", "English"},
+        sv_str(st_.settings_values, "model.outputLang", "") == "zh" ? 1
+            : sv_str(st_.settings_values, "model.outputLang", "") == "en" ? 2 : 0,
+        [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      const char* langs[3] = {"", "zh", "en"};
+      set_setting("model.outputLang", langs[idx < 0 || idx > 2 ? 0 : idx]);
+    }), tr("不指定 = 由模型自行决定")));
+    body.add(comp::field(tr("思考语言"), comp::select(
+        std::vector<std::string>{tr("不指定"), "中文", "English"},
+        st_.thinking_lang == "zh" ? 1 : st_.thinking_lang == "en" ? 2 : 0,
+        [this](const std::string& v) {
+      int idx = std::atoi(v.c_str());
+      const char* langs[3] = {"", "zh", "en"};
+      std::string l = langs[idx < 0 || idx > 2 ? 0 : idx];
+      update([&](AppState& s) { s.thinking_lang = l; });
+      set_setting("model.thinkingLang", l);
+    }), tr("影响工具/skill 说明的双语选择")));
 
     body.add(comp::section_title(tr("压缩")));
-    H bud_row = el("div", "stepper");
-    bud_row.add(comp::icon_button("\u2212", tr("减少"), [this](const std::string&) {
-      int n = std::atoi(st_.history_budget.c_str());
-      n = n > 1000 ? n - 1000 : 1000;
-      st_.history_budget = itos(n);
-      set_setting("history.tokenBudget", n);
-    }));
-    bud_row.add(el("span", "stepper-value").text(
-        (st_.history_budget.empty() ? std::string("8000") : st_.history_budget) +
-        " tok"));
-    bud_row.add(comp::icon_button("+", tr("增加"), [this](const std::string&) {
-      int n = std::atoi(st_.history_budget.c_str());
-      n = n < 128000 ? n + 1000 : 128000;
-      st_.history_budget = itos(n);
-      set_setting("history.tokenBudget", n);
-    }));
-    body.add(comp::field(tr("token 预算"), bud_row));
-
-    body.add(comp::section_title(tr("防过拟合")));
-    body.add(comp::field(tr("重复检测"), comp::toggle(
-        sv_bool(st_.settings_values, "session.overfitEnabled", false), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "session.overfitEnabled", false);
-      set_setting("session.overfitEnabled", !cur);
-    })));
-  } else if (sec == "model_prefs") {
-    // --- 模型偏好（provider.md §5：子代理/摘要模型的通用偏好）---
-    body.add(comp::section_title(tr("子代理")));
-    body.add(comp::field(tr("默认模型"), comp::text_input(
-        sv_str(st_.settings_values, "model.pref.subagent.model", ""),
-        tr("继承会话"),
-        [this](const std::string& v) {
-      set_setting("model.pref.subagent.model", v);
-    })));
-    body.add(comp::field(tr("默认思考档"), comp::select(
-        std::vector<std::string>{tr("继承"), tr("关"), tr("低"), tr("中"), tr("高")},
+    // 自动压缩阈值：会话视图长度达到窗口的 N% 就开始压缩。给档位而不是让用户
+    // 填一个百分比，因为"多少算满"本来就是个经验值。
+    body.add(comp::field(tr("自动压缩阈值"), comp::select(
+        std::vector<std::string>{"60%", "70%", "80%", "90%", tr("关闭")},
         [&]() {
-          std::string t = sv_str(st_.settings_values, "model.pref.subagent.thinking", "");
-          return t == "off" ? 1 : t == "low" ? 2 : t == "medium" ? 3
-                 : t == "high" ? 4 : 0;
+          int n = sv_int(st_.settings_values, "history.compressPct", 80);
+          return n <= 0 ? 4 : n <= 60 ? 0 : n <= 70 ? 1 : n <= 80 ? 2 : 3;
         }(),
         [this](const std::string& v) {
       int idx = std::atoi(v.c_str());
-      const char* vals[5] = {"", "off", "low", "medium", "high"};
-      set_setting("model.pref.subagent.thinking", vals[idx < 0 || idx > 4 ? 0 : idx]);
-    })));
+      const int vals[5] = {60, 70, 80, 90, 0};
+      set_setting("history.compressPct", vals[idx < 0 || idx > 4 ? 2 : idx]);
+    }), tr("上下文占用达到该比例时自动压缩较早的轮次")));
+
     body.add(comp::section_title(tr("摘要")));
     // 摘要默认继承会话模型：只有在需要便宜模型时才有必要单独指定
-    body.add(comp::field(tr("摘要模型"), comp::text_input(
-        sv_str(st_.settings_values, "model.pref.summary.model", ""),
-        tr("继承会话"),
-        [this](const std::string& v) {
-      set_setting("model.pref.summary.model", v);
-    })));
-  } else if (sec == "skills") {
-    // --- MCP 与 Skill ---
-    body.add(comp::section_title("MCP 与 Skill"));
-    if (st_.skills.empty()) {
-      body.add(comp::empty_state("暂无已注册 skill。", "", nullptr));
-    }
-    for (size_t i = 0; i < st_.skills.size(); ++i) {
-      H row = el("div", "settings-row");
-      row.add(el("span", "sr-name").text(
-          st_.skills[i].title.empty() ? st_.skills[i].name : st_.skills[i].title));
-      row.add(el("span", "dim grow").text(st_.skills[i].description));
-      if (!st_.skills[i].loadable) row.add(comp::badge("常驻"));
-      std::string name = st_.skills[i].name;
-      row.add(comp::button("查看", [this, name](const std::string&) {
-        call_async("skill.load", Json{{"name", name}},
-                   [this, name](const BackendResult& r) {
-          toast(r.ok ? ("已加载 skill: " + name) : ("加载失败：" + r.message));
-        });
-      }, "ghost"));
-      body.add(row);
-    }
-
-    // ---- 外部工具包（MCP/Skill 文件夹导入）----
-    body.add(comp::section_title("外部工具包"));
-    H macts = el("div", "settings-actions");
-    macts.add(comp::button("自动探测", [this](const std::string&) { detect_mcp(); }, "primary"));
-    body.add(macts);
-    if (st_.mcp_tools.empty()) {
-      body.add(comp::empty_state("暂无外部工具包。点「自动探测」或在下方新增。", "", nullptr));
-    }
-    for (size_t i = 0; i < st_.mcp_tools.size(); ++i) {
-      const AppState::McpRow& m = st_.mcp_tools[i];
-      H row = el("div", "settings-row");
-      row.add(el("span", "sr-name").text(m.name));
-      row.add(el("span", "dim grow").text(m.dir));
-      std::string name = m.name;
-      bool en = m.enabled;
-      row.add(comp::toggle(en, "", [this, name, en](const std::string&) {
-        toggle_mcp(name, !en);
-      }));
-      row.add(comp::button("移除", [this, name](const std::string&) {
-        remove_mcp(name);
-      }, "ghost"));
-      body.add(row);
-    }
-    H addm = el("div", "pv-header-add");
-    addm.add(comp::text_input(st_.mcp_new_name, "名称",
-                              [this](const std::string& v) { st_.mcp_new_name = v; }));
-    addm.add(comp::text_input(st_.mcp_new_dir, "目录路径",
-                              [this](const std::string& v) { st_.mcp_new_dir = v; }));
-    addm.add(comp::button("新增", [this](const std::string&) { add_mcp(); }, "ghost"));
-    addm.add(comp::button("浏览目录…", [this](const std::string&) {
+    body.add(comp::field(tr("摘要模型"),
+                         build_model_field("model_pref_summary",
+                                           "model.pref.summary.model",
+                                           sv_str(st_.settings_values,
+                                                  "model.pref.summary.model", ""),
+                                           tr("继承会话"))));
+  } else if (sec == "mcp") {
+    // --- MCP（外部工具包）---
+    // MCP 和 Skill 分成两页：两者都可能有很长的列表，探测/导入/新建的流程也不
+    // 一样，塞在一页里两边都挤。这一页只管"模型能自主调用的外部工具"。
+    H head = el("div", "settings-actions");
+    head.add(comp::button(tr("自动探测"), [this](const std::string&) { detect_mcp(); },
+                          "primary"));
+    head.add(comp::button(tr("手动导入"), [this](const std::string&) {
       call_async("project.pickFolder", Json::object(), [this](const BackendResult& r) {
         if (!r.ok) return;
         std::string path = jsonutil::get<std::string>(r.data, "path", "");
         if (path.empty()) return;
         update([&](AppState& s) { s.mcp_new_dir = path; });
+        add_mcp();
       });
     }, "ghost"));
-    body.add(addm);
+    body.add(head);
+    body.add(comp::search_box(st_.mcp_filter, tr("搜索 MCP"),
+                              [this](const std::string& v) {
+      update([&](AppState& s) { s.mcp_filter = v; });
+    }));
+    size_t shown = 0;
+    H list = el("div", "mcp-list");
+    for (size_t i = 0; i < st_.mcp_tools.size(); ++i) {
+      const AppState::McpRow& m = st_.mcp_tools[i];
+      if (!st_.mcp_filter.empty() &&
+          m.name.find(st_.mcp_filter) == std::string::npos &&
+          m.dir.find(st_.mcp_filter) == std::string::npos) {
+        continue;
+      }
+      ++shown;
+      H card = el("div", m.enabled ? "mcp-card" : "mcp-card off");
+      H top = el("div", "mcp-card-top");
+      top.add(el("span", "mcp-card-name").text(m.name));
+      top.add(el("span", "grow"));
+      std::string name = m.name;
+      bool en = m.enabled;
+      top.add(comp::toggle(en, "", [this, name, en](const std::string&) {
+        toggle_mcp(name, !en);
+      }));
+      card.add(top);
+      card.add(el("div", "mcp-card-path").text(m.dir));
+      if (!m.description.empty()) {
+        card.add(el("div", "mcp-card-desc").text(m.description));
+      }
+      H acts = el("div", "mcp-card-acts");
+      acts.add(comp::button(tr("移除"), [this, name](const std::string&) {
+        remove_mcp(name);
+      }, "ghost"));
+      card.add(acts);
+      list.add(card);
+    }
+    if (st_.mcp_tools.empty()) {
+      // 空列表只说"暂无"，不再在下面挂一个新建表单——那看起来像表单才是主体
+      body.add(comp::empty_state(
+          tr("暂无 MCP。点「自动探测」扫描常见位置，或用「手动导入」选择目录。"),
+          "", nullptr));
+    } else if (shown == 0) {
+      body.add(comp::empty_state(tr("没有匹配的 MCP。"), "", nullptr));
+    } else {
+      body.add(list);
+    }
+  } else if (sec == "skills") {
+    // --- Skill ---
+    // Skills are the ONLY "/命令" the user can type themselves (MCP commands and
+    // subagents are model-invoked only), so this page is about what you can call.
+    H head = el("div", "settings-actions");
+    head.add(comp::button(tr("自动探测"), [this](const std::string&) { detect_mcp(); },
+                          "primary"));
+    head.add(comp::button(tr("手动导入"), [this](const std::string&) {
+      call_async("project.pickFolder", Json::object(), [this](const BackendResult& r) {
+        if (!r.ok) return;
+        std::string path = jsonutil::get<std::string>(r.data, "path", "");
+        if (path.empty()) return;
+        update([&](AppState& s) { s.skill_new_dir = path; });
+        add_skill();
+      });
+    }, "ghost"));
+    body.add(head);
+    body.add(comp::hint(tr("Skill 是唯一可以由你输入 /名称 调用的命令")));
+    body.add(comp::search_box(st_.skill_filter, tr("搜索 Skill"),
+                              [this](const std::string& v) {
+      update([&](AppState& s) { s.skill_filter = v; });
+    }));
+    size_t shown = 0;
+    H list = el("div", "mcp-list");
+    for (size_t i = 0; i < st_.skills.size(); ++i) {
+      const AppState::SkillRow& sk = st_.skills[i];
+      std::string label = sk.title.empty() ? sk.name : sk.title;
+      if (!st_.skill_filter.empty() &&
+          label.find(st_.skill_filter) == std::string::npos &&
+          sk.name.find(st_.skill_filter) == std::string::npos) {
+        continue;
+      }
+      ++shown;
+      H card = el("div", "mcp-card");
+      H top = el("div", "mcp-card-top");
+      top.add(el("span", "mcp-card-name").text(label));
+      if (!sk.loadable) top.add(comp::badge(tr("常驻")));
+      top.add(el("span", "grow"));
+      std::string name = sk.name;
+      top.add(comp::icon_button("eye", tr("查看内容"), [this, name](const std::string&) {
+        call_async("skill.load", Json{{"name", name}},
+                   [this, name](const BackendResult& r) {
+          toast(r.ok ? (tr("已加载 skill：") + name) : (tr("加载失败：") + r.message));
+        });
+      }));
+      card.add(top);
+      card.add(el("div", "mcp-card-path").text("/" + sk.name +
+                                               (sk.dir.empty() ? "" : ("  ·  " + sk.dir))));
+      if (!sk.description.empty()) {
+        card.add(el("div", "mcp-card-desc").text(sk.description));
+      }
+      list.add(card);
+    }
+    if (st_.skills.empty()) {
+      body.add(comp::empty_state(
+          tr("暂无 Skill。点「自动探测」扫描常见位置，或用「手动导入」选择目录。"),
+          "", nullptr));
+    } else if (shown == 0) {
+      body.add(comp::empty_state(tr("没有匹配的 Skill。"), "", nullptr));
+    } else {
+      body.add(list);
+    }
   } else if (sec == "memory") {
     // --- 长期记忆 ---
-    body.add(comp::section_title("长期记忆"));
-    for (size_t i = 0; i < st_.long_memory.size(); ++i) {
-      H row = el("div", "settings-row");
-      row.add(el("span", "sr-name").text(st_.long_memory[i].first));
-      row.add(el("span", "dim grow").text(st_.long_memory[i].second));
-      std::string k = st_.long_memory[i].first;
-      row.add(comp::button("删除", [this, k](const std::string&) {
-        remove_kv("model.longMemory", k);
-      }, "ghost"));
-      body.add(row);
-    }
+    // 这不是一张用户维护的 KV 表：它是**模型自己以 note 形式写下的提醒**，
+    // 用户在这里只是复核/删除/手动补一条。所以按"便签"呈现（内容为主），而不是
+    // 键值对表格。
+    body.add(comp::section_title(tr("长期记忆")));
+    body.add(comp::hint(tr("模型在对话中自行记下的提醒；你可以编辑或删除")));
     if (st_.long_memory.empty()) {
-      body.add(comp::empty_state("暂无长期记忆条目。", "", nullptr));
+      body.add(comp::empty_state(tr("还没有记忆条目。模型记下提醒后会出现在这里。"),
+                                 "", nullptr));
+    }
+    for (size_t i = 0; i < st_.long_memory.size(); ++i) {
+      H card = el("div", "note-card");
+      H top = el("div", "note-top");
+      top.add(el("span", "note-title").text(st_.long_memory[i].first));
+      top.add(el("span", "grow"));
+      std::string k = st_.long_memory[i].first;
+      top.add(comp::icon_button("trash", tr("删除"), [this, k](const std::string&) {
+        remove_kv("model.longMemory", k);
+      }));
+      card.add(top);
+      card.add(el("div", "note-body").text(st_.long_memory[i].second));
+      body.add(card);
     }
     H madd = el("div", "pv-header-add");
-    madd.add(comp::text_input(st_.mem_new_key, "键",
+    madd.add(comp::text_input(st_.mem_new_key, tr("标题"),
                               [this](const std::string& v) { st_.mem_new_key = v; }));
-    madd.add(comp::text_input(st_.mem_new_value, "值",
+    madd.add(comp::text_input(st_.mem_new_value, tr("内容"),
                               [this](const std::string& v) { st_.mem_new_value = v; }));
-    madd.add(comp::button("添加", [this](const std::string&) {
+    madd.add(comp::button(tr("记一条"), [this](const std::string&) {
       add_kv("model.longMemory", st_.mem_new_key, st_.mem_new_value);
     }, "ghost"));
     body.add(madd);
@@ -3727,17 +3719,9 @@ VNodePtr UiApp::build_settings() {
       int idx = std::atoi(v.c_str());
       const char* langs[3] = {"auto", "zh", "en"};
       set_setting("ui.language", langs[idx < 0 || idx > 2 ? 0 : idx]);
-    })));
-    body.add(comp::field(tr("思考语言"), comp::select(
-        std::vector<std::string>{tr("跟随系统"), "中文", "English"},
-        st_.thinking_lang == "zh" ? 1 : st_.thinking_lang == "en" ? 2 : 0,
-        [this](const std::string& v) {
-      int idx = std::atoi(v.c_str());
-      const char* langs[3] = {"auto", "zh", "en"};
-      std::string l = langs[idx < 0 || idx > 2 ? 0 : idx];
-      update([&](AppState& s) { s.thinking_lang = l; });
-      set_setting("model.thinkingLang", l);
-    })));
+    }), tr("只影响界面文字，不影响模型输出")));
+    // NOTE: 思考语言 lives under 模型偏好 (it is a model instruction, not a UI
+    // appearance setting), together with 输出语言.
 
     body.add(comp::section_title(tr("字体")));
     // Font choices are free text with a datalist of common families: a picker
@@ -3796,51 +3780,109 @@ VNodePtr UiApp::build_settings() {
       apply_appearance();
     })));
   } else if (sec == "session_defaults") {
-    body.add(comp::section_title("会话默认"));
+    body.add(comp::section_title(tr("会话默认")));
     body.add(comp::hint(tr("只影响新会话；已有会话不受影响")));
-    body.add(comp::field("默认模型", comp::text_input(
-        sv_str(st_.settings_values, "session.default.model", ""), "继承全局",
-        [this](const std::string& v) { set_setting("session.default.model", v); })));
-    body.add(comp::field("默认思考档", comp::select(
-        std::vector<std::string>{"继承", "关", "低", "中", "高"},
-        [&]() {
-          std::string t = sv_str(st_.settings_values, "session.default.thinking", "");
-          return t == "off" ? 1 : t == "low" ? 2 : t == "medium" ? 3
-                 : t == "high" ? 4 : 0;
-        }(),
-        [this](const std::string& v) {
-      int idx = std::atoi(v.c_str());
-      const char* vals[5] = {"", "off", "low", "medium", "high"};
-      set_setting("session.default.thinking", vals[idx < 0 || idx > 4 ? 0 : idx]);
-    })));
-    body.add(comp::field("默认文件权限", comp::select(
-        std::vector<std::string>{"approve", "permissive", "full"},
-        [&]() {
-          std::string p = sv_str(st_.settings_values, "session.default.filePerm", "permissive");
-          return p == "approve" ? 0 : p == "full" ? 2 : 1;
-        }(),
-        [this](const std::string& v) {
-      int idx = std::atoi(v.c_str());
-      const char* vals[3] = {"approve", "permissive", "full"};
-      set_setting("session.default.filePerm", vals[idx < 0 || idx > 2 ? 1 : idx]);
-    })));
-    body.add(comp::field("默认自动模式", comp::toggle(
-        sv_bool(st_.settings_values, "session.default.autoMode", false), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "session.default.autoMode", false);
-      set_setting("session.default.autoMode", !cur);
-    }), "自动模式下移除 ask 工具、高风险降级"));
-    body.add(comp::field("Enter 行为", comp::select(
-        std::vector<std::string>{"Enter 发送", "Enter 换行"},
-        sv_str(st_.settings_values, "session.default.enterSend", "enter") == "newline" ? 1 : 0,
-        [this](const std::string& v) {
-      set_setting("session.default.enterSend", std::atoi(v.c_str()) == 1 ? "newline" : "enter");
-    })));
+    // 模型：用同一套模型选择器组件（和输入框上的那个是同一个），而不是让用户
+    // 手打模型名——手打的名字拼错了只有到调用时才知道。
+    body.add(comp::field(tr("默认模型"),
+                         build_model_field("session_default_model",
+                                           "session.default.model",
+                                           sv_str(st_.settings_values,
+                                                  "session.default.model", ""),
+                                           tr("继承全局"))));
+    // 思考档位因模型而异，所以这里不写死 off/low/medium/high：档位取自当前
+    // 默认模型粗匹配出来的那份表（没设默认模型时给会话模型的档位）。
+    {
+      std::string model_for_levels = sv_str(st_.settings_values, "session.default.model", "");
+      if (model_for_levels.empty()) model_for_levels = st_.model;
+      std::vector<std::string> lv = thinking_levels_for(model_for_levels);
+      std::vector<std::string> opts;
+      opts.push_back(tr("继承模型默认"));
+      for (size_t i = 0; i < lv.size(); ++i) opts.push_back(thinking_label(lv[i]));
+      std::string cur = sv_str(st_.settings_values, "session.default.thinking", "");
+      int sel = 0;
+      for (size_t i = 0; i < lv.size(); ++i) {
+        if (lv[i] == cur) sel = static_cast<int>(i) + 1;
+      }
+      H lvl = comp::select(opts, sel, [this, lv](const std::string& v) {
+        int idx = std::atoi(v.c_str());
+        std::string val = (idx <= 0 || idx > static_cast<int>(lv.size()))
+                              ? std::string() : lv[idx - 1];
+        set_setting("session.default.thinking", val);
+      });
+      body.add(comp::field(tr("默认思考档"), lvl,
+                           lv.empty() ? tr("该模型没有可配档位") : ""));
+    }
+    // 文件权限：三档 + "记忆上次"。做成带说明的选择列表而不是下拉框——光看
+    // "permissive" 没人知道它到底放行了什么。
+    {
+      std::vector<comp::ChoiceOption> perms;
+      comp::ChoiceOption o;
+      o.value = "approve";
+      o.icon = "shield-halved";
+      o.title = tr("逐次批准");
+      o.desc = tr("每次写文件、执行命令都先问一次");
+      perms.push_back(o);
+      o.value = "permissive";
+      o.icon = "shield-halved";
+      o.title = tr("宽松");
+      o.desc = tr("常规操作直接执行，高风险才问");
+      perms.push_back(o);
+      o.value = "full";
+      o.icon = "bolt";
+      o.title = tr("完全放行");
+      o.desc = tr("不再询问（仅在你信任当前项目时使用）");
+      perms.push_back(o);
+      o.value = "remember";
+      o.icon = "clock";
+      o.title = tr("记忆上次");
+      o.desc = tr("新会话沿用上一次会话的选择");
+      perms.push_back(o);
+      body.add(comp::section_title(tr("文件权限")));
+      body.add(comp::choice_list(
+          perms, sv_str(st_.settings_values, "session.default.filePerm", "permissive"),
+          [this](const std::string& v) { set_setting("session.default.filePerm", v); }));
+    }
+    // 自动模式：同样三态 + 记忆，语义和文件权限一致。
+    {
+      std::vector<comp::ChoiceOption> modes;
+      comp::ChoiceOption o;
+      o.value = "auto";
+      o.icon = "robot";
+      o.title = tr("自动");
+      o.desc = tr("移除 ask 工具，高风险操作降级处理");
+      modes.push_back(o);
+      o.value = "manual";
+      o.icon = "hand";
+      o.title = tr("手动");
+      o.desc = tr("每轮都由你决定下一步");
+      modes.push_back(o);
+      o.value = "remember";
+      o.icon = "clock";
+      o.title = tr("记忆上次");
+      o.desc = tr("新会话沿用上一次会话的选择");
+      modes.push_back(o);
+      body.add(comp::section_title(tr("自动模式")));
+      std::string cur_auto =
+          sv_bool(st_.settings_values, "session.default.autoMode", false) ? "auto"
+                                                                         : "manual";
+      body.add(comp::choice_list(modes, cur_auto, [this](const std::string& v) {
+        if (v == "remember") {
+          set_setting("session.default.autoModeRemember", true);
+          return;
+        }
+        set_setting("session.default.autoModeRemember", false);
+        set_setting("session.default.autoMode", v == "auto");
+      }));
+    }
+    // NOTE: "Enter 行为" was removed. It was a setting with no visible effect
+    // (the composer always sends on Enter) that also contradicted the 快捷键
+    // page, which claims Enter is the send key.
   } else if (sec == "network") {
     body.add(comp::section_title("网络"));
     body.add(comp::field("网络总开关", comp::toggle(
         sv_bool(st_.settings_values, "permissions.network.enabled", true),
-        "允许模型发起网络请求（fetch/search）", [this](const std::string&) {
+        tr("允许模型发起网络请求（fetch/search）"), [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "permissions.network.enabled", true);
       set_setting("permissions.network.enabled", !cur);
     })));
@@ -3850,34 +3892,80 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "permissions.network.verifyCert", true);
       set_setting("permissions.network.verifyCert", !cur);
     })));
+    // 代理：三态。以前只有"主机 + 端口"，于是"跟随系统"和"关闭"这两种最常见
+    // 的意图都表达不出来（留空到底是直连还是跟随系统？）。
     body.add(comp::section_title("代理"));
-    body.add(comp::hint(tr("留空 = 直连")));
-    body.add(comp::field("代理主机", comp::text_input(
-        sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
-        [this](const std::string& v) {
-      set_setting("permissions.network.proxyHost", v);
-    }), "如 127.0.0.1"));
-    body.add(comp::field("代理端口", comp::text_input(
-        std::to_string(sv_int(st_.settings_values, "permissions.network.proxyPort", 0)), "",
-        [this](const std::string& v) {
-      int p = std::atoi(v.c_str());
-      set_setting("permissions.network.proxyPort", p > 0 ? p : 0);
-    }), "如 7890（0 = 不用代理）"));
+    {
+      std::vector<comp::ChoiceOption> px;
+      comp::ChoiceOption o;
+      o.value = "system";
+      o.icon = "gear";
+      o.title = tr("跟随系统");
+      o.desc = tr("读取系统代理设置");
+      px.push_back(o);
+      o.value = "custom";
+      o.icon = "server";
+      o.title = tr("自定义");
+      o.desc = tr("手动填写主机与端口");
+      px.push_back(o);
+      o.value = "off";
+      o.icon = "plug";
+      o.title = tr("关闭");
+      o.desc = tr("直连，不使用代理");
+      px.push_back(o);
+      std::string mode = sv_str(st_.settings_values, "permissions.network.proxyMode", "system");
+      body.add(comp::choice_list(px, mode, [this](const std::string& v) {
+        set_setting("permissions.network.proxyMode", v);
+      }));
+      if (mode == "custom") {
+        body.add(comp::field("代理主机", comp::text_input(
+            sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
+            [this](const std::string& v) {
+          set_setting("permissions.network.proxyHost", v);
+        }), "如 127.0.0.1"));
+        body.add(comp::field("代理端口", comp::text_input(
+            std::to_string(sv_int(st_.settings_values, "permissions.network.proxyPort", 0)), "",
+            [this](const std::string& v) {
+          int p = std::atoi(v.c_str());
+          set_setting("permissions.network.proxyPort", p > 0 ? p : 0);
+        }), "如 7890"));
+      }
+    }
   } else if (sec == "terminal") {
     body.add(comp::section_title("终端"));
-    std::vector<std::string> shell_opts = st_.shells;
-    if (shell_opts.empty()) shell_opts.push_back("自动探测");
-    body.add(comp::field("默认 shell", comp::select(shell_opts, st_.shell_index,
-                                                    [this, shell_opts](const std::string& v) {
-      int idx = std::atoi(v.c_str());
-      update([&](AppState& s) { s.shell_index = idx; });
-      std::string name = (idx <= 0 || idx >= static_cast<int>(shell_opts.size()))
-                             ? "" : shell_opts[idx];
-      call_async("settings.setShell", Json{{"name", name}},
-                 [this](const BackendResult& r) {
-        toast(r.ok ? "已设置 shell" : ("设置失败：" + r.message));
-      });
-    }), "bash > zsh > pwsh7+ > PowerShell > cmd（cmd 兜底）"));
+    // 探测到的 shell 列表（"探测"按钮随时重扫；每一项都能直接选中当默认）
+    H tacts = el("div", "settings-actions");
+    tacts.add(comp::button(tr("重新探测"), [this](const std::string&) {
+      load_shells();
+    }, "ghost"));
+    body.add(tacts);
+    if (st_.shell_rows.empty()) {
+      body.add(comp::empty_state(tr("没有探测到可用的 shell。"), "", nullptr));
+    } else {
+      std::vector<comp::ChoiceOption> shells;
+      comp::ChoiceOption auto_o;
+      auto_o.value = "";
+      auto_o.icon = "wand-magic-sparkles";
+      auto_o.title = tr("自动选择");
+      auto_o.desc = tr("按优先级挑一个可用的");
+      shells.push_back(auto_o);
+      for (size_t i = 0; i < st_.shell_rows.size(); ++i) {
+        comp::ChoiceOption o;
+        o.value = st_.shell_rows[i].name;
+        o.icon = "terminal";
+        o.title = st_.shell_rows[i].name;
+        // 显示解析到的路径：两个都叫 pwsh 的安装否则分不出来
+        o.desc = st_.shell_rows[i].path;
+        shells.push_back(o);
+      }
+      std::string cur = sv_str(st_.settings_values, "terminal.shell", "");
+      body.add(comp::choice_list(shells, cur, [this](const std::string& v) {
+        set_setting("terminal.shell", v);
+        call_async("settings.setShell", Json{{"name", v}}, [this](const BackendResult& r) {
+          toast(r.ok ? tr("已设置 shell") : (tr("设置失败：") + r.message));
+        });
+      }));
+    }
     body.add(comp::field("编码", comp::select(
         std::vector<std::string>{"系统默认", "UTF-8", "GBK"}, 0,
         [this](const std::string& v) {
@@ -3915,49 +4003,43 @@ VNodePtr UiApp::build_settings() {
     }, "primary"));
     body.add(fsave);
   } else if (sec == "environment") {
-    body.add(comp::section_title("环境"));
-    for (size_t i = 0; i < st_.env_vars.size(); ++i) {
-      H row = el("div", "settings-row");
-      row.add(el("span", "sr-name").text(st_.env_vars[i].first));
-      row.add(el("span", "dim grow").text(st_.env_vars[i].second));
-      std::string k = st_.env_vars[i].first;
-      row.add(comp::button("删除", [this, k](const std::string&) {
-        remove_kv("environment.vars", k);
-      }, "ghost"));
-      body.add(row);
+    // --- 环境 ---
+    // 只有一张表：CLI 工具路径。原来还有一张"环境变量（PATH 追加）"，但它和
+    // CLI 工具路径表达的是同一件事（把某个目录/可执行文件交给 agent），两张表
+    // 让用户不知道该填哪张。
+    H eacts = el("div", "settings-actions");
+    eacts.add(comp::button(tr("自动探测"), [this](const std::string&) {
+      detect_cli_tools();
+    }, "primary"));
+    body.add(eacts);
+    if (st_.cli_tools.empty()) {
+      body.add(comp::empty_state(
+          tr("还没有条目。点「自动探测」扫描 PATH 上的常见工具，或手动添加。"),
+          "", nullptr));
     }
-    if (st_.env_vars.empty()) {
-      body.add(comp::empty_state("暂无环境变量。", "", nullptr));
-    }
-    H eadd = el("div", "pv-header-add");
-    eadd.add(comp::text_input(st_.env_new_key, "名称（如 PATH）",
-                              [this](const std::string& v) { st_.env_new_key = v; }));
-    eadd.add(comp::text_input(st_.env_new_value, "值",
-                              [this](const std::string& v) { st_.env_new_value = v; }));
-    eadd.add(comp::button("添加", [this](const std::string&) {
-      add_kv("environment.vars", st_.env_new_key, st_.env_new_value);
-    }, "ghost"));
-    body.add(eadd);
-    body.add(comp::section_title("CLI 工具路径"));
     for (size_t i = 0; i < st_.cli_tools.size(); ++i) {
       H row = el("div", "settings-row");
       row.add(el("span", "sr-name").text(st_.cli_tools[i].first));
       row.add(el("span", "dim grow").text(st_.cli_tools[i].second));
       std::string k = st_.cli_tools[i].first;
-      row.add(comp::button("删除", [this, k](const std::string&) {
+      // 路径可以直接改成另一个文件：给一个"选文件"按钮，省得手打路径
+      row.add(comp::icon_button("folder-open", tr("选择文件"), [this, k](const std::string&) {
+        pick_cli_tool_path(k);
+      }));
+      row.add(comp::button(tr("删除"), [this, k](const std::string&) {
         remove_kv("environment.cliTools", k);
       }, "ghost"));
       body.add(row);
     }
-    if (st_.cli_tools.empty()) {
-      body.add(comp::empty_state("暂无 CLI 工具条目。", "", nullptr));
-    }
     H cadd = el("div", "pv-header-add");
-    cadd.add(comp::text_input(st_.cli_new_key, "key",
+    cadd.add(comp::text_input(st_.cli_new_key, tr("名称"),
                               [this](const std::string& v) { st_.cli_new_key = v; }));
-    cadd.add(comp::text_input(st_.cli_new_value, "路径",
+    cadd.add(comp::text_input(st_.cli_new_value, tr("路径"),
                               [this](const std::string& v) { st_.cli_new_value = v; }));
-    cadd.add(comp::button("添加", [this](const std::string&) {
+    cadd.add(comp::button(tr("浏览…"), [this](const std::string&) {
+      pick_cli_tool_draft();
+    }, "ghost"));
+    cadd.add(comp::button(tr("添加"), [this](const std::string&) {
       add_kv("environment.cliTools", st_.cli_new_key, st_.cli_new_value);
     }, "ghost"));
     body.add(cadd);
@@ -3987,10 +4069,21 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "browser.enabled", true);
       set_setting("browser.enabled", !cur);
     })));
-    body.add(comp::field("驱动路径", comp::text_input(
-        sv_str(st_.settings_values, "browser.driver", ""), "自动（Playwright/内置）",
-        [this](const std::string& v) { set_setting("browser.driver", v); }),
-        "browser.driver（空 = 自动探测）"));
+    // 驱动路径：给一个"选文件"按钮。手打一个可执行文件路径基本不可能打对，
+    // 而且这里要的是文件，用目录选择框也选不中。
+    {
+      H drv = el("div", "model-field");
+      drv.add(comp::text_input(sv_str(st_.settings_values, "browser.driver", ""),
+                               tr("自动（内置驱动）"),
+                               [this](const std::string& v) {
+        set_setting("browser.driver", v);
+      }));
+      drv.add(comp::icon_button("folder-open", tr("选择文件"), [this](const std::string&) {
+        pick_file_into("browser.driver", tr("可执行文件"),
+                       "*.exe;*.cmd;*.bat;*.ps1;*");
+      }));
+      body.add(comp::field(tr("驱动路径"), drv, tr("空 = 自动探测内置驱动")));
+    }
     body.add(comp::field("允许联网", comp::toggle(
         sv_bool(st_.settings_values, "browser.permissions.net", true), "",
         [this](const std::string&) {
@@ -4003,14 +4096,9 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "browser.permissions.certs", false);
       set_setting("browser.permissions.certs", !cur);
     })));
-    H bacts = el("div", "settings-actions");
-    bacts.add(comp::button("加载 skill 说明", [this](const std::string&) {
-      call_async("skill.load", Json{{"name", "browser-control"}},
-                 [this](const BackendResult& r) {
-        toast(r.ok ? "已加载 browser-control skill" : ("加载失败：" + r.message));
-      });
-    }, "primary"));
-    body.add(bacts);
+    // NOTE: "加载 skill 说明" was removed. Loading a skill is something the MODEL
+    // decides when it needs it; a button that pushes a skill into context is not
+    // a user-facing action.
   } else if (sec == "computer") {
     body.add(comp::section_title("电脑控制"));
     body.add(comp::field("启用电脑控制", comp::toggle(
@@ -4033,17 +4121,17 @@ VNodePtr UiApp::build_settings() {
   } else {
     // --- 常规：界面显示 ---
     // Per rules/goal.md, 通用·常规 is "界面显示等" - UI behaviour. The context
-    // window / compression knobs are agent behaviour and live under 模型 (see the
-    // 上下文 section), which is where someone looking for "how much history does
-    // the model see" would actually look.
+    // window / compression knobs are agent behaviour and belong to the model
+    // section, not here.
     body.add(comp::section_title(tr("界面显示")));
-    // Tab placement: the docs ask for a label-page mode that can become a
-    // vertical side strip. It is a real layout switch, not a cosmetic one.
+    // Tab placement: a real layout switch (the strip becomes a vertical side
+    // strip), applied as a data attribute so CSS owns the layout.
     body.add(comp::field(tr("标签位置"), comp::select(
         std::vector<std::string>{tr("顶部"), tr("左侧")},
         sv_str(st_.settings_values, "ui.tabs", "top") == "left" ? 1 : 0,
         [this](const std::string& v) {
       set_setting("ui.tabs", std::atoi(v.c_str()) == 1 ? "left" : "top");
+      apply_appearance();  // a layout switch has to take effect immediately
     })));
     body.add(comp::field(tr("会话名提示"), comp::toggle(
         sv_bool(st_.settings_values, "ui.tabTooltip", true), "",
@@ -4051,17 +4139,16 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "ui.tabTooltip", true);
       set_setting("ui.tabTooltip", !cur);
     })));
-    body.add(comp::field(tr("会话标签上限"), comp::select(
-        std::vector<std::string>{"5", "8", "12", "不限"},
-        [&]() {
-          int n = sv_int(st_.settings_values, "ui.maxTabs", 8);
-          return n <= 5 ? 0 : n <= 8 ? 1 : n <= 12 ? 2 : 3;
-        }(),
-        [this](const std::string& v) {
-      int idx = std::atoi(v.c_str());
-      const int vals[4] = {5, 8, 12, 0};
-      set_setting("ui.maxTabs", vals[idx < 0 || idx > 3 ? 1 : idx]);
-    })));
+    // NOTE: 会话标签上限 was removed on purpose. The strip scrolls, and 主页 is
+    // always there, so a cap only hid tabs the user had open.
+
+    body.add(comp::section_title(tr("会话行为")));
+    body.add(comp::field(tr("过拟合检测"), comp::toggle(
+        sv_bool(st_.settings_values, "session.overfitEnabled", false), "",
+        [this](const std::string&) {
+      bool cur = sv_bool(st_.settings_values, "session.overfitEnabled", false);
+      set_setting("session.overfitEnabled", !cur);
+    }), tr("连续多轮输出高度相似时提示，避免模型原地打转")));
 
     body.add(comp::section_title(tr("数据保留")));
     H days_row = el("div", "stepper");
@@ -4079,7 +4166,8 @@ VNodePtr UiApp::build_settings() {
     }));
     body.add(comp::field(tr("用量记录保留"), days_row));
   }
-  wrap.add(body);
+  cols.add(body);
+  wrap.add(cols);
   return wrap.get();
 }
 
@@ -4207,20 +4295,25 @@ void UiApp::open_new_session() {
   new_session_in_project(st_.projects[0].pid);
 }
 
-// 顶层 "+"：打开一个"新建"标签页，内容同主页的"项目"（列出项目与其会话，
-// 点会话即打开、点新建即建）。以前这里是"直接给第一个项目开会话"——那既猜错
-// 了用户想开的项目，也不给选择的机会。
-void UiApp::open_new_tab() {
-  update([&](AppState& s) {
-    bool found = false;
-    for (size_t i = 0; i < s.tab_ids.size(); ++i) {
-      if (s.tab_ids[i] == kNewTabId) found = true;
-    }
-    // one "新建" tab is enough; a second one would show the same list
-    if (!found) s.tab_ids.push_back(kNewTabId);
-    s.active_tab = kNewTabId;
-  });
-  switch_tab(kNewTabId);
+// 顶层 "+"：打开"新建"页面（内容同主页·项目：点会话即开、点新建即建）。
+// 它不是标签页，所以关掉就消失，也不会出现在访问栈里。
+void UiApp::open_new_tab() { open_modal_page("new"); }
+
+// 设置/新建这类页面：盖在当前标签页之上，不占标签、不进访问栈。
+void UiApp::open_modal_page(const std::string& page) {
+  if (page.empty()) return;
+  // any transient popup belongs to the page we are leaving
+  st_.model_picker_open = false;
+  st_.skill_menu_open = false;
+  st_.side_menu_open = false;
+  st_.modal_page = page;
+  render();
+}
+
+void UiApp::close_modal_page() {
+  if (st_.modal_page.empty()) return;
+  st_.modal_page.clear();
+  render();
 }
 
 void UiApp::new_session_in_project(const std::string& pid) {
@@ -4649,6 +4742,13 @@ void UiApp::save_model() {
     toast("请填写模型名");
     return;
   }
+  // 上下文长度必填：压缩阈值和上下文水位都要用它算比例，0 会让两者都失真。
+  if (m.context_len <= 0) {
+    update([&](AppState& s) {
+      s.model_status = tr("请填写上下文长度（必填）");
+    });
+    return;
+  }
   if (m.display.empty()) m.display = m.id;
   Json body = model_row_to_json(m);
   call_async("model.save", Json{{"providerId", pid}, {"model", body}},
@@ -4722,14 +4822,21 @@ void UiApp::test_model(const std::string& model_id) {
 }
 
 // ===========================================================================
-// Composer: 模型选择器（左供应商 / 右模型）
+// 模型选择器（左供应商 / 右模型）
 // ===========================================================================
-void UiApp::open_model_picker() {
+// It is ONE component reused by every "pick a model" affordance: the composer's
+// model button and the settings fields (会话默认 / 模型偏好 / 子代理). `owner`
+// says which widget is showing it (only that widget renders the popup, so it can
+// never appear twice), and `target` says what a pick means: "" = the session's
+// model, otherwise a settings key.
+void UiApp::open_model_picker(const std::string& owner, const std::string& target) {
   // The picker lists providers, so make sure they are loaded before it opens
   // (it can be opened from the session page without ever visiting settings).
   if (!st_.providers_loaded) load_providers();
   update([&](AppState& s) {
     s.model_picker_open = true;
+    s.model_picker_owner = owner;
+    s.model_picker_target = target;
     s.model_picker_query.clear();
     // Default to the provider being edited in settings, else the first one -
     // opening onto an empty right pane would look broken.
@@ -4773,16 +4880,196 @@ void UiApp::load_picker_models(const std::string& provider_id) {
 }
 
 void UiApp::pick_model(const std::string& provider_id, const std::string& model_id) {
+  (void)provider_id;
   if (model_id.empty()) return;
+  std::string target = st_.model_picker_target;
   std::string sid = active_sid();
   update([&](AppState& s) {
-    s.model = model_id;
     s.model_picker_open = false;
+    s.model_picker_owner.clear();
+    s.model_picker_target.clear();
   });
-  if (!sid.empty()) {
-    call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}});
+  if (target.empty()) {
+    // the session's model
+    update([&](AppState& s) { s.model = model_id; });
+    if (!sid.empty()) {
+      call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}});
+    }
+    toast("已切换到 " + model_id);
+    return;
   }
-  toast("已切换到 " + model_id);
+  // a settings field: write the key (the field reads it back from settings)
+  set_setting(target, model_id);
+  toast("已设为 " + model_id);
+}
+
+// A settings field's model button. It renders the same popup as the composer,
+// so "which model" is answered by the same component everywhere.
+H UiApp::build_model_field(const std::string& owner, const std::string& setting_key,
+                           const std::string& current, const std::string& placeholder) {
+  H box = el("div", "model-field");
+  H btn = el("button", "model-pick-btn");
+  btn.attr("type", "button");
+  btn.attr("title", tr("选择模型"));
+  std::string key = setting_key;
+  btn.on(EventKind::kClick, [this, owner, key](const std::string&) {
+    open_model_picker(owner, key);
+  });
+  btn.add(comp::model_icon("", current));
+  btn.add(el("span", "mpb-name").text(current.empty() ? placeholder : current));
+  btn.add(el("span", "mpb-caret").text("\u25be"));
+  box.add(btn);
+  if (!current.empty()) {
+    btn.attr("title", current + "（点击更换）");
+    box.add(comp::icon_button("\u2715", tr("清除（继承）"), [this, key](const std::string&) {
+      set_setting(key, std::string());
+    }));
+  }
+  if (st_.model_picker_open && st_.model_picker_owner == owner) {
+    box.add(build_model_picker(owner, current));
+  }
+  return box;
+}
+
+H UiApp::build_model_picker(const std::string& owner, const std::string& current) {
+  H pop = el("div", "model-picker");
+  pop.key("model-picker:" + owner);
+  pop.anim(anim::kPop);
+  H head = el("div", "mp-head");
+  head.add(el("span", "mp-title").text(tr("选择模型")));
+  head.add(el("span", "grow"));
+  head.add(comp::icon_button("\u2715", tr("关闭"), [this](const std::string&) {
+    update([&](AppState& s) {
+      s.model_picker_open = false;
+      s.model_picker_owner.clear();
+    });
+  }));
+  pop.add(head);
+
+  H cols = el("div", "mp-cols");
+  // left: providers
+  H plist = el("div", "mp-providers");
+  for (size_t i = 0; i < st_.providers.size(); ++i) {
+    const AppState::ProviderRow& p = st_.providers[i];
+    bool active = p.id == st_.model_picker_provider;
+    H item = el("div", active ? "mp-prov active" : "mp-prov");
+    item.key("mp-" + p.id);
+    std::string pid = p.id;
+    item.on(EventKind::kClick, [this, pid](const std::string&) {
+      update([&](AppState& s) {
+        s.model_picker_provider = pid;
+        s.model_picker_models.clear();
+        s.model_picker_loaded = false;
+        s.model_picker_status.clear();
+        // A query typed against one provider's models should not silently
+        // filter the next provider's list down to nothing.
+        s.model_picker_query.clear();
+      });
+      load_picker_models(pid);
+    });
+    item.add(el("div", "mp-prov-name").text(p.name.empty() ? p.id : p.name));
+    item.add(el("div", "mp-prov-kind dim").text(p.kind));
+    plist.add(item);
+  }
+  if (st_.providers.empty()) {
+    plist.add(comp::empty_state(tr("还没有供应商。"), "", nullptr));
+  }
+  cols.add(plist);
+
+  // right: models of the selected provider
+  H mside = el("div", "mp-models");
+  H search = comp::search_box(st_.model_picker_query, tr("搜索模型"),
+                              [this](const std::string& v) {
+    // must re-render: the filter decides which rows exist
+    update([&](AppState& s) { s.model_picker_query = v; });
+  });
+  // Keyed by provider: switching providers clears the query, but a focused
+  // input's value is deliberately NOT patched (that is what keeps a caret from
+  // jumping mid-typing), so the cleared state would never reach the DOM. A new
+  // key recreates the node, which is the framework-level way to say "start over".
+  search.key("mp-search:" + owner + ":" + st_.model_picker_provider);
+  mside.add(search);
+  // Filtering happens here rather than in the backend: the list is already in
+  // memory and a round trip per keystroke would make typing feel laggy.
+  std::vector<const AppState::ModelRow*> vis;
+  for (size_t i = 0; i < st_.model_picker_models.size(); ++i) {
+    const AppState::ModelRow& m = st_.model_picker_models[i];
+    if (!st_.model_picker_query.empty()) {
+      std::string ql = lower_ascii(st_.model_picker_query);
+      if (lower_ascii(m.id + " " + m.display).find(ql) == std::string::npos) continue;
+    }
+    vis.push_back(&m);
+  }
+  // Above the threshold the list is sorted and grouped by initial, which only
+  // means anything if the order is alphabetical.
+  const bool grouped = vis.size() > 20;
+  if (grouped) {
+    std::sort(vis.begin(), vis.end(),
+              [](const AppState::ModelRow* a, const AppState::ModelRow* b) {
+      return lower_ascii(a->display.empty() ? a->id : a->display) <
+             lower_ascii(b->display.empty() ? b->id : b->display);
+    });
+  }
+  if (!st_.model_picker_loaded) {
+    mside.add(el("div", "hint").text(tr("加载中…")));
+  } else if (vis.empty()) {
+    mside.add(comp::empty_state(
+        st_.model_picker_query.empty() ? tr("这个供应商还没有启用中的模型。")
+                                       : tr("没有匹配的模型。"),
+        "", nullptr));
+  } else {
+    std::string last_group;
+    H list = el("div", "mp-list");
+    for (size_t i = 0; i < vis.size(); ++i) {
+      const AppState::ModelRow& m = *vis[i];
+      std::string label = m.display.empty() ? m.id : m.display;
+      if (grouped) {
+        char c = label.empty() ? '#' : label[0];
+        std::string g;
+        if (c >= 'a' && c <= 'z') g = std::string(1, static_cast<char>(c - 'a' + 'A'));
+        else if (c >= 'A' && c <= 'Z') g = std::string(1, c);
+        else if (c >= '0' && c <= '9') g = "#";
+        else g = "·";
+        if (g != last_group) {
+          list.add(el("div", "mp-group").text(g));
+          last_group = g;
+        }
+      }
+      bool cur = m.id == current;
+      H row = el("div", cur ? "mp-model active" : "mp-model");
+      row.key("mpm-" + m.id);
+      std::string mid = m.id;
+      std::string ppid = st_.model_picker_provider;
+      row.on(EventKind::kClick, [this, ppid, mid](const std::string&) {
+        pick_model(ppid, mid);
+      });
+      row.add(comp::model_icon(m.icon, m.id));
+      H nm = el("div", "mp-model-name");
+      nm.add(el("span", "mp-model-id").text(label));
+      H caps = el("span", "md-caps");
+      bool any_cap = false;
+      if (m.vision) { caps.add(el("i", "fa fa-eye").attr("title", tr("视觉"))); any_cap = true; }
+      if (m.audio) { caps.add(el("i", "fa fa-volume-high").attr("title", tr("音频"))); any_cap = true; }
+      if (m.video) { caps.add(el("i", "fa fa-video").attr("title", tr("视频"))); any_cap = true; }
+      if (m.pdf) { caps.add(el("i", "fa fa-file-pdf").attr("title", tr("PDF"))); any_cap = true; }
+      if (m.structured) { caps.add(el("i", "fa fa-brackets-curly").attr("title", tr("结构化输出"))); any_cap = true; }
+      if (any_cap) nm.add(caps);
+      row.add(nm);
+      if (m.context_len > 0) {
+        row.add(el("span", "mp-ctx dim").text(
+            itos(static_cast<int>(m.context_len / 1000)) + "K"));
+      }
+      if (cur) row.add(el("i", "fa fa-check"));
+      list.add(row);
+    }
+    mside.add(list);
+  }
+  if (!st_.model_picker_status.empty()) {
+    mside.add(el("div", "pv-status").text(st_.model_picker_status));
+  }
+  cols.add(mside);
+  pop.add(cols);
+  return pop;
 }
 
 // ===========================================================================
@@ -4828,6 +5115,104 @@ void UiApp::toggle_mcp(const std::string& name, bool enabled) {
   call_async("mcp.setEnabled", Json{{"name", name}, {"enabled", enabled}},
              [this](const BackendResult&) {
     load_mcp_tools();
+  });
+}
+
+// A skill is imported from a directory (same flow as MCP: pick a folder, the
+// backend reads the manifest out of it).
+void UiApp::add_skill() {
+  if (!backend_) return;
+  std::string dir = st_.skill_new_dir;
+  if (dir.empty()) {
+    toast(tr("请先选择目录"));
+    return;
+  }
+  call_async("skill.import", Json{{"dir", dir}}, [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("导入失败：") + r.message);
+      return;
+    }
+    update([&](AppState& s) { s.skill_new_dir.clear(); });
+    load_skills();
+    toast(tr("已导入 Skill"));
+  });
+}
+
+// CLI 工具探测：在 PATH 上找常见的开发工具（git/node/python/cargo/...），把
+// 找到的路径写进 environment.cliTools。只列出**找到的**，其余留给用户自己加。
+void UiApp::detect_cli_tools() {
+  call_async("environment.detectCliTools", Json::object(), [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("探测失败：") + r.message);
+      return;
+    }
+    const Json& found = r.data.contains("tools") ? r.data["tools"] : r.data;
+    if (!found.is_object()) return;
+    // 合并进已有表（用户手填的不能被探测结果冲掉）
+    Json cur = sv_obj(st_.settings_values, "environment.cliTools");
+    size_t added = 0;
+    for (Json::const_iterator it = found.begin(); it != found.end(); ++it) {
+      if (!it.value().is_string()) continue;
+      if (cur.contains(it.key())) continue;
+      cur[it.key()] = it.value();
+      ++added;
+    }
+    if (added == 0) {
+      toast(tr("没有发现新的 CLI 工具"));
+      return;
+    }
+    set_setting("environment.cliTools", cur);
+    toast(tr("发现 ") + itos(static_cast<int>(added)) + tr(" 个 CLI 工具"));
+  });
+}
+
+// 选文件 -> 写进某个设置键。驱动路径这类字段需要的是文件本身，用目录选择框
+// 选不中，所以这里走 dialog.pickFile。
+void UiApp::pick_file_into(const std::string& setting_key,
+                           const std::string& filter_desc,
+                           const std::string& filter_spec) {
+  Json args = Json::object();
+  if (!filter_desc.empty()) args["filterDesc"] = filter_desc;
+  if (!filter_spec.empty()) args["filterSpec"] = filter_spec;
+  call_async("dialog.pickFile", args, [this, setting_key](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("打开文件选择框失败"));
+      return;
+    }
+    std::string path = jsonutil::get<std::string>(r.data, "path", "");
+    if (path.empty()) return;  // cancelled
+    set_setting(setting_key, path);
+  });
+}
+
+// CLI 工具路径的两种选文件场景：改已有条目（合并进 map）和填新增草稿（只改草稿
+// 输入框，等用户点"添加"）。分开是因为前者写设置、后者只动草稿。
+void UiApp::pick_cli_tool_path(const std::string& key) {
+  Json args = Json::object();
+  args["filterDesc"] = tr("可执行文件");
+  args["filterSpec"] = "*.exe;*.cmd;*.bat;*.ps1;*";
+  call_async("dialog.pickFile", args, [this, key](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("打开文件选择框失败"));
+      return;
+    }
+    std::string path = jsonutil::get<std::string>(r.data, "path", "");
+    if (path.empty()) return;
+    Json cur = sv_obj(st_.settings_values, "environment.cliTools");
+    cur[key] = path;
+    set_setting("environment.cliTools", cur);
+  });
+}
+
+void UiApp::pick_cli_tool_draft() {
+  Json args = Json::object();
+  args["filterDesc"] = tr("可执行文件");
+  args["filterSpec"] = "*.exe;*.cmd;*.bat;*.ps1;*";
+  call_async("dialog.pickFile", args, [this](const BackendResult& r) {
+    if (!r.ok) return;
+    std::string path = jsonutil::get<std::string>(r.data, "path", "");
+    if (path.empty()) return;
+    update([&](AppState& s) { s.cli_new_value = path; });
   });
 }
 

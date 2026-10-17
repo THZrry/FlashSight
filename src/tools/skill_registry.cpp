@@ -1,6 +1,11 @@
 // skill_registry.cpp - 中英双语 skill 注册表实现（addon2.md）
 #include "skill_registry.hpp"
 
+#include <fstream>
+#include <sstream>
+
+#include <ghc/filesystem.hpp>
+
 #include "common/fs_i18n.hpp"
 
 namespace fs {
@@ -132,9 +137,191 @@ Json SkillRegistry::list_json(ThinkLang lang) const {
     j["title"] = zh ? s.title_zh : s.title_en;
     j["description"] = zh ? s.desc_zh : s.desc_en;
     j["loadable"] = s.loadable;
+    if (!s.dir.empty()) j["dir"] = s.dir;
+    j["user"] = s.user;
+    j["enabled"] = s.enabled;
     arr.push_back(j);
   }
   return arr;
+}
+
+// ----- 用户 skill -----
+// 一个 skill 目录里放一份 SKILL.md（正文）+ 可选 frontmatter 里的 name/title。
+// 也接受直接放一个 <name>.md。这样用户把一个 skill 文件夹丢进来就能用，不用学
+// 一套额外的清单格式。
+namespace {
+
+// 取 frontmatter 里 `key: value` 的值（没有 frontmatter 就返回空）
+std::string front_value(const std::string& text, const std::string& key) {
+  if (text.compare(0, 3, "---") != 0) return std::string();
+  size_t end = text.find("\n---", 3);
+  if (end == std::string::npos) return std::string();
+  std::string head = text.substr(3, end - 3);
+  size_t i = 0;
+  while (i < head.size()) {
+    size_t e = head.find('\n', i);
+    if (e == std::string::npos) e = head.size();
+    std::string line = head.substr(i, e - i);
+    size_t c = line.find(':');
+    if (c != std::string::npos) {
+      std::string k = line.substr(0, c);
+      std::string v = line.substr(c + 1);
+      // trim both sides
+      size_t a = 0, b = k.size();
+      while (a < b && (k[a] == ' ' || k[a] == '\t')) ++a;
+      while (b > a && (k[b - 1] == ' ' || k[b - 1] == '\t')) --b;
+      k = k.substr(a, b - a);
+      a = 0; b = v.size();
+      while (a < b && (v[a] == ' ' || v[a] == '\t')) ++a;
+      while (b > a && (v[b - 1] == ' ' || v[b - 1] == '\r')) --b;
+      v = v.substr(a, b - a);
+      if (k == key) return v;
+    }
+    if (e == head.size()) break;
+    i = e + 1;
+  }
+  return std::string();
+}
+
+std::string strip_frontmatter(const std::string& text) {
+  if (text.compare(0, 3, "---") != 0) return text;
+  size_t end = text.find("\n---", 3);
+  if (end == std::string::npos) return text;
+  size_t nl = text.find('\n', end + 1);
+  return nl == std::string::npos ? std::string() : text.substr(nl + 1);
+}
+
+std::string read_text(const ghc::filesystem::path& p) {
+  std::ifstream ifs(p.string(), std::ios::binary);
+  if (!ifs) return std::string();
+  std::stringstream ss;
+  ss << ifs.rdbuf();
+  return ss.str();
+}
+
+}  // namespace
+
+int SkillRegistry::import_dir(const std::string& dir) {
+  if (dir.empty()) return 0;
+  std::error_code ec;
+  if (!ghc::filesystem::is_directory(dir, ec)) return 0;
+  int added = 0;
+  for (auto& e : ghc::filesystem::directory_iterator(dir, ec)) {
+    ghc::filesystem::path p = e.path();
+    ghc::filesystem::path md;
+    std::string name;
+    if (ghc::filesystem::is_directory(p, ec)) {
+      if (ghc::filesystem::exists(p / "SKILL.md", ec)) md = p / "SKILL.md";
+      else if (ghc::filesystem::exists(p / "skill.md", ec)) md = p / "skill.md";
+      else continue;
+      name = p.filename().string();
+    } else if (p.extension() == ".md") {
+      md = p;
+      name = p.stem().string();
+    } else {
+      continue;
+    }
+    std::string text = read_text(md);
+    if (text.empty()) continue;
+    Skill s;
+    std::string fm_name = front_value(text, "name");
+    s.name = fm_name.empty() ? name : fm_name;
+    if (has(s.name)) continue;  // 已有的不重复导入
+    s.title_zh = front_value(text, "title");
+    if (s.title_zh.empty()) s.title_zh = s.name;
+    s.title_en = s.title_zh;
+    s.desc_zh = front_value(text, "description");
+    s.desc_en = s.desc_zh;
+    s.body_zh = strip_frontmatter(text);
+    s.body_en = s.body_zh;
+    s.loadable = true;
+    s.dir = md.parent_path().string();
+    s.user = true;
+    s.enabled = true;
+    skills_.push_back(s);
+    ++added;
+  }
+  return added;
+}
+
+bool SkillRegistry::add(const Skill& s) {
+  if (s.name.empty()) return false;
+  for (auto& e : skills_) {
+    if (e.name == s.name) {
+      e = s;
+      e.user = true;
+      return true;
+    }
+  }
+  Skill n = s;
+  n.user = true;
+  skills_.push_back(n);
+  return true;
+}
+
+bool SkillRegistry::set_enabled(const std::string& name, bool enabled) {
+  for (auto& s : skills_) {
+    if (s.name == name) {
+      s.enabled = enabled;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SkillRegistry::remove(const std::string& name) {
+  for (size_t i = 0; i < skills_.size(); ++i) {
+    if (skills_[i].name == name) {
+      // 内置 skill 删不掉（它们是代码的一部分），只能停用
+      if (!skills_[i].user) return false;
+      skills_.erase(skills_.begin() + static_cast<long>(i));
+      return true;
+    }
+  }
+  return false;
+}
+
+Json SkillRegistry::user_json() const {
+  Json arr = Json::array();
+  for (auto& s : skills_) {
+    if (!s.user) continue;
+    Json j = Json::object();
+    j["name"] = s.name;
+    j["title"] = s.title_zh;
+    j["description"] = s.desc_zh;
+    j["body"] = s.body_zh;
+    j["dir"] = s.dir;
+    j["enabled"] = s.enabled;
+    arr.push_back(j);
+  }
+  return arr;
+}
+
+void SkillRegistry::load_user(const Json& j) {
+  // 先摘掉旧的用户条目（重新加载 = 以磁盘上的设置为准）
+  for (long i = static_cast<long>(skills_.size()) - 1; i >= 0; --i) {
+    if (skills_[static_cast<size_t>(i)].user) {
+      skills_.erase(skills_.begin() + i);
+    }
+  }
+  if (!j.is_array()) return;
+  for (size_t i = 0; i < j.size(); ++i) {
+    if (!j[i].is_object()) continue;
+    Skill s;
+    s.name = jsonutil::get<std::string>(j[i], "name", "");
+    if (s.name.empty()) continue;
+    s.title_zh = jsonutil::get<std::string>(j[i], "title", s.name);
+    s.title_en = s.title_zh;
+    s.desc_zh = jsonutil::get<std::string>(j[i], "description", "");
+    s.desc_en = s.desc_zh;
+    s.body_zh = jsonutil::get<std::string>(j[i], "body", "");
+    s.body_en = s.body_zh;
+    s.dir = jsonutil::get<std::string>(j[i], "dir", "");
+    s.enabled = jsonutil::get<bool>(j[i], "enabled", true);
+    s.loadable = true;
+    s.user = true;
+    skills_.push_back(s);
+  }
 }
 
 void register_skill_tools(ToolRegistry* registry, SkillRegistry* skills) {

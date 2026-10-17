@@ -30,6 +30,10 @@ class ShellDetector {
   // 全量探测结果（JSON 数组，便于 FsApi settings.detectShells）
   static Json detect_all_json();
 
+  // 在 PATH 上探测常见的开发 CLI 工具，返回 {name: path}（只含找到的）。
+  // 用途：设置-环境 里"自动探测"。只列找到的——列一堆没装的工具路径没意义。
+  static Json detect_cli_tools_json();
+
  private:
   static ShellInfo probe_bash();
   static ShellInfo probe_zsh();

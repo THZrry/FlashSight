@@ -269,7 +269,8 @@ void NullDom::set_appearance(const Appearance& a) {
   calls_.push_back(Call{"set_appearance", 0,
                         "palette=" + a.palette + " mode=" + a.mode +
                             " font=" + a.font + " mono=" + a.mono +
-                            " size=" + std::to_string(a.font_size)});
+                            " size=" + std::to_string(a.font_size) +
+                            " tabs=" + a.tabs});
 }
 
 std::string NullDom::dump() const {

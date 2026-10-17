@@ -96,6 +96,10 @@ struct AppState {
   // somewhere unrelated" is the whole reason this exists. Entries for tabs that
   // have since closed are skipped when popping.
   std::vector<std::string> tab_history;
+  // 设置/新建这类页面**不是标签页**：它们点开就直接显示，关掉就销毁，也不进
+  // 访问栈（进栈会让"关掉一个标签页回到设置"这种荒谬的回退发生）。它们盖在
+  // 当前标签页之上，关掉就回到原来那个标签页。
+  std::string modal_page;  // "" | "settings" | "new"
 
   // ---- home ----
   int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计
@@ -295,12 +299,25 @@ struct AppState {
   std::string model_new_level;         // 新增思考档位的输入草稿
   // 会话里的模型选择器（弹出层）：左供应商 / 右模型
   bool model_picker_open = false;
+  // Which widget opened it. The picker is a real component reused by the
+  // composer and by settings fields, so exactly one place may render it.
+  std::string model_picker_owner;
+  // What a pick does: "" = the session's model, otherwise a settings key. This
+  // is what lets the same component serve both without a second code path.
+  std::string model_picker_target;
   std::string model_picker_provider;
   std::string model_picker_query;
   std::vector<ModelRow> model_picker_models;   // 选中 provider 的启用模型
   bool model_picker_loaded = false;
   std::string model_picker_status;
-  std::vector<std::string> shells;  // settings.detectShells result
+  // Detected shells (name + resolved path). The path is what makes the list
+  // useful: two entries named "pwsh" from different installs are otherwise
+  // indistinguishable, and the user may want to see which one will run.
+  struct ShellRow {
+    std::string name;
+    std::string path;
+  };
+  std::vector<ShellRow> shell_rows;  // settings.detectShells result
   int shell_index = 0;
   std::string history_recent = "20";
   std::string history_budget = "8000";
@@ -321,20 +338,25 @@ struct AppState {
     std::string name;
     std::string title;
     std::string description;
+    std::string dir;          // 所属目录/来源（卡片上显示）
     bool loadable = true;
   };
   std::vector<SkillRow> skills;            // skill.list result
   bool skills_loaded = false;
+  std::string skill_filter;                // 本地搜索（列表可能很长）
+  std::string skill_new_dir;
   // ---- settings / MCP 与外部工具 ----
   struct McpRow {
     std::string name;
     std::string dir;
+    std::string description;  // 卡片上的简介
     bool enabled = true;
   };
   std::vector<McpRow> mcp_tools;
   bool mcp_loaded = false;
   std::string mcp_new_name;
   std::string mcp_new_dir;
+  std::string mcp_filter;   // 本地搜索
   std::vector<std::pair<std::string, std::string> > long_memory;  // 长期记忆
   std::vector<std::pair<std::string, std::string> > env_vars;     // 环境变量
   std::vector<std::pair<std::string, std::string> > cli_tools;    // CLI 工具
@@ -547,8 +569,11 @@ class UiApp {
   // bring a closed terminal's tab back (the overview card does this on click)
   void reopen_terminal_tab(const std::string& tid);
   void close_tab(const std::string& id);
-  // 顶层 "+"：打开一个"新建"标签页（而不是直接给第一个项目开会话）
+  // 顶层 "+"：打开"新建"页面（不是标签页）
   void open_new_tab();
+  // 设置/新建这类"盖在当前标签页之上、不入栈"的页面
+  void open_modal_page(const std::string& page);
+  void close_modal_page();
   // open a panel by kind (adds a new one; singleton kinds are opened through
   // open_or_focus_side_tab)
   void open_side_tab(const std::string& kind);
@@ -574,14 +599,32 @@ class UiApp {
   void toggle_model_enabled(const std::string& model_id, bool enabled);
   void test_model(const std::string& model_id);
   // ---- composer / 模型选择器 ----
-  void open_model_picker();
+  // owner: which widget opened it (only that one renders the popup).
+  // target: "" = the session's model, otherwise a settings key.
+  void open_model_picker(const std::string& owner, const std::string& target);
   void pick_model(const std::string& provider_id, const std::string& model_id);
   void load_picker_models(const std::string& provider_id);
+  // The popup itself. Shared by the composer and by settings fields so there is
+  // one model picker in the app, not two that drift apart.
+  H build_model_picker(const std::string& owner, const std::string& current);
+  // A settings field's model button (opens the picker for `setting_key`).
+  H build_model_field(const std::string& owner, const std::string& setting_key,
+                      const std::string& current, const std::string& placeholder);
   // ---- settings / MCP actions ----
   void detect_mcp();
   void add_mcp();
   void remove_mcp(const std::string& name);
   void toggle_mcp(const std::string& name, bool enabled);
+  // ---- settings / Skill actions ----
+  void add_skill();
+  // ---- settings / 环境（CLI 工具探测）----
+  void detect_cli_tools();
+  // 选文件并把结果写进某个设置键（驱动路径 / CLI 工具路径）
+  void pick_file_into(const std::string& setting_key, const std::string& filter_desc,
+                      const std::string& filter_spec);
+  // CLI 工具路径的两种选文件场景
+  void pick_cli_tool_path(const std::string& key);
+  void pick_cli_tool_draft();
   // ---- settings / key-value tables (长期记忆 / 环境变量 / CLI 工具) ----
   void add_kv(const std::string& key_setting, const std::string& k, const std::string& v);
   void remove_kv(const std::string& key_setting, const std::string& k);

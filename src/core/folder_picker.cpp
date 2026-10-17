@@ -61,6 +61,68 @@ bool pick_folder_dialog(std::string* out) {
   return ok;
 }
 
+bool pick_file_dialog(std::string* out, const std::string& filter_desc,
+                      const std::string& filter_spec) {
+  HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED |
+                                           COINIT_DISABLE_OLE1DDE);
+  bool com_owned = SUCCEEDED(hr);
+  if (hr == RPC_E_CHANGED_MODE) com_owned = false;
+
+  bool ok = false;
+  IFileDialog* dlg = nullptr;
+  hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                        IID_PPV_ARGS(&dlg));
+  if (SUCCEEDED(hr)) {
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts))) {
+      // NOTE: no FOS_PICKFOLDERS - that flag is the only difference from the
+      // folder dialog, and with it the same dialog picks files instead.
+      dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
+                      FOS_PATHMUSTEXIST);
+    }
+    if (!filter_spec.empty()) {
+      // COMDLG_FILTERSPEC wants wide strings; convert from UTF-8.
+      auto widen = [](const std::string& s) {
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+        std::wstring w(static_cast<size_t>(n > 0 ? n : 0), L'\0');
+        if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+        if (!w.empty()) w.resize(w.size() - 1);
+        return w;
+      };
+      std::wstring wd = widen(filter_desc.empty() ? "文件" : filter_desc);
+      std::wstring ws = widen(filter_spec);
+      COMDLG_FILTERSPEC spec[1];
+      spec[0].pszName = wd.c_str();
+      spec[0].pszSpec = ws.c_str();
+      dlg->SetFileTypes(1, spec);
+    }
+    hr = dlg->Show(nullptr);
+    if (SUCCEEDED(hr)) {
+      IShellItem* item = nullptr;
+      if (SUCCEEDED(dlg->GetResult(&item))) {
+        PWSTR path = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+          int len = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0,
+                                        nullptr, nullptr);
+          if (len > 0) {
+            std::string buf(static_cast<size_t>(len), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, path, -1, &buf[0], len, nullptr,
+                                nullptr);
+            buf.resize(static_cast<size_t>(len - 1));
+            if (out) *out = buf;
+            ok = true;
+          }
+          CoTaskMemFree(path);
+        }
+        item->Release();
+      }
+    }
+    dlg->Release();
+  }
+  if (com_owned) CoUninitialize();
+  return ok;
+}
+
 bool reveal_in_file_manager(const std::string& path) {
   if (path.empty()) return false;
   // explorer has quirky exit codes; fire and forget
@@ -156,6 +218,10 @@ std::string find_folder_by_name(const std::vector<std::string>& roots,
 namespace fs {
 
 bool pick_folder_dialog(std::string*) { return false; }
+
+bool pick_file_dialog(std::string*, const std::string&, const std::string&) {
+  return false;
+}
 
 bool reveal_in_file_manager(const std::string& path) {
   if (path.empty()) return false;

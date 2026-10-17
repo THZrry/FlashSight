@@ -59,6 +59,19 @@ H checkbox(const std::string& label, bool checked, EventFn on_change);
 H toggle(bool on, const std::string& label, EventFn on_change);
 H search_box(const std::string& value, const std::string& placeholder, EventFn on_input);
 
+// A labelled choice rendered as selectable rows: icon + title + one-line
+// explanation. A plain <select> cannot carry the explanation, and a bare label
+// ("permissive") means nothing to someone who has not read the docs - which is
+// exactly what the permission and auto-mode settings need to say.
+struct ChoiceOption {
+  std::string value;   // value handed to on_pick
+  std::string icon;    // Font Awesome class suffix ("" = none)
+  std::string title;   // short label
+  std::string desc;    // one-line explanation ("" = none)
+};
+H choice_list(const std::vector<ChoiceOption>& options, const std::string& selected,
+              EventFn on_pick);
+
 // ---------- display ----------
 H badge(const std::string& text, const std::string& variant = "");
 H spinner();

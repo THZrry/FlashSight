@@ -140,19 +140,21 @@ The process of project: P0 环境搭建
   WhaleUI 无"改写文本节点"API 故 Node 用槽位下标；布尔属性按存在性；空 style 要
   remove_property。详见 current.md <38> 与 doc-internal/ui-whaleui.md。
 
-<39>(UNRESOLVED): WhaleUI 布局缺陷 —— flex 项主轴尺寸写成视口单位（vh/vw）时塌成
+<39>(SOLVED): WhaleUI 布局缺陷 —— flex 项主轴尺寸写成视口单位（vh/vw）时塌成
   1px，导致桌面 UI 只画出标签条。根因：layout_flex 走 len_px（视口硬编码 0）
   再被 1px 地板兜住（layout.cpp:3471 / 3515）；百分比基数还用了宽度
   （layout.cpp:3471）。复现 + 报告已交上游 WhaleUI temp/incorrect1/。
-  详见 current.md <39>。
+  2026-10-17 上游已修（WhaleUI e87979c）：主轴改走 len_or_auto_vp、百分比基数
+  按主轴取；复现程序 15 变体全 ok，桌面 UI 完整渲染可交互。详见 current.md <39>。
 
-## 当前状态（更新 2026-10-16）
+## 当前状态（更新 2026-10-17）
 
 - P0-P3 + 缺口补齐 + addon2 后端增强 + addon3 UI 框架重做 + 终端/网络接线全部完成。
-- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证；160 用例 1568 断言通过。
+- UI 四层重构，构建纯 xmake（单条命令从零可构建），事件端到端已验证。
 - 终端已是真终端（VT 解析 + ConPTY + scrollback + 搜索）；设置/外观已做实。
-- WhaleUI 桌面后端已接入并接线（`--whaleui=y`，默认不编译），头文件与构建开关就位。
-- 等：WhaleUI 修 flex 主轴视口单位塌 1px（notes <39>，已交上游）；vision 平台截图/图像解码后端。
+- WhaleUI 桌面后端已接入并接线（`--whaleui=y`，默认不编译）；上游修掉 flex 主轴
+  视口单位塌 1px（notes <39>）后，桌面 UI 已能完整渲染并交互。
+- 等：vision 平台截图/图像解码后端；WhaleUI 缺口 A-G（见 doc-internal/ui-whaleui.md §5）。
 
 <40>(SOLVED): 终端标签与"所有"解耦（关标签不删终端、重开追加到末尾，新增
   `term_order`）+ 空间利用（设置页 grid 双栏、供应商表单双栏 + 模型列表右栏、
@@ -173,3 +175,10 @@ The process of project: P0 环境搭建
   （项目卡片列表，不再直接给第一个项目开会话）+ 项目卡片会话行加状态点/相对时间/
   可删除（带确认）+ 左列顶部对齐、按钮图标化 + 修 panel_tabs 缺 key 导致关面板
   触发相邻槽位动作。195 用例 1732 断言。详见 current.md <42>。
+
+<43>(SOLVED): 设置页按 settings1.md 返工 —— 设置/新建改为盖在当前标签页上的页面
+  （不是标签、不入栈）、标签位置左/顶真正实现、标签条可滚动（删上限）、删掉「上下文」
+  整段、会话默认/模型偏好/网络/终端/环境/MCP/Skill/长期记忆/浏览器控制逐页重做、
+  供应商页自动选中+品牌图标+模型全选+能力两列+档位逗号输入、修"获取模型列表"
+  结果没入库导致永远显示预置模型、新增 dialog.pickFile 与 CLI 工具探测。
+  197 用例 1724 断言。详见 current.md <43>。

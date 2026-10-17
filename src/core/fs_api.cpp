@@ -167,6 +167,8 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   // MCP/外部工具注册表：从设置恢复（重启后保留）
   Json mcp = settings_->get_value(kKeyMcpEntries, Json::array());
   if (mcp.is_array()) mcp_registry_->load(mcp);
+  // 用户 skill：从设置恢复（内置 skill 是代码，不在这里）
+  agent_host_->skills().load_user(settings_->get_value(kKeySkills, Json::array()));
   // 逐模型设置：从设置恢复用户覆盖（启用状态/能力/档位/重试/图标）
   model_table_->load_user_models(settings_->get_value(kKeyProviderModels, Json::object()));
   apply_proxy_settings();  // 代理设置立即生效
@@ -223,6 +225,15 @@ FsResult FsApi::project_get(const std::string& pid) { return proj_->get_project(
 FsResult FsApi::project_pick_folder() {
   std::string path;
   if (pick_folder_dialog(&path)) {
+    return FsResult::success(Json{{"path", path}});
+  }
+  return FsResult::success(Json{{"cancelled", true}});
+}
+// 选文件（不是选目录）：驱动路径、CLI 工具路径这些字段需要的是可执行文件本身，
+// 用目录选择框是选不中的。
+FsResult FsApi::pick_file(const std::string& filterDesc, const std::string& filterSpec) {
+  std::string path;
+  if (pick_file_dialog(&path, filterDesc, filterSpec)) {
     return FsResult::success(Json{{"path", path}});
   }
   return FsResult::success(Json{{"cancelled", true}});
@@ -601,6 +612,58 @@ FsResult FsApi::skill_load(const std::string& name) {
                                     parse_think_lang(agent_host_->thinking_lang()));
 }
 
+// 从目录导入 skill（该目录下每个含 SKILL.md 的子目录 / 每个 .md 文件算一条）。
+// 导入后写回设置：注册表本身是内存里的，重启要从设置恢复。
+FsResult FsApi::skill_import(const std::string& dir) {
+  if (dir.empty()) return FsResult::error(ErrCode::kInvalidArg, "dir required");
+  int n = agent_host_->skills().import_dir(dir);
+  settings_->set_global(kKeySkills, agent_host_->skills().user_json());
+  settings_->save_global();
+  return FsResult::success(Json{{"added", n}, {"skills", agent_host_->skills().list_json(
+      parse_think_lang(agent_host_->thinking_lang()))}});
+}
+
+// 新建一条 skill：正文就是用户写的说明。
+FsResult FsApi::skill_create(const std::string& name, const std::string& title,
+                             const std::string& description, const std::string& body) {
+  if (name.empty()) return FsResult::error(ErrCode::kInvalidArg, "name required");
+  Skill s;
+  s.name = name;
+  s.title_zh = title.empty() ? name : title;
+  s.title_en = s.title_zh;
+  s.desc_zh = description;
+  s.desc_en = description;
+  s.body_zh = body;
+  s.body_en = body;
+  s.loadable = true;
+  if (!agent_host_->skills().add(s)) {
+    return FsResult::error(ErrCode::kInvalidArg, "cannot add skill");
+  }
+  settings_->set_global(kKeySkills, agent_host_->skills().user_json());
+  settings_->save_global();
+  return FsResult::success(Json{{"name", name}});
+}
+
+FsResult FsApi::skill_set_enabled(const std::string& name, bool enabled) {
+  if (!agent_host_->skills().set_enabled(name, enabled)) {
+    return FsResult::error(ErrCode::kNotFound, "skill not found: " + name);
+  }
+  settings_->set_global(kKeySkills, agent_host_->skills().user_json());
+  settings_->save_global();
+  return FsResult::success();
+}
+
+FsResult FsApi::skill_remove(const std::string& name) {
+  if (!agent_host_->skills().remove(name)) {
+    // 内置 skill 删不掉，只能停用
+    return FsResult::error(ErrCode::kInvalidArg,
+                           "builtin skill cannot be removed; disable it instead");
+  }
+  settings_->set_global(kKeySkills, agent_host_->skills().user_json());
+  settings_->save_global();
+  return FsResult::success();
+}
+
 // 浏览器控制 skill 的加载口（addon2：/browser-load 按需加载，不直接提供）
 FsResult FsApi::browser_load() { return skill_load("browser-control"); }
 
@@ -944,6 +1007,10 @@ FsResult FsApi::settings_dump(const std::string& pid) {
 }
 FsResult FsApi::settings_detect_shells() {
   return FsResult::success(ShellDetector::detect_all_json());
+}
+FsResult FsApi::environment_detect_cli_tools() {
+  return FsResult::success(
+      Json{{"tools", ShellDetector::detect_cli_tools_json()}});
 }
 FsResult FsApi::settings_set_shell(const std::string& name) {
   return settings_->set_global(kKeyTerminalShell, name);
@@ -1291,6 +1358,11 @@ FsResult FsApi::provider_list_models(const std::string& providerId) {
   if (res.ok) {
     models = res.models;
     level = "api";
+    // Store what the endpoint actually returned. Without this the fetched list
+    // lived only in this reply: model.list (which the model panel reads) fell
+    // back to the built-in preset every time, so "获取模型列表" looked like it
+    // kept returning the same few fake models.
+    model_table_->set_api_models(providerId, models);
   } else {
     level = "preset";
     message = res.message;

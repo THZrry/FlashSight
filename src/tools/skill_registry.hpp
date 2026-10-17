@@ -31,6 +31,9 @@ struct Skill {
   std::string body_zh;      // 加载后返回的详细用法
   std::string body_en;
   bool loadable = true;     // true=需按需加载（不进工具列表）
+  std::string dir;          // 来源目录（用户导入的 skill 才有；卡片上显示）
+  bool user = false;        // 用户导入/新建（可删除）
+  bool enabled = true;      // 停用只是不让模型看到，用户仍可 /名称 调用
 };
 
 // 内置 skill 表
@@ -47,6 +50,18 @@ class SkillRegistry {
   // 全部 skill 的简述列表（按语言）
   Json list_json(ThinkLang lang) const;
   bool has(const std::string& name) const;
+
+  // ----- 用户 skill（导入 / 新建 / 启停 / 删除）-----
+  // 从一个目录导入：该目录下每个含 SKILL.md（或 <name>.md）的子目录/文件算一条。
+  // 返回新增条数。
+  int import_dir(const std::string& dir);
+  // 新建一条（正文即用户填的说明）。
+  bool add(const Skill& s);
+  bool set_enabled(const std::string& name, bool enabled);
+  bool remove(const std::string& name);
+  // 用户 skill 的整份进出（持久化到设置 skills.entries）。
+  Json user_json() const;
+  void load_user(const Json& j);
 
  private:
   std::vector<Skill> skills_;

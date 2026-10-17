@@ -79,6 +79,9 @@ constexpr char kKeyThinkingLang[] = "model.thinkingLang";
 constexpr char kKeyLspServers[] = "lsp.servers";
 // MCP / 外部工具注册表（[{name, dir, enabled}]；重启后恢复）
 constexpr char kKeyMcpEntries[] = "mcp.entries";
+// 用户 skill 表（[{name,title,description,body,dir,enabled}]；内置 skill 是代码，
+// 不进设置，只有用户导入/新建的才需要持久化）
+constexpr char kKeySkills[] = "skills.entries";
 // 网络代理（httplib 不读系统代理；在此显式设置）
 constexpr char kKeyNetworkProxyHost[] = "permissions.network.proxyHost";
 constexpr char kKeyNetworkProxyPort[] = "permissions.network.proxyPort";

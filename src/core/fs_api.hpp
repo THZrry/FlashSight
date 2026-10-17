@@ -53,6 +53,8 @@ class FsApi {
   // 打开系统"选择文件夹"对话框（浏览器无法提供本机路径，由本进程弹窗）
   // 返回 {path} 或 cancelled=true
   FsResult project_pick_folder();
+  // 选文件（可带过滤器）：驱动路径 / CLI 工具路径这类字段需要的是文件本身
+  FsResult pick_file(const std::string& filterDesc, const std::string& filterSpec);
   // 解析浏览器拖放拿到的文件夹名（浏览器不给绝对路径）：在常见根目录中搜索
   // {name} -> {path} 或 {notFound:true}
   FsResult project_resolve_drop(const std::string& name);
@@ -135,6 +137,8 @@ class FsApi {
   FsResult settings_unset(const std::string& key, const std::string& pid);
   FsResult settings_dump(const std::string& pid);  // 全量（带来源标注）
   FsResult settings_detect_shells();
+  // 在 PATH 上探测常见开发 CLI 工具（设置-环境"自动探测"）
+  FsResult environment_detect_cli_tools();
   FsResult settings_set_shell(const std::string& name);
   FsResult settings_set_ignore_global(const std::string& pid, bool ignore);
 
@@ -206,6 +210,12 @@ class FsApi {
   // ----- skill.*（addon2：中英双语 skill，按需加载）-----
   FsResult skill_list();
   FsResult skill_load(const std::string& name);
+  // 用户 skill：从目录导入 / 新建 / 启停 / 删除（内置的删不掉，只能停用）
+  FsResult skill_import(const std::string& dir);
+  FsResult skill_create(const std::string& name, const std::string& title,
+                        const std::string& description, const std::string& body);
+  FsResult skill_set_enabled(const std::string& name, bool enabled);
+  FsResult skill_remove(const std::string& name);
   // 浏览器控制 skill 的加载口（addon2：不直接提供，用 /browser-load 按需加载）
   FsResult browser_load();
   // ----- mcp.*（外部工具/技能包管理；注册表持久化到设置 mcp.entries）-----

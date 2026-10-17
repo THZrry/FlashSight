@@ -30,6 +30,10 @@ UiApi::UiApi(FsApi* api) {
   reg("project.get", [api](const Json& a) { return api->project_get(s(a, "pid")); });
   // native folder dialog (the browser cannot hand out OS paths)
   reg("project.pickFolder", [api](const Json&) { return api->project_pick_folder(); });
+  // 选文件（不是目录）：驱动路径 / CLI 工具路径用得上
+  reg("dialog.pickFile", [api](const Json& a) {
+    return api->pick_file(s(a, "filterDesc"), s(a, "filterSpec"));
+  });
   // resolve a dropped folder name to a path (browsers hide absolute paths)
   reg("project.resolveDrop", [api](const Json& a) {
     return api->project_resolve_drop(s(a, "name"));
@@ -165,6 +169,9 @@ UiApi::UiApi(FsApi* api) {
   });
   reg("settings.dump", [api](const Json& a) { return api->settings_dump(s(a, "pid")); });
   reg("settings.detectShells", [api](const Json&) { return api->settings_detect_shells(); });
+  reg("environment.detectCliTools", [api](const Json&) {
+    return api->environment_detect_cli_tools();
+  });
   reg("settings.setShell", [api](const Json& a) {
     return api->settings_set_shell(s(a, "name"));
   });
@@ -280,6 +287,15 @@ UiApi::UiApi(FsApi* api) {
   // ---- skill / misc ----
   reg("skill.list", [api](const Json&) { return api->skill_list(); });
   reg("skill.load", [api](const Json& a) { return api->skill_load(s(a, "name")); });
+  reg("skill.import", [api](const Json& a) { return api->skill_import(s(a, "dir")); });
+  reg("skill.create", [api](const Json& a) {
+    return api->skill_create(s(a, "name"), s(a, "title"), s(a, "description"),
+                             s(a, "body"));
+  });
+  reg("skill.setEnabled", [api](const Json& a) {
+    return api->skill_set_enabled(s(a, "name"), b(a, "enabled", true));
+  });
+  reg("skill.remove", [api](const Json& a) { return api->skill_remove(s(a, "name")); });
   reg("browser.load", [api](const Json&) { return api->browser_load(); });
   reg("thinking.setLang", [api](const Json& a) {
     return api->set_thinking_lang(s(a, "lang", "auto"));
