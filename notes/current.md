@@ -1022,3 +1022,17 @@ The process of project: P0 环境搭建 + P1 AppCore
     delete`、`session.setAutoMode/setPermission/setModel/setThinking`、
     `settings.set`、`skill.*`、`model.*` 均已注册。
   - 测试 204 用例 / 1873 断言（新增：标签拖拽排序、左栏导航、双 view 页面槽）。
+
+<47>(SOLVED): 设置/新建改为真正的覆盖层 + 左栏启动即生效。
+  - `build_shell` 拆出 `build_shell_into(H&)`：正常 shell 始终挂载，设置/新建作为
+    最上层 `.modal-layer`（absolute inset 0，z-index 30）叠上去。关闭时整层播
+    `anim-exit-fade` 后再删，所以"关设置"也有退场动画，而不是整个 window 换树。
+    这也解释了之前设置关闭没有动画：模态页替换的是 page-slot，框架看到的是容器
+    被换掉，根本轮不到页面的 exit_anim。
+  - 离场方向改在 `render()` 里按"这一次移动"盖到旧页面上（创建时烘焙的方向在
+    后退时是错的）。
+  - `mount()` 加载设置：保存的 `ui.tabs=left` / 配色 / 字体在启动时就生效，不再
+    等打开设置页。
+  - 文件权限的"记忆上次"也用独立标记（`session.default.filePermRemember`），
+    新会话按各自开关分别沿用 `session.last.autoMode` / `session.last.filePerm`。
+  - 204 用例 / 1878 断言。
