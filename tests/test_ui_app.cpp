@@ -1960,10 +1960,15 @@ FS_TEST(uiapp_settings_is_modal_page) {
   EXPECT_EQ(app.state().modal_page, std::string("settings"));
   EXPECT_TRUE(dump_has(dom, "设置"));
   EXPECT_TRUE(dump_has(dom, "常规"));
-  // 设置是整窗页面：它覆盖标签栏，而不是缩在标签栏下面
+  // 设置是整窗页面：它盖在 shell（含标签栏）之上的一层里。底下保持挂载
+  // （这样关闭时有淡出动画），但视觉上被 modal-layer 完全覆盖。
   std::string d = dom.dump();
-  EXPECT_TRUE(d.find("class=\"tabs\"") == std::string::npos);
-  EXPECT_TRUE(d.find("tab-title") == std::string::npos);
+  EXPECT_TRUE(d.find("modal-layer") != std::string::npos);
+  EXPECT_TRUE(d.find("settings-page") != std::string::npos);
+  size_t layer = d.find("modal-layer");
+  size_t settings = d.find("settings-page");
+  ASSERT_TRUE(layer != std::string::npos && settings != std::string::npos);
+  EXPECT_TRUE(layer < settings);  // the modal page lives inside that layer
   // switching tabs dismisses it (it belongs to the tab it was opened over)
   app.update([](AppState& s) {
     seed_session(s, "sess_a");

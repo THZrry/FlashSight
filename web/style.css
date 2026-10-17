@@ -261,6 +261,17 @@ html, body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;  /* anchor for the modal layer */
+}
+/* 设置/新建：盖在 shell 之上的一层。底下保持挂载，所以关掉时能淡出，
+   而不是整个 window 换一棵树。 */
+.shell { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.modal-layer {
+  position: absolute; inset: 0;
+  z-index: 30;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  overflow: hidden;
 }
 /* 标签位置=左侧：整窗变成"竖标签栏 + 内容列"。这不是换个外观，是真正的布局
    切换（标签条从顶部横条变成左侧竖条），所以由 data-tabs 驱动而不是靠宽度。 */
@@ -440,6 +451,7 @@ html, body {
    tab strip. It also carries the entrance animation's containing block. */
 .page-slot { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; overflow: hidden; }
 .page-slot > .page { flex: 1; min-height: 0; }
+.modal-layer > .page { flex: 1; min-height: 0; }
 
 /* ============================ home ============================ */
 .home-page { background: var(--bg); }

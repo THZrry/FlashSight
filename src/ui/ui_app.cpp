@@ -1316,14 +1316,7 @@ void UiApp::render() {
         VNodePtr op = old_slot->children[0];
         VNodePtr np = new_slot->children[0];
         if (op && np && op->key != np->key) {
-          bool entering_modal = np->key.find("settings") != std::string::npos ||
-                                np->key.find(":new") != std::string::npos;
-          bool leaving_modal = op->key.find("settings") != std::string::npos ||
-                               op->key.find(":new") != std::string::npos;
-          op->exit_anim = (entering_modal || leaving_modal)
-                              ? anim::kExitFade
-                              : ((page_dir_ == "-1") ? anim::kExitRight
-                                                     : anim::kExitLeft);
+          op->exit_anim = (page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft;
         }
       }
     }
@@ -1501,15 +1494,36 @@ VNodePtr UiApp::build_shell() {
   H win = el("div", "window");
   win.key("drop-zone");  // drag & drop a folder anywhere on the window
 
-  // 设置是"整窗"级别的页面：它覆盖标签栏，而不是缩在标签栏下面。设置里改的
-  // 是整窗的东西（外观、标签位置、语言），标签栏在它旁边既没用又会诱导用户
-  // 以为还能切走。所以这里直接跳过标签条，让设置占满整个窗口。
-  if (st_.modal_page == "settings") {
-    win.add(build_page_slot());
-    win.add(build_overlays());
-    return win.get();
+  // 设置/新建是"整窗"级别的页面：盖在标签栏之上，而不是缩在标签栏下面。
+  // 它们作为最后一层（在 overlays 之上）叠进来，底下的 shell 保持原样：
+  // 于是打开/关闭都有真正的进出动画，而不是整个 window 被换掉。
+  H shell = el("div", "shell");
+  shell.key("shell");
+  build_shell_into(shell);
+  win.add(shell);
+  win.add(build_overlays());
+  if (st_.modal_page == "settings" || st_.modal_page == "new") {
+    H overlay = el("div", "modal-layer");
+    overlay.key("modal-layer");
+    // The LAYER is what disappears when the modal closes, so it is the layer
+    // that must fade out: fading only the inner page would leave the opaque
+    // backdrop covering the shell until the node is dropped.
+    overlay.exit(anim::kExitFade);
+    VNodePtr page = (st_.modal_page == "settings") ? build_settings()
+                                                   : build_new_tab();
+    page->key = "page:" + st_.modal_page;
+    add_anim(page, anim::kView);
+    page->exit_anim = anim::kExitFade;
+    page->anim_key = "modal:" + st_.modal_page;
+    overlay.add(page);
+    win.add(overlay);
   }
+  return win.get();
+}
 
+// The normal window content (tab strip / nav rail + page slot). Split out of
+// build_shell so a modal page can sit ON TOP of it instead of replacing it.
+void UiApp::build_shell_into(H& win) {
   // ---- top tab strip ----
   // 标签位置=左侧时，标签条不再是一排可关闭的工作标签，而是"项目导航栏"：
   // 按项目列出全部会话（见 build_nav_rail）。两者是两种不同的导航模式，不能
@@ -1537,8 +1551,7 @@ VNodePtr UiApp::build_shell() {
     col.add(build_page_slot());
     row.add(col);
     win.add(row);
-    win.add(build_overlays());
-    return win.get();
+    return;
   }
 
   std::vector<TabSpec> tabs;
@@ -1590,8 +1603,6 @@ VNodePtr UiApp::build_shell() {
   // becoming a tab of its own: it is opened, used, and closed, and having it in
   // the strip (and in the visit stack) made closing tabs fall back into settings.
   win.add(build_page_slot());
-  win.add(build_overlays());
-  return win.get();
 }
 
 // The page area is its own slot: a leaving page is positioned absolutely INSIDE
@@ -1599,20 +1610,14 @@ VNodePtr UiApp::build_shell() {
 VNodePtr UiApp::build_page_slot() {
   std::string page_id;
   VNodePtr page;
-  if (st_.modal_page == "settings") {
-    page_id = "settings";
-    page = build_settings();
-  } else if (st_.modal_page == "new") {
-    page_id = "new";
-    page = build_new_tab();
-  } else if (st_.active_tab == "home") {
+  if (st_.active_tab == "home") {
     page_id = "home";
     page = build_home();
   } else {
     page_id = "session";
     page = build_session();
   }
-  page->key = "page:" + page_id + (st_.modal_page.empty() ? st_.active_tab : "");
+  page->key = "page:" + page_id + st_.active_tab;
   // The framework applies the animation, looked up from the page's declaration
   // above - so a page switch animates because it is DECLARED, not because a
   // builder remembered to add a class. The key change makes the diff recreate
@@ -1630,11 +1635,7 @@ VNodePtr UiApp::build_page_slot() {
     pg_anim = (page_dir_ == "-1") ? anim::kSlideRight : anim::kSlideLeft;
   }
   add_anim(page, pg_anim ? pg_anim : anim::kView);
-  // 模态页（设置/新建）没有"前进/后退"的方向，淡出即可；普通标签页朝导航
-  // 相反方向滑出。
-  page->exit_anim = (page_id == "settings" || page_id == "new")
-                        ? anim::kExitFade
-                        : ((page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft);
+  page->exit_anim = (page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft;
   {
     std::string token = page_id;
     if (page_id == "session" && st_.session_loaded) token += ":loaded";

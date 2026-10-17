@@ -751,6 +751,9 @@ class UiApp {
 
   // ---- page builders (return the page body for the active tab) ----
   VNodePtr build_shell();
+  // the normal window content (tab strip / nav rail + page slot), split out so
+  // a modal page can be layered ON TOP of it without replacing it
+  void build_shell_into(H& win);
   // the content area both navigation modes share (also the frame the leaving
   // page is pinned to during a two-view transition)
   VNodePtr build_page_slot();
