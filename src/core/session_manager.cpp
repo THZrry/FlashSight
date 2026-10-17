@@ -2,6 +2,7 @@
 #include "session_manager.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <set>
 #include <string>
@@ -175,6 +176,27 @@ FsResult SessionManager::close_session(const std::string& sid) {
   locks_.release_all_for(sid);
   sid_pid_.erase(sid);
   return FsResult::success();
+}
+
+FsResult SessionManager::delete_session(const std::string& sid) {
+  if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty sid");
+  // Release the lock first: a leftover lock entry would make a future session
+  // with the same id look occupied.
+  locks_.release_all_for(sid);
+  sid_pid_.erase(sid);
+  // Resolve the store from the sid's own project rather than the in-memory map,
+  // which is empty for a session this process never opened.
+  Json full;
+  FsResult lr = load_full_checked(sid, &full);
+  if (!lr.ok()) return lr;
+  std::string pid = jsonutil::get<std::string>(full["meta"], "pid", "");
+  nlohmann::json p = proj_->registry().get(pid);
+  if (!p.is_object() || !p.contains("path") || !p["path"].is_string()) {
+    return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  }
+  SessionFileStore store(
+      ProjectStore::of(ghc::filesystem::path(p["path"].get<std::string>())));
+  return store.remove(sid);
 }
 
 FsResult SessionManager::append_turn(const std::string& sid, const Json& turn) {
@@ -375,6 +397,24 @@ std::string SessionManager::pid_of(const std::string& sid) const {
     return jsonutil::get<std::string>(full["meta"], "pid", "");
   }
   return "";
+}
+
+int64_t SessionManager::full_mtime_ms(const std::string& sid) const {
+  std::string pid = pid_of(sid);
+  if (pid.empty()) return 0;
+  nlohmann::json p = proj_->registry().get(pid);
+  if (!p.is_object() || !p.contains("path") || !p["path"].is_string()) return 0;
+  ghc::filesystem::path full =
+      ProjectStore::of(ghc::filesystem::path(p["path"].get<std::string>())).full_json(sid);
+  std::error_code ec;
+  if (!ghc::filesystem::exists(full, ec)) return 0;
+  auto t = ghc::filesystem::last_write_time(full, ec);
+  if (ec) return 0;
+  // duration_cast, not .count(): file_time_type's period is platform-defined
+  // (100ns ticks on Windows), so a raw count would be off by four orders of
+  // magnitude and the UI would show nonsense dates.
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             t.time_since_epoch()).count();
 }
 
 }  // namespace fs

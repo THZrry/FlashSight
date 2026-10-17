@@ -44,7 +44,15 @@ struct ProjectCard {
   // directly, narrow collapses it behind the header), so it is always loaded.
   bool sessions_loaded = false;
   bool expanded = false;            // narrow layout: list revealed?
-  std::vector<std::pair<std::string, std::string> > sessions;  // sid, title
+  // A session row carries more than a title: the card shows WHEN it last
+  // changed and WHETHER it is running, and both have to be deletable.
+  struct SessionRow {
+    std::string sid;
+    std::string title;
+    int64_t updated_ms = 0;  // full.json mtime; 0 = unknown
+    bool running = false;    // a turn is in flight right now
+  };
+  std::vector<SessionRow> sessions;
 };
 
 // Side panel tab (session page). Free-form: add/close, and a kind that supports
@@ -83,6 +91,11 @@ struct AppState {
   std::string active_tab = "home";
   std::vector<SessionTab> sessions;
   int session_seq = 0;
+  // Visit stack (most recent LAST). Closing the active tab goes BACK to where
+  // you came from rather than jumping to a fixed tab: "closed a tab and landed
+  // somewhere unrelated" is the whole reason this exists. Entries for tabs that
+  // have since closed are skipped when popping.
+  std::vector<std::string> tab_history;
 
   // ---- home ----
   int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计
@@ -111,6 +124,9 @@ struct AppState {
   // ---- side panel ----
   std::vector<SideTab> side_tabs;
   std::string active_side = "usage";
+  // Visit stack for the side panel, same purpose as tab_history: closing the
+  // active panel returns to the previous one instead of jumping to the first.
+  std::vector<std::string> side_history;
   int side_seq = 0;
   // "+" shows a temporary PAGE listing every panel kind (with a one-line
   // explanation), not a small popup: it is where new panels are discovered, and
@@ -337,6 +353,11 @@ struct AppState {
   bool ask_modal = false;
   std::string ask_text;
   int ask_id = 0;           // ask tool id (0 = permission prompt, not ask tool)
+  // Generic confirm modal. Deleting a session is destructive, so it must not
+  // fire straight from a click; `kind` says what to do on OK.
+  std::string confirm_kind;   // "session" | ""
+  std::string confirm_id;
+  std::string confirm_text;
   bool plan_open = false;
   std::vector<std::string> plan_steps;
   std::string toast;
@@ -455,8 +476,10 @@ class UiApp {
   // Load a file panel's directory (the panel keeps its own path/entries).
   void load_files(const std::string& tab_id, const std::string& pid,
                   const std::string& rel);
-  // Read one file for a file panel's preview.
+  // Read one file for a preview panel.
   void preview_file(const std::string& tab_id, const std::string& rel);
+  // Open a file's contents in its OWN side tab (not inline under the tree).
+  void open_file_preview(const std::string& rel);
   // Loaders for the settings sections.
   void load_preset_agents();
   void load_skills();
@@ -479,6 +502,9 @@ class UiApp {
   void pick_and_open_folder();
   // create a session under a specific project (from its card)
   void new_session_in_project(const std::string& pid);
+  // 删除会话（先确认；不可恢复）
+  void confirm_delete_session(const std::string& sid, const std::string& title);
+  void delete_session(const std::string& sid);
   // handle a drop anywhere on the window. kind: "dir" | "file" | "url" | "text"
   // (a folder is opened as a project; a file name / url / text goes to the
   // composer as an attachment reference)
@@ -521,6 +547,8 @@ class UiApp {
   // bring a closed terminal's tab back (the overview card does this on click)
   void reopen_terminal_tab(const std::string& tid);
   void close_tab(const std::string& id);
+  // 顶层 "+"：打开一个"新建"标签页（而不是直接给第一个项目开会话）
+  void open_new_tab();
   // open a panel by kind (adds a new one; singleton kinds are opened through
   // open_or_focus_side_tab)
   void open_side_tab(const std::string& kind);
@@ -568,6 +596,8 @@ class UiApp {
   int event_count() const { return event_count_; }
   int render_count() const { return render_count_; }
   size_t message_count() const { return st_.messages.size(); }
+  // test hook: the relative-time formatter (a free function in the .cpp)
+  static std::string rel_time_for_test(int64_t ms);
 
  private:
   IDom& dom_;
@@ -633,6 +663,8 @@ class UiApp {
   VNodePtr build_home_explore();
   VNodePtr build_home_projects();
   VNodePtr build_home_usage();
+  // 顶层 "+" 的页面：项目列表 + 每个项目的会话（点会话即开、点新建即建）
+  VNodePtr build_new_tab();
   VNodePtr build_session();
   VNodePtr build_settings();
   VNodePtr build_side_panel();

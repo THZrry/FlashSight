@@ -119,6 +119,20 @@ FsResult SessionFileStore::trim_turns(const std::string& sid, size_t keep) {
   return FsResult::success();
 }
 
+FsResult SessionFileStore::remove(const std::string& sid) {
+  if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty sid");
+  ghc::filesystem::path dir = ps_.session_dir(sid);
+  std::error_code ec;
+  if (!ghc::filesystem::exists(dir, ec)) {
+    return FsResult::error(ErrCode::kNotFound, "session not found: " + sid);
+  }
+  ghc::filesystem::remove_all(dir, ec);
+  if (ec) {
+    return FsResult::error(ErrCode::kIo, "cannot remove session dir: " + ec.message());
+  }
+  return FsResult::success();
+}
+
 FsResult SessionFileStore::write_patch(const std::string& sid, const std::string& turn_id,
                                       const Json& patch) {
   ghc::filesystem::path p = ps_.patch(sid, turn_id);

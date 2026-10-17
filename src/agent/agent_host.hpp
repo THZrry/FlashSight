@@ -114,6 +114,10 @@ class AgentHost {
   SubagentManager& subagents() { return subagents_; }
   WakeScheduler& wakes() { return wakes_; }
 
+  // 该会话是否正在跑（有 loop 且处于运行态）。UI 用它显示会话状态：
+  // "正在运行"是当前事实，不是落盘的历史，所以从内存问而不是读文件。
+  bool is_running(const std::string& sid) const;
+
  private:
   AgentHostDeps deps_;
   ToolRegistry tools_;

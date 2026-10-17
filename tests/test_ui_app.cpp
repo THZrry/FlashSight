@@ -5,6 +5,9 @@
 // same shape a backend response produces) instead of relying on demo data.
 #include "test_framework.hpp"
 
+#include <chrono>
+#include <functional>
+
 #include "ui/ui_app.hpp"
 #include "ui/ui_backend.hpp"
 #include "ui/ui_components.hpp"
@@ -43,7 +46,12 @@ void seed_project(AppState& s) {
   p.name = "FlashSight";
   p.path = "C:\\aaa\\FlashSight";
   p.session_count = 1;
-  p.sessions.push_back(std::make_pair(std::string("sess_a"), std::string("UI 框架重构")));
+  ProjectCard::SessionRow row;
+  row.sid = "sess_a";
+  row.title = "UI 框架重构";
+  row.updated_ms = 1700000000000LL;  // a fixed past timestamp
+  row.running = true;
+  p.sessions.push_back(row);
   s.projects.push_back(p);
 }
 
@@ -598,9 +606,62 @@ FS_TEST(uiapp_side_add_page_lists_kinds) {
   app.update([](AppState& s) { s.side_menu_open = true; });
   EXPECT_TRUE(dump_has(dom, "side-add"));
   EXPECT_TRUE(dump_has(dom, "添加面板"));
-  EXPECT_TRUE(dump_has(dom, "项目文件树与预览"));   // each kind explains itself
+  EXPECT_TRUE(dump_has(dom, "项目文件树"));          // each kind explains itself
+  EXPECT_TRUE(dump_has(dom, "文件内容"));            // preview is its own panel
   EXPECT_TRUE(dump_has(dom, "模型发起的工具调用"));
   EXPECT_TRUE(dump_has(dom, "已打开"));             // seeded panels are marked
+}
+
+// The panel strip must be KEYED. Unkeyed children are matched by position, so
+// closing a middle panel shifts every later node left and the handlers travel
+// with the slot - closing one panel then fired the next slot's action (in
+// practice the "+" page opened by itself).
+FS_TEST(uiapp_panel_tabs_are_keyed) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.side_tabs.clear();
+    s.side_seq = 0;
+  });
+  app.open_or_focus_side_tab("files");
+  app.open_or_focus_side_tab("ops");
+  std::string ops = app.state().active_side;
+  // every panel tab carries its own key, and the "+" carries one too
+  const VNodePtr& tree = app.tree_for_test();
+  VNodePtr bar = find_by_key(tree, "panel-add");
+  EXPECT_TRUE(bar != nullptr);
+  // collect keys of the strip's children
+  auto keys_of = [](const VNodePtr& n) {
+    std::vector<std::string> out;
+    if (!n) return out;
+    for (size_t i = 0; i < n->children.size(); ++i) {
+      out.push_back(n->children[i]->key);
+    }
+    return out;
+  };
+  VNodePtr strip = nullptr;
+  // find the panel-tabs container: the parent of the keyed add button
+  std::function<void(const VNodePtr&)> walk = [&](const VNodePtr& n) {
+    if (!n) return;
+    for (size_t i = 0; i < n->children.size(); ++i) {
+      if (n->children[i] == bar) strip = n;
+      walk(n->children[i]);
+    }
+  };
+  walk(tree);
+  ASSERT_TRUE(strip != nullptr);
+  std::vector<std::string> keys = keys_of(strip);
+  EXPECT_EQ(keys.size(), size_t(3));  // two panels + the "+"
+  for (size_t i = 0; i < keys.size(); ++i) EXPECT_FALSE(keys[i].empty());
+
+  // closing the active panel leaves the strip intact and does NOT open the
+  // "+" page (the regression this test exists for)
+  app.close_side_tab(ops);
+  EXPECT_FALSE(app.state().side_menu_open);
+  EXPECT_EQ(app.state().side_tabs.size(), size_t(1));
 }
 
 // The terminal overview shows a few lines per terminal (not a whole screen) and
@@ -1528,4 +1589,272 @@ FS_TEST(uiapp_file_tree_uses_icons) {
   EXPECT_TRUE(dump_has(dom, "mi-file-folder"));
   EXPECT_TRUE(dump_has(dom, "mi-file-cpp"));
   EXPECT_TRUE(dump_has(dom, "main.cpp"));
+}
+
+// ---------------------------------------------------------------------------
+// 打开文件 = 新开侧栏标签页（而不是内联在文件树下面）
+// ---------------------------------------------------------------------------
+
+FS_TEST(uiapp_file_click_opens_preview_tab) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    s.active_pid = "p1";
+    s.side_tabs.clear();
+    SideTab t;
+    t.id = "files1";
+    t.title = "文件";
+    t.kind = "files";
+    t.loaded = true;
+    s.side_tabs.push_back(t);
+    s.active_side = "files1";
+  });
+  size_t before = app.state().side_tabs.size();
+  app.open_file_preview("src/main.cpp");
+  EXPECT_EQ(app.state().side_tabs.size(), before + 1);
+  const SideTab& last = app.state().side_tabs.back();
+  EXPECT_EQ(last.kind, std::string("preview"));
+  EXPECT_EQ(last.path, std::string("src/main.cpp"));
+  // the tab is named after the FILE (several previews must be distinguishable)
+  EXPECT_EQ(last.title, std::string("main.cpp"));
+  EXPECT_EQ(app.state().active_side, last.id);
+  // the file panel is still there, so you can read and browse at once
+  bool files_alive = false;
+  for (size_t i = 0; i < app.state().side_tabs.size(); ++i) {
+    if (app.state().side_tabs[i].kind == "files") files_alive = true;
+  }
+  EXPECT_TRUE(files_alive);
+}
+
+// Re-opening the same file focuses its tab instead of stacking duplicates.
+FS_TEST(uiapp_preview_reuses_tab_for_same_file) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s); s.active_pid = "p1"; });
+  app.open_file_preview("a/b.cpp");
+  size_t n = app.state().side_tabs.size();
+  app.open_file_preview("a/b.cpp");
+  EXPECT_EQ(app.state().side_tabs.size(), n);
+  // a DIFFERENT file does get its own tab
+  app.open_file_preview("a/c.cpp");
+  EXPECT_EQ(app.state().side_tabs.size(), n + 1);
+}
+
+// Closing a preview goes back to the panel it was opened from (the file tree),
+// not to the first panel in the strip.
+FS_TEST(uiapp_closing_preview_returns_to_files) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    s.active_pid = "p1";
+    s.side_tabs.clear();
+    SideTab t;
+    t.id = "files1";
+    t.kind = "files";
+    t.title = "文件";
+    s.side_tabs.push_back(t);
+    s.active_side = "files1";
+  });
+  app.open_file_preview("main.cpp");
+  std::string preview = app.state().active_side;
+  EXPECT_EQ(app.state().side_tabs.back().kind, std::string("preview"));
+  app.close_side_tab(preview);
+  EXPECT_EQ(app.state().active_side, std::string("files1"));
+}
+
+// ---------------------------------------------------------------------------
+// 访问栈：关闭标签页回到来处
+// ---------------------------------------------------------------------------
+
+FS_TEST(uiapp_closing_tab_returns_to_previous) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    seed_session(s, "sess_a");
+    SessionTab b;
+    b.id = "sess_b";
+    b.title = "会话B";
+    s.sessions.push_back(b);
+    s.tab_ids.push_back("sess_b");
+  });
+  // home -> A -> B
+  app.show("sess_a");
+  app.show("sess_b");
+  EXPECT_EQ(app.state().active_tab, std::string("sess_b"));
+  // closing B must go back to A (where we came from), not to a fixed tab
+  app.close_tab("sess_b");
+  EXPECT_EQ(app.state().active_tab, std::string("sess_a"));
+  // closing A goes back to home
+  app.close_tab("sess_a");
+  EXPECT_EQ(app.state().active_tab, std::string("home"));
+}
+
+// A closed tab that is still on the stack must be skipped, not selected.
+FS_TEST(uiapp_tab_history_skips_dead_entries) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    seed_session(s, "sess_a");
+    SessionTab b;
+    b.id = "sess_b";
+    s.sessions.push_back(b);
+    s.tab_ids.push_back("sess_b");
+    SessionTab c;
+    c.id = "sess_c";
+    s.sessions.push_back(c);
+    s.tab_ids.push_back("sess_c");
+  });
+  app.show("sess_a");
+  app.show("sess_b");
+  app.show("sess_c");
+  // B dies while C is on screen: closing C must skip it and land on A
+  app.close_tab("sess_b");
+  EXPECT_EQ(app.state().active_tab, std::string("sess_c"));
+  app.close_tab("sess_c");
+  EXPECT_EQ(app.state().active_tab, std::string("sess_a"));
+}
+
+// Switching tabs closes transient popups: the model picker must not stay glued
+// over a page it does not belong to.
+FS_TEST(uiapp_switching_tab_closes_popups) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    SessionTab b;
+    b.id = "sess_b";
+    s.sessions.push_back(b);
+    s.tab_ids.push_back("sess_b");
+    s.model_picker_open = true;
+    s.skill_menu_open = true;
+    s.side_menu_open = true;
+  });
+  app.show("sess_b");
+  EXPECT_FALSE(app.state().model_picker_open);
+  EXPECT_FALSE(app.state().skill_menu_open);
+  EXPECT_FALSE(app.state().side_menu_open);
+}
+
+// The side panel keeps its own visit stack: closing the active panel returns to
+// the one you came from.
+FS_TEST(uiapp_side_panel_history) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.open_or_focus_side_tab("files");
+  std::string files1 = app.state().active_side;
+  app.open_or_focus_side_tab("ops");
+  std::string ops = app.state().active_side;
+  EXPECT_NE(files1, ops);
+  // closing the active (ops) goes back to files, not to the first panel
+  app.close_side_tab(ops);
+  EXPECT_EQ(app.state().active_side, files1);
+}
+
+// ---------------------------------------------------------------------------
+// 顶层 "+" 打开"新建"标签页
+// ---------------------------------------------------------------------------
+
+FS_TEST(uiapp_plus_opens_new_tab_page) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_project(s); });
+  app.open_new_tab();
+  EXPECT_EQ(app.state().active_tab, std::string("new"));
+  EXPECT_TRUE(dump_has(dom, "新建"));
+  // the page lists the projects (so you pick one) instead of opening a session
+  EXPECT_TRUE(dump_has(dom, "FlashSight"));
+  EXPECT_TRUE(dump_has(dom, "新建会话"));
+  // pressing "+" again focuses the same tab rather than stacking duplicates
+  size_t n = app.state().tab_ids.size();
+  app.open_new_tab();
+  EXPECT_EQ(app.state().tab_ids.size(), n);
+}
+
+// ---------------------------------------------------------------------------
+// 项目卡片：会话行带时间/状态，且可删除
+// ---------------------------------------------------------------------------
+
+FS_TEST(uiapp_project_card_session_rows) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    ProjectCard& p = s.projects[0];
+    p.sessions.clear();
+    ProjectCard::SessionRow r1;
+    r1.sid = "s1";
+    r1.title = "在跑的那个";
+    r1.updated_ms = 1700000000000LL;
+    r1.running = true;
+    p.sessions.push_back(r1);
+    ProjectCard::SessionRow r2;
+    r2.sid = "s2";
+    r2.title = "闲着的那个";
+    r2.updated_ms = 1700000000000LL;
+    r2.running = false;
+    p.sessions.push_back(r2);
+    p.session_count = 2;
+  });
+  // a running turn is marked as such, and both rows carry a delete affordance
+  EXPECT_TRUE(dump_has(dom, "ps-dot running"));
+  EXPECT_TRUE(dump_has(dom, "ps-del"));
+  EXPECT_TRUE(dump_has(dom, "在跑的那个"));
+  EXPECT_TRUE(dump_has(dom, "闲着的那个"));
+}
+
+// Deleting a session is destructive, so it goes through a confirm modal.
+FS_TEST(uiapp_delete_session_confirms_first) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_project(s); });
+  app.confirm_delete_session("sess_a", "UI 框架重构");
+  EXPECT_EQ(app.state().confirm_kind, std::string("session"));
+  EXPECT_EQ(app.state().confirm_id, std::string("sess_a"));
+  EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
+  EXPECT_TRUE(dump_has(dom, "无法恢复"));
+}
+
+// 相对时间：列表里给"多久之前"，很久以前给日期。
+FS_TEST(uiapp_rel_time_formats) {
+  // unknown -> empty (the row shows no time rather than "56 年 前")
+  EXPECT_TRUE(UiApp::rel_time_for_test(0).empty());
+  // now -> 刚刚
+  int64_t now_wall = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count());
+  EXPECT_EQ(UiApp::rel_time_for_test(now_wall), std::string("刚刚"));
+  // 5 minutes ago
+  EXPECT_EQ(UiApp::rel_time_for_test(now_wall - 5 * 60 * 1000), std::string("5 分钟前"));
+  // 3 hours ago
+  EXPECT_EQ(UiApp::rel_time_for_test(now_wall - 3 * 3600 * 1000), std::string("3 小时前"));
+  // 2 days ago
+  EXPECT_EQ(UiApp::rel_time_for_test(now_wall - 2 * 86400 * 1000), std::string("2 天前"));
+  // older than a month -> an absolute date, not "87 天前"
+  std::string old = UiApp::rel_time_for_test(now_wall - 200LL * 86400 * 1000);
+  EXPECT_TRUE(old.size() == 10 && old[4] == '-' && old[7] == '-');
 }

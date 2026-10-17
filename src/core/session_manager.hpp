@@ -34,6 +34,9 @@ class SessionManager {
   FsResult get_session(const std::string& sid) const;
   FsResult list_sessions(const std::string& pid) const;
   FsResult close_session(const std::string& sid);
+  // 删除会话（连同 patches/terminals 一起移除）。不可恢复：UI 负责先确认。
+  // 会先释放锁，否则删完还留着一条锁记录，下次同名 sid 会被误判为占用。
+  FsResult delete_session(const std::string& sid);
 
   // ----- 会话设置（即时生效 + 记 systemOps）-----
   FsResult set_model(const std::string& sid, const std::string& model);
@@ -64,6 +67,10 @@ class SessionManager {
   // 便捷访问
   std::string pid_of(const std::string& sid) const;
   FsResult load_full(const std::string& sid, Json* out) const;
+  // full.json 的最后修改时间（ms）；0 = 取不到。用作"会话最后活动时间"：
+  // 每次 append_turn 都会重写 full.json，所以 mtime 就是最后活动时刻，
+  // 不需要额外在 meta 里维护一个 updatedAt 字段。
+  int64_t full_mtime_ms(const std::string& sid) const;
   SessionFileStore make_store(const std::string& sid) const;
   ProjectStore project_store_of(const std::string& sid) const;
 

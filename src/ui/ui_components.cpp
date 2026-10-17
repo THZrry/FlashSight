@@ -147,6 +147,7 @@ H tab_strip(const std::vector<TabSpec>& tabs, const std::string& active_key,
     bar.add(tab);
   }
   H add = el("div", "tab add");
+  add.key("tab-add");  // never inherit a closed tab's slot
   add.attr("title", "新建标签页");
   add.on(EventKind::kClick, on_add);
   add.text("+");
@@ -170,6 +171,12 @@ H panel_tabs(const std::vector<TabSpec>& tabs, const std::string& active_key,
   for (size_t i = 0; i < tabs.size(); ++i) {
     const TabSpec& t = tabs[i];
     H tab = el("div", t.key == active_key ? "ptab active" : "ptab");
+    // Same stable identity as the top strip. Without it the diff matches by
+    // POSITION, so closing a middle panel shifts every later node one slot left
+    // and the handlers travel with the slot - which is how closing one panel
+    // ended up firing another's action (the "+" button, in practice).
+    tab.key(t.key);
+    tab.attr("data-key", t.key);
     std::string k = t.key;
     tab.on(EventKind::kClick, [on_select, k](const std::string&) { on_select(k); });
     tab.add(el("span", "ptab-title").text(t.title));
@@ -183,6 +190,7 @@ H panel_tabs(const std::vector<TabSpec>& tabs, const std::string& active_key,
     bar.add(tab);
   }
   H add = el("div", "ptab add");
+  add.key("panel-add");  // never inherit a closed tab's slot
   add.attr("title", "新建面板");
   add.on(EventKind::kClick, on_add);
   add.text("+");

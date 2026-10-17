@@ -51,6 +51,9 @@ UiApi::UiApi(FsApi* api) {
   reg("session.open", [api](const Json& a) { return api->session_open(s(a, "sid")); });
   reg("session.close", [api](const Json& a) { return api->session_close(s(a, "sid")); });
   reg("session.list", [api](const Json& a) { return api->session_list(s(a, "pid")); });
+  reg("session.delete", [api](const Json& a) {
+    return api->session_delete(s(a, "sid"));
+  });
   reg("session.get", [api](const Json& a) { return api->session_get(s(a, "sid")); });
   reg("session.fork", [api](const Json& a) {
     return api->session_fork(s(a, "sid"), s(a, "turnId"));

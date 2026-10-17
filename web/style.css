@@ -311,6 +311,20 @@ html, body {
   font-weight: 600;
 }
 .home-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+
+/* ---- 新建标签页（顶层 "+"）---- */
+/* Same content as 主页·项目, so it borrows the same card styles; only the
+   header differs. */
+.new-page { display: flex; flex-direction: column; min-height: 0; }
+.new-head {
+  flex: none;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 18px 26px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.new-title { font-size: 16px; font-weight: 600; }
+.new-acts { display: flex; gap: 8px; margin-top: 8px; }
+.new-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
 .home-foot {
   flex: none;
   display: flex;
@@ -346,19 +360,22 @@ html, body {
 .proj-card:hover { border-color: var(--border-strong); box-shadow: var(--pop); }
 .proj-top {
   grid-area: info;
-  display: flex; flex-direction: column; justify-content: center; gap: 10px;
-  padding: 14px 16px;
+  display: flex; flex-direction: column; justify-content: flex-start; gap: 8px;
+  padding: 12px 14px;
   min-width: 0;
 }
 .proj-left { min-width: 0; }
 .proj-name { font-size: 15px; font-weight: 600; }
 .proj-path {
-  color: var(--text-dim); font-size: 12.5px; margin-top: 3px;
+  color: var(--text-dim); font-size: 12.5px; margin-top: 2px;
   font-family: var(--mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.proj-meta { display: flex; gap: 6px; margin-top: 7px; font-size: 12px; }
-.proj-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.proj-meta { display: flex; gap: 6px; margin-top: 5px; font-size: 12px; }
+/* Icon + label actions stay on one line: as full-width labelled buttons they
+   were most of what made this column look empty and noisy. */
+.proj-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; }
+.proj-actions .it-btn { height: 26px; font-size: 12px; }
 /* sessions area: the dominant part of the card */
 .proj-right {
   grid-area: sessions;
@@ -384,8 +401,8 @@ html, body {
 .prh-toggle { font-size: 12px; color: var(--text-faint); }
 .proj-sessions { display: flex; flex-direction: column; }
 .proj-session {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 16px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 14px;
   border-top: 1px solid var(--border);
   cursor: pointer;
   font-size: 12.5px;
@@ -395,6 +412,19 @@ html, body {
 .proj-session.dim-none { color: var(--text-faint); cursor: default; }
 .proj-session.dim-none:hover { background: transparent; }
 .ps-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Status dot: green while a turn is in flight, hollow when parked. A session's
+   state is the second thing you look for after its name. */
+.ps-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  border: 1px solid var(--border-strong);
+}
+.ps-dot.running { background: var(--ok, #2ea043); border-color: transparent; }
+.ps-time { flex: none; font-size: 11.5px; }
+/* Delete stays hidden until the row is hovered: a column of ✕ buttons reads as
+   a toolbar and makes every row look dangerous. */
+.ps-del { display: none; }
+.proj-session:hover .ps-del { display: inline-flex; }
+.proj-session:hover .ps-time { display: none; }
 
 /* Two layouts, chosen by the card's own width (container query, so it reacts to
    the panel, not just the window):
@@ -743,18 +773,11 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .file-ico { color: var(--text-faint); width: 12px; text-align: center; }
 .file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-size { font-family: var(--mono); font-size: 11px; }
-.file-preview {
-  margin-top: 8px; border: 1px solid var(--border);
-  border-radius: var(--radius); background: var(--panel-2); overflow: hidden;
-  box-shadow: var(--shadow-1);
-}
-.file-preview-head {
-  padding: 5px 9px; font-family: var(--mono); font-size: 11.5px;
-  color: var(--text-dim); border-bottom: 1px solid var(--border);
-  background: var(--panel-3);
-}
+/* A preview now lives in its OWN panel tab, so it fills the panel instead of
+   being a capped block under the tree. */
 .file-preview-body {
-  margin: 0; padding: 8px 10px; max-height: 260px; overflow: auto;
+  margin: 0; padding: 8px 10px; overflow: auto;
+  flex: 1; min-height: 0;
   background: var(--code-bg); color: var(--code-text);
   font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
 }
@@ -1374,12 +1397,16 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   font-family: var(--mono); }
 .mpb-caret { color: var(--text-faint); font-size: 10px; }
 
-/* ---- 模型选择器（浮层：左供应商 / 右模型）---- */
-.picker-backdrop { position: fixed; inset: 0; z-index: 45; }
+/* ---- 模型选择器（锚在输入框上方的弹出层：左供应商 / 右模型）---- */
+/* It is anchored to the composer, not centered on the screen: it opens from the
+   model button, so it has to come out of it. Sits ABOVE the composer like the
+   "/" menu, and never reflows the input. */
+.picker-backdrop { position: fixed; inset: 0; z-index: 40; }
 .model-picker {
-  position: fixed; z-index: 46;
-  left: 50%; top: 50%; transform: translate(-50%, -50%);
-  width: min(760px, 92vw); height: min(520px, 80vh);
+  position: absolute; z-index: 41;
+  right: 0; bottom: calc(100% + 8px);
+  width: min(720px, 100%);
+  height: min(460px, 60vh);
   display: flex; flex-direction: column;
   background: var(--panel);
   border: 1px solid var(--border-strong);

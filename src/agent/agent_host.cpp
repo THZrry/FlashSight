@@ -289,6 +289,15 @@ FsResult AgentHost::on_timer_tick() {
   return FsResult::success(Json{{"fired", (int)due.size()}});
 }
 
+bool AgentHost::is_running(const std::string& sid) const {
+  auto it = loops_.find(sid);
+  if (it == loops_.end() || !it->second) return false;
+  // kIdle/kTurnDone mean the loop is parked between turns; anything else is a
+  // turn in flight (planning, calling a tool, or waiting on the user).
+  LoopState s = it->second->state();
+  return s != LoopState::kIdle && s != LoopState::kTurnDone;
+}
+
 FsResult AgentHost::on_subagent_done(const std::string& id, const std::string& summary) {
   FsResult r = subagents_.complete_with_summary(id, summary, Json::object());
   if (!r.ok()) return r;

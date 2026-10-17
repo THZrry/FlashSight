@@ -76,6 +76,8 @@ class FsApi {
   FsResult session_rollback(const std::string& sid, const std::string& turnId);
   FsResult session_forget(const std::string& sid, const std::string& scope);
   FsResult session_list(const std::string& pid);
+  // 删除会话（连同 patches/terminals）；不可恢复，UI 负责确认
+  FsResult session_delete(const std::string& sid);
   FsResult session_set_model(const std::string& sid, const std::string& model);
   FsResult session_set_thinking(const std::string& sid, const std::string& thinking);
   FsResult session_set_permission(const std::string& sid, const std::string& perm);

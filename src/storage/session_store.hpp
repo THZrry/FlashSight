@@ -34,6 +34,10 @@ class SessionFileStore {
   // 回滚：裁剪到只保留前 keep 个 turn（并同步裁剪 snapshots），原子写
   FsResult trim_turns(const std::string& sid, size_t keep);
 
+  // 删除整个会话目录（full.json + patches/ + terminals/）。不可恢复，所以由调用
+  // 方负责先确认；这里只做文件操作。
+  FsResult remove(const std::string& sid);
+
   // ----- patches/<turnId>.json -----
   FsResult write_patch(const std::string& sid, const std::string& turn_id,
                        const Json& patch);

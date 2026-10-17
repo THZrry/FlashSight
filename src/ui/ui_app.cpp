@@ -120,7 +120,11 @@ struct SideKind {
 const SideKind kSideKinds[] = {
     {"usage", "用量", "上下文水位与本会话成本", false},
     {"subagents", "子代理", "子代理运行状态与引导", false},
-    {"files", "文件", "项目文件树与预览（可多开）", true},
+    {"files", "文件", "项目文件树（可多开）", true},
+    // A preview is its OWN tab, not an inline block under the tree: reading a
+    // file and browsing the tree are two things you want to see at once, and an
+    // inline block pushed the tree out of view.
+    {"preview", "预览", "文件内容（可多开）", true},
     {"git", "Git", "Git 状态与变更（可多开）", true},
     {"ops", "操作", "本会话的系统操作记录", true},
     {"calls", "调用", "模型发起的工具调用", true},
@@ -191,6 +195,11 @@ const int64_t kToastMs = 3200;  // how long a toast stays on screen
 // The strip shows a search box only once terminals are numerous enough to get
 // lost in; below that it is just noise.
 const size_t kTermSearchThreshold = 10;
+
+// The "+" tab's id. It is a real TAB (closable, and you can have one open while
+// a session runs in another) rather than "start a session somewhere": what you
+// want after pressing "+" is a place to decide what to open.
+const char* const kNewTabId = "new";
 
 std::string lower_ascii(const std::string& s) {
   std::string o = s;
@@ -282,6 +291,37 @@ std::string thinking_label(const std::string& v) {
   if (v == "medium") return "中";
   if (v == "high") return "高";
   return v;
+}
+
+// 相对时间（"3 分钟前"）。列表里给一个大致时间就够了，绝对时间戳反而要花力气
+// 去读；只算到"天"，再久就显示日期。
+//
+// 注意基准：会话时间来自后端 full.json 的 mtime（真实墙上时间），而这里的
+// now_ms() 是**单调时钟**（steady_clock / performance.now()），两者原点不同。
+// 所以这里用系统墙上时间做差，不能拿 now_ms() 去减 mtime，否则会算出天量偏差。
+std::string rel_time(int64_t ms) {
+  if (ms <= 0) return std::string();
+  int64_t now_wall = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count());
+  int64_t d = now_wall - ms;
+  if (d < 0) d = 0;
+  int64_t sec = d / 1000;
+  if (sec < 60) return "刚刚";
+  int64_t min = sec / 60;
+  if (min < 60) return itos(static_cast<int>(min)) + " 分钟前";
+  int64_t hr = min / 60;
+  if (hr < 24) return itos(static_cast<int>(hr)) + " 小时前";
+  int64_t day = hr / 24;
+  if (day < 30) return itos(static_cast<int>(day)) + " 天前";
+  // older than a month: an absolute date is more useful than "87 天前"
+  time_t t = static_cast<time_t>(ms / 1000);
+  struct tm* g = localtime(&t);
+  if (!g) return std::string();
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", g->tm_year + 1900,
+                g->tm_mon + 1, g->tm_mday);
+  return std::string(buf);
 }
 
 }  // namespace
@@ -602,8 +642,20 @@ void UiApp::switch_tab(const std::string& id) {
   }
   if (id == st_.active_tab && last_session_key_ == leaving && leaving == id) return;
   if (!leaving.empty()) save_session_view(leaving);
+  // Any open transient popup belongs to the tab being left. Leaving it up is how
+  // the model picker "stayed glued" across a tab switch.
+  st_.model_picker_open = false;
+  st_.skill_menu_open = false;
+  st_.side_menu_open = false;
+  // Record where we came from so closing this tab can return here.
+  if (!st_.active_tab.empty() && st_.active_tab != id) {
+    st_.tab_history.push_back(st_.active_tab);
+    if (st_.tab_history.size() > 64) st_.tab_history.erase(st_.tab_history.begin());
+  }
   st_.active_tab = id;
-  std::string sid = (id == "home" || id == "settings") ? "" : id;
+  // A "新建"/session tab is only meaningful with a session key; the pages
+  // (home/settings/new) have no per-session view to restore.
+  std::string sid = (id == "home" || id == "settings" || id == kNewTabId) ? "" : id;
   if (sid.empty()) {
     last_session_key_.clear();
     render();
@@ -713,14 +765,25 @@ void UiApp::load_sessions(size_t project_index) {
   if (pid.empty()) return;
   call_async("session.list", Json{{"pid", pid}}, [this, project_index](const BackendResult& r) {
     if (!r.ok || !r.data.is_array()) return;
-    std::vector<std::pair<std::string, std::string> > rows;
+    std::vector<ProjectCard::SessionRow> rows;
     for (size_t i = 0; i < r.data.size(); ++i) {
       const Json& s = r.data[i];
-      std::string sid = jsonutil::get<std::string>(s, "sid", "");
-      std::string title = jsonutil::get<std::string>(s, "title", "");
-      if (title.empty()) title = "会话 " + sid;  // untitled: still readable
-      if (!sid.empty()) rows.push_back(std::make_pair(sid, title));
+      ProjectCard::SessionRow row;
+      row.sid = jsonutil::get<std::string>(s, "sid", "");
+      row.title = jsonutil::get<std::string>(s, "title", "");
+      if (row.title.empty()) row.title = "会话 " + row.sid;  // untitled: readable
+      row.updated_ms = jsonutil::get_int(s, "updatedAt", 0);
+      row.running = jsonutil::get<bool>(s, "running", false);
+      if (!row.sid.empty()) rows.push_back(row);
     }
+    // Most recently touched first: the list is a history, and the thing you want
+    // is almost always the one you were just in. A session with no mtime sorts
+    // last rather than jumping to the top as if it were newest.
+    std::stable_sort(rows.begin(), rows.end(),
+                     [](const ProjectCard::SessionRow& a,
+                        const ProjectCard::SessionRow& b) {
+      return a.updated_ms > b.updated_ms;
+    });
     update([&](AppState& st) {
       if (project_index < st.projects.size()) {
         st.projects[project_index].sessions = rows;
@@ -907,14 +970,57 @@ void UiApp::preview_file(const std::string& tab_id, const std::string& rel) {
     update([&](AppState& s) {
       for (size_t i = 0; i < s.side_tabs.size(); ++i) {
         if (s.side_tabs[i].id != tab_id) continue;
+        s.side_tabs[i].path = rel;
         s.side_tabs[i].preview_path = rel;
+        s.side_tabs[i].loaded = true;
         s.side_tabs[i].preview =
             r.ok ? jsonutil::get<std::string>(r.data, "content", "")
-                 : ("（无法预览：" + r.message + "）");
+                 : (tr("（无法预览：") + r.message + "）");
         return;
       }
     });
   });
+}
+
+// Open a file's contents in its OWN side tab. Reading a file and browsing the
+// tree are two things you want visible at once, which an inline block under the
+// tree cannot do.
+void UiApp::open_file_preview(const std::string& rel) {
+  if (rel.empty()) return;
+  // Already open for this file? Focus it instead of stacking duplicates.
+  for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
+    if (st_.side_tabs[i].kind == "preview" && st_.side_tabs[i].path == rel) {
+      std::string id = st_.side_tabs[i].id;
+      update([&](AppState& s) {
+        if (!s.active_side.empty() && s.active_side != id) {
+          s.side_history.push_back(s.active_side);
+        }
+        s.active_side = id;
+      });
+      return;
+    }
+  }
+  std::string id;
+  update([&](AppState& s) {
+    s.side_seq++;
+    SideTab t;
+    t.id = "sb" + itos(s.side_seq);
+    t.kind = "preview";
+    t.path = rel;
+    // The tab is named after the FILE, not the kind: with several previews open
+    // a row of identical "预览" tabs tells you nothing.
+    t.title = folder_basename(rel);
+    s.side_tabs.push_back(t);
+    // Programmatic focus still has to record where we came from, or closing the
+    // preview falls back to the first panel instead of the file tree.
+    if (!s.active_side.empty() && s.active_side != t.id) {
+      s.side_history.push_back(s.active_side);
+      if (s.side_history.size() > 64) s.side_history.erase(s.side_history.begin());
+    }
+    s.active_side = t.id;
+    id = t.id;
+  });
+  preview_file(id, rel);
 }
 
 void UiApp::append_stream_delta(const std::string& text) {
@@ -1197,6 +1303,8 @@ struct PageAnim {
 const PageAnim kPageAnims[] = {
     {"home", anim::kView},
     {"settings", anim::kView},
+    // the "+" tab is a page of its own (it lists projects to pick from)
+    {"new", anim::kView},
     // a session page also fades/slides in; it is the most common switch, so it
     // gets the same treatment rather than being special-cased
     {"session", anim::kView},
@@ -1225,6 +1333,8 @@ VNodePtr UiApp::build_shell() {
       t.title = "主页";
     } else if (id == "settings") {
       t.title = "设置";
+    } else if (id == kNewTabId) {
+      t.title = "新建";
     } else {
       t.title = id;
       for (size_t k = 0; k < st_.sessions.size(); ++k) {
@@ -1242,7 +1352,7 @@ VNodePtr UiApp::build_shell() {
       tabs, st_.active_tab,
       [this](const std::string& k) { show(k); },
       [this](const std::string& k) { close_tab(k); },
-      [this](const std::string&) { open_new_session(); });
+      [this](const std::string&) { open_new_tab(); });
   win.add(strip);
 
   // ---- page ----
@@ -1256,6 +1366,9 @@ VNodePtr UiApp::build_shell() {
   } else if (st_.active_tab == "settings") {
     page_id = "settings";
     page = build_settings();
+  } else if (st_.active_tab == kNewTabId) {
+    page_id = "new";
+    page = build_new_tab();
   } else {
     page_id = "session";
     page = build_session();
@@ -1343,6 +1456,32 @@ VNodePtr UiApp::build_home() {
   return wrap.get();
 }
 
+// 顶层 "+" 打开的页面：就是"项目"这一页（项目卡片 + 每个项目的会话列表，
+// 点会话即打开、点"新建会话"即建）。它是一个**普通标签页**，可以关掉、可以
+// 和别的标签页并存；内容不另造一套，直接复用项目卡片。
+VNodePtr UiApp::build_new_tab() {
+  H wrap = el("div", "page new-page");
+  H head = el("div", "new-head");
+  head.add(el("div", "new-title").text(tr("新建")));
+  head.add(el("div", "hint").text(
+      tr("选一个项目新建会话，或打开一个已有的会话。")));
+  H acts = el("div", "new-acts");
+  acts.add(comp::button(tr("打开文件夹"), [this](const std::string&) {
+    pick_and_open_folder();
+  }, "primary"));
+  acts.add(comp::button(tr("设置"), [this](const std::string&) {
+    show("settings");
+  }, "ghost"));
+  head.add(acts);
+  wrap.add(head);
+  H body = el("div", "new-body");
+  VNodePtr cards = build_home_projects();
+  cards->key = "new:projects";
+  body.add(cards);
+  wrap.add(body);
+  return wrap.get();
+}
+
 VNodePtr UiApp::build_home_explore() {
   H wrap = el("div", "explore");
   H box = el("div", "explore-box");
@@ -1372,7 +1511,7 @@ VNodePtr UiApp::build_home_projects() {
     left.add(el("div", "proj-name").text(p.name));
     left.add(el("div", "proj-path").text(p.path));
     H meta = el("div", "proj-meta");
-    meta.add(el("span", "dim").text(itos(p.session_count) + " 个会话"));
+    meta.add(el("span", "dim").text(itos(p.session_count) + tr(" 个会话")));
     if (!p.updated.empty()) {
       meta.add(el("span", "dot-sep").text("·"));
       meta.add(el("span", "dim").text(p.updated));
@@ -1382,17 +1521,24 @@ VNodePtr UiApp::build_home_projects() {
     H actions = el("div", "proj-actions");
     std::string pid = p.pid;
     if (!pid.empty()) {
-      // open the folder in the OS file manager (not "expand the card")
-      actions.add(comp::button("在资源管理器中打开", [this, pid](const std::string&) {
+      // Icon + tooltip rather than a labelled button: two full-width labels per
+      // card were most of what made the left column feel empty and noisy.
+      H reveal = comp::icon_text_button("folder-open", tr("打开"), nullptr, "ghost");
+      reveal.attr("title", tr("在资源管理器中打开"));
+      reveal.on(EventKind::kClick, [this, pid](const std::string&) {
         call_async("project.reveal", Json{{"pid", pid}}, [this](const BackendResult& r) {
-          if (!r.ok) toast("无法打开文件管理器");
+          if (!r.ok) toast(tr("无法打开文件管理器"));
         });
-      }, "ghost"));
-      actions.add(comp::button("移出列表", [this, pid](const std::string&) {
+      });
+      actions.add(reveal);
+      H rm = comp::icon_text_button("trash", tr("移出"), nullptr, "ghost");
+      rm.attr("title", tr("移出列表（不删除文件）"));
+      rm.on(EventKind::kClick, [this, pid](const std::string&) {
         call_async("project.remove", Json{{"pid", pid}}, [this](const BackendResult&) {
           load_projects();
         });
-      }, "ghost"));
+      });
+      actions.add(rm);
     }
     top.add(actions);
     card.add(top);
@@ -1419,14 +1565,30 @@ VNodePtr UiApp::build_home_projects() {
     right.add(rhead);
     H list = el("div", "proj-sessions");
     for (size_t k = 0; k < p.sessions.size(); ++k) {
+      const ProjectCard::SessionRow& s = p.sessions[k];
       H row = el("div", "proj-session");
-      std::string sid = p.sessions[k].first;
-      std::string title = p.sessions[k].second;
+      std::string sid = s.sid;
+      std::string title = s.title;
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      row.add(el("span", "ps-title").text(p.sessions[k].second));
-      row.add(el("span", "dim").text("\u203a"));
+      // status dot: a running turn is a fact about NOW, so it is shown as one
+      H dot = el("span", s.running ? "ps-dot running" : "ps-dot");
+      dot.attr("title", s.running ? tr("正在运行") : tr("空闲"));
+      row.add(dot);
+      row.add(el("span", "ps-title").text(s.title));
+      row.add(el("span", "grow"));
+      if (s.updated_ms > 0) {
+        row.add(el("span", "ps-time dim").text(rel_time(s.updated_ms)));
+      }
+      // Delete: hidden until hover (a row of delete buttons reads as a toolbar,
+      // and the click has to be unmistakably the row's own).
+      H del = comp::icon_button("\u2715", tr("删除会话（不可恢复）"),
+                                [this, sid, title](const std::string&) {
+        confirm_delete_session(sid, title);
+      });
+      del.cls("ps-del");
+      row.add(del);
       list.add(row);
     }
     if (p.sessions.empty()) {
@@ -1754,6 +1916,157 @@ VNodePtr UiApp::build_session() {
     pop.add(close);
     comp_box.add(pop);
   }
+  // ---- 模型选择器 ----
+  // Anchored to the composer, exactly like the "/" menu above: it opens from the
+  // model button, so it has to come out of it (a dialog in the middle of the
+  // screen has no visible connection to what opened it). It also must NOT live
+  // in the overlay layer, which is `pointer-events: none` - a backdrop placed
+  // there cannot receive the click that is supposed to dismiss it, which is why
+  // the picker used to stay glued open.
+  if (st_.model_picker_open) {
+    H back = el("div", "picker-backdrop");
+    back.on(EventKind::kClick, [this](const std::string&) {
+      update([&](AppState& s) { s.model_picker_open = false; });
+    });
+    comp_box.add(back);
+    H pop = el("div", "model-picker");
+    pop.key("model-picker");
+    pop.anim(anim::kPop);
+    H head = el("div", "mp-head");
+    head.add(el("span", "mp-title").text(tr("选择模型")));
+    head.add(el("span", "grow"));
+    head.add(comp::icon_button("\u2715", tr("关闭"), [this](const std::string&) {
+      update([&](AppState& s) { s.model_picker_open = false; });
+    }));
+    pop.add(head);
+
+    H cols = el("div", "mp-cols");
+    // left: providers
+    H plist = el("div", "mp-providers");
+    for (size_t i = 0; i < st_.providers.size(); ++i) {
+      const AppState::ProviderRow& p = st_.providers[i];
+      bool active = p.id == st_.model_picker_provider;
+      H item = el("div", active ? "mp-prov active" : "mp-prov");
+      item.key("mp-" + p.id);
+      std::string pid = p.id;
+      item.on(EventKind::kClick, [this, pid](const std::string&) {
+        update([&](AppState& s) {
+          s.model_picker_provider = pid;
+          s.model_picker_models.clear();
+          s.model_picker_loaded = false;
+          s.model_picker_status.clear();
+          // A query typed against one provider's models should not silently
+          // filter the next provider's list down to nothing.
+          s.model_picker_query.clear();
+        });
+        load_picker_models(pid);
+      });
+      item.add(el("div", "mp-prov-name").text(p.name.empty() ? p.id : p.name));
+      item.add(el("div", "mp-prov-kind dim").text(p.kind));
+      plist.add(item);
+    }
+    if (st_.providers.empty()) {
+      plist.add(comp::empty_state(tr("还没有供应商。"), "", nullptr));
+    }
+    cols.add(plist);
+
+    // right: models of the selected provider
+    H mside = el("div", "mp-models");
+    H search = comp::search_box(st_.model_picker_query, tr("搜索模型"),
+                                [this](const std::string& v) {
+      // must re-render: the filter decides which rows exist
+      update([&](AppState& s) { s.model_picker_query = v; });
+    });
+    // Keyed by provider: switching providers clears the query, but a focused
+    // input's value is deliberately NOT patched (that is what keeps a caret
+    // from jumping mid-typing), so the cleared state would never reach the DOM.
+    // A new key recreates the node, which is the framework-level way to say
+    // "this input starts over".
+    search.key("mp-search:" + st_.model_picker_provider);
+    mside.add(search);
+    // Filtering happens here rather than in the backend: the list is already in
+    // memory and a round trip per keystroke would make typing feel laggy.
+    std::vector<const AppState::ModelRow*> vis;
+    for (size_t i = 0; i < st_.model_picker_models.size(); ++i) {
+      const AppState::ModelRow& m = st_.model_picker_models[i];
+      if (!st_.model_picker_query.empty()) {
+        std::string ql = lower_ascii(st_.model_picker_query);
+        if (lower_ascii(m.id + " " + m.display).find(ql) == std::string::npos) continue;
+      }
+      vis.push_back(&m);
+    }
+    // Above the threshold the list is sorted and grouped by initial, which only
+    // means anything if the order is alphabetical (grouping an arbitrary order
+    // would repeat a letter down the list).
+    const bool grouped = vis.size() > 20;
+    if (grouped) {
+      std::sort(vis.begin(), vis.end(),
+                [](const AppState::ModelRow* a, const AppState::ModelRow* b) {
+        return lower_ascii(a->display.empty() ? a->id : a->display) <
+               lower_ascii(b->display.empty() ? b->id : b->display);
+      });
+    }
+    if (!st_.model_picker_loaded) {
+      mside.add(el("div", "hint").text(tr("加载中…")));
+    } else if (vis.empty()) {
+      mside.add(comp::empty_state(
+          st_.model_picker_query.empty() ? tr("这个供应商还没有启用中的模型。")
+                                         : tr("没有匹配的模型。"),
+          "", nullptr));
+    } else {
+      std::string last_group;
+      H list = el("div", "mp-list");
+      for (size_t i = 0; i < vis.size(); ++i) {
+        const AppState::ModelRow& m = *vis[i];
+        std::string label = m.display.empty() ? m.id : m.display;
+        if (grouped) {
+          char c = label.empty() ? '#' : label[0];
+          std::string g;
+          if (c >= 'a' && c <= 'z') g = std::string(1, static_cast<char>(c - 'a' + 'A'));
+          else if (c >= 'A' && c <= 'Z') g = std::string(1, c);
+          else if (c >= '0' && c <= '9') g = "#";
+          else g = "·";
+          if (g != last_group) {
+            list.add(el("div", "mp-group").text(g));
+            last_group = g;
+          }
+        }
+        bool cur = m.id == st_.model;
+        H row = el("div", cur ? "mp-model active" : "mp-model");
+        row.key("mpm-" + m.id);
+        std::string mid = m.id;
+        std::string ppid = st_.model_picker_provider;
+        row.on(EventKind::kClick, [this, ppid, mid](const std::string&) {
+          pick_model(ppid, mid);
+        });
+        row.add(comp::model_icon(m.icon, m.id));
+        H nm = el("div", "mp-model-name");
+        nm.add(el("span", "mp-model-id").text(label));
+        H caps = el("span", "md-caps");
+        bool any_cap = false;
+        if (m.vision) { caps.add(el("i", "fa fa-eye").attr("title", tr("视觉"))); any_cap = true; }
+        if (m.audio) { caps.add(el("i", "fa fa-volume-high").attr("title", tr("音频"))); any_cap = true; }
+        if (m.video) { caps.add(el("i", "fa fa-video").attr("title", tr("视频"))); any_cap = true; }
+        if (m.pdf) { caps.add(el("i", "fa fa-file-pdf").attr("title", tr("PDF"))); any_cap = true; }
+        if (m.structured) { caps.add(el("i", "fa fa-brackets-curly").attr("title", tr("结构化输出"))); any_cap = true; }
+        if (any_cap) nm.add(caps);
+        row.add(nm);
+        if (m.context_len > 0) {
+          row.add(el("span", "mp-ctx dim").text(
+              itos(static_cast<int>(m.context_len / 1000)) + "K"));
+        }
+        if (cur) row.add(el("i", "fa fa-check"));
+        list.add(row);
+      }
+      mside.add(list);
+    }
+    if (!st_.model_picker_status.empty()) {
+      mside.add(el("div", "pv-status").text(st_.model_picker_status));
+    }
+    cols.add(mside);
+    pop.add(cols);
+    comp_box.add(pop);
+  }
   center.add(comp_box);
 
   // plan panel floats over the history's left edge (absolute, inside center)
@@ -1820,7 +2133,14 @@ VNodePtr UiApp::build_side_panel() {
   }
   side.add(comp::panel_tabs(tabs, st_.active_side,
                             [this](const std::string& k) {
-    update([&](AppState& s) { s.active_side = k; });
+    update([&](AppState& s) {
+      // remember where we came from so closing this panel returns there
+      if (!s.active_side.empty() && s.active_side != k) {
+        s.side_history.push_back(s.active_side);
+        if (s.side_history.size() > 64) s.side_history.erase(s.side_history.begin());
+      }
+      s.active_side = k;
+    });
     // refresh that panel's own data when it becomes active
     load_side_tab(k);
   },
@@ -1959,7 +2279,10 @@ VNodePtr UiApp::build_side_panel() {
           if (isdir) {
             load_files(panel_id, st_.active_pid, rel);
           } else {
-            preview_file(panel_id, rel);
+            // Opening a file opens a PREVIEW TAB. An inline block under the tree
+            // pushed the tree off screen, so you could not read a file and keep
+            // browsing at the same time.
+            open_file_preview(rel);
           }
         });
         row.add(comp::file_icon(e.name, e.is_dir));
@@ -1971,14 +2294,24 @@ VNodePtr UiApp::build_side_panel() {
         }
         body.add(row);
       }
-      if (panel && !panel->preview_path.empty()) {
-        H pv = el("div", "file-preview");
-        pv.add(el("div", "file-preview-head").text(panel->preview_path));
-        H pre = el("pre", "file-preview-body");
-        pre.text(panel->preview.empty() ? "（空文件）" : panel->preview);
-        pv.add(pre);
-        body.add(pv);
-      }
+    }
+  } else if (kind == "preview") {
+    // One file's contents, in its own tab.
+    const std::string& rel = panel ? panel->path : std::string();
+    if (rel.empty()) {
+      body.add(comp::empty_state(tr("没有选中的文件。"), "", nullptr));
+    } else {
+      H head = el("div", "files-nav");
+      head.add(el("span", "files-cwd").text(folder_basename(rel)));
+      head.add(el("span", "grow"));
+      head.add(comp::button(tr("刷新"), [this, panel_id, rel](const std::string&) {
+        preview_file(panel_id, rel);
+      }, "ghost"));
+      body.add(head);
+      H pre = el("pre", "file-preview-body");
+      pre.text(panel->loaded ? (panel->preview.empty() ? tr("（空文件）") : panel->preview)
+                             : tr("加载中…"));
+      body.add(pre);
     }
   } else if (kind == "git") {
     body.add(comp::empty_state("Git 状态（需要项目为 git 仓库；git 工具尚未接线）",
@@ -3785,153 +4118,29 @@ VNodePtr UiApp::build_overlays() {
     }
   }));
   }
-  // ---- 模型选择器（左供应商 / 右模型）----
-  // A real picker rather than a <select>: the choices are (provider, model)
-  // pairs, there can be hundreds of them, and each carries capabilities. A
-  // dropdown could not show any of that.
-  if (st_.model_picker_open) {
-    H back = el("div", "picker-backdrop");
-    back.on(EventKind::kClick, [this](const std::string&) {
-      update([&](AppState& s) { s.model_picker_open = false; });
-    });
-    layer.add(back);
-    H pop = el("div", "model-picker");
-    pop.anim(anim::kPop);
-    H head = el("div", "mp-head");
-    head.add(el("span", "mp-title").text(tr("选择模型")));
-    head.add(el("span", "grow"));
-    head.add(comp::icon_button("\u2715", tr("关闭"), [this](const std::string&) {
-      update([&](AppState& s) { s.model_picker_open = false; });
+  // Generic confirm modal (destructive actions). Its own branch so a session
+  // delete and a permission prompt can never be confused for each other.
+  if (!st_.confirm_kind.empty()) {
+    std::vector<H> body;
+    body.push_back(el("div").text(st_.confirm_text));
+    std::string kind = st_.confirm_kind;
+    std::string id = st_.confirm_id;
+    layer.add(comp::modal(tr("请确认"), body, tr("删除"),
+                          [this, kind, id](const std::string&) {
+      update([&](AppState& s) {
+        s.confirm_kind.clear();
+        s.confirm_id.clear();
+        s.confirm_text.clear();
+      });
+      if (kind == "session") delete_session(id);
+    },
+                          [this](const std::string&) {
+      update([&](AppState& s) {
+        s.confirm_kind.clear();
+        s.confirm_id.clear();
+        s.confirm_text.clear();
+      });
     }));
-    pop.add(head);
-
-    H cols = el("div", "mp-cols");
-    // left: providers
-    H plist = el("div", "mp-providers");
-    for (size_t i = 0; i < st_.providers.size(); ++i) {
-      const AppState::ProviderRow& p = st_.providers[i];
-      bool active = p.id == st_.model_picker_provider;
-      H item = el("div", active ? "mp-prov active" : "mp-prov");
-      item.key("mp-" + p.id);
-      std::string pid = p.id;
-      item.on(EventKind::kClick, [this, pid](const std::string&) {
-        update([&](AppState& s) {
-          s.model_picker_provider = pid;
-          s.model_picker_models.clear();
-          s.model_picker_loaded = false;
-          s.model_picker_status.clear();
-          // A query typed against one provider's models should not silently
-          // filter the next provider's list down to nothing.
-          s.model_picker_query.clear();
-        });
-        load_picker_models(pid);
-      });
-      item.add(el("div", "mp-prov-name").text(p.name.empty() ? p.id : p.name));
-      item.add(el("div", "mp-prov-kind dim").text(p.kind));
-      plist.add(item);
-    }
-    if (st_.providers.empty()) {
-      plist.add(comp::empty_state(tr("还没有供应商。"), "", nullptr));
-    }
-    cols.add(plist);
-
-    // right: models of the selected provider
-    H mside = el("div", "mp-models");
-    H search = comp::search_box(st_.model_picker_query, tr("搜索模型"),
-                                [this](const std::string& v) {
-      // must re-render: the filter decides which rows exist
-      update([&](AppState& s) { s.model_picker_query = v; });
-    });
-    // Keyed by provider: switching providers clears the query, but a focused
-    // input's value is deliberately NOT patched (that is what keeps a caret
-    // from jumping mid-typing), so the cleared state would never reach the DOM.
-    // A new key recreates the node, which is the framework-level way to say
-    // "this input starts over".
-    search.key("mp-search:" + st_.model_picker_provider);
-    mside.add(search);
-    // Filtering happens here rather than in the backend: the list is already in
-    // memory and a round trip per keystroke would make typing feel laggy.
-    std::vector<const AppState::ModelRow*> vis;
-    for (size_t i = 0; i < st_.model_picker_models.size(); ++i) {
-      const AppState::ModelRow& m = st_.model_picker_models[i];
-      if (!st_.model_picker_query.empty()) {
-        std::string ql = lower_ascii(st_.model_picker_query);
-        if (lower_ascii(m.id + " " + m.display).find(ql) == std::string::npos) continue;
-      }
-      vis.push_back(&m);
-    }
-
-    // Above the threshold the list is sorted and grouped by initial, which only
-    // means anything if the order is alphabetical (grouping an arbitrary order
-    // would repeat a letter down the list).
-    const bool grouped = vis.size() > 20;
-    if (grouped) {
-      std::sort(vis.begin(), vis.end(),
-                [](const AppState::ModelRow* a, const AppState::ModelRow* b) {
-        return lower_ascii(a->display.empty() ? a->id : a->display) <
-               lower_ascii(b->display.empty() ? b->id : b->display);
-      });
-    }
-
-    if (!st_.model_picker_loaded) {
-      mside.add(el("div", "hint").text(tr("加载中…")));
-    } else if (vis.empty()) {
-      mside.add(comp::empty_state(
-          st_.model_picker_query.empty() ? tr("这个供应商还没有启用中的模型。")
-                                         : tr("没有匹配的模型。"),
-          "", nullptr));
-    } else {
-      std::string last_group;
-      H list = el("div", "mp-list");
-      for (size_t i = 0; i < vis.size(); ++i) {
-        const AppState::ModelRow& m = *vis[i];
-        std::string label = m.display.empty() ? m.id : m.display;
-        if (grouped) {
-          char c = label.empty() ? '#' : label[0];
-          std::string g;
-          if (c >= 'a' && c <= 'z') g = std::string(1, static_cast<char>(c - 'a' + 'A'));
-          else if (c >= 'A' && c <= 'Z') g = std::string(1, c);
-          else if (c >= '0' && c <= '9') g = "#";
-          else g = "·";
-          if (g != last_group) {
-            list.add(el("div", "mp-group").text(g));
-            last_group = g;
-          }
-        }
-        bool cur = m.id == st_.model;
-        H row = el("div", cur ? "mp-model active" : "mp-model");
-        row.key("mpm-" + m.id);
-        std::string mid = m.id;
-        std::string ppid = st_.model_picker_provider;
-        row.on(EventKind::kClick, [this, ppid, mid](const std::string&) {
-          pick_model(ppid, mid);
-        });
-        row.add(comp::model_icon(m.icon, m.id));
-        H nm = el("div", "mp-model-name");
-        nm.add(el("span", "mp-model-id").text(label));
-        H caps = el("span", "md-caps");
-        bool any_cap = false;
-        if (m.vision) { caps.add(el("i", "fa fa-eye").attr("title", tr("视觉"))); any_cap = true; }
-        if (m.audio) { caps.add(el("i", "fa fa-volume-high").attr("title", tr("音频"))); any_cap = true; }
-        if (m.video) { caps.add(el("i", "fa fa-video").attr("title", tr("视频"))); any_cap = true; }
-        if (m.pdf) { caps.add(el("i", "fa fa-file-pdf").attr("title", tr("PDF"))); any_cap = true; }
-        if (m.structured) { caps.add(el("i", "fa fa-brackets-curly").attr("title", tr("结构化输出"))); any_cap = true; }
-        if (any_cap) nm.add(caps);
-        row.add(nm);
-        if (m.context_len > 0) {
-          row.add(el("span", "mp-ctx dim").text(itos(static_cast<int>(m.context_len / 1000)) + "K"));
-        }
-        if (cur) row.add(el("i", "fa fa-check"));
-        list.add(row);
-      }
-      mside.add(list);
-    }
-    if (!st_.model_picker_status.empty()) {
-      mside.add(el("div", "pv-status").text(st_.model_picker_status));
-    }
-    cols.add(mside);
-    pop.add(cols);
-    layer.add(pop);
   }
   if (!st_.toast.empty()) {
     H t = el("div", "toast");
@@ -3976,6 +4185,8 @@ void UiApp::send_message() {
   call_async("session.send", Json{{"sid", sid}, {"text", text}});
 }
 
+std::string UiApp::rel_time_for_test(int64_t ms) { return rel_time(ms); }
+
 void UiApp::open_new_session() {
   // a real session needs a project; without one, fall back to a local tab
   if (!backend_ || st_.projects.empty()) {
@@ -3996,6 +4207,22 @@ void UiApp::open_new_session() {
   new_session_in_project(st_.projects[0].pid);
 }
 
+// 顶层 "+"：打开一个"新建"标签页，内容同主页的"项目"（列出项目与其会话，
+// 点会话即打开、点新建即建）。以前这里是"直接给第一个项目开会话"——那既猜错
+// 了用户想开的项目，也不给选择的机会。
+void UiApp::open_new_tab() {
+  update([&](AppState& s) {
+    bool found = false;
+    for (size_t i = 0; i < s.tab_ids.size(); ++i) {
+      if (s.tab_ids[i] == kNewTabId) found = true;
+    }
+    // one "新建" tab is enough; a second one would show the same list
+    if (!found) s.tab_ids.push_back(kNewTabId);
+    s.active_tab = kNewTabId;
+  });
+  switch_tab(kNewTabId);
+}
+
 void UiApp::new_session_in_project(const std::string& pid) {
   if (!backend_) return;
   std::string cwd;
@@ -4006,7 +4233,7 @@ void UiApp::new_session_in_project(const std::string& pid) {
     }
   }
   call_async("session.new", Json{{"pid", pid}, {"cwd", cwd}},
-             [this](const BackendResult& r) {
+             [this, pid](const BackendResult& r) {
     if (!r.ok) return;
     std::string sid = jsonutil::get<std::string>(r.data, "sid", "");
     if (sid.empty()) sid = jsonutil::get<std::string>(r.data, "id", "");
@@ -4017,11 +4244,55 @@ void UiApp::new_session_in_project(const std::string& pid) {
       t.title = "会话" + itos(static_cast<int>(s.sessions.size() + 1));
       s.sessions.push_back(t);
       s.tab_ids.push_back(sid);
+      // remember where we came from so closing this tab returns there
+      if (!s.active_tab.empty() && s.active_tab != sid) {
+        s.tab_history.push_back(s.active_tab);
+      }
       s.active_tab = sid;
       s.messages.clear();
       s.session_input.clear();
     });
     load_terminals(sid);
+    // The card's list must show the new session (and its count), so re-read the
+    // project's sessions rather than waiting for the next full refresh.
+    for (size_t i = 0; i < st_.projects.size(); ++i) {
+      if (st_.projects[i].pid == pid) load_sessions(i);
+    }
+  });
+}
+
+void UiApp::confirm_delete_session(const std::string& sid, const std::string& title) {
+  if (sid.empty()) return;
+  // Deleting a session removes its files. That is not undoable, so it goes
+  // through the same modal the permission gate uses instead of firing straight
+  // from the click.
+  st_.confirm_kind = "session";
+  st_.confirm_id = sid;
+  st_.confirm_text = tr("删除会话「") + (title.empty() ? sid : title) +
+                     tr("」？记录与补丁会一并删除，无法恢复。");
+  render();
+}
+
+void UiApp::delete_session(const std::string& sid) {
+  if (sid.empty()) return;
+  call_async("session.delete", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("删除失败：") + r.message);
+      return;
+    }
+    toast(tr("已删除会话"));
+    // If it was open, close its tab first (the visit stack then decides where
+    // we land), and drop its cached view.
+    bool was_open = false;
+    for (size_t i = 0; i < st_.tab_ids.size(); ++i) {
+      if (st_.tab_ids[i] == sid) was_open = true;
+    }
+    if (was_open) {
+      close_tab(sid);
+    } else {
+      views_.erase(sid);
+    }
+    load_projects();  // refresh counts + lists
   });
 }
 
@@ -4949,6 +5220,11 @@ void UiApp::handle_dropped_folder(const std::string& name) {  if (name.empty()) 
 
 void UiApp::close_tab(const std::string& id) {
   if (id == "home") return;
+  // Where to go after closing: back through the visit stack, skipping tabs that
+  // are gone. Only when the stack has nothing usable do we fall back to home -
+  // jumping to a fixed tab is what made closing feel random.
+  std::string next;
+  bool closing_active = (id == st_.active_tab);
   update([&](AppState& s) {
     for (size_t i = 0; i < s.tab_ids.size(); ++i) {
       if (s.tab_ids[i] == id) {
@@ -4962,8 +5238,30 @@ void UiApp::close_tab(const std::string& id) {
         break;
       }
     }
-    if (s.active_tab == id) s.active_tab = "home";
+    if (!closing_active) return;
+    // pop the stack until we find a tab that still exists
+    while (!s.tab_history.empty()) {
+      std::string cand = s.tab_history.back();
+      s.tab_history.pop_back();
+      if (cand == id) continue;
+      bool alive = false;
+      for (size_t i = 0; i < s.tab_ids.size(); ++i) {
+        if (s.tab_ids[i] == cand) alive = true;
+      }
+      if (alive) {
+        next = cand;
+        break;
+      }
+    }
+    if (next.empty()) next = "home";
   });
+  if (closing_active) {
+    // The session view of the closed tab is dead weight (and its sid could be
+    // reused), so drop it.
+    views_.erase(id);
+    if (last_session_key_ == id) last_session_key_.clear();
+    switch_tab(next);
+  }
 }
 
 void UiApp::open_or_focus_side_tab(const std::string& kind) {
@@ -4981,7 +5279,12 @@ void UiApp::open_or_focus_side_tab(const std::string& kind) {
     for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
       if (st_.side_tabs[i].kind == kind) {
         std::string key = st_.side_tabs[i].id;
-        update([&](AppState& s) { s.active_side = key; });
+        update([&](AppState& s) {
+          if (!s.active_side.empty() && s.active_side != key) {
+            s.side_history.push_back(s.active_side);
+          }
+          s.active_side = key;
+        });
         load_side_tab(key);
         return;
       }
@@ -4995,6 +5298,9 @@ void UiApp::open_or_focus_side_tab(const std::string& kind) {
     t.kind = kind;
     t.title = side_title(t.kind);
     s.side_tabs.push_back(t);
+    if (!s.active_side.empty() && s.active_side != t.id) {
+      s.side_history.push_back(s.active_side);
+    }
     s.active_side = t.id;
     id = t.id;
   });
@@ -5016,6 +5322,8 @@ void UiApp::load_side_tab(const std::string& id) {
   if (kind == "files" && !st_.active_pid.empty()) load_files(id, st_.active_pid, path);
 }
 void UiApp::close_side_tab(const std::string& id) {
+  std::string next;
+  bool closing_active = (id == st_.active_side);
   update([&](AppState& s) {
     for (size_t i = 0; i < s.side_tabs.size(); ++i) {
       if (s.side_tabs[i].id == id) {
@@ -5023,10 +5331,26 @@ void UiApp::close_side_tab(const std::string& id) {
         break;
       }
     }
-    if (s.active_side == id && !s.side_tabs.empty()) {
-      s.active_side = s.side_tabs[0].id;
+    if (!closing_active) return;
+    // Same rule as the top strip: go back to the panel you came from, skipping
+    // ones that are gone. Only fall back to the first tab when nothing is left.
+    while (!s.side_history.empty()) {
+      std::string cand = s.side_history.back();
+      s.side_history.pop_back();
+      if (cand == id) continue;
+      bool alive = false;
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id == cand) alive = true;
+      }
+      if (alive) {
+        next = cand;
+        break;
+      }
     }
+    if (next.empty() && !s.side_tabs.empty()) next = s.side_tabs[0].id;
+    s.active_side = next;
   });
+  if (closing_active && !next.empty()) load_side_tab(next);
 }
 
 }  // namespace ui

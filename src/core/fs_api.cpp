@@ -416,7 +416,29 @@ FsResult FsApi::session_rollback(const std::string& sid, const std::string& turn
 FsResult FsApi::session_forget(const std::string& sid, const std::string& scope) {
   return sessions_->forget(sid, scope);
 }
-FsResult FsApi::session_list(const std::string& pid) { return sessions_->list_sessions(pid); }
+FsResult FsApi::session_list(const std::string& pid) {
+  FsResult r = sessions_->list_sessions(pid);
+  if (!r.ok() || !r.data.is_array()) return r;
+  // Enrich each row with the two things the project card shows and the session
+  // files do not carry: when it last changed, and whether it is busy right now.
+  // Both are derived here (file mtime + the host's live loops) rather than
+  // stored, so they cannot go stale on disk.
+  Json out = Json::array();
+  for (size_t i = 0; i < r.data.size(); ++i) {
+    Json m = r.data[i];
+    if (!m.is_object()) continue;
+    std::string sid = jsonutil::get<std::string>(m, "sid", "");
+    if (sid.empty()) continue;
+    m["running"] = agent_host_ && agent_host_->is_running(sid);
+    int64_t mt = sessions_->full_mtime_ms(sid);
+    if (mt > 0) m["updatedAt"] = mt;
+    out.push_back(m);
+  }
+  return FsResult::success(out);
+}
+FsResult FsApi::session_delete(const std::string& sid) {
+  return sessions_->delete_session(sid);
+}
 FsResult FsApi::session_set_model(const std::string& sid, const std::string& model) {
   FsResult r = sessions_->set_model(sid, model);
   if (r.ok()) sessions_->append_system_op(sid, "setModel", Json{{"model", model}});
