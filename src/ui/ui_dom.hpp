@@ -113,6 +113,25 @@ class IDom {
     (void)on_resize;
   }
 
+  // Same, but for a panel that sits to the LEFT of its divider (the project
+  // navigation rail): dragging right must WIDEN it, the mirror of the side
+  // panel. Kept separate from bind_splitter so both dividers can be live at the
+  // same time and each one only changes its own pair of columns.
+  virtual void bind_nav_splitter(Node splitter, Node nav,
+                                 std::function<void(int)> on_resize) {
+    (void)splitter;
+    (void)nav;
+    (void)on_resize;
+  }
+
+  // --- tab reordering (drag a tab onto another tab) ---
+  // Reports "fromKey\ttoKey"; the app owns the tab order, the adapter only
+  // reports which tab was dropped on which.
+  virtual void bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) {
+    (void)strip;
+    (void)cb;
+  }
+
   // --- vertical splitter (drag the top edge of a bottom panel to set height) ---
   // Same contract as bind_splitter, on the vertical axis: `splitter` sits on
   // `panel`'s TOP edge and dragging up must make the panel taller.
@@ -204,6 +223,12 @@ class IDom {
     (void)cls;
   }
 
+  // Can this backend keep a removed subtree alive for its exit animation? The
+  // framework asks before delaying a removal: a backend without CSS animations
+  // (NullDom, unit tests) must remove immediately, or a test that closes a tab
+  // would still see the closed page in the dump.
+  virtual bool supports_exit_animations() const { return false; }
+
   // --- appearance (palette / mode / fonts) ---
   // Applied to the document root, because these are the variables the whole
   // stylesheet is built from. `mode` is "auto" | "light" | "dark"; the adapter
@@ -255,6 +280,9 @@ class NullDom : public IDom {
   void off(Node node, EventKind kind) override;
   void bind_splitter(Node splitter, Node side,
                      std::function<void(int)> on_resize) override;
+  void bind_nav_splitter(Node splitter, Node nav,
+                         std::function<void(int)> on_resize) override;
+  void bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) override;
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override;
   void bind_drop_zone(Node node,
@@ -297,6 +325,14 @@ class NullDom : public IDom {
   void fire_split_for_test(int width) {
     if (split_cb_) split_cb_(width);
   }
+  // test hook: simulate the end of a nav-rail drag
+  void fire_nav_split_for_test(int width) {
+    if (nav_split_cb_) nav_split_cb_(width);
+  }
+  // test hook: simulate dropping one tab onto another
+  void fire_tab_drag_for_test(const std::string& from, const std::string& to) {
+    if (tab_drag_cb_) tab_drag_cb_(from + "\t" + to);
+  }
   // test hook: simulate the end of a vertical splitter drag
   void fire_vsplit_for_test(int height) {
     if (vsplit_cb_) vsplit_cb_(height);
@@ -331,6 +367,8 @@ class NullDom : public IDom {
   std::vector<Call> calls_;
   std::function<void(const std::string&, const std::string&)> drop_cb_;
   std::function<void(int)> split_cb_;
+  std::function<void(int)> nav_split_cb_;
+  std::function<void(const std::string&)> tab_drag_cb_;
   std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;

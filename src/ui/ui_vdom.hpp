@@ -90,6 +90,14 @@ extern const char* const kSlideRight;
 // A bottom drawer opening.
 extern const char* const kDrawer;
 
+// Exit intents. These are not mount animations: they are applied to a node that
+// is LEAVING the tree (see VNode::exit_anim). A page that is replaced keeps its
+// own DOM alive just long enough to play one of these while the incoming page
+// enters - the "two views" transition - instead of the old subtree vanishing.
+extern const char* const kExitLeft;   // slides out to the left
+extern const char* const kExitRight;  // slides out to the right
+extern const char* const kExitFade;   // fades/scales out in place
+
 // Is `name` one of the registered animations? (Unknown names are ignored rather
 // than silently producing a dead class.)
 bool known(const std::string& name);
@@ -186,6 +194,13 @@ struct VNode {
   // changes on a matched node the framework replays the declared animation, so a
   // part can say "animate me when my content is actually there".
   std::string anim_key;
+  // Exit animation. When this node DISAPPEARS from the new tree it is not
+  // removed right away: the framework keeps its DOM, plays this animation on it
+  // and drops it a moment later (sweep_exits). That is what makes a page swap a
+  // real cross-transition: the outgoing page and the incoming page coexist as
+  // two separate DOM subtrees for the duration of the animation, instead of one
+  // set of elements being given both animations at once.
+  std::string exit_anim;
   std::vector<VAttr> attrs;
   std::vector<VStyle> styles;
   std::vector<VEvent> events;
@@ -243,6 +258,11 @@ class H {
     n_->anim_key = token;
     return *this;
   }
+  // Exit intent: what this node does when it leaves the tree (see VNode::exit_anim).
+  H exit(const std::string& intent) {
+    n_->exit_anim = intent;
+    return *this;
+  }
   H on(EventKind k, EventFn fn) {
     n_->events.push_back(VEvent{k, bus().add(fn)});
     return *this;
@@ -282,6 +302,11 @@ void collect_handler_ids(const VNodePtr& v, std::vector<int>* out);
 
 // Find a node by key (depth-first). Returns null when absent.
 VNodePtr find_by_key(const VNodePtr& v, const std::string& key);
+
+// Remove exit-animated nodes whose animation has finished. Call once per render
+// tick (the app's pump does it); a node kept for an exit is not part of the new
+// tree, so nothing else would ever clean it up.
+void sweep_exits(IDom& dom, int64_t now_ms);
 
 }  // namespace ui
 }  // namespace fs

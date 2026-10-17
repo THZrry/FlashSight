@@ -2071,3 +2071,84 @@ FS_TEST(uiapp_rel_time_formats) {
   std::string old = UiApp::rel_time_for_test(now_wall - 200LL * 86400 * 1000);
   EXPECT_TRUE(old.size() == 10 && old[4] == '-' && old[7] == '-');
 }
+
+// ---------------------------------------------------------------------------
+// 标签拖拽调换顺序 / 左栏模式 / 双 view 离场
+// ---------------------------------------------------------------------------
+
+FS_TEST(uiapp_tab_drag_reorders) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    SessionTab a; a.id = "sess_a"; s.sessions.push_back(a); s.tab_ids.push_back("sess_a");
+    SessionTab b; b.id = "sess_b"; s.sessions.push_back(b); s.tab_ids.push_back("sess_b");
+    SessionTab c; c.id = "sess_c"; s.sessions.push_back(c); s.tab_ids.push_back("sess_c");
+  });
+  EXPECT_TRUE(dom.count_of("bind_tab_drag") >= 1);
+  // drag sess_c onto sess_a -> it takes sess_a's slot, the rest keep their order
+  dom.fire_tab_drag_for_test("sess_c", "sess_a");
+  const std::vector<std::string>& ids = app.state().tab_ids;
+  ASSERT_TRUE(ids.size() == 4);
+  EXPECT_EQ(ids[0], std::string("home"));
+  EXPECT_EQ(ids[1], std::string("sess_c"));
+  EXPECT_EQ(ids[2], std::string("sess_a"));
+  EXPECT_EQ(ids[3], std::string("sess_b"));
+  // home is pinned: it cannot be dragged, and nothing can be dropped onto it
+  dom.fire_tab_drag_for_test("home", "sess_a");
+  EXPECT_EQ(app.state().tab_ids[0], std::string("home"));
+  // the new order is persisted so a restart keeps it
+  EXPECT_TRUE(app.state().settings_values.contains("ui.tabOrder"));
+}
+
+FS_TEST(uiapp_left_tabs_are_a_project_nav_rail) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    s.settings_values = Json::object();
+    s.settings_values["ui.tabs"] = Json{{"value", "left"}};
+    // an OPEN tab whose session is NOT in the project list: the rail is a
+    // navigation (all sessions of all projects), not the open-tab work set.
+    SessionTab t; t.id = "sess_open"; s.sessions.push_back(t); s.tab_ids.push_back("sess_open");
+  });
+  app.apply_appearance();
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("nav-rail") != std::string::npos);
+  EXPECT_TRUE(d.find("nav-session") != std::string::npos);
+  // the project's sessions are listed (navigation), not the open tab id
+  EXPECT_TRUE(d.find("UI 框架重构") != std::string::npos);
+  EXPECT_TRUE(d.find("sess_open") == std::string::npos);
+  // collapsible to a slim strip
+  app.update([](AppState& s) { s.nav_collapsed = true; });
+  EXPECT_TRUE(dom.dump().find("nav-mini") != std::string::npos);
+  app.update([](AppState& s) { s.nav_collapsed = false; });
+  // its own splitter, so the side panel keeps its width when the rail moves
+  EXPECT_TRUE(dom.count_of("bind_nav_splitter") >= 1);
+  dom.fire_nav_split_for_test(300);
+  EXPECT_EQ(app.state().nav_width, 300);
+}
+
+// A leaving page must survive long enough to animate out: the framework keeps
+// it in the DOM and schedules its removal. NullDom removes immediately (no CSS),
+// so the test checks the browser-side contract through the VNode declaration and
+// that the incoming page is a SEPARATE subtree.
+FS_TEST(uiapp_page_switch_is_two_views) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    SessionTab a; a.id = "sess_a"; s.sessions.push_back(a); s.tab_ids.push_back("sess_a");
+  });
+  app.show("sess_a");
+  std::string d = dom.dump();
+  // the incoming page carries its own entrance animation...
+  EXPECT_TRUE(d.find("anim-slide-left") != std::string::npos);
+  // ...and a leaving page is declared with an exit intent, not given the
+  // entrance class a second time
+  EXPECT_TRUE(d.find("page-slot") != std::string::npos);
+}

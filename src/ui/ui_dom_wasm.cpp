@@ -179,10 +179,9 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
   // Rebinding just swaps the callback id (0 = no binding at all).
   bar.__fsSplitCb = cb_id;
   bar.__fsSplitSide = side || null;
-  // The listeners install once and read the CURRENT id at press time: the
-  // divider node survives the patch, so its old listeners would otherwise keep
-  // dragging a panel that is no longer there (which silently persisted a bogus
-  // width - the collapsed panel came back with the wrong size).
+  // Listeners install once and read the CURRENT id at press time: the divider
+  // node survives the patch, so its old listeners would otherwise keep dragging
+  // a panel that is no longer there.
   bar.style.cursor = cb_id ? 'col-resize' : 'default';
   if (bar.__fsSplitInit) return;
   bar.__fsSplitInit = true;
@@ -224,6 +223,110 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
     }
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
+  });
+});
+
+// The mirror image: a panel on the LEFT of its divider (the project nav rail).
+// Dragging right must WIDEN it, so the delta is ADDED. The right-hand side panel
+// is a separate binding and keeps its width - dragging one divider never
+// redistributes the other column.
+EM_JS(void, fs_dom_nav_splitter, (int split_node, int nav_node, int cb_id), {
+  var bar = globalThis.__fsNodes[split_node];
+  var nav = globalThis.__fsNodes[nav_node];
+  if (!bar) return;
+  bar.__fsNavSplitCb = cb_id;
+  bar.__fsNavSplitNav = nav || null;
+  bar.style.cursor = cb_id ? 'col-resize' : 'default';
+  if (bar.__fsNavSplitInit) return;
+  bar.__fsNavSplitInit = true;
+  bar.addEventListener('mousedown', function (down) {
+    if (!bar.__fsNavSplitCb) return;
+    var nav = bar.__fsNavSplitNav;
+    if (!nav) return;
+    var t = down.target;
+    if (t && t.classList && t.classList.contains('splitter-handle')) return;
+    down.preventDefault();
+    var startX = down.clientX;
+    var startW = nav.getBoundingClientRect().width;
+    var moved = false;
+    function move(ev) {
+      var dx = ev.clientX - startX;
+      if (!moved && Math.abs(dx) > 3) moved = true;
+      if (!moved) return;
+      var w = startW + dx;   // the nav is LEFT of the divider: right = wider
+      if (w < 160) w = 160;
+      if (w > 480) w = 480;
+      nav.style.width = w + 'px';
+      nav.style.flex = '0 0 auto';
+    }
+    function up() {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      if (!moved) return;
+      var swallow = function (ev) { ev.stopPropagation(); ev.preventDefault(); };
+      document.addEventListener('click', swallow, true);
+      setTimeout(function () { document.removeEventListener('click', swallow, true); }, 0);
+      var w = parseInt(nav.style.width, 10);
+      if (isFinite(w) && bar.__fsNavSplitCb && Module._fs_ui_nav_split) {
+        Module._fs_ui_nav_split(bar.__fsNavSplitCb, w);
+      }
+    }
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+});
+
+// Reorder top-level tabs by dragging one tab onto another. The tab elements are
+// keyed by data-key; the app owns the order, so the adapter only reports the
+// pair and the next render moves the real nodes.
+EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
+  var strip = globalThis.__fsNodes[strip_node];
+  if (!strip) return;
+  strip.__fsTabDragCb = cb_id;
+  if (strip.__fsTabDragInit) return;
+  strip.__fsTabDragInit = true;
+  var fromEl = null;
+  strip.addEventListener('mousedown', function (down) {
+    var t = down.target;
+    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
+    if (!t || t === strip) return;
+    if (t.classList.contains('add')) return;      // the "+" is not a tab
+    if (down.target.closest && down.target.closest('.tab-close')) return;
+    fromEl = t;
+    t.classList.add('dragging');
+  });
+  strip.addEventListener('mouseover', function (over) {
+    if (!fromEl) return;
+    var t = over.target;
+    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
+    if (!t || t === strip || t === fromEl || t.classList.contains('add')) return;
+    t.classList.add('drop-target');
+  });
+  strip.addEventListener('mouseout', function (over) {
+    var t = over.target;
+    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
+    if (t && t.classList) t.classList.remove('drop-target');
+  });
+  strip.addEventListener('mouseup', function (up) {
+    if (!fromEl) return;
+    var t = up.target;
+    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
+    var from = fromEl.getAttribute('data-key');
+    fromEl.classList.remove('dragging');
+    var toEls = strip.querySelectorAll('.tab.drop-target');
+    for (var i = 0; i < toEls.length; i++) toEls[i].classList.remove('drop-target');
+    fromEl = null;
+    if (!t || t === strip || t.classList.contains('add')) return;
+    var to = t.getAttribute('data-key');
+    if (!from || !to || from === to) return;
+    if (strip.__fsTabDragCb && Module._fs_ui_tab_drag) {
+      var payload = from + '\t' + to;
+      var len = Module.lengthBytesUTF8(payload) + 1;
+      var ptr = Module._malloc(len);
+      Module.stringToUTF8(payload, ptr, len);
+      Module._fs_ui_tab_drag(strip.__fsTabDragCb, ptr);
+      Module._free(ptr);
+    }
   });
 });
 
@@ -569,6 +672,28 @@ int& split_seq() {
   return s;
 }
 
+// nav-rail resize callbacks (independent of the side-panel divider: the two
+// columns are resized against their OWN neighbour, so moving one never moves
+// the other)
+std::map<int, std::function<void(int)> >& nav_split_cbs() {
+  static std::map<int, std::function<void(int)> > m;
+  return m;
+}
+int& nav_split_seq() {
+  static int s = 0;
+  return s;
+}
+
+// tab drag/reorder callbacks
+std::map<int, std::function<void(const std::string&)> >& tab_drag_cbs() {
+  static std::map<int, std::function<void(const std::string&)> > m;
+  return m;
+}
+int& tab_drag_seq() {
+  static int s = 0;
+  return s;
+}
+
 // vertical (bottom panel height) resize callbacks
 std::map<int, std::function<void(int)> >& vsplit_cbs() {
   static std::map<int, std::function<void(int)> > m;
@@ -791,6 +916,28 @@ class WasmDom : public IDom {
     fs_dom_splitter(static_cast<int>(splitter.id), static_cast<int>(side.id), cb_id);
   }
 
+  void bind_nav_splitter(Node splitter, Node nav,
+                         std::function<void(int)> on_resize) override {
+    int cb_id = 0;
+    if (on_resize) {
+      cb_id = ++nav_split_seq();
+      nav_split_cbs().clear();
+      nav_split_cbs()[cb_id] = std::move(on_resize);
+    }
+    fs_dom_nav_splitter(static_cast<int>(splitter.id), static_cast<int>(nav.id),
+                        cb_id);
+  }
+
+  void bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) override {
+    int cb_id = 0;
+    if (cb) {
+      cb_id = ++tab_drag_seq();
+      tab_drag_cbs().clear();
+      tab_drag_cbs()[cb_id] = std::move(cb);
+    }
+    fs_dom_tab_drag(static_cast<int>(strip.id), cb_id);
+  }
+
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override {
     int cb_id = 0;
@@ -859,6 +1006,10 @@ class WasmDom : public IDom {
     fs_dom_play_animation(static_cast<int>(node.id), cls.c_str());
   }
 
+  // The browser can animate a leaving subtree; keeping it alive for ~200ms is
+  // what lets the old page and the new page coexist during a tab switch.
+  bool supports_exit_animations() const override { return true; }
+
   void set_appearance(const Appearance& a) override {
     fs_dom_appearance(a.palette.c_str(), a.mode.c_str(), a.font.c_str(),
                       a.mono.c_str(), a.font_size, a.code_highlight ? 1 : 0,
@@ -908,6 +1059,22 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_split(int cb_id, int width) {
   std::map<int, std::function<void(int)> >::iterator it = split_cbs().find(cb_id);
   if (it == split_cbs().end() || !it->second) return;
   it->second(width);
+}
+
+// Called from JS (fs_dom_nav_splitter) when the project rail drag ends.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_nav_split(int cb_id, int width) {
+  std::map<int, std::function<void(int)> >::iterator it =
+      nav_split_cbs().find(cb_id);
+  if (it == nav_split_cbs().end() || !it->second) return;
+  it->second(width);
+}
+
+// Called from JS (fs_dom_tab_drag) with "fromKey\ttoKey".
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_tab_drag(int cb_id, const char* payload) {
+  std::map<int, std::function<void(const std::string&)> >::iterator it =
+      tab_drag_cbs().find(cb_id);
+  if (it == tab_drag_cbs().end() || !it->second) return;
+  it->second(std::string(payload ? payload : ""));
 }
 
 // Called from JS (fs_dom_vsplitter) when a drag ends, with the final height.

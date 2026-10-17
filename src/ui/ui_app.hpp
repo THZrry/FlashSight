@@ -103,6 +103,13 @@ struct AppState {
   // 当前标签页之上，关掉就回到原来那个标签页。
   std::string modal_page;  // "" | "settings" | "new"
 
+  // ---- 左侧栏模式（设置·外观·标签位置=左侧）----
+  // 它不是"竖着放的标签条"：顶栏模式的标签是打开的工作集，可以关；左侧栏是
+  // 项目导航，永远按项目列出全部会话，不关不消失。宽度独立于右侧面板，拖拽
+  // 只改变它和中间栏之间的分配，右侧栏位置不动。
+  bool nav_collapsed = false;
+  int nav_width = 240;  // px
+
   // ---- home ----
   int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计
   std::vector<ProjectCard> projects;
@@ -592,6 +599,11 @@ class UiApp {
   // bring a closed terminal's tab back (the overview card does this on click)
   void reopen_terminal_tab(const std::string& tid);
   void close_tab(const std::string& id);
+  // reorder a tab by dropping it onto another (keys, not indices: the strip is
+  // keyed by tab id)
+  void move_tab(const std::string& from, const std::string& to);
+  // re-apply the persisted tab order (ui.tabOrder) to the open tabs
+  void apply_saved_tab_order();
   // 顶层 "+"：打开"新建"页面（不是标签页）
   void open_new_tab();
   // 设置/新建这类"盖在当前标签页之上、不入栈"的页面
@@ -739,6 +751,11 @@ class UiApp {
 
   // ---- page builders (return the page body for the active tab) ----
   VNodePtr build_shell();
+  // the content area both navigation modes share (also the frame the leaving
+  // page is pinned to during a two-view transition)
+  VNodePtr build_page_slot();
+  // 左侧栏（标签位置=左侧）：按项目列出全部会话的导航栏，不是竖着的标签条。
+  VNodePtr build_nav_rail();
   VNodePtr build_home();
   VNodePtr build_home_explore();
   VNodePtr build_home_projects();

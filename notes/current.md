@@ -980,3 +980,45 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 测试 201 用例 / 1822 断言（新增：贴边水位、自动挡顺序、方向感知、设置覆盖
     标签栏、按天图表、聚合 calls；`model_table_list_merges_and_falls_back` 改为
     断言空列表）。
+
+<46>(SOLVED): 框架双 view + 左栏模式 + 拖拽排序 + 细节修正。
+  - **双 view 切换（框架层）**：页面切换时旧页面不再"立刻消失 + 新页面带着两个
+    动画进来"。`VNode` 新增 `exit_anim`；`patch` 里被丢弃的子树不立即 `remove`，
+    而是加上 `.page-exit`/`.exiting` + `anim-exit-*` 播完再删（`sweep_exits`，
+    由 render 与 250ms pump 驱动）。于是旧页面在退、新页面在进，是两棵独立 DOM
+    各自播自己的动画。离场前会剥掉 `anim-*` 类，避免同一元素上同时跑进场和离场
+    （这正是"看着奇怪"的原因）。方向在 `render()` 里按本次移动盖到旧页面上
+    （创建时烘焙的方向是错的：后退时旧页面也该往反方向退）。`IDom` 新增
+    `supports_exit_animations()`：NullDom 立即删除（否则单测里关掉的页面还留在
+    dump 里），wasm/Whale 返回 true。
+  - **大部分组件移出/消失都有动画**：行/卡片/popover 被丢弃时统一淡出
+    （`has_visual_class` 白名单），不再只有进场。
+  - **侧栏面板切换有动画**：`.side-body` 按 active_side 做 key + anim_key，切面板
+    时整块重建并进场。
+  - **标签拖拽排序**：`IDom::bind_tab_drag` + `fs_dom_tab_drag`（拖起/悬停/落下
+    三段，报告 "from\tto"），`UiApp::move_tab` 移动标签并把 `ui.tabOrder` 写回
+    设置；启动时 `apply_saved_tab_order` 恢复。主页固定第一位。
+  - **项目卡片 hover 不再改高度**：行高固定 32px，重命名/删除按钮改成绝对定位
+    覆盖（原来 display 切换会撑高一行），`:hover` 只改颜色。
+  - **用量统计初始加载供应商**：进入用量页（点击或 home_tab=2 直接渲染）都会
+    触发 `provider.listProviders`，左侧范围列表不再空白。
+  - **左侧栏模式重做**：`ui.tabs=left` 时不再是"竖过来的标签条"，而是项目导航
+    （`build_nav_rail`）：按项目列出全部会话、宽度可拖（`bind_nav_splitter`，
+    独立回调）、可最小化成 34px 窄条。左右两个分隔条各自独立——拖导航只改
+    导航↔内容，拖右侧栏只改内容↔右侧栏。设置与外观在启动时加载
+    （`mount()` 调 `load_settings_section("")`），保存的左栏/配色/字体不再要
+    等打开设置页才生效。
+  - **设置文案与布局**：删掉长期记忆的空状态文字（上面已有 hint）、删掉
+    "{{SESSION}} 会被替换…" 与 "与默认请求体浅合并…" 两句；请求体覆盖改成
+    标题在上、输入框在下（JSON 需要宽度），`.pv-body-field`。
+  - **"记忆上次"可选了**：原来把 `remember` 写进 `session.default.autoMode`
+    （布尔）并读同一个键，选择永远匹配不上。改成独立标记
+    `session.default.autoModeRemember` / `filePermRemember`；`SessionManager`
+    在 set_auto_mode/set_permission 时记下 `session.last.*`，新会话在 remember
+    打开时沿用它。
+  - **后端接线核对**：`session.send` 带 model/thinking（先落盘再发）；
+    `provider.listModels` 失败返回本地已知模型；`usage.query` 的 byDay/
+    byProviderModel 带 `calls`；`project.list` 带 sessionCount；`session.rename/
+    delete`、`session.setAutoMode/setPermission/setModel/setThinking`、
+    `settings.set`、`skill.*`、`model.*` 均已注册。
+  - 测试 204 用例 / 1873 断言（新增：标签拖拽排序、左栏导航、双 view 页面槽）。

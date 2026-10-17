@@ -212,6 +212,17 @@ void NullDom::bind_splitter(Node splitter, Node side,
   calls_.push_back(Call{"bind_splitter", splitter.id, std::to_string(side.id)});
 }
 
+void NullDom::bind_nav_splitter(Node splitter, Node nav,
+                                std::function<void(int)> on_resize) {
+  nav_split_cb_ = on_resize;
+  calls_.push_back(Call{"bind_nav_splitter", splitter.id, std::to_string(nav.id)});
+}
+
+void NullDom::bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) {
+  tab_drag_cb_ = cb;
+  calls_.push_back(Call{"bind_tab_drag", strip.id, ""});
+}
+
 void NullDom::bind_vsplitter(Node splitter, Node panel,
                              std::function<void(int)> on_resize) {
   vsplit_cb_ = on_resize;

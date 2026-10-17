@@ -340,6 +340,22 @@ class WhaleDom : public IDom {
     bind_drag(hbar_, el_of(splitter), el_of(side), false, on_resize);
   }
 
+  void bind_nav_splitter(Node splitter, Node nav,
+                         std::function<void(int)> on_resize) override {
+    // The nav rail is LEFT of its divider: the shared drag handler subtracts the
+    // delta, so a rightward drag would shrink it. Flip the direction by wrapping
+    // the callback is not enough (the drag itself is wrong), so the nav binding
+    // gets its own drag state with `grow_with_delta = true`.
+    bind_nav_drag(el_of(splitter), el_of(nav), on_resize);
+  }
+
+  void bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) override {
+    // WhaleUI has no HTML5 drag; a full pointer-based reorder there would need
+    // its own hit-testing. The tabs still work, they just cannot be dragged.
+    (void)strip;
+    (void)cb;
+  }
+
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override {
     bind_drag(vbar_, el_of(splitter), el_of(panel), true, on_resize);
@@ -480,6 +496,11 @@ class WhaleDom : public IDom {
     p->cls = cls;
     whaleui_set_timeout(&WhaleDom::apply_pending_anim, p, 0);
   }
+
+  // WhaleUI can run CSS animations, so the two-view exit transition works there
+  // too; keeping the old subtree alive is the framework's decision, not the
+  // backend's.
+  bool supports_exit_animations() const override { return true; }
 
   // ---- appearance ---------------------------------------------------------
 
@@ -679,7 +700,7 @@ class WhaleDom : public IDom {
         ++i;
       }
     }
-    Listener** slots[] = {&hbar_, &vbar_, &key_down_, &drop_over_, &drop_drop_};
+    Listener** slots[] = {&hbar_, &vbar_, &navbar_, &key_down_, &drop_over_, &drop_drop_};
     for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); ++i) {
       if (*slots[i] && (*slots[i])->el == el) *slots[i] = nullptr;
     }
@@ -722,6 +743,7 @@ class WhaleDom : public IDom {
     if (!bar) return;
     Drag& d = vertical ? vdrag_ : hdrag_;
     d.vertical = vertical;
+    d.grow_with_delta = false;
     d.target = target;
     d.cb = on_resize;
     bind_aux(slot_ref, bar, "mousedown", [this, vertical](whaleui_dom_event_t* ev) {
@@ -743,6 +765,35 @@ class WhaleDom : public IDom {
     });
   }
 
+  // The nav rail sits LEFT of its divider, so it grows when the pointer moves
+  // RIGHT. It has its own Drag state so the side panel's divider keeps working
+  // at the same time and neither drag moves the other column.
+  void bind_nav_drag(whaleui_dom_element_t* bar, whaleui_dom_element_t* nav,
+                     std::function<void(int)> on_resize) {
+    if (!bar) return;
+    Drag& d = navdrag_;
+    d.vertical = false;
+    d.grow_with_delta = true;
+    d.target = nav;
+    d.cb = on_resize;
+    bind_aux(navbar_, bar, "mousedown", [this](whaleui_dom_event_t* ev) {
+      Drag& dr = navdrag_;
+      if (!dr.target || !dr.cb) return;
+      whaleui_dom_rect_t r;
+      if (whaleui_dom_get_bounding_client_rect(dr.target, &r) != 0) return;
+      dr.active = true;
+      dr.moved = false;
+      dr.start = whaleui_dom_event_mouse_x(ev);
+      dr.start_size = static_cast<int>(r.width);
+      dr.size = dr.start_size;
+      drag_live_ = &dr;
+      whaleui_dom_element_t* docel = reinterpret_cast<whaleui_dom_element_t*>(doc_);
+      whaleui_dom_add_event_listener(docel, "mousemove", &WhaleDom::on_drag_move,
+                                     this);
+      whaleui_dom_add_event_listener(docel, "mouseup", &WhaleDom::on_drag_up, this);
+    });
+  }
+
   static void on_drag_move(whaleui_dom_event_t* ev, void* ud) {
     WhaleDom* self = static_cast<WhaleDom*>(ud);
     if (!self || !self->drag_live_) return;
@@ -754,8 +805,9 @@ class WhaleDom : public IDom {
     if (delta > 3 || delta < -3) d.moved = true;
     if (!d.moved) return;
     // The handle sits on the panel's near edge, so dragging TOWARD the panel
-    // (left on the side divider, up on the bottom drawer) grows it.
-    int size = d.start_size - delta;
+    // (left on the side divider, up on the bottom drawer) grows it. The nav rail
+    // is on the far side of its divider, so there the delta is added.
+    int size = d.grow_with_delta ? (d.start_size + delta) : (d.start_size - delta);
     if (d.vertical) {
       if (size < 120) size = 120;
       int w = 0, h = 0;
@@ -764,6 +816,12 @@ class WhaleDom : public IDom {
       if (size > maxh) size = maxh;
       whaleui_dom_set_style(d.target, "height",
                             (std::to_string(size) + "px").c_str());
+    } else if (d.grow_with_delta) {
+      if (size < 160) size = 160;
+      if (size > 480) size = 480;
+      whaleui_dom_set_style(d.target, "width",
+                            (std::to_string(size) + "px").c_str());
+      whaleui_dom_set_style(d.target, "flex", "0 0 auto");
     } else {
       if (size < 220) size = 220;
       if (size > 720) size = 720;
@@ -907,6 +965,7 @@ class WhaleDom : public IDom {
   // auxiliary listener slots (one live listener each)
   Listener* hbar_ = nullptr;      // side-panel divider
   Listener* vbar_ = nullptr;      // bottom-drawer grip
+  Listener* navbar_ = nullptr;    // project nav rail divider
   Listener* key_down_ = nullptr;  // terminal keydown
   Listener* drop_over_ = nullptr;
   Listener* drop_drop_ = nullptr;
@@ -920,6 +979,7 @@ class WhaleDom : public IDom {
     bool active = false;
     bool moved = false;
     bool vertical = false;
+    bool grow_with_delta = false;  // nav rail: it is LEFT of the divider
     whaleui_dom_element_t* target = nullptr;
     int start = 0;
     int start_size = 0;
@@ -928,6 +988,7 @@ class WhaleDom : public IDom {
   };
   Drag hdrag_;
   Drag vdrag_;
+  Drag navdrag_;
   Drag* drag_live_ = nullptr;  // the session the doc handlers resolve
 
   whaleui_resize_observer_t* resize_obs_ = nullptr;

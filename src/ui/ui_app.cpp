@@ -177,6 +177,23 @@ std::string folder_basename(const std::string& path) {
   return path.substr(cut, end - cut);
 }
 
+// Read a string setting from the cached section values (default when absent).
+// The dump wraps values as {value, source}; a bare value is accepted too.
+std::string sv_str_inner(const Json& vals, const std::string& key,
+                         const std::string& def) {
+  if (!vals.is_object() || !vals.contains(key)) return def;
+  const Json& v = vals[key];
+  if (v.is_string()) return v.get<std::string>();
+  if (v.is_object() && v.contains("value") && v["value"].is_string()) {
+    return v["value"].get<std::string>();
+  }
+  return def;
+}
+std::string sv_str(const Json& vals, const std::string& key,
+                   const std::string& def) {
+  return sv_str_inner(vals, key, def);
+}
+
 // append a class to an already-built VNode (used for mount animations on
 // subtrees returned by the page builders)
 void add_class(const VNodePtr& v, const std::string& cls) {
@@ -392,6 +409,10 @@ void UiApp::mount() {
     unsubscribe_events_ = backend_->subscribe(
         [this](const std::string& e, const Json& p) { on_backend_event(e, p); });
     load_projects();
+    // Appearance and the tab layout live in settings, so they must be loaded at
+    // STARTUP: waiting until the settings page is opened meant a saved
+    // ui.tabs=left (or palette/font) was ignored on every fresh launch.
+    load_settings_section("");
   }
   render();
 }
@@ -436,6 +457,9 @@ void UiApp::pump() {
     st_.toast.clear();
     render();
   }
+  // drop subtrees whose exit animation is over (they are outside the tree, so
+  // only this timer can clean them up)
+  sweep_exits(dom_, now_ms());
 }
 
 // Terminal refresh, driven by its own (faster) timer: a terminal must keep up
@@ -1280,6 +1304,29 @@ void UiApp::render() {
     render_pending_ = false;
     ++render_count_;
     VNodePtr neu = build_shell();
+    // Exit direction belongs to the MOVE, not to the page: a page's exit_anim
+    // was baked in when it was CREATED, so a page opened by a forward move
+    // would always slide out to the left even when you go back. Stamp the
+    // outgoing page here, where both the old and the new page are known.
+    {
+      VNodePtr old_slot = find_by_key(tree_, "page-slot");
+      VNodePtr new_slot = find_by_key(neu, "page-slot");
+      if (old_slot && new_slot && !old_slot->children.empty() &&
+          !new_slot->children.empty()) {
+        VNodePtr op = old_slot->children[0];
+        VNodePtr np = new_slot->children[0];
+        if (op && np && op->key != np->key) {
+          bool entering_modal = np->key.find("settings") != std::string::npos ||
+                                np->key.find(":new") != std::string::npos;
+          bool leaving_modal = op->key.find("settings") != std::string::npos ||
+                               op->key.find(":new") != std::string::npos;
+          op->exit_anim = (entering_modal || leaving_modal)
+                              ? anim::kExitFade
+                              : ((page_dir_ == "-1") ? anim::kExitRight
+                                                     : anim::kExitLeft);
+        }
+      }
+    }
     patch(dom_, tree_, neu, root_);
     tree_ = neu;
     last_rendered_tab_ = st_.active_tab;
@@ -1332,6 +1379,26 @@ void UiApp::render() {
                           [this](const std::string& kind, const std::string& value) {
         handle_drop(kind, value);
       });
+    }
+    // top tab strip: drag a tab onto another to reorder it
+    VNodePtr tabstrip = find_by_key(tree_, "top-tabs");
+    if (tabstrip && tabstrip->dom.valid()) {
+      dom_.bind_tab_drag(tabstrip->dom, [this](const std::string& payload) {
+        size_t tab = payload.find('\t');
+        if (tab == std::string::npos) return;
+        move_tab(payload.substr(0, tab), payload.substr(tab + 1));
+      });
+    }
+    // project nav rail divider (left mode): its own binding, so dragging it
+    // never moves the side panel
+    VNodePtr navbar = find_by_key(tree_, "nav-splitter");
+    VNodePtr navrail = find_by_key(tree_, "nav-rail");
+    if (navbar && navrail && navbar->dom.valid() && navrail->dom.valid()) {
+      dom_.bind_nav_splitter(navbar->dom, navrail->dom, [this](int w) {
+        if (w > 0) st_.nav_width = w;
+      });
+    } else if (navbar && navbar->dom.valid()) {
+      dom_.bind_nav_splitter(navbar->dom, Node{0}, nullptr);
     }
     // document-level keys (Escape dismisses transient overlays)
     dom_.bind_global_key([this](const std::string& key) {
@@ -1391,6 +1458,9 @@ void UiApp::render() {
       term_focus_pending_ = false;
       if (term && term->dom.valid()) dom_.focus(term->dom);
     }
+    // drop exit-animated nodes whose animation has finished (they are no longer
+    // part of the tree, so nothing else would ever remove them)
+    sweep_exits(dom_, now_ms());
   } while (render_pending_);
   render_in_progress_ = false;
 }
@@ -1435,17 +1505,42 @@ VNodePtr UiApp::build_shell() {
   // 是整窗的东西（外观、标签位置、语言），标签栏在它旁边既没用又会诱导用户
   // 以为还能切走。所以这里直接跳过标签条，让设置占满整个窗口。
   if (st_.modal_page == "settings") {
-    VNodePtr page = build_settings();
-    page->key = "page:settings";
-    add_anim(page, page_anim_for("settings") ? page_anim_for("settings")
-                                             : anim::kView);
-    page->anim_key = "settings";
-    win.add(page);
+    win.add(build_page_slot());
     win.add(build_overlays());
     return win.get();
   }
 
   // ---- top tab strip ----
+  // 标签位置=左侧时，标签条不再是一排可关闭的工作标签，而是"项目导航栏"：
+  // 按项目列出全部会话（见 build_nav_rail）。两者是两种不同的导航模式，不能
+  // 混用——所以这里按设置二选一，而不是把同一排标签竖过来。
+  const bool left_tabs = sv_str(st_.settings_values, "ui.tabs", "top") == "left";
+  if (left_tabs) {
+    H row = el("div", "nav-row");
+    row.key("nav-row");
+    if (!st_.nav_collapsed) {
+      row.add(build_nav_rail());
+      H navsplit = el("div", "nav-splitter");
+      navsplit.key("nav-splitter");
+      row.add(navsplit);
+    } else {
+      // 最小化：只留一条窄条，一个展开按钮。项目导航仍然"在"，只是收起。
+      H mini = el("div", "nav-mini");
+      mini.key("nav-mini");
+      mini.add(comp::icon_button("chevron-right", tr("展开项目栏"), [this](const std::string&) {
+        update([&](AppState& s) { s.nav_collapsed = false; });
+      }));
+      row.add(mini);
+    }
+    H col = el("div", "nav-main");
+    col.key("nav-main");
+    col.add(build_page_slot());
+    row.add(col);
+    win.add(row);
+    win.add(build_overlays());
+    return win.get();
+  }
+
   std::vector<TabSpec> tabs;
   for (size_t i = 0; i < st_.tab_ids.size(); ++i) {
     const std::string& id = st_.tab_ids[i];
@@ -1471,6 +1566,7 @@ VNodePtr UiApp::build_shell() {
       [this](const std::string& k) { show(k); },
       [this](const std::string& k) { close_tab(k); },
       [this](const std::string&) { open_new_tab(); });
+  strip.key("top-tabs");
   // 侧栏开关放在标签条最右端：这是"整窗"级别的控制，属于标题栏区域，而不是
   // 夹在会话内容中间的那条细缝。原来只有分隔条上那个小箭头，太难点。
   if (st_.active_tab != "home") {
@@ -1493,6 +1589,14 @@ VNodePtr UiApp::build_shell() {
   // A modal page (设置 / 新建) covers whatever tab is underneath instead of
   // becoming a tab of its own: it is opened, used, and closed, and having it in
   // the strip (and in the visit stack) made closing tabs fall back into settings.
+  win.add(build_page_slot());
+  win.add(build_overlays());
+  return win.get();
+}
+
+// The page area is its own slot: a leaving page is positioned absolutely INSIDE
+// it for the two-view transition, so it must not cover the tab strip.
+VNodePtr UiApp::build_page_slot() {
   std::string page_id;
   VNodePtr page;
   if (st_.modal_page == "settings") {
@@ -1526,15 +1630,99 @@ VNodePtr UiApp::build_shell() {
     pg_anim = (page_dir_ == "-1") ? anim::kSlideRight : anim::kSlideLeft;
   }
   add_anim(page, pg_anim ? pg_anim : anim::kView);
+  // 模态页（设置/新建）没有"前进/后退"的方向，淡出即可；普通标签页朝导航
+  // 相反方向滑出。
+  page->exit_anim = (page_id == "settings" || page_id == "new")
+                        ? anim::kExitFade
+                        : ((page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft);
   {
     std::string token = page_id;
     if (page_id == "session" && st_.session_loaded) token += ":loaded";
     page->anim_key = token;
   }
-  win.add(page);
-  win.add(build_overlays());
-  return win.get();
+  H slot = el("div", "page-slot");
+  slot.key("page-slot");
+  slot.add(page);
+  return slot.get();
 }
+// ===========================================================================
+// 左侧栏模式：项目导航
+// ===========================================================================
+// 这不是"竖过来的标签条"。顶栏模式的标签是一个可以关掉的工作集；左侧栏是
+// 导航：永远按项目列出全部会话（和主页·项目一致），点一个就打开，不关闭、
+// 不入工作集、不因为开得多而变长。宽度独立（可拖拽），可最小化成一条窄条。
+VNodePtr UiApp::build_nav_rail() {
+  H rail = el("div", "nav-rail");
+  rail.key("nav-rail");
+  rail.style("width", itos(st_.nav_width) + "px");
+  rail.style("flex", "0 0 auto");
+
+  H head = el("div", "nav-head");
+  head.add(el("span", "nav-title").text(tr("项目")));
+  head.add(el("span", "grow"));
+  // 新会话：在最近活跃的项目里建（没有项目时禁用）
+  head.add(comp::icon_button("square-plus", tr("新建会话"), [this](const std::string&) {
+    if (st_.projects.empty()) {
+      toast(tr("先打开一个项目"));
+      return;
+    }
+    new_session_in_project(st_.projects[0].pid);
+  }));
+  head.add(comp::icon_button("chevron-left", tr("收起侧栏"), [this](const std::string&) {
+    update([&](AppState& s) { s.nav_collapsed = true; });
+  }));
+  rail.add(head);
+
+  H body = el("div", "nav-body");
+  if (st_.projects.empty()) {
+    body.add(comp::empty_state(tr("还没有项目。"), tr("打开文件夹"),
+                               [this](const std::string&) { pick_and_open_folder(); }));
+  }
+  for (size_t i = 0; i < st_.projects.size(); ++i) {
+    const ProjectCard& p = st_.projects[i];
+    H grp = el("div", "nav-proj");
+    H ph = el("div", "nav-proj-head");
+    ph.add(el("span", "nav-proj-mono").text(
+        p.name.empty() ? "?" : p.name.substr(0, p.name.size() > 1 ? 2 : 1)));
+    ph.add(el("span", "nav-proj-name").text(p.name));
+    std::string pid = p.pid;
+    H plus = comp::icon_button("square-plus", tr("在这个项目里新建会话"),
+                               [this, pid](const std::string&) {
+      new_session_in_project(pid);
+    });
+    plus.cls("nav-proj-add");
+    ph.add(plus);
+    grp.add(ph);
+    for (size_t k = 0; k < p.sessions.size(); ++k) {
+      const ProjectCard::SessionRow& s = p.sessions[k];
+      std::string sid = s.sid;
+      std::string title = s.title;
+      H row = el("div", s.sid == st_.active_tab ? "nav-session active" : "nav-session");
+      row.on(EventKind::kClick, [this, sid, title](const std::string&) {
+        open_session(sid, title);
+      });
+      row.add(el("span", s.running ? "nav-dot running" : "nav-dot"));
+      row.add(el("span", "nav-session-title").text(s.title));
+      grp.add(row);
+    }
+    if (p.sessions.empty()) {
+      grp.add(el("div", "nav-empty").text(tr("暂无会话")));
+    }
+    body.add(grp);
+  }
+  rail.add(body);
+
+  H foot = el("div", "nav-foot");
+  foot.add(comp::button(tr("打开文件夹"), [this](const std::string&) {
+    pick_and_open_folder();
+  }, "ghost"));
+  foot.add(comp::icon_button("gear", tr("设置"), [this](const std::string&) {
+    open_modal_page("settings");
+  }));
+  rail.add(foot);
+  return rail.get();
+}
+
 // ===========================================================================
 // Home
 // ===========================================================================
@@ -1550,7 +1738,12 @@ VNodePtr UiApp::build_home() {
   head.add(comp::title_tabs(items, st_.home_tab, [this](const std::string& v) {
     int idx = std::atoi(v.c_str());
     update([&](AppState& s) { s.home_tab = idx; });
-    if (idx == 2 && !st_.usage_loaded) load_usage();
+    if (idx == 2) {
+      // 用量页要显示"按供应商"的范围列表：那来自 provider.listProviders，
+      // 以前只有打开过设置或模型选择器才会加载，所以第一次进用量页左侧是空的。
+      if (!st_.providers_loaded) load_providers();
+      if (!st_.usage_loaded) load_usage();
+    }
   }));
   wrap.add(head);
 
@@ -1567,6 +1760,10 @@ VNodePtr UiApp::build_home() {
       break;
     }
     case 2: {
+      // Directly opening the page (home_tab=2 restored / tests) must load the
+      // same data the tab click does: providers (the left scope list) and usage.
+      if (!st_.providers_loaded) load_providers();
+      if (!st_.usage_loaded) load_usage();
       VNodePtr p = build_home_usage();
       p->key = "home:usage";
       body.add(p);
@@ -2630,10 +2827,14 @@ VNodePtr UiApp::build_side_panel() {
   }
 
   H body = el("div", "side-body");
-  std::string kind = "usage";
+  // 侧栏面板内容按面板 key 化：切换面板时整块重新创建并播放进场动画。原来
+  // body 是一个无 key 的稳定节点，切换只是原地换字，看起来像"闪了一下"。
+  body.key("side-body:" + st_.active_side);
+  body.anim(anim::kEnter).anim_key("side:" + st_.active_side);
   // The active panel, so each panel can read ITS OWN state (two file panels sit
   // in two different directories; sharing one set of fields would make them
   // fight over it).
+  std::string kind = "usage";
   const SideTab* panel = nullptr;
   for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
     if (st_.side_tabs[i].id == st_.active_side) {
@@ -3137,17 +3338,6 @@ int sv_int(const Json& vals, const std::string& key, int def) {
   return def;
 }
 
-std::string sv_str(const Json& vals, const std::string& key,
-                   const std::string& def) {
-  if (!vals.is_object() || !vals.contains(key)) return def;
-  const Json& v = vals[key];
-  if (v.is_string()) return v.get<std::string>();
-  if (v.is_object() && v.contains("value") && v["value"].is_string()) {
-    return v["value"].get<std::string>();
-  }
-  return def;
-}
-
 // settings values arrive either bare or wrapped as {value, source}; return the
 // inner value object for map-typed settings (empty object when absent).
 Json sv_obj(const Json& vals, const std::string& key) {
@@ -3202,6 +3392,7 @@ void UiApp::apply_settings(const Json& values) {
   } else if (values.is_object()) {
     st_.settings_values = values;
   }
+  apply_saved_tab_order();
   // thinking language is host-side too
   std::string lang = sv_str(st_.settings_values, "model.thinkingLang", "");
   if (!lang.empty()) st_.thinking_lang = lang;
@@ -3513,8 +3704,6 @@ VNodePtr UiApp::build_settings() {
         // 预填的一条普通头（x-opencode-session: {{SESSION}}），后端把
         // {{SESSION}} 换成会话 id。这样 Azure 的 api-key 和 opencode 的亲和头
         // 走的是同一条路径，没有"某种供应商才有的隐藏开关"。
-        abody.add(comp::hint(
-            tr("{{SESSION}} 会被替换成当前会话 id（opencode 系端点需要）")));
         for (size_t i = 0; i < st_.pv_headers.size(); ++i) {
           H row = el("div", "settings-row");
           row.add(el("span", "sr-name").text(st_.pv_headers[i].first));
@@ -3543,10 +3732,17 @@ VNodePtr UiApp::build_settings() {
         abody.add(addh);
         // 自定义 body：浅合并进默认请求体。有些网关要求供应商特有的字段，
         // 没有这个就只能改代码。
-        abody.add(comp::field(tr("请求体覆盖（JSON）"), comp::textarea(
+        //
+        // 标题与输入框上下排：这个字段的标签和提示都长，左右排会把输入框挤成
+        // 一条细缝（JSON 需要宽度，不是高度）。所以它不用 .field，而是自己
+        // 的竖排块。
+        H bodyfield = el("div", "pv-body-field");
+        bodyfield.add(el("div", "pv-body-label").text(tr("请求体覆盖（JSON）")));
+        bodyfield.add(comp::textarea(
             st_.pv_body_text, tr("{\"key\": \"value\"}"), [this](const std::string& v) {
           st_.pv_body_text = v;
-        }, nullptr), tr("与默认请求体浅合并；留空 = 不改")));
+        }, nullptr));
+        abody.add(bodyfield);
         adv.add(abody);
       }
       form.add(adv);
@@ -4184,8 +4380,9 @@ VNodePtr UiApp::build_settings() {
     body.add(comp::section_title(tr("长期记忆")));
     body.add(comp::hint(tr("模型在对话中自行记下的提醒；你可以编辑或删除")));
     if (st_.long_memory.empty()) {
-      body.add(comp::empty_state(tr("还没有记忆条目。模型记下提醒后会出现在这里。"),
-                                 "", nullptr));
+      // 空状态不再带一句解释文字：上面那行 hint 已经把这件事说清楚了，
+      // 两句"还没有…"叠在一起只是噪音。
+      body.add(comp::empty_state(tr(""), "", nullptr));
     }
     for (size_t i = 0; i < st_.long_memory.size(); ++i) {
       H card = el("div", "note-card");
@@ -4377,9 +4574,23 @@ VNodePtr UiApp::build_settings() {
       o.desc = tr("新会话沿用上一次会话的选择");
       perms.push_back(o);
       body.add(comp::section_title(tr("文件权限")));
-      body.add(comp::choice_list(
-          perms, sv_str(st_.settings_values, "session.default.filePerm", "permissive"),
-          [this](const std::string& v) { set_setting("session.default.filePerm", v); }));
+      // The stored value is the LEVEL; "记住上次" is a separate flag. Reading the
+      // level back directly meant picking 记忆上次 wrote the literal string
+      // "remember" into a permission field and the next render could not match
+      // any option, so the choice never showed as selected.
+      std::string perm_sel = sv_bool(st_.settings_values,
+                                     "session.default.filePermRemember", false)
+                                 ? "remember"
+                                 : sv_str(st_.settings_values,
+                                          "session.default.filePerm", "permissive");
+      body.add(comp::choice_list(perms, perm_sel, [this](const std::string& v) {
+        if (v == "remember") {
+          set_setting("session.default.filePermRemember", true);
+          return;
+        }
+        set_setting("session.default.filePermRemember", false);
+        set_setting("session.default.filePerm", v);
+      }));
     }
     // 自动模式：同样三态 + 记忆，语义和文件权限一致。
     {
@@ -4401,9 +4612,14 @@ VNodePtr UiApp::build_settings() {
       o.desc = tr("新会话沿用上一次会话的选择");
       modes.push_back(o);
       body.add(comp::section_title(tr("自动模式")));
+      // Same split as 文件权限: the mode is one setting, "记住上次" is a flag.
+      // Reading the flag as a mode made the selected option impossible to match.
       std::string cur_auto =
-          sv_bool(st_.settings_values, "session.default.autoMode", false) ? "auto"
-                                                                         : "manual";
+          sv_bool(st_.settings_values, "session.default.autoModeRemember", false)
+              ? "remember"
+              : (sv_bool(st_.settings_values, "session.default.autoMode", false)
+                     ? "auto"
+                     : "manual");
       body.add(comp::choice_list(modes, cur_auto, [this](const std::string& v) {
         if (v == "remember") {
           set_setting("session.default.autoModeRemember", true);
@@ -6295,6 +6511,66 @@ void UiApp::close_tab(const std::string& id) {
     if (last_session_key_ == id) last_session_key_.clear();
     switch_tab(next, -1);  // closing always retraces: animate as a "back"
   }
+}
+
+// 拖动标签调换顺序：把 from 移到 to 原来的位置（其余标签相对顺序不变）。
+// 主页固定在第一位——它不是工作标签，而是一个入口。
+// 按设置里的 ui.tabOrder 重排已打开的标签：用户的排列是持久化的安排，重启后
+// 新开同一个会话应当回到原来的位置。未知 id 保持原顺序排在后面，主页永远第一。
+void UiApp::apply_saved_tab_order() {
+  if (!st_.settings_values.is_object() ||
+      !st_.settings_values.contains("ui.tabOrder")) {
+    return;
+  }
+  const Json& raw = st_.settings_values["ui.tabOrder"];
+  Json order = (raw.is_object() && raw.contains("value")) ? raw["value"] : raw;
+  if (order.is_array()) {
+    std::vector<std::string> out;
+    out.push_back("home");
+    for (size_t i = 0; i < order.size(); ++i) {
+      if (!order[i].is_string()) continue;
+      std::string id = order[i].get<std::string>();
+      if (id == "home") continue;
+      for (size_t k = 0; k < st_.tab_ids.size(); ++k) {
+        if (st_.tab_ids[k] == id) {
+          bool dup = false;
+          for (size_t j = 0; j < out.size(); ++j) if (out[j] == id) dup = true;
+          if (!dup) out.push_back(id);
+        }
+      }
+    }
+    for (size_t k = 0; k < st_.tab_ids.size(); ++k) {
+      bool known = false;
+      for (size_t j = 0; j < out.size(); ++j) if (out[j] == st_.tab_ids[k]) known = true;
+      if (!known) out.push_back(st_.tab_ids[k]);
+    }
+    st_.tab_ids = out;
+  }
+}
+
+void UiApp::move_tab(const std::string& from, const std::string& to) {
+  if (from.empty() || to.empty() || from == to) return;
+  if (from == "home" || to == "home") return;
+  update([&](AppState& s) {
+    int fi = -1, ti = -1;
+    for (size_t i = 0; i < s.tab_ids.size(); ++i) {
+      if (s.tab_ids[i] == from) fi = static_cast<int>(i);
+      if (s.tab_ids[i] == to) ti = static_cast<int>(i);
+    }
+    if (fi < 0 || ti < 0) return;
+    std::string moved = s.tab_ids[fi];
+    s.tab_ids.erase(s.tab_ids.begin() + fi);
+    // recompute after the erase: indices shift when moving left -> right
+    int insert = ti;
+    if (fi < ti) insert = ti - 1;
+    if (insert < 0) insert = 0;
+    if (insert > static_cast<int>(s.tab_ids.size())) insert = static_cast<int>(s.tab_ids.size());
+    s.tab_ids.insert(s.tab_ids.begin() + insert, moved);
+  });
+  // 顺序是用户的安排，重启后应当还在：写回设置。
+  Json order = Json::array();
+  for (size_t i = 0; i < st_.tab_ids.size(); ++i) order.push_back(st_.tab_ids[i]);
+  set_setting("ui.tabOrder", order);
 }
 
 void UiApp::open_or_focus_side_tab(const std::string& kind) {

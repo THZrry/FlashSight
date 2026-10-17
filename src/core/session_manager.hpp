@@ -83,6 +83,9 @@ class SessionManager {
   LockArbiter locks_;
   // 会话 → 项目 pid 缓存（未命中时会回查项目注册表并在此登记）
   mutable std::map<std::string, std::string> sid_pid_;
+  // "记忆上次"：最近一次会话里用户手动选过的自动挡/权限。只在没有显式默认
+  // 时用于新会话。写在 settings 的 session.last.autoMode / session.last.filePerm。
+  void remember_last_session_choice(const std::string& sid);
   // 权限升级确认令牌
   std::map<std::string, std::string> upgrade_tokens_;
 

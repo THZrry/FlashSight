@@ -26,6 +26,9 @@ const char* const kFade = "fade";
 const char* const kSlideLeft = "slide-left";
 const char* const kSlideRight = "slide-right";
 const char* const kDrawer = "drawer";
+const char* const kExitLeft = "exit-left";
+const char* const kExitRight = "exit-right";
+const char* const kExitFade = "exit-fade";
 
 namespace {
 struct Entry {
@@ -41,6 +44,9 @@ const Entry kTable[] = {
     {kSlideLeft, "anim-slide-left"},
     {kSlideRight, "anim-slide-right"},
     {kDrawer, "anim-drawer"},
+    {kExitLeft, "anim-exit-left"},
+    {kExitRight, "anim-exit-right"},
+    {kExitFade, "anim-exit-fade"},
 };
 const int kCount = static_cast<int>(sizeof(kTable) / sizeof(kTable[0]));
 }  // namespace
@@ -64,6 +70,135 @@ const std::vector<std::string>& all() {
 }
 
 }  // namespace anim
+
+// ---------------- exit animations ----------------
+// A node that leaves the tree does not have to vanish: when it declares an exit
+// intent (or is a row/card that entered with one) its DOM is kept alive for one
+// short animation while the incoming tree is already mounted beside it. That is
+// the "two views" transition: each side owns its own elements and plays its own
+// animation, instead of one set of elements receiving both at once.
+namespace {
+
+struct PendingExit {
+  IDom* dom;
+  Node node;
+  int64_t deadline_ms;  // 0 = not stamped yet (the sweep stamps it)
+  int64_t ttl_ms;
+};
+
+std::vector<PendingExit>& pending_exits() {
+  static std::vector<PendingExit> v;
+  return v;
+}
+
+std::string class_attr_of(const VNode& n) {
+  for (size_t i = 0; i < n.attrs.size(); ++i) {
+    if (n.attrs[i].key == "class") return n.attrs[i].value;
+  }
+  return std::string();
+}
+
+// Remove every `anim-*` token from a class list. A node that is leaving must not
+// keep its MOUNT animation class: otherwise the browser runs the entrance and
+// the exit on the same element at once, which is exactly the "one element, two
+// animations" artefact the two-view transition is meant to avoid.
+std::string without_anim_classes(const std::string& cls) {
+  std::string out;
+  size_t i = 0;
+  while (i < cls.size()) {
+    size_t e = cls.find(' ', i);
+    if (e == std::string::npos) e = cls.size();
+    std::string tok = cls.substr(i, e - i);
+    if (!tok.empty() && tok.compare(0, 5, "anim-") != 0) {
+      if (!out.empty()) out += " ";
+      out += tok;
+    }
+    i = e + 1;
+  }
+  return out;
+}
+
+bool has_visual_class(const std::string& cls) {
+  static const char* kVisual[] = {
+      "proj-card", "proj-session", "settings-row", "file-row", "subagent-card",
+      "msg", "side-add-card", "pv-item", "note-card", "explore-row", "choice",
+      "pv-tpl", "md-row", "plan-step", "td-all-item", "ts-row", "ub-row",
+      "usage-chart", "scope", "att-chip", "call-row", "op-row", "term-row",
+      "side-panel", "tab", "ptab", "model-picker"};
+  std::string padded = " " + cls + " ";
+  for (size_t i = 0; i < sizeof(kVisual) / sizeof(kVisual[0]); ++i) {
+    std::string needle = std::string(" ") + kVisual[i] + " ";
+    if (padded.find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
+bool is_page_class(const std::string& cls) {
+  return (" " + cls + " ").find(" page ") != std::string::npos;
+}
+
+void start_exit(IDom& dom, const VNodePtr& oldv) {
+  if (!oldv || !oldv->dom.valid()) return;
+  // A backend without animations removes immediately: keeping a node that no
+  // longer belongs to the tree would just leak it.
+  if (!dom.supports_exit_animations()) {
+    dom.remove(oldv->dom);
+    return;
+  }
+  std::string cls = class_attr_of(*oldv);
+  bool page = is_page_class(cls);
+  std::string intent = oldv->exit_anim;
+  if (intent.empty()) {
+    // Rows, cards and popovers leave with a short fade; a whole page fades too
+    // (its direction comes from the caller's explicit exit intent).
+    if (oldv->anim == anim::kEnter || oldv->anim == anim::kList ||
+        oldv->anim == anim::kPop || oldv->anim == anim::kDrawer ||
+        has_visual_class(cls) || page) {
+      intent = anim::kExitFade;
+    }
+  }
+  std::string anim_cls = anim::css_class(intent);
+  if (anim_cls.empty()) {
+    dom.remove(oldv->dom);
+    return;
+  }
+  if (intent == anim::kExitLeft || intent == anim::kExitRight) page = true;
+  std::string c = without_anim_classes(cls);
+  if (!c.empty()) c += " ";
+  c += page ? "page-exit " : "exiting ";
+  c += anim_cls;
+  dom.set_attr(oldv->dom, "class", c);
+  dom.play_animation(oldv->dom, anim_cls);
+  PendingExit p;
+  p.dom = &dom;
+  p.node = oldv->dom;
+  p.deadline_ms = 0;
+  p.ttl_ms = page ? 240 : 180;
+  pending_exits().push_back(p);
+}
+
+}  // namespace
+
+void sweep_exits(IDom& dom, int64_t now_ms) {
+  std::vector<PendingExit>& v = pending_exits();
+  for (size_t i = 0; i < v.size();) {
+    if (v[i].dom != &dom) {
+      ++i;
+      continue;
+    }
+    if (v[i].deadline_ms == 0) {
+      v[i].deadline_ms = now_ms + v[i].ttl_ms;
+      ++i;
+      continue;
+    }
+    if (now_ms >= v[i].deadline_ms) {
+      dom.remove(v[i].node);
+      v.erase(v.begin() + static_cast<long>(i));
+    } else {
+      ++i;
+    }
+  }
+}
 
 void EventBus::retain(const std::vector<int>& keep) {
   std::vector<int> sorted = keep;
@@ -271,8 +406,12 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
 
   // 2) current DOM order = old children that still have live nodes
   std::vector<Node> cur;
+  std::vector<VNodePtr> cur_nodes;  // same order as `cur`, for exit intents
   for (size_t i = 0; i < oldv->children.size(); ++i) {
-    if (oldv->children[i]->dom.valid()) cur.push_back(oldv->children[i]->dom);
+    if (oldv->children[i]->dom.valid()) {
+      cur.push_back(oldv->children[i]->dom);
+      cur_nodes.push_back(oldv->children[i]);
+    }
   }
 
   // 3) drop nodes no longer wanted
@@ -288,7 +427,9 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
     if (keep) {
       live.push_back(cur[i]);
     } else {
-      dom.remove(cur[i]);
+      // A dropped child plays its exit animation first (see start_exit); the
+      // node stays in the DOM as an overlay until sweep_exits() removes it.
+      start_exit(dom, cur_nodes[i]);
     }
   }
 
@@ -347,11 +488,14 @@ void patch_node(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
 
 void patch(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu, Node parent) {
   if (!neu) {
-    if (oldv && oldv->dom.valid()) dom.remove(oldv->dom);
+    if (oldv && oldv->dom.valid()) start_exit(dom, oldv);
     return;
   }
   if (!oldv || !oldv->dom.valid() || !same_kind(*oldv, *neu)) {
-    if (oldv && oldv->dom.valid()) dom.remove(oldv->dom);
+    // A different kind of node cannot be patched in place. If the old one
+    // declared an exit it is kept as an overlay for one animation; otherwise it
+    // is simply replaced.
+    if (oldv && oldv->dom.valid()) start_exit(dom, oldv);
     if (neu->is_text()) {
       neu->dom = dom.create_text(neu->text);
     } else {

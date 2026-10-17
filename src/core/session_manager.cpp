@@ -100,8 +100,28 @@ FsResult SessionManager::new_session(const std::string& pid, const std::string& 
   if (proj_->settings()) {
     defaults["model"] = proj_->settings()->get_value(kKeyNewSessionModel, "");
     defaults["thinking"] = proj_->settings()->get_value(kKeyNewSessionThinking, "");
+    // 自动挡/权限支持"记忆上次"：记住上一次会话里的选择，新会话沿用。没有
+    // remember 标记时用显式默认值。
+    bool remember = false;
+    {
+      SettingValue sv = proj_->settings()->get("session.default.autoModeRemember");
+      if (sv.value.is_boolean()) remember = sv.value.get<bool>();
+    }
+    bool remember_perm = false;
+    {
+      SettingValue sv = proj_->settings()->get("session.default.filePermRemember");
+      if (sv.value.is_boolean()) remember_perm = sv.value.get<bool>();
+    }
     defaults["filePerm"] = proj_->settings()->get_value(kKeyNewSessionFilePerm, "permissive");
     defaults["autoMode"] = proj_->settings()->get_value(kKeyNewSessionAutoMode, false);
+    if (remember) {
+      SettingValue last_auto = proj_->settings()->get("session.last.autoMode");
+      if (last_auto.value.is_boolean()) defaults["autoMode"] = last_auto.value;
+    }
+    if (remember_perm) {
+      SettingValue last_perm = proj_->settings()->get("session.last.filePerm");
+      if (last_perm.value.is_string()) defaults["filePerm"] = last_perm.value;
+    }
     defaults["enterSend"] = proj_->settings()->get_value(kKeyNewSessionEnterSend, "enter");
   }
   Json ss = default_session_settings(defaults);
@@ -260,10 +280,31 @@ FsResult SessionManager::set_permission(const std::string& sid, const std::strin
   if (!file_perm_from_str(perm, &fp)) {
     return FsResult::error(ErrCode::kInvalidArg, "bad filePerm: " + perm);
   }
-  return update_session_settings(sid, Json{{"filePerm", perm}});
+  FsResult r = update_session_settings(sid, Json{{"filePerm", perm}});
+  if (r.ok()) remember_last_session_choice(sid);
+  return r;
 }
 FsResult SessionManager::set_auto_mode(const std::string& sid, bool auto_mode) {
-  return update_session_settings(sid, Json{{"autoMode", auto_mode}});
+  FsResult r = update_session_settings(sid, Json{{"autoMode", auto_mode}});
+  if (r.ok()) remember_last_session_choice(sid);
+  return r;
+}
+
+// "记忆上次" 的数据来源：用户在某次会话里真正切换过自动挡/权限，就把这一对
+// 值记成"上一次的选择"。新会话在 session.default.autoModeRemember=true 且没有
+// 显式默认时读它。写 settings 失败不影响会话本身（这只是给下一次用的提示）。
+void SessionManager::remember_last_session_choice(const std::string& sid) {
+  if (!proj_->settings()) return;
+  Json full;
+  if (!load_full(sid, &full).ok()) return;
+  Json ss = full.value("sessionSettings", Json::object());
+  if (ss.contains("autoMode")) {
+    proj_->settings()->set_global("session.last.autoMode", ss["autoMode"]);
+  }
+  if (ss.contains("filePerm")) {
+    proj_->settings()->set_global("session.last.filePerm", ss["filePerm"]);
+  }
+  proj_->settings()->save_global();
 }
 FsResult SessionManager::set_enter_send(const std::string& sid, const std::string& enter_send) {
   enter_send_from_str(enter_send, EnterSend::kEnter);
