@@ -63,18 +63,34 @@ ghc::filesystem::path resolve_any(const std::string& cwd, const std::string& rel
   return pathutil::normalize(pathutil::normalize(cwd) / rel);
 }
 
-// 按权限档解析路径：full -> 项目内外皆可；其余 -> 仅项目内
+// Is this path outside the project root? The three permission levels are
+// defined in terms of this: 宽松 (permissive) allows everything INSIDE the
+// project without asking and asks before touching anything outside it.
+bool escapes_project(const std::string& cwd, const std::string& rel) {
+  ghc::filesystem::path base = pathutil::normalize(cwd);
+  if (base.empty()) return false;
+  ghc::filesystem::path raw(rel);
+  ghc::filesystem::path p = raw.is_absolute()
+                                ? pathutil::normalize(raw)
+                                : pathutil::normalize(base / rel);
+  return !pathutil::is_within(p, base) && p != base;
+}
+
+// 按权限档解析路径：full 或"本次已批准" -> 项目内外皆可；其余 -> 仅项目内
 ghc::filesystem::path resolve_by_perm(const ToolContext& ctx, const std::string& rel) {
-  if (ctx.permission == "full") {
+  if (ctx.permission == "full" || ctx.approved) {
     ghc::filesystem::path p = resolve_any(ctx.cwd, rel);
     return p;
   }
   return resolve_in(ctx.cwd, rel);
 }
 
-// 写权限门（addon2 A4 + permissions.md）：approve 档需人工批准（由 Loop 权限门拦），
-// 这里做兜底：非 full 权限时拒绝绝对路径/项目外路径；full 允许项目外。
-// 另外所有档位都过黑白名单（黑名单 > 白名单 > 三档默认）。
+// 写权限门（addon2 A4 + permissions.md）。
+//   approve     : 每次都问（由 Loop 的权限门拦；这里只兜底）
+//   permissive  : 项目内直接写；项目外（绝对路径 / 其他目录）需要批准
+//   full        : 不拦
+// 批准过的这一次（ctx.approved）直接放行，否则"问完还拒绝"比不问更糟。
+// 所有档位都过黑白名单（黑名单 > 白名单 > 三档默认）。
 FsResult check_write_perm(const ToolContext& ctx, const ghc::filesystem::path& p,
                           const std::string& rel) {
   if (ctx.deny_check) {
@@ -84,12 +100,12 @@ FsResult check_write_perm(const ToolContext& ctx, const ghc::filesystem::path& p
     }
   }
   if (ctx.permission == "full") return FsResult::success();
-  ghc::filesystem::path raw(rel);
-  if (raw.is_absolute()) {
-    return FsResult::deny("approve", "absolute path requires full permission");
-  }
-  (void)p;
-  return FsResult::success();
+  if (ctx.approved) return FsResult::success();
+  if (!escapes_project(ctx.cwd, rel)) return FsResult::success();
+  // 项目外：approve 档与 permissive 档都需要用户点头。deny("approve", ...)
+  // 就是 Loop 用来判定"要不要走权限门"的信号。
+  return FsResult::deny("approve",
+                        "path is outside the project; ask the user before writing");
 }
 
 // 写入噪声检测（addon2）：命中则拒绝写盘并提示模型重检查
@@ -182,7 +198,7 @@ void register_file_tools(ToolRegistry* registry) {
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         std::string rel = jsonutil::get<std::string>(args, "path", ".");
         bool detail = jsonutil::get<bool>(args, "detail", false);
-        ghc::filesystem::path p = resolve_in(ctx.cwd, rel);
+        ghc::filesystem::path p = resolve_by_perm(ctx, rel);
         if (p.empty()) return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
         std::error_code ec;
         if (!ghc::filesystem::exists(p, ec) || !ghc::filesystem::is_directory(p, ec)) {

@@ -1036,3 +1036,29 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 文件权限的"记忆上次"也用独立标记（`session.default.filePermRemember`），
     新会话按各自开关分别沿用 `session.last.autoMode` / `session.last.filePerm`。
   - 204 用例 / 1878 断言。
+
+<48>(SOLVED): 动画节奏、权限语义、新建页位置、左栏导航、i18n 补齐、拖拽反馈。
+  - **动画错开（双 view 的节奏）**：离场与入场同时开始会让两页交错，看着乱。
+    现在入场页加 `.page-stagger`（`animation-delay: .18s` + `backwards`，等待
+    期间保持不可见），旧页 `.22s` 退到 ~80% 时新页才开始进。页面入场也从
+    `translateY(10px)` 改成原地 `scale(.996)`——"从最底下升上来"不是切页的语义。
+  - **新建页不再覆盖标签栏**：只有设置是整窗 `modal-layer`；"新建"回到 page-slot
+    里（标签栏照常可见可点）。左栏模式下没有标签条，所以导航顶部加了"新建"
+    （打开同一个新建页）与"主页"入口。
+  - **文件权限语义（后端）**：`AgentLoop::needs_approval` 按档位判定——
+    approve=所有写/删/网络/终端都问；permissive=项目内直接放行，项目外路径/
+    终端/网络要问；full=不问。`ToolContext::approved` 让"批准过的这一次"真的
+    放行（否则问完还拒绝）。`file_tools` 的写门也按"是否逃出项目"判定，
+    `file.ls` 走 `resolve_by_perm`。`AgentHost::loop_for` 现在从 full.json 的
+    meta 读 cwd/pid（之前 Loop 的 cwd 是空的，项目内外根本无从判断）。
+    三档图标也分开：逐次批准=手、宽松=文件夹、完全放行=闪电。
+  - **i18n 补齐**：新增 ~295 条英文条目，并把 `ui_app.cpp` 里 200+ 处直接写死的
+    中文（`.text()`/`button`/`field`/`hint`/`empty_state`/`title`/`toast`）包进
+    `tr()`；`ui_components.cpp` 也接上 i18n（复制/本轮要点）；相对时间、会话
+    标题前缀、用量范围标签、主页标题按钮都走 tr。扫描脚本确认剩余未翻译项只有
+    动态拼接的片段。
+  - **标签拖动反馈**：拖动超过 4px 才进入拖拽（避免把点击当拖动），被拖标签
+    变淡、跟随光标的浮动副本、落点标签高亮；拖动结束吞掉随后的 click。
+  - **构建流程坑**：`emcc` 不在 PATH 时 `fs_ui_wasm` 会被静默跳过，浏览器里
+    一直是旧 UI。构建前需 `set PATH=C:\Program Files\emscripten\emscripten;%PATH%`。
+  - 205 用例 / 1888 断言（新增 `loop_permission_levels`）。

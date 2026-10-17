@@ -3,6 +3,7 @@
 
 #include <cstdio>
 
+#include "fs_i18n.hpp"
 #include "icon_tables_gen.hpp"
 
 namespace fs {
@@ -10,6 +11,11 @@ namespace ui {
 namespace comp {
 
 namespace {
+
+// UI strings go through the shared table: Chinese is the key, English is looked
+// up. Components are built by the app layer too, so they need the same treatment
+// as the page builders (otherwise a button label stays Chinese in an English UI).
+std::string tr(const std::string& zh) { return i18n::tr(zh); }
 
 // small helpers -------------------------------------------------------------
 
@@ -520,9 +526,8 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle) {
   if (!m.time.empty()) meta.add(el("span", "time").text(m.time));
   H cp = el("button", "mini-btn");
   cp.attr("type", "button");
-  cp.text("复制");
-  cp.on(EventKind::kClick, on_copy);
-  meta.add(cp);
+  cp.text(tr("复制"));
+  cp.on(EventKind::kClick, on_copy);  meta.add(cp);
   wrap.add(meta);
   return wrap;
 }
@@ -547,7 +552,7 @@ H tool_block(const ToolBlock& b, EventFn on_toggle) {
 H turn_summary(const std::string& text) {
   // not folded, no border
   H s = el("div", "turn-summary");
-  s.add(el("span", "ts-label").text("本轮要点"));
+  s.add(el("span", "ts-label").text(tr("本轮要点")));
   s.add(el("div", "ts-text").text(text));
   return s;
 }

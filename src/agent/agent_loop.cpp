@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "fs_path.hpp"
 #include "fs_simhash.hpp"
 
 namespace fs {
@@ -101,6 +102,38 @@ bool AgentLoop::is_high_risk(const std::string& tool) const {
          tool.rfind("terminal.", 0) == 0;
 }
 
+// 需要用户点头的动作，按权限档区分（用户明确要求的口径）：
+//   approve     : 所有写/删/网络/终端都要问
+//   permissive  : 项目内的写/删直接放行；**系统级操作**（项目外的文件读写、
+//                 起终端、发网络）要问
+//   full        : 不问
+// "项目内"的判定看工具参数里的 path：相对路径就在项目里，绝对路径且不在
+// 项目根下就是系统操作。
+bool AgentLoop::needs_approval(const std::string& tool, const Json& args) const {
+  if (opts_.permission == "full") return false;
+  if (tool.rfind("network.", 0) == 0 || tool.rfind("terminal.", 0) == 0) {
+    return true;  // 系统级：与档位无关（full 已提前返回）
+  }
+  bool write = tool.rfind("file.write", 0) == 0 ||
+               tool.rfind("file.diffWrite", 0) == 0 ||
+               tool.rfind("file.rm", 0) == 0;
+  if (!write) return false;
+  if (opts_.permission == "approve") return true;
+  // permissive：只对项目外（系统）路径询问。Resolve the path the same way the
+  // file tools do and compare it with the project root - checking
+  // `is_absolute()` alone misses rooted-but-drive-less paths and relative paths
+  // that walk out with "..".
+  std::string rel = jsonutil::get<std::string>(args, "path", "");
+  if (rel.empty()) return false;
+  ghc::filesystem::path base = pathutil::normalize(opts_.cwd);
+  if (base.empty()) return false;
+  ghc::filesystem::path raw(rel);
+  ghc::filesystem::path p = raw.is_absolute()
+                                ? pathutil::normalize(raw)
+                                : pathutil::normalize(base / rel);
+  return !pathutil::is_within(p, base) && p != base;
+}
+
 // 自动模式不确定上下文：高风险降级 deferred（agent-loop.md 3）
 bool AgentLoop::should_deferred(const std::string& tool) const {
   // v1：自动模式下高风险工具且无用户确认标记 → deferred
@@ -190,7 +223,8 @@ FsResult AgentLoop::handle_tool_call(const Json& call) {
 
   // 自动模式：ask 已被移除；高风险降级 deferred（agent-loop.md 3）
   bool auto_mode = jsonutil::get<bool>(opts_.history.env, "autoMode", false);
-  if (auto_mode && is_high_risk(name)) {
+  bool ask = needs_approval(name, args);
+  if (auto_mode && ask) {
     // 自动模式高风险：deferred，等待用户（手动模式才等批准；自动模式下发 permission.prompt 事件）
     state_ = LoopState::kWaiting;
     pending_tool_ = name;
@@ -198,8 +232,8 @@ FsResult AgentLoop::handle_tool_call(const Json& call) {
     emit("permission.prompt", Json{{"tool", name}, {"args", args}});
     return FsResult::success();
   }
-  // 手动模式：approve 档才等批准；这里 v1 统一等批准（简化为 wait）
-  if (!auto_mode && is_high_risk(name)) {
+  // 手动模式：按档位决定要不要等批准（approve 全问；permissive 只问系统操作）
+  if (!auto_mode && ask) {
     state_ = LoopState::kWaiting;
     pending_tool_ = name;
     pending_args_ = args;
@@ -218,6 +252,10 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
   ctx.cwd = opts_.cwd;
   ctx.auto_mode = jsonutil::get<bool>(opts_.history.env, "autoMode", false);
   ctx.permission = opts_.permission;
+  // This call reached execute_tool either because it needed no approval or
+  // because the user just approved it - either way the permission gate must not
+  // ask again (a second refusal after "allow" is worse than never asking).
+  ctx.approved = true;
   ctx.thinking_lang = opts_.thinking_lang;
   ctx.emit = [this](const std::string& e, const Json& p) { emit(e, p); };
   // 进程（todo）/invoke_tool 由 Host 注入的 invoke_tool 转发时补齐

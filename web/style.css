@@ -132,8 +132,11 @@
    prefers-reduced-motion turns the whole block off.
 */
 @keyframes anim-fade { from { opacity: 0; } to { opacity: 1; } }
+/* Page swaps fade/scale in place. A translateY here read as "the page is
+   sliding up from the bottom", which is not what a tab switch means; the
+   direction is carried by the slide-left/right variants instead. */
 @keyframes anim-view {
-  from { opacity: 0; transform: translateY(10px) scale(.995); }
+  from { opacity: 0; transform: scale(.996); }
   to   { opacity: 1; transform: none; }
 }
 @keyframes anim-enter {
@@ -163,8 +166,8 @@
 
 /* --- exit: the leaving half of a two-view transition ---
    The outgoing page/row keeps its own DOM for ~200ms and animates out while the
-   incoming subtree is already mounted. Pages are taken out of layout (absolute)
-   so the two can overlap instead of stacking; rows simply fade where they are. */
+   incoming subtree is mounted. Pages are taken out of layout (absolute) so the
+   two can overlap instead of stacking; rows simply fade where they are. */
 @keyframes anim-exit-left {
   from { opacity: 1; transform: none; }
   to   { opacity: 0; transform: translateX(-14px); }
@@ -186,9 +189,20 @@
 .anim-slide-left  { animation: anim-slide-left .16s ease-out; }
 .anim-slide-right { animation: anim-slide-right .16s ease-out; }
 .anim-drawer { animation: anim-drawer .16s cubic-bezier(.22,.61,.36,1); }
-.anim-exit-left  { animation: anim-exit-left .2s ease-in forwards; }
-.anim-exit-right { animation: anim-exit-right .2s ease-in forwards; }
+.anim-exit-left  { animation: anim-exit-left .22s ease-in forwards; }
+.anim-exit-right { animation: anim-exit-right .22s ease-in forwards; }
 .anim-exit-fade  { animation: anim-exit-fade .17s ease-in forwards; }
+
+/* --- stagger: the outgoing page gets a head start ---
+   Both halves used to start at t=0, so the two pages crossed each other and the
+   motion read as noise. The incoming page now waits until the outgoing one is
+   ~80% done (.18s of a .22s exit), so the eye follows one page out, then the
+   next one in. `backwards` keeps the incoming page invisible during the wait
+   (without it the page would sit fully drawn, then jump back to its start). */
+.page-stagger {
+  animation-delay: .18s;
+  animation-fill-mode: backwards;
+}
 /* A leaving page must not take part in layout any more (the new page is already
    there): pin it over the page area for the duration of its animation. */
 .page-exit {
@@ -294,6 +308,19 @@ html, body {
   border-bottom: 1px solid var(--border);
 }
 .nav-title { font-weight: 600; font-size: 12.5px; }
+/* 主页入口：左栏没有标签条，主页必须能从导航进去 */
+.nav-home {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  margin: 6px 6px 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.nav-home:hover { background: var(--hover); color: var(--text); }
+.nav-home.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.nav-home .fa { font-size: 12px; }
 .nav-head .icon-btn { width: 26px; height: 26px; }
 .nav-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 6px 12px; }
 .nav-proj { margin-top: 8px; }
@@ -443,6 +470,25 @@ html, body {
 }
 .tabs .tab.add:hover { background: var(--hover); color: var(--text); }
 .tabs .spacer { flex: 1; }
+
+/* --- tab drag: the dragged tab and its landing spot must be visible --- */
+.tabs .tab { cursor: grab; }
+.tabs .tab.dragging { opacity: .35; cursor: grabbing; }
+.tabs .tab.drop-target {
+  box-shadow: inset 2px 0 0 var(--accent), inset -2px 0 0 var(--accent);
+  background: var(--accent-soft);
+}
+/* the floating copy that follows the cursor while dragging */
+.tab-ghost {
+  position: fixed;
+  z-index: 90;
+  pointer-events: none;
+  opacity: .9;
+  transform: rotate(-1.5deg) scale(1.02);
+  box-shadow: var(--shadow-2);
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+}
 
 /* ============================ page ============================ */
 .page { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }

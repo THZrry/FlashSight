@@ -76,7 +76,7 @@ std::string read_asset(const char* rel) {
   return std::string();
 }
 
-// The shell document: the same two stylesheets the browser loads, inlined (the
+// The shell document: the same stylesheets the browser loads, inlined (the
 // engine reads <link> through the VFS too, but inlining keeps the document
 // self-contained), plus the empty root the app renders into.
 //
@@ -85,12 +85,17 @@ std::string read_asset(const char* rel) {
 // registered through whaleui_font_register() is named after its FILE
 // ("fa-solid-900"). Pointing .fa at that name is what makes the glyphs resolve.
 // Drop it once WhaleUI supports @font-face (see doc-internal/ui-whaleui.md §5D).
-std::string shell_html(const std::string& css, const std::string& icons) {
+//
+// icons.css carries the brand/file icons as inline SVG data URIs (background-
+// image), so it needs no font - it is inlined verbatim.
+std::string shell_html(const std::string& css, const std::string& fa_css,
+                       const std::string& icon_css) {
   std::string html;
   html += "<!DOCTYPE html><html><head><meta charset=\"utf-8\">";
   html += "<title>FlashSight</title><style>";
   html += css;
-  html += icons;
+  html += fa_css;
+  html += icon_css;
   html += ".fa{font-family:\"fa-solid-900\",var(--font)}\n";
   html += "</style></head><body><div id=\"fs-root\"></div></body></html>";
   return html;
@@ -172,14 +177,20 @@ int run_whale_ui(FsApi* api) {
   whaleui_window_set_bordered(win, 1);
   whaleui_window_set_min_size(win, 900, 600);
 
-  // Style sources: the UI stylesheet (web/style.css) + the icon subset, plus
-  // the icon font, registered through the VFS so the .fa-* glyphs resolve.
+  // Style sources: the UI stylesheet (web/style.css) + the Font Awesome subset
+  // + the brand/file icon sheet, plus the icon font registered through the VFS
+  // so the .fa-* glyphs resolve.
   std::string css = read_asset("style.css");
-  std::string icons = read_asset("icons/fa-subset.css");
+  std::string fa_css = read_asset("icons/fa-subset.css");
+  std::string icon_css = read_asset("icons/icons.css");
   if (css.empty()) {
     std::fprintf(stderr,
                  "warning: style.css not found next to the exe or under web/ "
                  "(running unstyled)\n");
+  }
+  if (icon_css.empty()) {
+    std::fprintf(stderr, "warning: icons/icons.css not found (brand/file icons "
+                         "will be blank)\n");
   }
   whaleui_font_register_system_defaults();
   {
@@ -191,7 +202,7 @@ int run_whale_ui(FsApi* api) {
     }
   }
 
-  if (whaleui_window_load_html(win, shell_html(css, icons).c_str()) != 0) {
+  if (whaleui_window_load_html(win, shell_html(css, fa_css, icon_css).c_str()) != 0) {
     std::fprintf(stderr, "whaleui_window_load_html failed\n");
     whaleui_window_destroy(win);
     whaleui_app_destroy(app);

@@ -71,4 +71,9 @@
 .fa-pen-to-square:before{content:"\f044"}
 .fa-square-plus:before{content:"\f0fe"}
 .fa-arrow-right-arrow-left:before{content:"\f0ec"}
+.fa-user-lock:before{content:"\f502"}
+.fa-lock:before{content:"\f023"}
+.fa-lock-open:before{content:"\f3c1"}
+.fa-house:before{content:"\f015"}
+.fa-grip-vertical:before{content:"\f58e"}
 .fa,.fas,.fa-solid{font-weight:900}

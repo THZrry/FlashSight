@@ -1,6 +1,7 @@
 // test_p3.cpp - P3 Agent 引擎单测（M3 验收，FakeNet/FakeClock，不碰真网真时钟）
 // Part 1: Loop 状态机 + 挂起 + 引导队列
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,8 @@ FS_TEST(loop_send_text_turn) {
 FS_TEST(loop_send_while_busy_queues) {
   AgentLoop::Options opts;
   opts.sid = "s_1";
+  // approve 档：每次写文件都要问（这里验证的是权限门流程本身）
+  opts.permission = "approve";
   bool first = true;
   opts.event = [](const std::string&, const Json&) {};
   AgentLoop loop(std::move(opts));
@@ -86,6 +89,8 @@ FS_TEST(loop_send_while_busy_queues) {
 FS_TEST(loop_approve_deny) {
   AgentLoop::Options opts;
   opts.sid = "s_1";
+  // approve 档：file.rm 也要先问（宽松档下项目内的删除是直接放行的）
+  opts.permission = "approve";
   opts.event = [](const std::string&, const Json&) {};
   AgentLoop loop(std::move(opts));
   int calls = 0;
@@ -551,7 +556,8 @@ FS_TEST(m3_manual_e2e_persist) {
 
   // 工具执行接线：file.write 走真实文件工具（ToolRegistry 直接调）
   // AgentLoop 的工具执行由 Host 驱动——v1 验证 send 走通 + 事件
-  FsResult sendr = host.send(sid, "write out.txt", Json::object(), false);
+  // approve 档：手动模式下每次写文件都先问（permissive 档项目内直接放行）
+  FsResult sendr = host.send(sid, "write out.txt", Json::object(), false, "approve");
   EXPECT_TRUE(sendr.ok());
   // 模型回了 file.write（高风险）-> waiting + permission.prompt
   bool has_prompt = false;
@@ -908,4 +914,66 @@ FS_TEST(settings_env_merge) {
   auto ctools = s.merged_cli_tools();
   EXPECT_EQ(ctools["vscode"], std::string("/usr/bin/code"));
   EXPECT_EQ(ctools["nvim"], std::string("/usr/bin/nvim"));
+}
+
+// ---------- 权限档语义：宽松 = 项目内放行、系统操作询问 ----------
+FS_TEST(loop_permission_levels) {
+  auto make_loop = [](const std::string& perm, std::vector<std::string>* events,
+                      const std::string& path) {
+    AgentLoop::Options opts;
+    opts.sid = "s_perm";
+    opts.permission = perm;
+    opts.cwd = "/tmp/proj";  // lexical check only: no file is touched
+    opts.event = [events](const std::string& e, const Json&) {
+      if (events) events->push_back(e);
+    };
+    AgentLoop* loop = new AgentLoop(std::move(opts));
+    loop->call_model = [path](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+      Json call = Json::object();
+      call["name"] = "file.write";
+      call["args"] = Json{{"path", path}, {"content", "x"}};
+      out->tool_calls = Json::array({call});
+      out->error = "";
+      return FsResult::success();
+    };
+    return loop;
+  };
+
+  // permissive + project-relative path: executes without asking
+  {
+    std::vector<std::string> ev;
+    std::unique_ptr<AgentLoop> loop(make_loop("permissive", &ev, "src/a.cpp"));
+    EXPECT_TRUE(loop->send("write").ok());
+    bool prompt = false;
+    for (auto& e : ev) if (e == "permission.prompt") prompt = true;
+    EXPECT_FALSE(prompt);
+  }
+  // permissive + absolute path outside the project: asks
+  {
+    std::vector<std::string> ev;
+    std::unique_ptr<AgentLoop> loop(make_loop("permissive", &ev, "/etc/hosts"));
+    EXPECT_TRUE(loop->send("write").ok());
+    bool prompt = false;
+    for (auto& e : ev) if (e == "permission.prompt") prompt = true;
+    EXPECT_TRUE(prompt);
+    EXPECT_TRUE(loop->state() == LoopState::kWaiting);
+  }
+  // approve: even a project-relative write asks
+  {
+    std::vector<std::string> ev;
+    std::unique_ptr<AgentLoop> loop(make_loop("approve", &ev, "src/a.cpp"));
+    EXPECT_TRUE(loop->send("write").ok());
+    bool prompt = false;
+    for (auto& e : ev) if (e == "permission.prompt") prompt = true;
+    EXPECT_TRUE(prompt);
+  }
+  // full: no prompt for either
+  {
+    std::vector<std::string> ev;
+    std::unique_ptr<AgentLoop> loop(make_loop("full", &ev, "/etc/hosts"));
+    EXPECT_TRUE(loop->send("write").ok());
+    bool prompt = false;
+    for (auto& e : ev) if (e == "permission.prompt") prompt = true;
+    EXPECT_FALSE(prompt);
+  }
 }

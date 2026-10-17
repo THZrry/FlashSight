@@ -350,13 +350,13 @@ std::string rel_time(int64_t ms) {
   int64_t d = now_wall - ms;
   if (d < 0) d = 0;
   int64_t sec = d / 1000;
-  if (sec < 60) return "刚刚";
+  if (sec < 60) return tr("刚刚");
   int64_t min = sec / 60;
-  if (min < 60) return itos(static_cast<int>(min)) + " 分钟前";
+  if (min < 60) return itos(static_cast<int>(min)) + tr(" 分钟前");
   int64_t hr = min / 60;
-  if (hr < 24) return itos(static_cast<int>(hr)) + " 小时前";
+  if (hr < 24) return itos(static_cast<int>(hr)) + tr(" 小时前");
   int64_t day = hr / 24;
-  if (day < 30) return itos(static_cast<int>(day)) + " 天前";
+  if (day < 30) return itos(static_cast<int>(day)) + tr(" 天前");
   // older than a month: an absolute date is more useful than "87 天前"
   time_t t = static_cast<time_t>(ms / 1000);
   struct tm* g = localtime(&t);
@@ -757,7 +757,7 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
       s.tab_ids.push_back(sid);
       SessionTab st;
       st.id = sid;
-      st.title = title.empty() ? ("会话" + sid) : title;
+      st.title = title.empty() ? (tr("会话") + sid) : title;
       s.sessions.push_back(st);
     }
   });
@@ -848,7 +848,7 @@ void UiApp::load_sessions(size_t project_index) {
       ProjectCard::SessionRow row;
       row.sid = jsonutil::get<std::string>(s, "sid", "");
       row.title = jsonutil::get<std::string>(s, "title", "");
-      if (row.title.empty()) row.title = "会话 " + row.sid;  // untitled: readable
+      if (row.title.empty()) row.title = tr("会话 ") + row.sid;  // untitled: readable
       row.updated_ms = jsonutil::get_int(s, "updatedAt", 0);
       row.running = jsonutil::get<bool>(s, "running", false);
       if (!row.sid.empty()) rows.push_back(row);
@@ -1317,6 +1317,10 @@ void UiApp::render() {
         VNodePtr np = new_slot->children[0];
         if (op && np && op->key != np->key) {
           op->exit_anim = (page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft;
+          // Stagger: the outgoing page gets a head start, the incoming one waits
+          // until it is ~80% gone. Starting both at t=0 made the two pages cross
+          // and the whole switch read as noise.
+          add_class(np, "page-stagger");
         }
       }
     }
@@ -1502,19 +1506,20 @@ VNodePtr UiApp::build_shell() {
   build_shell_into(shell);
   win.add(shell);
   win.add(build_overlays());
-  if (st_.modal_page == "settings" || st_.modal_page == "new") {
+  // 设置是整窗页面（盖住标签栏）；"新建"不是——它只是页面区里的一个页面，
+  // 标签栏照常可见可点（用户明确要求新建页不要覆盖标签栏）。
+  if (st_.modal_page == "settings") {
     H overlay = el("div", "modal-layer");
     overlay.key("modal-layer");
     // The LAYER is what disappears when the modal closes, so it is the layer
     // that must fade out: fading only the inner page would leave the opaque
     // backdrop covering the shell until the node is dropped.
     overlay.exit(anim::kExitFade);
-    VNodePtr page = (st_.modal_page == "settings") ? build_settings()
-                                                   : build_new_tab();
-    page->key = "page:" + st_.modal_page;
+    VNodePtr page = build_settings();
+    page->key = "page:settings";
     add_anim(page, anim::kView);
     page->exit_anim = anim::kExitFade;
-    page->anim_key = "modal:" + st_.modal_page;
+    page->anim_key = "modal:settings";
     overlay.add(page);
     win.add(overlay);
   }
@@ -1610,14 +1615,19 @@ void UiApp::build_shell_into(H& win) {
 VNodePtr UiApp::build_page_slot() {
   std::string page_id;
   VNodePtr page;
-  if (st_.active_tab == "home") {
+  if (st_.modal_page == "new") {
+    // "新建" is a PAGE inside the tab area, not a full-window modal: the tab
+    // strip stays visible (you can still switch tabs from it).
+    page_id = "new";
+    page = build_new_tab();
+  } else if (st_.active_tab == "home") {
     page_id = "home";
     page = build_home();
   } else {
     page_id = "session";
     page = build_session();
   }
-  page->key = "page:" + page_id + st_.active_tab;
+  page->key = "page:" + page_id + (page_id == "new" ? "" : st_.active_tab);
   // The framework applies the animation, looked up from the page's declaration
   // above - so a page switch animates because it is DECLARED, not because a
   // builder remembered to add a class. The key change makes the diff recreate
@@ -1635,7 +1645,9 @@ VNodePtr UiApp::build_page_slot() {
     pg_anim = (page_dir_ == "-1") ? anim::kSlideRight : anim::kSlideLeft;
   }
   add_anim(page, pg_anim ? pg_anim : anim::kView);
-  page->exit_anim = (page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft;
+  page->exit_anim = (page_id == "new")
+                        ? anim::kExitFade
+                        : ((page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft);
   {
     std::string token = page_id;
     if (page_id == "session" && st_.session_loaded) token += ":loaded";
@@ -1661,18 +1673,23 @@ VNodePtr UiApp::build_nav_rail() {
   H head = el("div", "nav-head");
   head.add(el("span", "nav-title").text(tr("项目")));
   head.add(el("span", "grow"));
-  // 新会话：在最近活跃的项目里建（没有项目时禁用）
-  head.add(comp::icon_button("square-plus", tr("新建会话"), [this](const std::string&) {
-    if (st_.projects.empty()) {
-      toast(tr("先打开一个项目"));
-      return;
-    }
-    new_session_in_project(st_.projects[0].pid);
+  // 新建：打开"新建"页（和顶栏 "+" 同一个页面），不是直接在当前项目里开会话
+  // ——"新建"要先选项目，这个选择不能替用户做。
+  head.add(comp::icon_button("square-plus", tr("新建"), [this](const std::string&) {
+    open_new_tab();
   }));
   head.add(comp::icon_button("chevron-left", tr("收起侧栏"), [this](const std::string&) {
     update([&](AppState& s) { s.nav_collapsed = true; });
   }));
   rail.add(head);
+
+  // 主页入口：左栏模式下没有标签条，主页必须能从导航里进去
+  H home = el("div", st_.active_tab == "home" && st_.modal_page.empty()
+                          ? "nav-home active" : "nav-home");
+  home.on(EventKind::kClick, [this](const std::string&) { show("home"); });
+  home.add(el("i", "fa fa-house"));
+  home.add(el("span").text(tr("主页")));
+  rail.add(home);
 
   H body = el("div", "nav-body");
   if (st_.projects.empty()) {
@@ -1732,9 +1749,9 @@ VNodePtr UiApp::build_home() {
   wrap.attr("data-home-tab", itos(st_.home_tab));  // diagnostics + tests
   // centered title buttons: 探索 / 项目 / 用量统计
   std::vector<std::string> items;
-  items.push_back("探索");
-  items.push_back("项目");
-  items.push_back("用量统计");
+  items.push_back(tr("探索"));
+  items.push_back(tr("项目"));
+  items.push_back(tr("用量统计"));
   H head = el("div", "home-head");
   head.add(comp::title_tabs(items, st_.home_tab, [this](const std::string& v) {
     int idx = std::atoi(v.c_str());
@@ -1782,10 +1799,10 @@ VNodePtr UiApp::build_home() {
   // footer actions; both flows start from the native folder picker (the
   // browser cannot hand out OS paths, so the backend opens the dialog)
   H foot = el("div", "home-foot");
-  foot.add(comp::button("打开文件夹", [this](const std::string&) {
+  foot.add(comp::button(tr("打开文件夹"), [this](const std::string&) {
     pick_and_open_folder();
   }, "primary"));
-  foot.add(comp::button("新建项目", [this](const std::string&) {
+  foot.add(comp::button(tr("新建项目"), [this](const std::string&) {
     call_async("project.pickFolder", Json::object(), [this](const BackendResult& r) {
       if (!r.ok) return;
       std::string path = jsonutil::get<std::string>(r.data, "path", "");
@@ -1797,7 +1814,7 @@ VNodePtr UiApp::build_home() {
   }));
   H grow = el("span", "grow");
   foot.add(grow);
-  foot.add(comp::button("设置", [this](const std::string&) {
+  foot.add(comp::button(tr("设置"), [this](const std::string&) {
     open_modal_page("settings");
   }, "ghost"));
   wrap.add(foot);
@@ -2133,7 +2150,8 @@ VNodePtr UiApp::build_home_usage() {
 
   H panel = el("div", "usage-panel");
 
-  // ---- range tabs: the query is filtered by `from`, not by a fake bar chart ----
+  // range tabs: the query is filtered by `from`, not by a fake bar chart.
+  // Labels go through tr() so an English UI does not show "1 天".
   H ranges = el("div", "usage-ranges");
   const char* kRangeLabels[4] = {"1 天", "7 天", "30 天", "全部"};
   for (int i = 0; i < 4; ++i) {
@@ -2380,11 +2398,11 @@ VNodePtr UiApp::build_session() {
   H hist = el("div", "history");
   H hist_inner = el("div", "history-inner");
   if (st_.messages.empty()) {
-    hist_inner.add(comp::empty_state("开始新的对话。输入消息后 Enter 发送。", "", nullptr));
+    hist_inner.add(comp::empty_state(tr("开始新的对话。输入消息后 Enter 发送。"), "", nullptr));
   }
   for (size_t i = 0; i < st_.messages.size(); ++i) {
     comp::ChatMsg m = st_.messages[i];
-    hist_inner.add(comp::chat_message(m, [this](const std::string&) { toast("已复制"); },
+    hist_inner.add(comp::chat_message(m, [this](const std::string&) { toast(tr("已复制")); },
                                       [this, i](const std::string&) {
       update([&](AppState& s) {
         if (i < s.messages.size() && !s.messages[i].tools.empty()) {
@@ -2500,7 +2518,8 @@ VNodePtr UiApp::build_session() {
     left_tools.add(auto_btn);
   }
   // 权限: a compact select, but with the three levels spelled out (the values
-  // alone - approve/permissive/full - mean nothing).
+  // alone - approve/permissive/full - mean nothing). The wording states what
+  // each level actually gates: 宽松 = 项目内放行、项目外/系统操作要问。
   {
     H perm_sel = el("div", "bar-group");
     std::vector<std::string> perms;
@@ -2532,7 +2551,10 @@ VNodePtr UiApp::build_session() {
         });
       }
     });
-    sel.attr("title", tr("文件权限"));
+    // One lookup key per tooltip: splitting a sentence across adjacent literals
+    // makes the translation table miss it (the concatenated text is what the
+    // user sees, but each literal is looked up separately).
+    sel.attr("title", tr("文件权限：逐次批准 = 每次写文件都问；宽松 = 项目内直接做、系统操作（其他文件夹读写/终端/网络）询问；完全放行 = 不再询问"));
     perm_sel.add(sel);
     left_tools.add(perm_sel);
   }
@@ -2646,7 +2668,7 @@ VNodePtr UiApp::build_session() {
     H pop = el("div", "skill-menu");
     pop.key("skill-menu");
     if (st_.skill_menu.empty()) {
-      pop.add(el("div", "skill-menu-item dim").text("（暂无 skill）"));
+      pop.add(el("div", "skill-menu-item dim").text(tr("（暂无 skill）")));
     }
     for (size_t i = 0; i < st_.skill_menu.size(); ++i) {
       std::string name = st_.skill_menu[i];
@@ -2668,7 +2690,7 @@ VNodePtr UiApp::build_session() {
     close.on(EventKind::kClick, [this](const std::string&) {
       update([&](AppState& s) { s.skill_menu_open = false; });
     });
-    close.add(el("span").text("取消（Esc）"));
+    close.add(el("span").text(tr("取消（Esc）")));
     pop.add(close);
     comp_box.add(pop);
   }
@@ -2701,13 +2723,13 @@ VNodePtr UiApp::build_session() {
     H plan = el("div", "plan-float");
     plan.anim("pop");
     H phead = el("div", "plan-head");
-    phead.add(el("span", "plan-title").text("任务规划"));
+    phead.add(el("span", "plan-title").text(tr("任务规划")));
     phead.add(comp::icon_button("\u2715", "收起", [this](const std::string&) {
       update([&](AppState& s) { s.plan_open = false; });
     }));
     plan.add(phead);
     if (st_.plan_steps.empty()) {
-      plan.add(el("div", "plan-empty dim").text("暂无规划步骤"));
+      plan.add(el("div", "plan-empty dim").text(tr("暂无规划步骤")));
     }
     for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
       H step = el("div", "plan-step");
@@ -2846,13 +2868,13 @@ VNodePtr UiApp::build_side_panel() {
   const std::string panel_id = panel ? panel->id : std::string();
 
   if (kind == "usage") {
-    body.add(comp::key_value("上下文水位", itos(st_.context_pct) + "%"));
+    body.add(comp::key_value(tr("上下文水位"), itos(st_.context_pct) + "%"));
     body.add(comp::progress(st_.context_pct));
-    body.add(comp::key_value("本会话成本", st_.session_cost));
-    body.add(comp::key_value("本轮 tokens", "12.4K / 3.1K"));
+    body.add(comp::key_value(tr("本会话成本"), st_.session_cost));
+    body.add(comp::key_value(tr("本轮 tokens"), "12.4K / 3.1K"));
   } else if (kind == "subagents") {
     if (st_.subagents.empty()) {
-      body.add(comp::empty_state("没有子代理在运行。", "", nullptr));
+      body.add(comp::empty_state(tr("没有子代理在运行。"), "", nullptr));
     }
     for (size_t i = 0; i < st_.subagents.size(); ++i) {
       const AppState::SubagentRow& a = st_.subagents[i];
@@ -2865,13 +2887,13 @@ VNodePtr UiApp::build_side_panel() {
       card.add(head);
       card.add(el("div", "sa-task").text(a.task));
       H acts = el("div", "sa-actions");
-      acts.add(comp::button("引导", [this, i](const std::string&) {
+      acts.add(comp::button(tr("引导"), [this, i](const std::string&) {
         if (i >= st_.subagents.size()) return;
         std::string id = st_.subagents[i].id;
         call_async("subagent.steer", Json{{"id", id}, {"text", "继续"}},
-                   [this](const BackendResult&) { toast("已发送引导"); });
+                   [this](const BackendResult&) { toast(tr("已发送引导")); });
       }, "ghost"));
-      acts.add(comp::button("取消", [this, i](const std::string&) {
+      acts.add(comp::button(tr("取消"), [this, i](const std::string&) {
         if (i >= st_.subagents.size()) return;
         std::string id = st_.subagents[i].id;
         call_async("subagent.cancel", Json{{"id", id}}, [this, i](const BackendResult&) {
@@ -2885,27 +2907,27 @@ VNodePtr UiApp::build_side_panel() {
     }
   } else if (kind == "files") {
     if (st_.active_pid.empty()) {
-      body.add(comp::empty_state("先打开一个会话，文件树会显示该项目的文件。", "", nullptr));
+      body.add(comp::empty_state(tr("先打开一个会话，文件树会显示该项目的文件。"), "", nullptr));
     } else {
       const std::string& path = panel ? panel->path : std::string();
       // breadcrumb / up row
       H nav = el("div", "files-nav");
       if (!path.empty()) {
-        nav.add(comp::button("↑ 上级", [this, panel_id, path](const std::string&) {
+        nav.add(comp::button(tr("↑ 上级"), [this, panel_id, path](const std::string&) {
           size_t cut = path.find_last_of("/\\");
           std::string parent = cut == std::string::npos ? "" : path.substr(0, cut);
           load_files(panel_id, st_.active_pid, parent);
         }, "ghost"));
       }
       nav.add(el("span", "files-cwd dim").text(path.empty() ? "/" : ("/" + path)));
-      nav.add(comp::button("刷新", [this, panel_id, path](const std::string&) {
+      nav.add(comp::button(tr("刷新"), [this, panel_id, path](const std::string&) {
         load_files(panel_id, st_.active_pid, path);
       }, "ghost"));
       body.add(nav);
       const std::vector<SideTab::FileEntry>& entries =
           panel ? panel->entries : std::vector<SideTab::FileEntry>();
       if (entries.empty()) {
-        body.add(comp::empty_state("（空目录）", "", nullptr));
+        body.add(comp::empty_state(tr("（空目录）"), "", nullptr));
       }
       for (size_t i = 0; i < entries.size(); ++i) {
         const SideTab::FileEntry& e = entries[i];
@@ -2952,11 +2974,11 @@ VNodePtr UiApp::build_side_panel() {
       body.add(pre);
     }
   } else if (kind == "git") {
-    body.add(comp::empty_state("Git 状态（需要项目为 git 仓库；git 工具尚未接线）",
+    body.add(comp::empty_state(tr("Git 状态（需要项目为 git 仓库；git 工具尚未接线）"),
                                "", nullptr));
   } else if (kind == "ops") {
     if (st_.session_ops.empty()) {
-      body.add(comp::empty_state("暂无操作记录（systemOps）。", "", nullptr));
+      body.add(comp::empty_state(tr("暂无操作记录（systemOps）。"), "", nullptr));
     }
     for (size_t i = 0; i < st_.session_ops.size(); ++i) {
       H row = el("div", "op-row");
@@ -2966,7 +2988,7 @@ VNodePtr UiApp::build_side_panel() {
     }
   } else if (kind == "calls") {
     if (st_.session_calls.empty()) {
-      body.add(comp::empty_state("暂无工具调用记录。", "", nullptr));
+      body.add(comp::empty_state(tr("暂无工具调用记录。"), "", nullptr));
     }
     for (size_t i = 0; i < st_.session_calls.size(); ++i) {
       H row = el("div", "call-row");
@@ -2975,7 +2997,7 @@ VNodePtr UiApp::build_side_panel() {
       body.add(row);
     }
   } else {
-    body.add(comp::empty_state("面板内容", "", nullptr));
+    body.add(comp::empty_state(tr("面板内容"), "", nullptr));
   }
   side.add(body);
   return side.get();
@@ -3617,8 +3639,8 @@ VNodePtr UiApp::build_settings() {
     H two = el("div", "pv-two");
     H list = el("div", "pv-list");
     H lhead = el("div", "pv-list-head");
-    lhead.add(el("span", "pv-list-title").text("供应商"));
-    lhead.add(comp::button("新建", [this](const std::string&) {
+    lhead.add(el("span", "pv-list-title").text(tr("供应商")));
+    lhead.add(comp::button(tr("新建"), [this](const std::string&) {
       update([&](AppState& s) {
         s.provider_creating = true;
         s.provider_selected.clear();
@@ -3626,7 +3648,7 @@ VNodePtr UiApp::build_settings() {
     }, "primary"));
     list.add(lhead);
     if (st_.providers.empty()) {
-      list.add(el("div", "pv-empty").text("还没有供应商。点「新建」选择模板。"));
+      list.add(el("div", "pv-empty").text(tr("还没有供应商。点「新建」选择模板。")));
     }
     for (size_t i = 0; i < st_.providers.size(); ++i) {
       const AppState::ProviderRow& p = st_.providers[i];
@@ -3636,8 +3658,8 @@ VNodePtr UiApp::build_settings() {
       it.on(EventKind::kClick, [this, id](const std::string&) { select_provider(id); });
       H top = el("div", "pv-item-top");
       top.add(el("span", "pv-item-name").text(p.name.empty() ? p.id : p.name));
-      if (!p.enabled) top.add(comp::badge("停用"));
-      if (!p.has_key) top.add(comp::badge("无密钥"));
+      if (!p.enabled) top.add(comp::badge(tr("停用")));
+      if (!p.has_key) top.add(comp::badge(tr("无密钥")));
       it.add(top);
       it.add(el("div", "pv-item-kind").text(p.kind));
       it.add(el("div", "pv-item-url").text(p.endpoint));
@@ -3658,7 +3680,7 @@ VNodePtr UiApp::build_settings() {
       H cols = el("div", "pv-detail-cols");
       H form = el("div", "pv-form");
       form.add(comp::section_title(creating ? "新建供应商" : "编辑供应商"));
-      form.add(comp::field("名称", comp::text_input(st_.pv_name, "显示名",
+      form.add(comp::field(tr("名称"), comp::text_input(st_.pv_name, "显示名",
                                                     [this](const std::string& v) {
         st_.pv_name = v;
       })));
@@ -3674,7 +3696,7 @@ VNodePtr UiApp::build_settings() {
       for (int k = 0; k < 4; ++k) {
         if (st_.pv_kind == kind_ids[k]) kind_idx = k;
       }
-      form.add(comp::field("格式", comp::select(kinds, kind_idx,
+      form.add(comp::field(tr("格式"), comp::select(kinds, kind_idx,
                                                 [this](const std::string& v) {
         int i = std::atoi(v.c_str());
         const char* ids[4] = {"openai-chat", "openai-response", "anthropic", "custom"};
@@ -4129,7 +4151,7 @@ VNodePtr UiApp::build_settings() {
     } else if (st_.provider_creating) {
       // step 2: the form (template already applied)
       H back = el("div", "pv-back");
-      back.add(comp::button("\u2190 重新选择模板", [this](const std::string&) {
+      back.add(comp::button(tr("\u2190 重新选择模板"), [this](const std::string&) {
         update([&](AppState& s) { s.pv_template_picked = false; });
       }, "ghost"));
       detail.add(back);
@@ -4555,14 +4577,14 @@ VNodePtr UiApp::build_settings() {
       std::vector<comp::ChoiceOption> perms;
       comp::ChoiceOption o;
       o.value = "approve";
-      o.icon = "shield-halved";
+      o.icon = "hand";
       o.title = tr("逐次批准");
       o.desc = tr("每次写文件、执行命令都先问一次");
       perms.push_back(o);
       o.value = "permissive";
-      o.icon = "shield-halved";
+      o.icon = "folder";
       o.title = tr("宽松");
-      o.desc = tr("常规操作直接执行，高风险才问");
+      o.desc = tr("项目内操作直接放行；系统操作（其他文件夹读写、终端、网络）询问");
       perms.push_back(o);
       o.value = "full";
       o.icon = "bolt";
@@ -4634,14 +4656,14 @@ VNodePtr UiApp::build_settings() {
     // (the composer always sends on Enter) that also contradicted the 快捷键
     // page, which claims Enter is the send key.
   } else if (sec == "network") {
-    body.add(comp::section_title("网络"));
-    body.add(comp::field("网络总开关", comp::toggle(
+    body.add(comp::section_title(tr("网络")));
+    body.add(comp::field(tr("网络总开关"), comp::toggle(
         sv_bool(st_.settings_values, "permissions.network.enabled", true),
         tr("允许模型发起网络请求（fetch/search）"), [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "permissions.network.enabled", true);
       set_setting("permissions.network.enabled", !cur);
     })));
-    body.add(comp::field("校验证书", comp::toggle(
+    body.add(comp::field(tr("校验证书"), comp::toggle(
         sv_bool(st_.settings_values, "permissions.network.verifyCert", true), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "permissions.network.verifyCert", true);
@@ -4649,7 +4671,7 @@ VNodePtr UiApp::build_settings() {
     })));
     // 代理：三态。以前只有"主机 + 端口"，于是"跟随系统"和"关闭"这两种最常见
     // 的意图都表达不出来（留空到底是直连还是跟随系统？）。
-    body.add(comp::section_title("代理"));
+    body.add(comp::section_title(tr("代理")));
     {
       std::vector<comp::ChoiceOption> px;
       comp::ChoiceOption o;
@@ -4673,12 +4695,12 @@ VNodePtr UiApp::build_settings() {
         set_setting("permissions.network.proxyMode", v);
       }));
       if (mode == "custom") {
-        body.add(comp::field("代理主机", comp::text_input(
+        body.add(comp::field(tr("代理主机"), comp::text_input(
             sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
             [this](const std::string& v) {
           set_setting("permissions.network.proxyHost", v);
         }), "如 127.0.0.1"));
-        body.add(comp::field("代理端口", comp::text_input(
+        body.add(comp::field(tr("代理端口"), comp::text_input(
             std::to_string(sv_int(st_.settings_values, "permissions.network.proxyPort", 0)), "",
             [this](const std::string& v) {
           int p = std::atoi(v.c_str());
@@ -4687,7 +4709,7 @@ VNodePtr UiApp::build_settings() {
       }
     }
   } else if (sec == "terminal") {
-    body.add(comp::section_title("终端"));
+    body.add(comp::section_title(tr("终端")));
     // 探测到的 shell 列表（"探测"按钮随时重扫；每一项都能直接选中当默认）
     H tacts = el("div", "settings-actions");
     tacts.add(comp::button(tr("重新探测"), [this](const std::string&) {
@@ -4721,7 +4743,7 @@ VNodePtr UiApp::build_settings() {
         });
       }));
     }
-    body.add(comp::field("编码", comp::select(
+    body.add(comp::field(tr("编码"), comp::select(
         std::vector<std::string>{"系统默认", "UTF-8", "GBK"}, 0,
         [this](const std::string& v) {
       int idx = std::atoi(v.c_str());
@@ -4729,27 +4751,27 @@ VNodePtr UiApp::build_settings() {
       set_setting("terminal.encoding", enc[idx < 0 || idx > 2 ? 0 : idx]);
     }), "终端 spawn 时使用"));
   } else if (sec == "files") {
-    body.add(comp::section_title("文件"));
-    body.add(comp::field("自动 git init", comp::toggle(
+    body.add(comp::section_title(tr("文件")));
+    body.add(comp::field(tr("自动 git init"), comp::toggle(
         sv_bool(st_.settings_values, "permissions.files.autoGitInit", false),
         "非 git 项目打开时自动 git init（默认关，permissions.md §3）",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "permissions.files.autoGitInit", false);
       set_setting("permissions.files.autoGitInit", !cur);
     })));
-    body.add(comp::section_title("黑名单（拒绝访问）"));
+    body.add(comp::section_title(tr("黑名单（拒绝访问）")));
     body.add(comp::hint(tr("优先级：黑名单 > 白名单 > 默认档；一行一个路径前缀")));
     body.add(comp::textarea(st_.file_blacklist_text, "每行一个路径…",
                             [this](const std::string& v) {
       st_.file_blacklist_text = v;  // 提交时拆分成数组
     }, nullptr));
-    body.add(comp::section_title("白名单（放行）"));
+    body.add(comp::section_title(tr("白名单（放行）")));
     body.add(comp::textarea(st_.file_whitelist_text, "每行一个路径…",
                             [this](const std::string& v) {
       st_.file_whitelist_text = v;
     }, nullptr));
     H fsave = el("div", "settings-actions");
-    fsave.add(comp::button("保存名单", [this](const std::string&) {
+    fsave.add(comp::button(tr("保存名单"), [this](const std::string&) {
       Json blist = split_lines(st_.file_blacklist_text);
       Json wlist = split_lines(st_.file_whitelist_text);
       call_async("settings.set", Json{{"key", "permissions.files.blacklist"}, {"value", blist}});
@@ -4799,7 +4821,7 @@ VNodePtr UiApp::build_settings() {
     }, "ghost"));
     body.add(cadd);
   } else if (sec == "shortcuts") {
-    body.add(comp::section_title("快捷键"));
+    body.add(comp::section_title(tr("快捷键")));
     body.add(comp::hint(tr("桌面端接入后生效")));
     const char* keys[][2] = {
         {"发送消息", "Enter"},    {"换行", "Shift+Enter"},
@@ -4817,8 +4839,8 @@ VNodePtr UiApp::build_settings() {
       body.add(row);
     }
   } else if (sec == "browser") {
-    body.add(comp::section_title("浏览器控制"));
-    body.add(comp::field("启用浏览器控制", comp::toggle(
+    body.add(comp::section_title(tr("浏览器控制")));
+    body.add(comp::field(tr("启用浏览器控制"), comp::toggle(
         sv_bool(st_.settings_values, "browser.enabled", true), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "browser.enabled", true);
@@ -4839,13 +4861,13 @@ VNodePtr UiApp::build_settings() {
       }));
       body.add(comp::field(tr("驱动路径"), drv, tr("空 = 自动探测内置驱动")));
     }
-    body.add(comp::field("允许联网", comp::toggle(
+    body.add(comp::field(tr("允许联网"), comp::toggle(
         sv_bool(st_.settings_values, "browser.permissions.net", true), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "browser.permissions.net", true);
       set_setting("browser.permissions.net", !cur);
     })));
-    body.add(comp::field("允许操作证书", comp::toggle(
+    body.add(comp::field(tr("允许操作证书"), comp::toggle(
         sv_bool(st_.settings_values, "browser.permissions.certs", false), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "browser.permissions.certs", false);
@@ -4855,14 +4877,14 @@ VNodePtr UiApp::build_settings() {
     // decides when it needs it; a button that pushes a skill into context is not
     // a user-facing action.
   } else if (sec == "computer") {
-    body.add(comp::section_title("电脑控制"));
-    body.add(comp::field("启用电脑控制", comp::toggle(
+    body.add(comp::section_title(tr("电脑控制")));
+    body.add(comp::field(tr("启用电脑控制"), comp::toggle(
         sv_bool(st_.settings_values, "computer.enabled", false), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "computer.enabled", false);
       set_setting("computer.enabled", !cur);
     })));
-    body.add(comp::field("允许截图", comp::toggle(
+    body.add(comp::field(tr("允许截图"), comp::toggle(
         sv_bool(st_.settings_values, "computer.screenshot", false), "",
         [this](const std::string&) {
       bool cur = sv_bool(st_.settings_values, "computer.screenshot", false);
@@ -5059,7 +5081,7 @@ void UiApp::open_new_session() {
       std::string id = "s" + itos(s.session_seq);
       SessionTab t;
       t.id = id;
-      t.title = "会话" + itos(s.session_seq);
+      t.title = tr("会话") + itos(s.session_seq);
       s.sessions.push_back(t);
       s.tab_ids.push_back(id);
       s.active_tab = id;
@@ -5114,7 +5136,7 @@ void UiApp::new_session_in_project(const std::string& pid) {
     update([&](AppState& s) {
       SessionTab t;
       t.id = sid;
-      t.title = "会话" + itos(static_cast<int>(s.sessions.size() + 1));
+      t.title = tr("会话") + itos(static_cast<int>(s.sessions.size() + 1));
       s.sessions.push_back(t);
       s.tab_ids.push_back(sid);
       // remember where we came from so closing this tab returns there
@@ -5231,13 +5253,13 @@ void UiApp::pick_and_open_folder() {
   // the OS dialog runs in the native process; the browser gets the path back
   call_async("project.pickFolder", Json::object(), [this](const BackendResult& r) {
     if (!r.ok) {
-      toast("打开文件夹选择框失败");
+      toast(tr("打开文件夹选择框失败"));
       return;
     }
     std::string path = jsonutil::get<std::string>(r.data, "path", "");
     if (path.empty()) return;  // user cancelled
     call_async("project.open", Json{{"path", path}}, [this](const BackendResult& r2) {
-      if (r2.ok) toast("已打开项目");
+      if (r2.ok) toast(tr("已打开项目"));
       load_projects();
     });
   });
@@ -5336,7 +5358,7 @@ void UiApp::begin_new_provider(const std::string& template_id) {
 
 void UiApp::save_provider() {
   if (st_.pv_base_url.empty()) {
-    toast("请填写 Endpoint");
+    toast(tr("请填写 Endpoint"));
     return;
   }
   Json conn = Json::object();
@@ -5369,7 +5391,7 @@ void UiApp::save_provider() {
   }
   call_async("provider.addProvider", Json{{"conn", conn}}, [this](const BackendResult& r) {
     if (!r.ok) return;
-    toast("已保存供应商");
+    toast(tr("已保存供应商"));
     update([&](AppState& s) {
       s.provider_creating = false;
       s.pv_template_picked = false;
@@ -5415,7 +5437,7 @@ void UiApp::fetch_provider_models(const std::string& id) {
   call_async("provider.listModels", Json{{"providerId", id}},
              [this, id](const BackendResult& r) {
     if (!r.ok) {
-      toast("获取失败：" + r.message);
+      toast(tr("获取失败：") + r.message);
       return;
     }
     std::vector<std::string> models;
@@ -5590,13 +5612,13 @@ void UiApp::begin_new_model() {
 void UiApp::save_model() {
   std::string pid = st_.provider_selected;
   if (pid.empty()) {
-    toast("请先保存供应商");
+    toast(tr("请先保存供应商"));
     return;
   }
   AppState::ModelRow m = st_.model_draft;
   if (st_.model_creating) m.id = st_.model_new_id;
   if (m.id.empty()) {
-    toast("请填写模型名");
+    toast(tr("请填写模型名"));
     return;
   }
   // 上下文长度必填：压缩阈值和上下文水位都要用它算比例，0 会让两者都失真。
@@ -5752,12 +5774,12 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
     if (!sid.empty()) {
       call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}});
     }
-    toast("已切换到 " + model_id);
+    toast(tr("已切换到 ") + model_id);
     return;
   }
   // a settings field: write the key (the field reads it back from settings)
   set_setting(target, model_id);
-  toast("已设为 " + model_id);
+  toast(tr("已设为 ") + model_id);
 }
 
 // A settings field's model button. It renders the same popup as the composer,
@@ -5944,7 +5966,7 @@ void UiApp::detect_mcp() {
 
 void UiApp::add_mcp() {
   if (st_.mcp_new_name.empty() || st_.mcp_new_dir.empty()) {
-    toast("请填写名称与目录");
+    toast(tr("请填写名称与目录"));
     return;
   }
   std::string name = st_.mcp_new_name;
@@ -6076,7 +6098,7 @@ void UiApp::pick_cli_tool_draft() {
 void UiApp::add_kv(const std::string& key_setting, const std::string& k,
                    const std::string& v) {
   if (k.empty()) {
-    toast("请填写键");
+    toast(tr("请填写键"));
     return;
   }
   // merge into the existing map so a single entry is added, not the whole table
@@ -6456,13 +6478,13 @@ void UiApp::handle_dropped_folder(const std::string& name) {  if (name.empty()) 
   call_async("project.resolveDrop", Json{{"name", name}}, [this, name](const BackendResult& r) {
     if (!r.ok) return;
     if (jsonutil::get<bool>(r.data, "notFound", false)) {
-      toast("未找到文件夹「" + name + "」，请用「打开文件夹」手动选择");
+      toast(tr("未找到文件夹「") + name + "」，请用「打开文件夹」手动选择");
       return;
     }
     std::string path = jsonutil::get<std::string>(r.data, "path", "");
     if (path.empty()) return;
     call_async("project.open", Json{{"path", path}}, [this](const BackendResult& r2) {
-      if (r2.ok) toast("已打开拖入的项目");
+      if (r2.ok) toast(tr("已打开拖入的项目"));
       load_projects();
     });
   });

@@ -308,12 +308,12 @@ function whaleui_copy_dlls()
                 end
             end
         end
-        -- the UI's stylesheet + icon font, in the layout the app asks for
+        -- the UI's stylesheet + icon assets, in the layout the app asks for
         local webdir = path.join(outdir, "web")
         os.mkdir(webdir)
         os.mkdir(path.join(webdir, "icons"))
         for _, rel in ipairs({"style.css", "index.html", "icons/fa-subset.css",
-                              "icons/fa-solid-900.woff2"}) do
+                              "icons/icons.css", "icons/fa-solid-900.woff2"}) do
             local src = path.join(os.projectdir(), "web", rel)
             if os.isfile(src) then
                 os.cp(src, path.join(webdir, rel))

@@ -69,6 +69,18 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
   AgentLoop::Options opts;
   opts.sid = sid;
   opts.permission = permission;
+  // The project root is what the file tools resolve against AND what the
+  // permission gate compares paths with ("inside the project" vs "system
+  // operation"). It was never set here, so every relative path resolved against
+  // an empty cwd and every absolute path looked "outside" - the loop needs it.
+  if (deps_.load_full) {
+    Json full;
+    if (deps_.load_full(sid, &full).ok() && full.contains("meta") &&
+        full["meta"].is_object()) {
+      opts.cwd = jsonutil::get<std::string>(full["meta"], "cwd", "");
+      opts.pid = jsonutil::get<std::string>(full["meta"], "pid", "");
+    }
+  }
   opts.event = [this](const std::string& e, const Json& p) { emit(e, p); };
   (void)auto_mode;
   auto loop = std::unique_ptr<AgentLoop>(new AgentLoop(std::move(opts)));
@@ -87,6 +99,7 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
     ctx.permission = in.permission;
     ctx.cwd = in.cwd;
     ctx.pid = in.pid;
+    ctx.approved = in.approved;
     return tools_.invoke(ctx, name, args);
   };
   AgentLoop& ref = *loop;

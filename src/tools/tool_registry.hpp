@@ -18,6 +18,10 @@ struct ToolContext {
   std::string cwd;          // 项目根
   bool auto_mode = false;   // 自动模式（ask 工具被移除 + 高风险降级）
   std::string permission = "permissive";  // 文件权限档：approve/permissive/full
+  // 用户刚刚批准了这一次调用（权限门 approve 之后）。只对本次调用生效：
+  // permissive 下访问项目外的路径需要批准，批准后这一次要真的放行，否则
+  // "问完还是拒绝"——比不问更糟。
+  bool approved = false;
   std::string thinking_lang = "";         // 思考语言（中英双语 skill；空=默认）
   std::function<FsResult(const std::string&, const Json&)> invoke_tool;  // 递归调子代理等
   // 回调：向主会话发事件（terminal.output / truncate.hint 等）

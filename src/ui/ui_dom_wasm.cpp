@@ -279,45 +279,80 @@ EM_JS(void, fs_dom_nav_splitter, (int split_node, int nav_node, int cb_id), {
 // Reorder top-level tabs by dragging one tab onto another. The tab elements are
 // keyed by data-key; the app owns the order, so the adapter only reports the
 // pair and the next render moves the real nodes.
+//
+// Feedback matters here: without it the drag is invisible (the tab you grabbed
+// looks unchanged, and there is no indication of where it will land). So the
+// dragged tab dims, a floating copy follows the cursor, and the tab under the
+// pointer is highlighted. A 4px threshold separates a drag from a click.
 EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
   var strip = globalThis.__fsNodes[strip_node];
   if (!strip) return;
   strip.__fsTabDragCb = cb_id;
   if (strip.__fsTabDragInit) return;
   strip.__fsTabDragInit = true;
-  var fromEl = null;
-  strip.addEventListener('mousedown', function (down) {
-    var t = down.target;
-    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
-    if (!t || t === strip) return;
-    if (t.classList.contains('add')) return;      // the "+" is not a tab
-    if (down.target.closest && down.target.closest('.tab-close')) return;
-    fromEl = t;
-    t.classList.add('dragging');
-  });
-  strip.addEventListener('mouseover', function (over) {
-    if (!fromEl) return;
-    var t = over.target;
-    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
-    if (!t || t === strip || t === fromEl || t.classList.contains('add')) return;
-    t.classList.add('drop-target');
-  });
-  strip.addEventListener('mouseout', function (over) {
-    var t = over.target;
-    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
-    if (t && t.classList) t.classList.remove('drop-target');
-  });
-  strip.addEventListener('mouseup', function (up) {
-    if (!fromEl) return;
-    var t = up.target;
-    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
-    var from = fromEl.getAttribute('data-key');
-    fromEl.classList.remove('dragging');
-    var toEls = strip.querySelectorAll('.tab.drop-target');
-    for (var i = 0; i < toEls.length; i++) toEls[i].classList.remove('drop-target');
+  var fromEl = null, ghost = null, started = false, startX = 0, startY = 0;
+  var lastTarget = null;
+
+  function tabAt(x, y) {
+    var el = document.elementFromPoint(x, y);
+    while (el && el !== strip && !(el.classList && el.classList.contains('tab'))) {
+      el = el.parentElement;
+    }
+    return (el && el !== strip) ? el : null;
+  }
+  function clearTarget() {
+    if (lastTarget) lastTarget.classList.remove('drop-target');
+    lastTarget = null;
+  }
+  function cleanup() {
+    if (fromEl) fromEl.classList.remove('dragging');
+    if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost);
+    ghost = null;
+    clearTarget();
     fromEl = null;
-    if (!t || t === strip || t.classList.contains('add')) return;
-    var to = t.getAttribute('data-key');
+    started = false;
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+  }
+  function move(ev) {
+    if (!fromEl) return;
+    if (!started) {
+      if (Math.abs(ev.clientX - startX) < 4 && Math.abs(ev.clientY - startY) < 4) return;
+      started = true;
+      fromEl.classList.add('dragging');
+      var r0 = fromEl.getBoundingClientRect();
+      ghost = fromEl.cloneNode(true);
+      ghost.classList.remove('dragging');
+      ghost.classList.add('tab-ghost');
+      ghost.style.width = r0.width + 'px';
+      ghost.style.left = r0.left + 'px';
+      ghost.style.top = r0.top + 'px';
+      document.body.appendChild(ghost);
+    }
+    ev.preventDefault();
+    if (ghost) {
+      var r = fromEl.getBoundingClientRect();
+      ghost.style.left = (ev.clientX - r.width / 2) + 'px';
+      ghost.style.top = (ev.clientY - 14) + 'px';
+    }
+    var t = tabAt(ev.clientX, ev.clientY);
+    if (t && (t === fromEl || t.classList.contains('add'))) t = null;
+    if (t !== lastTarget) {
+      clearTarget();
+      if (t) { t.classList.add('drop-target'); lastTarget = t; }
+    }
+  }
+  function up(ev) {
+    if (!fromEl) return;
+    var from = fromEl.getAttribute('data-key');
+    var to = started && lastTarget ? lastTarget.getAttribute('data-key') : null;
+    var wasDrag = started;
+    cleanup();
+    if (!wasDrag) return;
+    // swallow the click that follows a drag (it would switch tabs instead)
+    var swallow = function (e) { e.stopPropagation(); e.preventDefault(); };
+    document.addEventListener('click', swallow, true);
+    setTimeout(function () { document.removeEventListener('click', swallow, true); }, 0);
     if (!from || !to || from === to) return;
     if (strip.__fsTabDragCb && Module._fs_ui_tab_drag) {
       var payload = from + '\t' + to;
@@ -327,6 +362,19 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
       Module._fs_ui_tab_drag(strip.__fsTabDragCb, ptr);
       Module._free(ptr);
     }
+  }
+  strip.addEventListener('mousedown', function (down) {
+    var t = down.target;
+    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
+    if (!t || t === strip) return;
+    if (t.classList.contains('add')) return;      // the "+" is not a tab
+    if (down.target.closest && down.target.closest('.tab-close')) return;
+    fromEl = t;
+    started = false;
+    startX = down.clientX;
+    startY = down.clientY;
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
   });
 });
 

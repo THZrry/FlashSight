@@ -135,6 +135,10 @@ class AgentLoop {
   FsResult finish_turn(const Json& turn);
   void emit(const std::string& event, const Json& payload);
   bool is_high_risk(const std::string& tool) const;
+  // Does THIS call need the user's approval, given the session's permission
+  // level? approve: everything write-like; permissive: only system-level
+  // operations (paths outside the project, terminals, network); full: nothing.
+  bool needs_approval(const std::string& tool, const Json& args) const;
   bool should_deferred(const std::string& tool) const;
 };
 
