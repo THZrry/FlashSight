@@ -311,6 +311,12 @@ bool AgentHost::is_running(const std::string& sid) const {
   return s != LoopState::kIdle && s != LoopState::kTurnDone;
 }
 
+std::string AgentHost::loop_state(const std::string& sid) const {
+  auto it = loops_.find(sid);
+  if (it == loops_.end() || !it->second) return "idle";
+  return loop_state_str(it->second->state());
+}
+
 FsResult AgentHost::on_subagent_done(const std::string& id, const std::string& summary) {
   FsResult r = subagents_.complete_with_summary(id, summary, Json::object());
   if (!r.ok()) return r;

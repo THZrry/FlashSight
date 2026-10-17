@@ -303,6 +303,11 @@ void collect_handler_ids(const VNodePtr& v, std::vector<int>* out);
 // Find a node by key (depth-first). Returns null when absent.
 VNodePtr find_by_key(const VNodePtr& v, const std::string& key);
 
+// Find the first node whose key STARTS WITH `prefix`. Popups are keyed
+// "model-picker:<owner>" where the owner is partly dynamic (subagent names), so
+// an exact lookup cannot find them.
+VNodePtr find_by_key_prefix(const VNodePtr& v, const std::string& prefix);
+
 // Remove exit-animated nodes whose animation has finished. Call once per render
 // tick (the app's pump does it); a node kept for an exit is not part of the new
 // tree, so nothing else would ever clean it up.

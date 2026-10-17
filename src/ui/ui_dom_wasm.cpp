@@ -292,10 +292,15 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
   strip.__fsTabDragInit = true;
   var fromEl = null, ghost = null, started = false, startX = 0, startY = 0;
   var lastTarget = null;
+  // Both strips use this: the top tabs are `.tab`, the side panel's are `.ptab`.
+  function isTab(el) {
+    return el && el.classList &&
+           (el.classList.contains('tab') || el.classList.contains('ptab'));
+  }
 
   function tabAt(x, y) {
     var el = document.elementFromPoint(x, y);
-    while (el && el !== strip && !(el.classList && el.classList.contains('tab'))) {
+    while (el && el !== strip && !isTab(el)) {
       el = el.parentElement;
     }
     return (el && el !== strip) ? el : null;
@@ -336,8 +341,7 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
       ghost.style.top = (ev.clientY - 14) + 'px';
     }
     var t = tabAt(ev.clientX, ev.clientY);
-    if (t && (t === fromEl || t.classList.contains('add'))) t = null;
-    if (t !== lastTarget) {
+    if (t && (t === fromEl || t.classList.contains('add'))) t = null;    if (t !== lastTarget) {
       clearTarget();
       if (t) { t.classList.add('drop-target'); lastTarget = t; }
     }
@@ -365,7 +369,7 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
   }
   strip.addEventListener('mousedown', function (down) {
     var t = down.target;
-    while (t && t !== strip && !(t.classList && t.classList.contains('tab'))) t = t.parentElement;
+    while (t && t !== strip && !isTab(t)) t = t.parentElement;
     if (!t || t === strip) return;
     if (t.classList.contains('add')) return;      // the "+" is not a tab
     if (down.target.closest && down.target.closest('.tab-close')) return;
@@ -376,6 +380,81 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
   });
+});
+
+// Place a floating popup next to its anchor, inside the viewport.
+//
+// The popup is absolutely positioned by CSS (bottom: calc(100% + 8px)), which
+// always opens UPWARD. In a settings page the field can sit near the top of the
+// window, so "upward" runs off-screen and the list gets cut off. Here we
+// measure: if there is more room above than below, keep it above; otherwise
+// flip it below the anchor. Horizontal: keep it inside the window instead of
+// letting a right-aligned popup hang off the left edge.
+//
+// NOTE the coordinate space: `top`/`left` on an absolutely positioned element
+// are relative to its OFFSET PARENT (the .model-field row, which is
+// position:relative), NOT the viewport. Mixing the two put the picker half a
+// screen away from its button. Everything below is computed in the popup's own
+// containing block.
+EM_JS(void, fs_dom_place_popup, (int popup_node, int anchor_node), {
+  var pop = globalThis.__fsNodes[popup_node];
+  var anchor = globalThis.__fsNodes[anchor_node];
+  if (!pop || !anchor) return;
+  var a = anchor.getBoundingClientRect();
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var gap = 8;
+  var ph = pop.offsetHeight || 420;
+  var pw = pop.offsetWidth || 640;
+
+  // The containing block: the nearest positioned ancestor (or the body).
+  var cb = pop.offsetParent || document.body;
+  var c = cb.getBoundingClientRect();
+  // Anchor position inside that block.
+  var ax = a.left - c.left - cb.clientLeft;
+  var ay = a.top - c.top - cb.clientTop;
+
+  var above = a.top - gap;               // viewport space: room above
+  var below = vh - a.bottom - gap;       // viewport space: room below
+  pop.style.bottom = 'auto';
+  pop.style.top = 'auto';
+  if (below >= ph || below >= above) {
+    pop.style.top = Math.round(ay + a.height + gap) + 'px';
+    pop.classList.add('below');
+  } else {
+    // anchor-relative distance from the block's top to the popup's bottom edge
+    pop.style.top = Math.round(ay - ph - gap) + 'px';
+    pop.classList.remove('below');
+  }
+  // horizontal: keep the whole popup on screen (viewport clamp, then convert)
+  var leftVp = a.left;
+  if (leftVp + pw > vw - 8) leftVp = vw - pw - 8;
+  if (leftVp < 8) leftVp = 8;
+  pop.style.left = Math.round(leftVp - c.left - cb.clientLeft) + 'px';
+  pop.style.right = 'auto';
+});
+
+// Report presses that land outside a popup (and outside its anchor, which is
+// what opened it). This replaces the full-screen backdrop for popovers rendered
+// inside a small field: a backdrop there covered the field itself, so the first
+// click closed the popup AND was swallowed.
+EM_JS(void, fs_dom_outside_click, (int popup_node, int cb_id), {
+  var pop = globalThis.__fsNodes[popup_node];
+  if (!pop) return;
+  pop.__fsOutsideCb = cb_id;
+  if (pop.__fsOutsideInit) return;
+  pop.__fsOutsideInit = true;
+  function onDown(ev) {
+    if (!pop.__fsOutsideCb) return;
+    var t = ev.target;
+    if (pop.contains(t)) return;
+    // The anchor (.model-field / .model-btn-wrap) owns the toggle: a press there
+    // is a toggle, not a dismiss, and closing here would reopen immediately.
+    var host = pop.parentElement;
+    if (host && host.contains(t)) return;
+    if (t && t.closest && t.closest('.model-field, .model-btn-wrap')) return;
+    if (Module._fs_ui_outside_click) Module._fs_ui_outside_click(pop.__fsOutsideCb);
+  }
+  document.addEventListener('mousedown', onDown, true);
 });
 
 // Drag the top edge of a bottom panel to set its height. Same shape as
@@ -742,6 +821,16 @@ int& tab_drag_seq() {
   return s;
 }
 
+// click-outside callbacks (popovers)
+std::map<int, std::function<void()> >& outside_cbs() {
+  static std::map<int, std::function<void()> > m;
+  return m;
+}
+int& outside_seq() {
+  static int s = 0;
+  return s;
+}
+
 // vertical (bottom panel height) resize callbacks
 std::map<int, std::function<void(int)> >& vsplit_cbs() {
   static std::map<int, std::function<void(int)> > m;
@@ -986,6 +1075,20 @@ class WasmDom : public IDom {
     fs_dom_tab_drag(static_cast<int>(strip.id), cb_id);
   }
 
+  void place_popup(Node popup, Node anchor) override {
+    fs_dom_place_popup(static_cast<int>(popup.id), static_cast<int>(anchor.id));
+  }
+
+  void bind_outside_click(Node popup, std::function<void()> cb) override {
+    int cb_id = 0;
+    if (cb) {
+      cb_id = ++outside_seq();
+      outside_cbs().clear();
+      outside_cbs()[cb_id] = std::move(cb);
+    }
+    fs_dom_outside_click(static_cast<int>(popup.id), cb_id);
+  }
+
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override {
     int cb_id = 0;
@@ -1123,6 +1226,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_tab_drag(int cb_id, const char* paylo
       tab_drag_cbs().find(cb_id);
   if (it == tab_drag_cbs().end() || !it->second) return;
   it->second(std::string(payload ? payload : ""));
+}
+
+// Called from JS (fs_dom_outside_click) when a press lands outside the popup.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_outside_click(int cb_id) {
+  std::map<int, std::function<void()> >::iterator it = outside_cbs().find(cb_id);
+  if (it == outside_cbs().end() || !it->second) return;
+  it->second();
 }
 
 // Called from JS (fs_dom_vsplitter) when a drag ends, with the final height.

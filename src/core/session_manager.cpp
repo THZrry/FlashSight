@@ -187,6 +187,13 @@ FsResult SessionManager::list_sessions(const std::string& pid) const {
     FsResult rr = store.load_full(sid, &j);
     if (!rr.ok()) continue;
     if (j.contains("meta")) meta = j["meta"];
+    // A session's last turn may have failed; the project card shows that as a
+    // red status dot, so the list has to carry it (it already reads full.json).
+    if (j.contains("turns") && j["turns"].is_array() && !j["turns"].empty()) {
+      const nlohmann::json& last = j["turns"][j["turns"].size() - 1];
+      std::string err = jsonutil::get<std::string>(last, "error", "");
+      if (!err.empty()) meta["lastError"] = err;
+    }
     arr.push_back(meta);
   }
   return FsResult::success(arr);

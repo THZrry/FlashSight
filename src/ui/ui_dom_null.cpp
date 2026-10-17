@@ -223,6 +223,15 @@ void NullDom::bind_tab_drag(Node strip, std::function<void(const std::string&)> 
   calls_.push_back(Call{"bind_tab_drag", strip.id, ""});
 }
 
+void NullDom::place_popup(Node popup, Node anchor) {
+  calls_.push_back(Call{"place_popup", popup.id, std::to_string(anchor.id)});
+}
+
+void NullDom::bind_outside_click(Node popup, std::function<void()> cb) {
+  outside_cb_ = cb;
+  calls_.push_back(Call{"bind_outside_click", popup.id, ""});
+}
+
 void NullDom::bind_vsplitter(Node splitter, Node panel,
                              std::function<void(int)> on_resize) {
   vsplit_cb_ = on_resize;

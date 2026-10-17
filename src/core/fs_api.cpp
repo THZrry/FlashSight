@@ -441,6 +441,10 @@ FsResult FsApi::session_list(const std::string& pid) {
     std::string sid = jsonutil::get<std::string>(m, "sid", "");
     if (sid.empty()) continue;
     m["running"] = agent_host_ && agent_host_->is_running(sid);
+    // "busy" is not enough for the status dot: the UI distinguishes running,
+    // waiting-for-approval, failed and done. Loop state is live; lastError is
+    // filled by list_sessions, which already reads each full.json.
+    m["loopState"] = agent_host_ ? agent_host_->loop_state(sid) : "idle";
     int64_t mt = sessions_->full_mtime_ms(sid);
     if (mt > 0) m["updatedAt"] = mt;
     out.push_back(m);

@@ -124,6 +124,25 @@ class IDom {
     (void)on_resize;
   }
 
+  // --- popover placement ---
+  // Position a floating panel next to its anchor, inside the viewport: drop it
+  // below the anchor when there is room, flip above when there is not, and keep
+  // it horizontally inside the window. The app cannot know pixel geometry, so
+  // the adapter measures.
+  virtual void place_popup(Node popup, Node anchor) {
+    (void)popup;
+    (void)anchor;
+  }
+
+  // --- popup dismissal ---
+  // Report a pointer press that lands outside `popup`. Unlike a full-screen
+  // backdrop element this works for popovers rendered INSIDE a small field (a
+  // settings row), where a fixed backdrop would cover the field itself.
+  virtual void bind_outside_click(Node popup, std::function<void()> cb) {
+    (void)popup;
+    (void)cb;
+  }
+
   // --- tab reordering (drag a tab onto another tab) ---
   // Reports "fromKey\ttoKey"; the app owns the tab order, the adapter only
   // reports which tab was dropped on which.
@@ -283,6 +302,8 @@ class NullDom : public IDom {
   void bind_nav_splitter(Node splitter, Node nav,
                          std::function<void(int)> on_resize) override;
   void bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) override;
+  void place_popup(Node popup, Node anchor) override;
+  void bind_outside_click(Node popup, std::function<void()> cb) override;
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override;
   void bind_drop_zone(Node node,
@@ -333,6 +354,10 @@ class NullDom : public IDom {
   void fire_tab_drag_for_test(const std::string& from, const std::string& to) {
     if (tab_drag_cb_) tab_drag_cb_(from + "\t" + to);
   }
+  // test hook: simulate a click outside the bound popup
+  void fire_outside_click_for_test() {
+    if (outside_cb_) outside_cb_();
+  }
   // test hook: simulate the end of a vertical splitter drag
   void fire_vsplit_for_test(int height) {
     if (vsplit_cb_) vsplit_cb_(height);
@@ -369,6 +394,7 @@ class NullDom : public IDom {
   std::function<void(int)> split_cb_;
   std::function<void(int)> nav_split_cb_;
   std::function<void(const std::string&)> tab_drag_cb_;
+  std::function<void()> outside_cb_;
   std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;

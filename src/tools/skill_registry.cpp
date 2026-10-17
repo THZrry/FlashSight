@@ -61,6 +61,7 @@ std::vector<Skill> builtin_skills() {
         "Suggested flow: navigate -> query -> act -> screenshot/verify.\n"
         "Note: in wasm mode enable it from the sidebar.";
     s.loadable = true;
+    s.kind = "mcp";  // 内置 MCP：模型自主调用，不是用户 /命令
     v.push_back(s);
   }
 
@@ -83,6 +84,7 @@ std::vector<Skill> builtin_skills() {
         "Good for: rename symbol, find references, project-wide edits.\n"
         "Provide the language list first; the model picks on demand.";
     s.loadable = true;
+    s.kind = "mcp";  // 内置 MCP
     v.push_back(s);
   }
 
@@ -137,6 +139,7 @@ Json SkillRegistry::list_json(ThinkLang lang) const {
     j["title"] = zh ? s.title_zh : s.title_en;
     j["description"] = zh ? s.desc_zh : s.desc_en;
     j["loadable"] = s.loadable;
+    j["kind"] = s.kind;
     if (!s.dir.empty()) j["dir"] = s.dir;
     j["user"] = s.user;
     j["enabled"] = s.enabled;

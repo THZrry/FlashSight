@@ -181,26 +181,26 @@
   to   { opacity: 0; transform: scale(.995); }
 }
 
-.anim-view  { animation: anim-view .18s cubic-bezier(.22,.61,.36,1); }
+.anim-view  { animation: anim-view .2s cubic-bezier(.22,.61,.36,1); }
 .anim-enter { animation: anim-enter .14s cubic-bezier(.22,.61,.36,1); }
 .anim-list  { animation: anim-list .12s cubic-bezier(.22,.61,.36,1); }
 .anim-pop   { animation: anim-pop .14s cubic-bezier(.22,.61,.36,1); }
 .anim-fade  { animation: anim-fade .05s ease-out; }
-.anim-slide-left  { animation: anim-slide-left .16s ease-out; }
-.anim-slide-right { animation: anim-slide-right .16s ease-out; }
+.anim-slide-left  { animation: anim-slide-left .22s cubic-bezier(.22,.61,.36,1); }
+.anim-slide-right { animation: anim-slide-right .22s cubic-bezier(.22,.61,.36,1); }
 .anim-drawer { animation: anim-drawer .16s cubic-bezier(.22,.61,.36,1); }
-.anim-exit-left  { animation: anim-exit-left .22s ease-in forwards; }
-.anim-exit-right { animation: anim-exit-right .22s ease-in forwards; }
-.anim-exit-fade  { animation: anim-exit-fade .17s ease-in forwards; }
+.anim-exit-left  { animation: anim-exit-left .26s ease-in forwards; }
+.anim-exit-right { animation: anim-exit-right .26s ease-in forwards; }
+.anim-exit-fade  { animation: anim-exit-fade .2s ease-in forwards; }
 
 /* --- stagger: the outgoing page gets a head start ---
    Both halves used to start at t=0, so the two pages crossed each other and the
    motion read as noise. The incoming page now waits until the outgoing one is
-   ~80% done (.18s of a .22s exit), so the eye follows one page out, then the
+   ~80% done (.2s of a .26s exit), so the eye follows one page out, then the
    next one in. `backwards` keeps the incoming page invisible during the wait
    (without it the page would sit fully drawn, then jump back to its start). */
 .page-stagger {
-  animation-delay: .18s;
+  animation-delay: .2s;
   animation-fill-mode: backwards;
 }
 /* A leaving page must not take part in layout any more (the new page is already
@@ -211,7 +211,8 @@
   z-index: 5;
   pointer-events: none;
   overflow: hidden;
-}/* A leaving row/card stays in flow (removing it from layout would make the list
+}
+/* A leaving row/card stays in flow (removing it from layout would make the list
    jump under the cursor) but must not eat clicks while it fades. */
 .exiting { pointer-events: none; }
 
@@ -361,8 +362,16 @@ html, body {
 .nav-dot {
   flex: none; width: 6px; height: 6px; border-radius: 50%;
   border: 1px solid var(--border-strong);
+  box-sizing: border-box;
 }
-.nav-dot.running { background: var(--ok, #2ea043); border-color: transparent; }
+.nav-dot.done { background: var(--accent); border-color: transparent; }
+.nav-dot.failed { background: var(--err); border-color: transparent; }
+.nav-dot.waiting { background: #d9a400; border-color: transparent; }
+.nav-dot.running {
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin .7s linear infinite;
+}
 .nav-empty { padding: 3px 8px 3px 30px; color: var(--text-faint); font-size: 12px; }
 .nav-foot {
   flex: none; display: flex; align-items: center; gap: 4px;
@@ -489,6 +498,61 @@ html, body {
   background: var(--panel-2);
   border: 1px solid var(--border-strong);
 }
+
+/* ---- 搜索页（主页第三个入口 + 新建页的搜索框）---- */
+.search-page {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 14px; padding: 22px 18px; overflow: auto;
+}
+.search-box-wrap { width: min(680px, 100%); }
+.search-results {
+  width: min(680px, 100%);
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.search-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.search-row:last-child { border-bottom: none; }
+.search-row:hover { background: var(--hover); }
+.search-row-text { min-width: 0; }
+.search-row-title {
+  font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.search-row-sub {
+  font-size: 11.5px; font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.search-row-time { flex: none; font-size: 11.5px; }
+/* the search entry next to the three title tabs */
+.home-search-btn {
+  margin-left: 14px;
+  width: 28px; height: 28px;
+  color: var(--text-dim);
+}
+.home-search-btn:hover { color: var(--text); background: var(--hover); }
+.home-search-btn.active { color: var(--accent); background: var(--accent-soft); }
+
+/* ---- 左栏：搜索框 + 排序 ---- */
+.nav-tools { flex: none; padding: 6px 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.nav-sort { display: flex; gap: 2px; }
+.nav-sort-btn {
+  flex: 1; text-align: center;
+  padding: 3px 0;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.nav-sort-btn:hover { background: var(--hover); color: var(--text); }
+.nav-sort-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
 /* ============================ page ============================ */
 .page { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
@@ -715,13 +779,26 @@ html, body {
 .proj-session.dim-none { color: var(--text-faint); cursor: default; }
 .proj-session.dim-none:hover { background: transparent; }
 .ps-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Status dot: green while a turn is in flight, hollow when parked. A session's
-   state is the second thing you look for after its name. */
+/* Status dot: the colour says what the session is doing right now.
+   blue = finished, red = last turn failed, yellow = waiting for you,
+   spinner = running, hollow = idle. */
 .ps-dot {
   flex: none; width: 7px; height: 7px; border-radius: 50%;
   border: 1px solid var(--border-strong);
+  box-sizing: border-box;
 }
-.ps-dot.running { background: var(--ok, #2ea043); border-color: transparent; }
+.ps-dot.done { background: var(--accent); border-color: transparent; }
+.ps-dot.failed { background: var(--err); border-color: transparent; }
+.ps-dot.waiting { background: #d9a400; border-color: transparent; }
+.ps-dot.running {
+  border: none;
+  background: none;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin .7s linear infinite;
+}
 .ps-time { flex: none; font-size: 11.5px; }
 /* Row actions (rename / delete) stay hidden until hover: a column of icon
    buttons reads as a toolbar and makes every row look dangerous. They are
@@ -1994,6 +2071,10 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   box-shadow: var(--pop);
   overflow: hidden;
 }
+/* Placement is measured by the DOM adapter (place_popup): when there is no room
+   above the anchor it sets top and removes bottom, so the list opens downward
+   instead of being clipped at the top of the window. */
+.model-picker.below { bottom: auto; }
 .model-field .model-picker { right: auto; left: 0; }
 .mp-head {
   display: flex; align-items: center; gap: 8px;

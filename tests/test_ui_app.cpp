@@ -1241,24 +1241,25 @@ FS_TEST(uiapp_skill_section_separate_from_mcp) {
     a.title = "浏览器驱动技能";
     a.description = "驱动外部浏览器";
     a.loadable = true;
+    a.kind = "mcp";  // a built-in MCP, NOT a skill the user can type
     s.skills.push_back(a);
     AppState::SkillRow b;
     b.name = "my-skill";
     b.title = "我的技能";
     b.description = "本地导入的";
     b.dir = "C:/skills/my-skill";
+    b.kind = "skill";
     s.skills.push_back(b);
     s.skills_loaded = true;
   });
-  EXPECT_TRUE(dump_has(dom, "浏览器驱动技能"));
   EXPECT_TRUE(dump_has(dom, "我的技能"));
   EXPECT_TRUE(dump_has(dom, "搜索 Skill"));
-  // the page explains that a skill is the one /command the user can type
-  EXPECT_TRUE(dump_has(dom, "/名称"));
+  // Built-in MCP entries belong to the MCP page: /lsp is not a command the user
+  // can type, so listing it under Skill was misleading.
+  EXPECT_FALSE(dump_has(dom, "浏览器驱动技能"));
   // filtering narrows the list
   app.update([](AppState& s) { s.skill_filter = "my-skill"; });
   EXPECT_TRUE(dump_has(dom, "我的技能"));
-  EXPECT_FALSE(dump_has(dom, "浏览器驱动技能"));
 }
 
 FS_TEST(uiapp_toast_has_deadline) {
@@ -2156,4 +2157,127 @@ FS_TEST(uiapp_page_switch_is_two_views) {
   // ...and a leaving page is declared with an exit intent, not given the
   // entrance class a second time
   EXPECT_TRUE(d.find("page-slot") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 第二十二批：搜索页 / 状态点 / 左栏排序筛选 / 侧栏排序 / 模型选择器关闭
+// ---------------------------------------------------------------------------
+
+FS_TEST(uiapp_global_search_page) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    s.home_tab = 3;
+  });
+  EXPECT_TRUE(dump_has(dom, "global-search-input") ||
+              dump_has(dom, "搜索会话"));
+  // a query narrows to matching sessions and shows the project as context
+  app.update([](AppState& s) { s.search_query = "UI"; });
+  EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
+  app.update([](AppState& s) { s.search_query = "zzz-no-match"; });
+  EXPECT_TRUE(dump_has(dom, "没有匹配的会话"));
+  // the search entry sits beside the three title tabs
+  app.update([](AppState& s) { s.search_query.clear(); s.home_tab = 1; });
+  EXPECT_TRUE(dump_has(dom, "home-search-btn"));
+}
+
+FS_TEST(uiapp_session_status_dots) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    ProjectCard& p = s.projects[0];
+    p.sessions.clear();
+    ProjectCard::SessionRow r;
+    r.sid = "s1";
+    r.title = "done";
+    r.loop_state = "turnDone";
+    p.sessions.push_back(r);
+    r.sid = "s2";
+    r.title = "failed";
+    r.loop_state = "turnDone";
+    r.last_error = "boom";
+    p.sessions.push_back(r);
+    r.sid = "s3";
+    r.title = "waiting";
+    r.loop_state = "waiting";
+    r.last_error.clear();
+    r.running = true;
+    p.sessions.push_back(r);
+    r.sid = "s4";
+    r.title = "running";
+    r.loop_state = "planning";
+    p.sessions.push_back(r);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("ps-dot done") != std::string::npos);
+  EXPECT_TRUE(d.find("ps-dot failed") != std::string::npos);
+  EXPECT_TRUE(d.find("ps-dot waiting") != std::string::npos);
+  EXPECT_TRUE(d.find("ps-dot running") != std::string::npos);
+}
+
+FS_TEST(uiapp_nav_filter_and_sort) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    s.settings_values = Json::object();
+    s.settings_values["ui.tabs"] = Json{{"value", "left"}};
+  });
+  app.apply_appearance();
+  EXPECT_TRUE(dump_has(dom, "nav-sort-btn"));
+  // the rail's own search box (key is a diff identity, not a DOM attribute, so
+  // the assertion is on the placeholder the user actually sees)
+  EXPECT_TRUE(dump_has(dom, "搜索会话"));
+  // a query hides non-matching sessions
+  app.update([](AppState& s) { s.nav_filter = "zzz"; });
+  EXPECT_TRUE(dump_has(dom, "没有匹配的会话"));
+  app.update([](AppState& s) { s.nav_filter = "UI"; });
+  EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
+  // sorting by title is a stable reorder (no crash, same rows)
+  app.update([](AppState& s) { s.session_sort = "title"; });
+  EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
+}
+
+FS_TEST(uiapp_side_tab_drag_reorders) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.open_or_focus_side_tab("files");
+  std::string files = app.state().active_side;
+  app.open_or_focus_side_tab("ops");
+  std::string ops = app.state().active_side;
+  // drag ops (last) onto the first panel
+  std::string first = app.state().side_tabs[0].id;
+  dom.fire_tab_drag_for_test(ops, first);
+  EXPECT_EQ(app.state().side_tabs[0].id, ops);
+  EXPECT_EQ(app.state().side_tabs[1].id, first);
+  EXPECT_TRUE(files != ops);
+}
+
+FS_TEST(uiapp_model_picker_dismisses_on_outside_click) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model_picker_open = true;
+    s.model_picker_owner = "composer";
+    s.model_picker_provider = "p1";
+    s.model_picker_loaded = true;
+  });
+  EXPECT_TRUE(dom.count_of("bind_outside_click") >= 1);
+  EXPECT_TRUE(dom.count_of("place_popup") >= 1);
+  dom.fire_outside_click_for_test();
+  EXPECT_FALSE(app.state().model_picker_open);
 }

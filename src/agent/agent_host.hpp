@@ -117,6 +117,10 @@ class AgentHost {
   // 该会话是否正在跑（有 loop 且处于运行态）。UI 用它显示会话状态：
   // "正在运行"是当前事实，不是落盘的历史，所以从内存问而不是读文件。
   bool is_running(const std::string& sid) const;
+  // Live loop state for a session ("idle"|"planning"|"toolCalling"|"waiting"|
+  // "turnDone"). The UI turns this into a status dot: waiting means the model is
+  // blocked on the user (a permission prompt), which is different from running.
+  std::string loop_state(const std::string& sid) const;
 
  private:
   AgentHostDeps deps_;

@@ -228,6 +228,19 @@ VNodePtr find_by_key(const VNodePtr& v, const std::string& key) {
   return VNodePtr();
 }
 
+VNodePtr find_by_key_prefix(const VNodePtr& v, const std::string& prefix) {
+  if (!v) return VNodePtr();
+  if (v->key.size() >= prefix.size() &&
+      v->key.compare(0, prefix.size(), prefix) == 0) {
+    return v;
+  }
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    VNodePtr hit = find_by_key_prefix(v->children[i], prefix);
+    if (hit) return hit;
+  }
+  return VNodePtr();
+}
+
 VNodePtr make_vnode(const std::string& tag) {
   VNodePtr n(new VNode());
   n->tag = tag;
@@ -303,12 +316,20 @@ void patch_attrs(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
     attr_get(*neu, oldv->attrs[i].key, &found);
     if (!found) dom.remove_attr(neu->dom, oldv->attrs[i].key);
   }
-  // styles: re-apply changed, and CLEAR the ones the new tree no longer sets.
-  // Without the clear, an inline style survives forever: the terminal drawer
-  // sets height while open and, once collapsed, the stale inline height kept it
-  // full-size (a node that stops setting a style must stop having it).
+  // styles: re-apply CHANGED ones, and CLEAR the ones the new tree no longer
+  // sets. Only changed values are written: a divider drag sets the width
+  // directly on the DOM node, and a render that re-applied the stale state value
+  // would yank the panel back to its pre-drag width 4x/second - which is exactly
+  // the "sidebar twitches while you drag" bug.
   for (size_t i = 0; i < neu->styles.size(); ++i) {
-    dom.set_style(neu->dom, neu->styles[i].key, neu->styles[i].value);
+    bool changed = true;
+    for (size_t j = 0; j < oldv->styles.size(); ++j) {
+      if (oldv->styles[j].key == neu->styles[i].key) {
+        changed = (oldv->styles[j].value != neu->styles[i].value);
+        break;
+      }
+    }
+    if (changed) dom.set_style(neu->dom, neu->styles[i].key, neu->styles[i].value);
   }
   for (size_t i = 0; i < oldv->styles.size(); ++i) {
     bool still = false;

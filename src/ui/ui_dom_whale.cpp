@@ -356,6 +356,33 @@ class WhaleDom : public IDom {
     (void)cb;
   }
 
+  void place_popup(Node popup, Node anchor) override {
+    // Popups are absolutely positioned by the stylesheet; WhaleUI lays them out
+    // the same way, so the upward-opening default is already correct there.
+    // (No viewport flip: the desktop window is large enough for the picker.)
+    (void)popup;
+    (void)anchor;
+  }
+
+  void bind_outside_click(Node popup, std::function<void()> cb) override {
+    // Close on a press anywhere else. The document-level listener is the same
+    // mechanism the global-key binding uses.
+    whaleui_dom_element_t* el = el_of(popup);
+    if (!el) return;
+    outside_cb_ = cb;
+    bind_aux(outside_, reinterpret_cast<whaleui_dom_element_t*>(doc_), "mousedown",
+             [this, el](whaleui_dom_event_t* ev) {
+      if (!outside_cb_) return;
+      whaleui_dom_element_t* t =
+          reinterpret_cast<whaleui_dom_element_t*>(whaleui_dom_event_target(ev));
+      while (t) {
+        if (t == el) return;                 // inside the popup
+        t = whaleui_dom_parent(t);
+      }
+      outside_cb_();
+    });
+  }
+
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override {
     bind_drag(vbar_, el_of(splitter), el_of(panel), true, on_resize);
@@ -700,7 +727,8 @@ class WhaleDom : public IDom {
         ++i;
       }
     }
-    Listener** slots[] = {&hbar_, &vbar_, &navbar_, &key_down_, &drop_over_, &drop_drop_};
+    Listener** slots[] = {&hbar_, &vbar_, &navbar_, &key_down_, &drop_over_,
+                          &drop_drop_, &outside_};
     for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); ++i) {
       if (*slots[i] && (*slots[i])->el == el) *slots[i] = nullptr;
     }
@@ -966,10 +994,12 @@ class WhaleDom : public IDom {
   Listener* hbar_ = nullptr;      // side-panel divider
   Listener* vbar_ = nullptr;      // bottom-drawer grip
   Listener* navbar_ = nullptr;    // project nav rail divider
+  Listener* outside_ = nullptr;   // document-level press outside a popup
   Listener* key_down_ = nullptr;  // terminal keydown
   Listener* drop_over_ = nullptr;
   Listener* drop_drop_ = nullptr;
   std::function<void(const std::string&, const std::string&)> drop_cb_;
+  std::function<void()> outside_cb_;  // press outside an open popup
   std::function<void(const std::string&)> global_key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;
   std::function<void(int, int)> cell_cb_;

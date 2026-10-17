@@ -851,6 +851,8 @@ void UiApp::load_sessions(size_t project_index) {
       if (row.title.empty()) row.title = tr("会话 ") + row.sid;  // untitled: readable
       row.updated_ms = jsonutil::get_int(s, "updatedAt", 0);
       row.running = jsonutil::get<bool>(s, "running", false);
+      row.loop_state = jsonutil::get<std::string>(s, "loopState", "");
+      row.last_error = jsonutil::get<std::string>(s, "lastError", "");
       if (!row.sid.empty()) rows.push_back(row);
     }
     // Most recently touched first: the list is a history, and the thing you want
@@ -1377,7 +1379,7 @@ void UiApp::render() {
         handle_drop(kind, value);
       });
     }
-    // top tab strip: drag a tab onto another to reorder it
+    // Top tab strip: drag a tab onto another to reorder it.
     VNodePtr tabstrip = find_by_key(tree_, "top-tabs");
     if (tabstrip && tabstrip->dom.valid()) {
       dom_.bind_tab_drag(tabstrip->dom, [this](const std::string& payload) {
@@ -1386,7 +1388,35 @@ void UiApp::render() {
         move_tab(payload.substr(0, tab), payload.substr(tab + 1));
       });
     }
-    // project nav rail divider (left mode): its own binding, so dragging it
+    // Every open model picker: anchor it to its button (flip down when there is
+    // no room above) and dismiss it on a press outside. The owner name can be
+    // dynamic (subagent rows), so the popup is found by key prefix.
+    {
+      VNodePtr pop = find_by_key_prefix(tree_, "model-picker:");
+      VNodePtr anchor = find_by_key_prefix(tree_, "model-field:");
+      if (pop && !anchor) anchor = find_by_key(tree_, "model-btn-wrap");
+      if (pop && anchor && pop->dom.valid() && anchor->dom.valid()) {
+        dom_.place_popup(pop->dom, anchor->dom);
+      }
+      if (pop && pop->dom.valid()) {
+        dom_.bind_outside_click(pop->dom, [this]() {
+          update([&](AppState& s) {
+            s.model_picker_open = false;
+            s.model_picker_owner.clear();
+          });
+        });
+      }
+    }
+    // Side panel tabs: same drag-to-reorder as the top strip.
+    VNodePtr sidetabs = find_by_key(tree_, "side-tabs");
+    if (sidetabs && sidetabs->dom.valid()) {
+      dom_.bind_tab_drag(sidetabs->dom, [this](const std::string& payload) {
+        size_t tab = payload.find('\t');
+        if (tab == std::string::npos) return;
+        move_side_tab(payload.substr(0, tab), payload.substr(tab + 1));
+      });
+    }
+    // Project nav rail divider (left mode): its own binding, so dragging it
     // never moves the side panel
     VNodePtr navbar = find_by_key(tree_, "nav-splitter");
     VNodePtr navrail = find_by_key(tree_, "nav-rail");
@@ -1664,6 +1694,34 @@ VNodePtr UiApp::build_page_slot() {
 // 这不是"竖过来的标签条"。顶栏模式的标签是一个可以关掉的工作集；左侧栏是
 // 导航：永远按项目列出全部会话（和主页·项目一致），点一个就打开，不关闭、
 // 不入工作集、不因为开得多而变长。宽度独立（可拖拽），可最小化成一条窄条。
+// 会话状态点：运行中=转圈、待确认=黄、报错=红、完成=蓝、空闲=空心。
+// 颜色是"这一格现在怎么样"的唯一提示，所以放在标题前面而不是 hover 里。
+H session_dot_with(const std::string& base, const std::string& loop_state,
+                   const std::string& last_error, bool running) {
+  std::string cls = base;
+  std::string title = tr("空闲");
+  if (loop_state == "waiting") {
+    cls += " waiting";
+    title = tr("等待你确认");
+  } else if (running) {
+    cls += " running";
+    title = tr("正在运行");
+  } else if (!last_error.empty()) {
+    cls += " failed";
+    title = tr("上次运行出错");
+  } else if (!loop_state.empty() && loop_state != "idle") {
+    cls += " done";
+    title = tr("已完成");
+  }
+  H d = el("span", cls);
+  d.attr("title", title);
+  return d;
+}
+H session_dot(const std::string& loop_state, const std::string& last_error,
+              bool running) {
+  return session_dot_with("ps-dot", loop_state, last_error, running);
+}
+
 VNodePtr UiApp::build_nav_rail() {
   H rail = el("div", "nav-rail");
   rail.key("nav-rail");
@@ -1678,10 +1736,37 @@ VNodePtr UiApp::build_nav_rail() {
   head.add(comp::icon_button("square-plus", tr("新建"), [this](const std::string&) {
     open_new_tab();
   }));
+  head.add(comp::icon_button("magnifying-glass", tr("搜索"), [this](const std::string&) {
+    update([&](AppState& s) { s.home_tab = 3; });
+    show("home");
+  }));
   head.add(comp::icon_button("chevron-left", tr("收起侧栏"), [this](const std::string&) {
     update([&](AppState& s) { s.nav_collapsed = true; });
   }));
   rail.add(head);
+
+  // 搜索框 + 排序/筛选：导航栏里列表会越来越长，没有这两样只能靠肉眼找。
+  H tools = el("div", "nav-tools");
+  H nsearch = comp::search_box(st_.nav_filter, tr("搜索会话…"),
+                               [this](const std::string& v) {
+    update([&](AppState& s) { s.nav_filter = v; });
+  });
+  nsearch.key("nav-filter-input");
+  tools.add(nsearch);
+  H sortrow = el("div", "nav-sort");
+  const char* sortLabels[3] = {"最近", "名称", "状态"};
+  const char* sortVals[3] = {"", "title", "status"};
+  for (int i = 0; i < 3; ++i) {
+    std::string v = sortVals[i];
+    H b = el("div", st_.session_sort == v ? "nav-sort-btn active" : "nav-sort-btn");
+    b.on(EventKind::kClick, [this, v](const std::string&) {
+      update([&](AppState& s) { s.session_sort = v; });
+    });
+    b.text(tr(sortLabels[i]));
+    sortrow.add(b);
+  }
+  tools.add(sortrow);
+  rail.add(tools);
 
   // 主页入口：左栏模式下没有标签条，主页必须能从导航里进去
   H home = el("div", st_.active_tab == "home" && st_.modal_page.empty()
@@ -1696,8 +1781,47 @@ VNodePtr UiApp::build_nav_rail() {
     body.add(comp::empty_state(tr("还没有项目。"), tr("打开文件夹"),
                                [this](const std::string&) { pick_and_open_folder(); }));
   }
+  // 过滤 + 排序：导航栏会越来越长，没有这两样只能靠肉眼找。
+  std::string nf = st_.nav_filter;
+  std::string nfl = nf;
+  for (size_t i = 0; i < nfl.size(); ++i) {
+    nfl[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(nfl[i])));
+  }
+  auto nav_match = [&nfl](const std::string& hay) {
+    if (nfl.empty()) return true;
+    std::string h = hay;
+    for (size_t i = 0; i < h.size(); ++i) {
+      h[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(h[i])));
+    }
+    return h.find(nfl) != std::string::npos;
+  };
+  size_t nav_hits = 0;
   for (size_t i = 0; i < st_.projects.size(); ++i) {
     const ProjectCard& p = st_.projects[i];
+    bool proj_match = nav_match(p.name);
+    std::vector<ProjectCard::SessionRow> rows;
+    for (size_t k = 0; k < p.sessions.size(); ++k) {
+      if (proj_match || nav_match(p.sessions[k].title)) rows.push_back(p.sessions[k]);
+    }
+    if (rows.empty()) continue;
+    // sort: 最近 (default, already sorted by backend) / 名称 / 状态
+    if (st_.session_sort == "title") {
+      std::stable_sort(rows.begin(), rows.end(),
+                       [](const ProjectCard::SessionRow& a,
+                          const ProjectCard::SessionRow& b) { return a.title < b.title; });
+    } else if (st_.session_sort == "status") {
+      auto rank = [](const ProjectCard::SessionRow& r) {
+        if (r.loop_state == "waiting") return 0;
+        if (r.running) return 1;
+        if (!r.last_error.empty()) return 2;
+        return 3;
+      };
+      std::stable_sort(rows.begin(), rows.end(),
+                       [&rank](const ProjectCard::SessionRow& a,
+                               const ProjectCard::SessionRow& b) {
+        return rank(a) < rank(b);
+      });
+    }
     H grp = el("div", "nav-proj");
     H ph = el("div", "nav-proj-head");
     ph.add(el("span", "nav-proj-mono").text(
@@ -1711,22 +1835,25 @@ VNodePtr UiApp::build_nav_rail() {
     plus.cls("nav-proj-add");
     ph.add(plus);
     grp.add(ph);
-    for (size_t k = 0; k < p.sessions.size(); ++k) {
-      const ProjectCard::SessionRow& s = p.sessions[k];
+    for (size_t k = 0; k < rows.size(); ++k) {
+      const ProjectCard::SessionRow& s = rows[k];
+      ++nav_hits;
       std::string sid = s.sid;
       std::string title = s.title;
       H row = el("div", s.sid == st_.active_tab ? "nav-session active" : "nav-session");
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      row.add(el("span", s.running ? "nav-dot running" : "nav-dot"));
+      H nd = session_dot(s.loop_state, s.last_error, s.running);
+      nd.cls("nav-dot");  // same colour rules, rail-sized
+      row.add(nd);
       row.add(el("span", "nav-session-title").text(s.title));
       grp.add(row);
     }
-    if (p.sessions.empty()) {
-      grp.add(el("div", "nav-empty").text(tr("暂无会话")));
-    }
     body.add(grp);
+  }
+  if (nav_hits == 0 && !st_.projects.empty()) {
+    body.add(el("div", "nav-empty").text(tr("没有匹配的会话")));
   }
   rail.add(body);
 
@@ -1734,6 +1861,18 @@ VNodePtr UiApp::build_nav_rail() {
   foot.add(comp::button(tr("打开文件夹"), [this](const std::string&) {
     pick_and_open_folder();
   }, "ghost"));
+  // The home footer (hidden in this mode) carried 新建项目; keep it reachable
+  // from the rail so the action is not lost with the bar.
+  foot.add(comp::icon_button("folder-plus", tr("新建项目"), [this](const std::string&) {
+    call_async("project.pickFolder", Json::object(), [this](const BackendResult& r) {
+      if (!r.ok) return;
+      std::string path = jsonutil::get<std::string>(r.data, "path", "");
+      if (path.empty()) return;
+      call_async("project.create", Json{{"path", path}}, [this](const BackendResult&) {
+        load_projects();
+      });
+    });
+  }));
   foot.add(comp::icon_button("gear", tr("设置"), [this](const std::string&) {
     open_modal_page("settings");
   }));
@@ -1747,13 +1886,14 @@ VNodePtr UiApp::build_nav_rail() {
 VNodePtr UiApp::build_home() {
   H wrap = el("div", "page home-page");
   wrap.attr("data-home-tab", itos(st_.home_tab));  // diagnostics + tests
-  // centered title buttons: 探索 / 项目 / 用量统计
+  // centered title buttons: 探索 / 项目 / 用量统计 (+ a search icon at the right)
   std::vector<std::string> items;
   items.push_back(tr("探索"));
   items.push_back(tr("项目"));
   items.push_back(tr("用量统计"));
   H head = el("div", "home-head");
-  head.add(comp::title_tabs(items, st_.home_tab, [this](const std::string& v) {
+  head.add(comp::title_tabs(items, st_.home_tab > 2 ? -1 : st_.home_tab,
+                            [this](const std::string& v) {
     int idx = std::atoi(v.c_str());
     update([&](AppState& s) { s.home_tab = idx; });
     if (idx == 2) {
@@ -1763,6 +1903,14 @@ VNodePtr UiApp::build_home() {
       if (!st_.usage_loaded) load_usage();
     }
   }));
+  // 搜索入口：三个页签之外的一个图标，点开是独立的搜索页（不是弹窗——搜索结果
+  // 本身要占满一屏，而且它值得一个可以直接跳转的地址）。
+  H sbtn = comp::icon_button("magnifying-glass", tr("搜索"), [this](const std::string&) {
+    update([&](AppState& s) { s.home_tab = 3; });
+  });
+  sbtn.cls(st_.home_tab == 3 ? "home-search-btn active" : "home-search-btn");
+  sbtn.key("home-search-btn");
+  head.add(sbtn);
   wrap.add(head);
 
   H body = el("div", "home-body");
@@ -1774,6 +1922,12 @@ VNodePtr UiApp::build_home() {
       if (!st_.mcp_loaded) load_mcp_tools();
       VNodePtr p = build_home_explore();
       p->key = "home:explore";
+      // Sub-page swap: a fade, NOT the row entry animation. The row animation
+      // lifts content by a few pixels, which on a whole page reads as "the page
+      // jumped up from the bottom" (that is exactly how switching back from 用量
+      // to 项目 looked).
+      add_anim(p, anim::kFade);
+      p->anim_key = "home:" + itos(st_.home_tab);
       body.add(p);
       break;
     }
@@ -1784,12 +1938,24 @@ VNodePtr UiApp::build_home() {
       if (!st_.usage_loaded) load_usage();
       VNodePtr p = build_home_usage();
       p->key = "home:usage";
+      add_anim(p, anim::kFade);
+      p->anim_key = "home:" + itos(st_.home_tab);
       body.add(p);
       break;
     }
     default: {
+      if (st_.home_tab == 3) {
+        VNodePtr p = build_home_search();
+        p->key = "home:search";
+        add_anim(p, anim::kFade);
+        p->anim_key = "home:" + itos(st_.home_tab);
+        body.add(p);
+        break;
+      }
       VNodePtr p = build_home_projects();
       p->key = "home:projects";
+      add_anim(p, anim::kFade);
+      p->anim_key = "home:" + itos(st_.home_tab);
       body.add(p);
       break;
     }
@@ -1798,6 +1964,11 @@ VNodePtr UiApp::build_home() {
 
   // footer actions; both flows start from the native folder picker (the
   // browser cannot hand out OS paths, so the backend opens the dialog)
+  //
+  // In left-rail mode the rail already carries 打开文件夹 / 设置, so this bar
+  // would be a second copy of the same controls pinned to the bottom of every
+  // page. It is skipped there (the rail has 新建项目 instead).
+  if (sv_str(st_.settings_values, "ui.tabs", "top") == "left") return wrap.get();
   H foot = el("div", "home-foot");
   foot.add(comp::button(tr("打开文件夹"), [this](const std::string&) {
     pick_and_open_folder();
@@ -1830,6 +2001,13 @@ VNodePtr UiApp::build_new_tab() {
   head.add(el("div", "hint").text(
       tr("选一个项目新建会话，或打开一个已有的会话。")));
   H acts = el("div", "new-acts");
+  // 搜索框：新建页同样是"找到某个会话"的入口，所以这里也能直接搜
+  H nsearch = comp::search_box(st_.search_query, tr("搜索会话…"),
+                               [this](const std::string& v) {
+    update([&](AppState& s) { s.search_query = v; });
+  });
+  nsearch.key("new-search-input");
+  acts.add(nsearch);
   acts.add(comp::button(tr("打开文件夹"), [this](const std::string&) {
     pick_and_open_folder();
   }, "primary"));
@@ -1843,9 +2021,17 @@ VNodePtr UiApp::build_new_tab() {
   head.add(acts);
   wrap.add(head);
   H body = el("div", "new-body");
-  VNodePtr cards = build_home_projects();
-  cards->key = "new:projects";
-  body.add(cards);
+  if (st_.search_query.empty()) {
+    VNodePtr cards = build_home_projects();
+    cards->key = "new:projects";
+    body.add(cards);
+  } else {
+    // A query narrows the page to matching sessions instead of the full cards:
+    // that is the whole point of the box being here.
+    VNodePtr results = build_home_search();
+    results->key = "new:search";
+    body.add(results);
+  }
   wrap.add(body);
   return wrap.get();
 }
@@ -1950,6 +2136,71 @@ VNodePtr UiApp::build_home_explore() {
   return wrap.get();
 }
 
+VNodePtr UiApp::build_home_search() {
+  H wrap = el("div", "search-page");
+  H box = el("div", "search-box-wrap");
+  H search = comp::search_box(st_.search_query, tr("搜索会话、项目或路径…"),
+                              [this](const std::string& v) {
+    update([&](AppState& s) { s.search_query = v; });
+  });
+  search.key("global-search-input");
+  box.add(search);
+  wrap.add(box);
+
+  std::string q = st_.search_query;
+  std::string lower = q;
+  for (size_t i = 0; i < lower.size(); ++i) {
+    lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(lower[i])));
+  }
+  auto match = [&lower](const std::string& hay) {
+    if (lower.empty()) return true;
+    std::string h = hay;
+    for (size_t i = 0; i < h.size(); ++i) {
+      h[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(h[i])));
+    }
+    return h.find(lower) != std::string::npos;
+  };
+
+  H list = el("div", "search-results");
+  size_t hits = 0;
+  for (size_t i = 0; i < st_.projects.size(); ++i) {
+    const ProjectCard& p = st_.projects[i];
+    bool proj_match = match(p.name) || match(p.path);
+    for (size_t k = 0; k < p.sessions.size(); ++k) {
+      const ProjectCard::SessionRow& s = p.sessions[k];
+      // A project-name hit lists all of its sessions (searching a project is a
+      // normal way to narrow down); otherwise the session title must match.
+      if (!proj_match && !match(s.title)) continue;
+      ++hits;
+      std::string sid = s.sid;
+      std::string title = s.title;
+      H row = el("div", "search-row");
+      row.on(EventKind::kClick, [this, sid, title](const std::string&) {
+        open_session(sid, title);
+      });
+      row.add(session_dot(s.loop_state, s.last_error, s.running));
+      H txt = el("div", "search-row-text");
+      txt.add(el("div", "search-row-title").text(s.title));
+      txt.add(el("div", "search-row-sub dim").text(p.name + "  ·  " + p.path));
+      row.add(txt);
+      row.add(el("span", "grow"));
+      if (s.updated_ms > 0) {
+        row.add(el("span", "search-row-time dim").text(rel_time(s.updated_ms)));
+      }
+      list.add(row);
+    }
+  }
+  if (hits == 0) {
+    wrap.add(comp::empty_state(
+        q.empty() ? tr("输入关键词搜索所有项目里的会话。")
+                  : tr("没有匹配的会话。"),
+        "", nullptr));
+  } else {
+    wrap.add(list);
+  }
+  return wrap.get();
+}
+
 VNodePtr UiApp::build_home_projects() {
   H wrap = el("div", "projects");
   if (st_.projects.empty()) {
@@ -2044,7 +2295,7 @@ VNodePtr UiApp::build_home_projects() {
         // Inline rename: the row turns into an input. Enter commits, blur also
         // commits (clicking away is the normal way to finish), Esc cancels.
         H rrow = el("div", "proj-session renaming");
-        rrow.add(el("span", s.running ? "ps-dot running" : "ps-dot"));
+        rrow.add(session_dot(s.loop_state, s.last_error, s.running));
         H inp = comp::text_input(s.rename_text, tr("会话名称"),
                                  [this, sid](const std::string& v) {
           update([&](AppState& st2) {
@@ -2074,8 +2325,7 @@ VNodePtr UiApp::build_home_projects() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      H dot = el("span", s.running ? "ps-dot running" : "ps-dot");
-      dot.attr("title", s.running ? tr("正在运行") : tr("空闲"));
+      H dot = session_dot(s.loop_state, s.last_error, s.running);
       row.add(dot);
       row.add(el("span", "ps-title").text(s.title));
       row.add(el("span", "grow"));
@@ -2806,6 +3056,23 @@ VNodePtr UiApp::build_side_panel() {
       s.side_menu_open = !s.side_menu_open;
     });
   }));
+  // 侧栏标签也可以拖着排序：顺序是用户的工作区安排，和顶栏标签同一套交互。
+  {
+    VNodePtr strip = side.get();
+    // the tab strip is the first child of the panel
+    for (size_t i = 0; i < strip->children.size(); ++i) {
+      std::string cls;
+      for (size_t k = 0; k < strip->children[i]->attrs.size(); ++k) {
+        if (strip->children[i]->attrs[k].key == "class") {
+          cls = strip->children[i]->attrs[k].value;
+        }
+      }
+      if (cls.find("panel-tabs") != std::string::npos) {
+        strip->children[i]->key = "side-tabs";
+        break;
+      }
+    }
+  }
 
   // ---- the "+" page: pick a panel to add ----
   // A page rather than a popup menu: there are enough kinds that each needs a
@@ -3583,6 +3850,7 @@ void UiApp::load_skills() {
             row.description = jsonutil::get<std::string>(s, "description", "");
             row.dir = jsonutil::get<std::string>(s, "dir", "");
             row.loadable = jsonutil::get<bool>(s, "loadable", true);
+            row.kind = jsonutil::get<std::string>(s, "kind", "skill");
           }
           if (!row.name.empty()) rows.push_back(row);
         }
@@ -4294,6 +4562,37 @@ VNodePtr UiApp::build_settings() {
     }));
     size_t shown = 0;
     H list = el("div", "mcp-list");
+    // Built-in MCP entries (browser-control, lsp) live in the same registry as
+    // skills because the load flow is shared, but they are MCP: the model calls
+    // them, the user cannot type /lsp. Listing them under Skill was wrong.
+    for (size_t i = 0; i < st_.skills.size(); ++i) {
+      const AppState::SkillRow& sk = st_.skills[i];
+      if (sk.kind != "mcp") continue;
+      std::string label = sk.title.empty() ? sk.name : sk.title;
+      if (!st_.mcp_filter.empty() &&
+          label.find(st_.mcp_filter) == std::string::npos &&
+          sk.name.find(st_.mcp_filter) == std::string::npos) {
+        continue;
+      }
+      ++shown;
+      H card = el("div", "mcp-card");
+      H top = el("div", "mcp-card-top");
+      top.add(el("span", "mcp-card-name").text(label));
+      top.add(comp::badge(tr("内置")));
+      top.add(el("span", "grow"));
+      std::string name = sk.name;
+      top.add(comp::icon_button("eye", tr("查看内容"), [this, name](const std::string&) {
+        call_async("skill.load", Json{{"name", name}},
+                   [this, name](const BackendResult& r) {
+          toast(r.ok ? (tr("已加载 ") + name) : (tr("加载失败：") + r.message));
+        });
+      }));
+      card.add(top);
+      if (!sk.description.empty()) {
+        card.add(el("div", "mcp-card-desc").text(sk.description));
+      }
+      list.add(card);
+    }
     for (size_t i = 0; i < st_.mcp_tools.size(); ++i) {
       const AppState::McpRow& m = st_.mcp_tools[i];
       if (!st_.mcp_filter.empty() &&
@@ -4323,7 +4622,7 @@ VNodePtr UiApp::build_settings() {
       card.add(acts);
       list.add(card);
     }
-    if (st_.mcp_tools.empty()) {
+    if (st_.mcp_tools.empty() && shown == 0) {
       // 空列表只说"暂无"，不再在下面挂一个新建表单——那看起来像表单才是主体
       body.add(comp::empty_state(
           tr("暂无 MCP。点「自动探测」扫描常见位置，或用「手动导入」选择目录。"),
@@ -4350,7 +4649,6 @@ VNodePtr UiApp::build_settings() {
       });
     }, "ghost"));
     body.add(head);
-    body.add(comp::hint(tr("Skill 是唯一可以由你输入 /名称 调用的命令")));
     body.add(comp::search_box(st_.skill_filter, tr("搜索 Skill"),
                               [this](const std::string& v) {
       update([&](AppState& s) { s.skill_filter = v; });
@@ -4359,6 +4657,9 @@ VNodePtr UiApp::build_settings() {
     H list = el("div", "mcp-list");
     for (size_t i = 0; i < st_.skills.size(); ++i) {
       const AppState::SkillRow& sk = st_.skills[i];
+      // Built-in MCP entries are listed on the MCP page, not here: this page is
+      // "commands you can type", and /lsp is not one of them.
+      if (sk.kind == "mcp") continue;
       std::string label = sk.title.empty() ? sk.name : sk.title;
       if (!st_.skill_filter.empty() &&
           label.find(st_.skill_filter) == std::string::npos &&
@@ -4386,12 +4687,12 @@ VNodePtr UiApp::build_settings() {
       }
       list.add(card);
     }
-    if (st_.skills.empty()) {
+    if (shown == 0) {
       body.add(comp::empty_state(
-          tr("暂无 Skill。点「自动探测」扫描常见位置，或用「手动导入」选择目录。"),
+          st_.skills.empty()
+              ? tr("暂无 Skill。点「自动探测」扫描常见位置，或用「手动导入」选择目录。")
+              : tr("没有匹配的 Skill。"),
           "", nullptr));
-    } else if (shown == 0) {
-      body.add(comp::empty_state(tr("没有匹配的 Skill。"), "", nullptr));
     } else {
       body.add(list);
     }
@@ -5708,6 +6009,9 @@ void UiApp::test_model(const std::string& model_id) {
 // says which widget is showing it (only that widget renders the popup, so it can
 // never appear twice), and `target` says what a pick means: "" = the session's
 // model, otherwise a settings key.
+// Owners that can host the shared model picker. The render pass finds the open
+// popup by key prefix instead of enumerating owners, because a subagent row's
+// owner name is dynamic.
 void UiApp::open_model_picker(const std::string& owner, const std::string& target) {
   // The picker lists providers, so make sure they are loaded before it opens
   // (it can be opened from the session page without ever visiting settings).
@@ -5787,9 +6091,11 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
 H UiApp::build_model_field(const std::string& owner, const std::string& setting_key,
                            const std::string& current, const std::string& placeholder) {
   H box = el("div", "model-field");
+  box.key("model-field:" + owner);
   H btn = el("button", "model-pick-btn");
   btn.attr("type", "button");
   btn.attr("title", tr("选择模型"));
+  btn.key("model-btn:" + owner);
   std::string key = setting_key;
   btn.on(EventKind::kClick, [this, owner, key](const std::string&) {
     open_model_picker(owner, key);
@@ -5805,7 +6111,11 @@ H UiApp::build_model_field(const std::string& owner, const std::string& setting_
     }));
   }
   if (st_.model_picker_open && st_.model_picker_owner == owner) {
-    box.add(build_model_picker(owner, current));
+    VNodePtr pop = build_model_picker(owner, current);
+    box.add(pop);
+    // Anchored to this field's button, not to the whole window: the placement
+    // pass measures and flips it when there is no room above.
+    pop->key = "model-picker:" + owner;
   }
   return box;
 }
@@ -6653,6 +6963,27 @@ void UiApp::load_side_tab(const std::string& id) {
   if (kind == "subagents") load_subagents(active_sid());
   if (kind == "files" && !st_.active_pid.empty()) load_files(id, st_.active_pid, path);
 }
+// 侧栏标签拖拽排序：把 from 移到 to 的位置（其余保持相对顺序）。
+void UiApp::move_side_tab(const std::string& from, const std::string& to) {
+  if (from.empty() || to.empty() || from == to) return;
+  update([&](AppState& s) {
+    int fi = -1, ti = -1;
+    for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+      if (s.side_tabs[i].id == from) fi = static_cast<int>(i);
+      if (s.side_tabs[i].id == to) ti = static_cast<int>(i);
+    }
+    if (fi < 0 || ti < 0) return;
+    SideTab moved = s.side_tabs[fi];
+    s.side_tabs.erase(s.side_tabs.begin() + fi);
+    int insert = fi < ti ? ti - 1 : ti;
+    if (insert < 0) insert = 0;
+    if (insert > static_cast<int>(s.side_tabs.size())) {
+      insert = static_cast<int>(s.side_tabs.size());
+    }
+    s.side_tabs.insert(s.side_tabs.begin() + insert, moved);
+  });
+}
+
 void UiApp::close_side_tab(const std::string& id) {
   std::string next;
   bool closing_active = (id == st_.active_side);

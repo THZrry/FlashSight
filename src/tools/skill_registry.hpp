@@ -31,6 +31,10 @@ struct Skill {
   std::string body_zh;      // 加载后返回的详细用法
   std::string body_en;
   bool loadable = true;     // true=需按需加载（不进工具列表）
+  // "skill" = 用户可以 /名称 调用的命令；"mcp" = 内置 MCP（browser-control、
+  // lsp 这类由模型自主调用的外部能力）。两者都放在这张表里是因为加载流程
+  // 相同，但设置页要把它们分到 MCP 页——列在 Skill 页里会让人以为能 /lsp。
+  std::string kind = "skill";
   std::string dir;          // 来源目录（用户导入的 skill 才有；卡片上显示）
   bool user = false;        // 用户导入/新建（可删除）
   bool enabled = true;      // 停用只是不让模型看到，用户仍可 /名称 调用

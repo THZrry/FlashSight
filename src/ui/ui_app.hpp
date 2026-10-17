@@ -51,6 +51,11 @@ struct ProjectCard {
     std::string title;
     int64_t updated_ms = 0;  // full.json mtime; 0 = unknown
     bool running = false;    // a turn is in flight right now
+    // Live loop state ("waiting" = blocked on the user) and the last turn's
+    // error. Together with `running` these pick the status dot's colour:
+    // blue = done, red = failed, yellow = waiting for you, spinner = running.
+    std::string loop_state;
+    std::string last_error;
     bool renaming = false;   // inline rename in progress
     std::string rename_text; // draft while renaming
   };
@@ -109,11 +114,16 @@ struct AppState {
   // 只改变它和中间栏之间的分配，右侧栏位置不动。
   bool nav_collapsed = false;
   int nav_width = 240;  // px
+  std::string nav_filter;  // rail search box (session title / project)
 
   // ---- home ----
-  int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计
+  int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计 / 3 搜索
   std::vector<ProjectCard> projects;
   std::string explore_query;
+  // 全局搜索（主页标签栏最右的放大镜、新建页的搜索框、左栏搜索都跳到这页）
+  std::string search_query;
+  // 会话列表的排序方式："" = 最近活动，否则按标题/状态
+  std::string session_sort;   // "" | "title" | "status"
   Json usage;              // usage.query result (empty => show placeholders)
   bool usage_loaded = false;
   std::string usage_scope;  // provider id filter ("" = 总计)
@@ -356,7 +366,8 @@ struct AppState {
     std::string name;
     std::string title;
     std::string description;
-    std::string dir;          // 所属目录/来源（卡片上显示）
+    std::string dir;
+    std::string kind;      // "skill" (callable as /name) | "mcp" (built-in MCP)
     bool loadable = true;
   };
   std::vector<SkillRow> skills;            // skill.list result
@@ -613,6 +624,8 @@ class UiApp {
   // open_or_focus_side_tab)
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);
+  // reorder a side panel by dropping it onto another
+  void move_side_tab(const std::string& from, const std::string& to);
   // activate the existing tab of `kind`, or create one. Singleton kinds focus;
   // multi kinds (files, git) always add.
   void open_or_focus_side_tab(const std::string& kind);
@@ -762,6 +775,8 @@ class UiApp {
   VNodePtr build_home();
   VNodePtr build_home_explore();
   VNodePtr build_home_projects();
+  // 全局搜索页：跨项目搜会话（名称/路径），点结果直接打开
+  VNodePtr build_home_search();
   VNodePtr build_home_usage();
   // 顶层 "+" 的页面：项目列表 + 每个项目的会话（点会话即开、点新建即建）
   VNodePtr build_new_tab();
