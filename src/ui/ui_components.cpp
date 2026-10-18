@@ -2,8 +2,10 @@
 #include "ui_components.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 
+#include "fs_highlight.hpp"
 #include "fs_i18n.hpp"
 #include "icon_tables_gen.hpp"
 
@@ -727,7 +729,17 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
       body.add(gutter);
       H pre = el("pre", "code-block");
       if (!lang.empty()) pre.attr("data-lang", lang);
-      pre.text(code);
+      // Highlighting is a single HTML string written with innerHTML, not a tree
+      // of spans: a 200-line block is thousands of nodes otherwise, and this
+      // component is rebuilt on every render while a turn streams. The
+      // ui.codeHighlight setting is applied in CSS (see the .hl-* rules), so
+      // turning it off needs no re-render.
+      const highlight::LangSpec* spec = highlight::find_lang(lang);
+      if (spec && std::strcmp(spec->id, "plain") != 0) {
+        pre.html(highlight::to_html_cached(code, lang));
+      } else {
+        pre.text(code);
+      }
       body.add(pre);
       box.add(body);
       out.push_back(box);

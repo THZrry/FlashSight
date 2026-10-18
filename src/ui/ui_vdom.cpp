@@ -274,6 +274,7 @@ Node create_node(IDom& dom, const VNodePtr& v) {
   for (size_t i = 0; i < v->events.size(); ++i) {
     dom.on(v->dom, v->events[i].kind, v->events[i].hid);
   }
+  if (!v->html.empty()) dom.set_html(v->dom, v->html);
   return v->dom;
 }
 
@@ -506,7 +507,18 @@ void patch_node(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
   }
   patch_attrs(dom, oldv, neu);
   patch_events(dom, oldv, neu);
-  patch_children(dom, oldv, neu);
+  // Raw-HTML nodes own their children: the DOM ones came from the previous
+  // innerHTML, not from VNodes, so diffing them would be meaningless. Only a
+  // changed string is written (the highlighter cache makes repeats cheap, but a
+  // re-parse still throws away every span node in the block).
+  if (neu->html != oldv->html) {
+    if (neu->html.empty()) {
+      dom.clear(neu->dom);
+    } else {
+      dom.set_html(neu->dom, neu->html);
+    }
+  }
+  if (neu->html.empty()) patch_children(dom, oldv, neu);
   // Replay the declared animation when the token changed. A mount animation
   // fires on creation, so a node that survives the patch would never animate
   // again - which is how an animation got "swallowed" (it played while the

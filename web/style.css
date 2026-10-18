@@ -1192,6 +1192,41 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   overflow: visible; margin: 0;
   flex: 1; min-width: 0;
 }
+
+/* ---- syntax highlighting ----
+   One palette for both modes: code blocks sit on a dark surface in light mode
+   too (--code-bg), so a light-mode variant would only be wrong. Colours are
+   picked for contrast on #121418..#1b1d23, and every token class is a plain
+   colour change - no weight or background - so a long block stays calm.
+
+   The ui.codeHighlight setting is honoured HERE, not in the renderer: with the
+   attribute off every token class inherits the block's own colour. That way
+   toggling the setting costs one attribute write instead of re-highlighting
+   (and re-parsing) every block in the transcript. */
+.hl-kw { color: #c678dd; }              /* keyword / control flow */
+.hl-ty { color: #e5c07b; }              /* built-in type */
+.hl-st { color: #98c379; }              /* string */
+.hl-nu { color: #d19a66; }              /* number */
+.hl-cm { color: #7f848e; font-style: italic; }  /* comment */
+.hl-pp { color: #d19a66; }              /* preprocessor / annotation */
+.hl-fn { color: #61afef; }              /* call site */
+.hl-at { color: #e06c75; }              /* attribute / property / JSON key */
+.hl-tg { color: #e06c75; }              /* tag / CSS selector */
+.hl-me { color: #56b6c2; }              /* markdown marker / diff header */
+.hl-ad { color: #98c379; }              /* diff added */
+.hl-de { color: #e06c75; }              /* diff removed */
+[data-code-highlight="0"] .hl-kw,
+[data-code-highlight="0"] .hl-ty,
+[data-code-highlight="0"] .hl-st,
+[data-code-highlight="0"] .hl-nu,
+[data-code-highlight="0"] .hl-cm,
+[data-code-highlight="0"] .hl-pp,
+[data-code-highlight="0"] .hl-fn,
+[data-code-highlight="0"] .hl-at,
+[data-code-highlight="0"] .hl-tg,
+[data-code-highlight="0"] .hl-me,
+[data-code-highlight="0"] .hl-ad,
+[data-code-highlight="0"] .hl-de { color: inherit; font-style: inherit; }
 .caret {
   display: inline-block; width: 7px; height: 14px;
   background: var(--accent);

@@ -80,6 +80,14 @@ class IDom {
 
   // --- content / attributes ---
   virtual void set_text(Node node, const std::string& text) = 0;
+  // Replace the node's children with parsed markup (element.innerHTML). Used for
+  // highlighted code, which is one long string of spans: building it as VNodes
+  // would create thousands of nodes and re-patch them on every render, while the
+  // browser parses the string natively in one shot.
+  virtual void set_html(Node node, const std::string& html) {
+    (void)node;
+    (void)html;
+  }
   virtual void set_attr(Node node, const std::string& key, const std::string& value) = 0;
   virtual void remove_attr(Node node, const std::string& key) = 0;
   virtual void set_style(Node node, const std::string& key, const std::string& value) = 0;
@@ -316,6 +324,7 @@ class NullDom : public IDom {
   void remove(Node node) override;
   void clear(Node parent) override;
   void set_text(Node node, const std::string& text) override;
+  void set_html(Node node, const std::string& html) override;
   void set_attr(Node node, const std::string& key, const std::string& value) override;
   void remove_attr(Node node, const std::string& key) override;
   void set_style(Node node, const std::string& key, const std::string& value) override;

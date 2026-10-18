@@ -30,6 +30,9 @@ struct NullDom::Impl {
   struct FakeNode {
     std::string tag;
     std::string text;
+    // Markup written with set_html. Kept apart from `text` so a test can tell
+    // "the app wrote a string" from "the app wrote escaped text".
+    std::string html;
     std::vector<std::pair<std::string, std::string> > attrs;
     std::vector<uint64_t> children;
     uint64_t parent = 0;
@@ -67,6 +70,11 @@ struct NullDom::Impl {
       os << "<" << n.tag << attr_str(n) << ">";
       if (!n.visible) os << " (hidden)";
       os << "\n";
+      // innerHTML is shown as its own line: it is content, not an attribute, and
+      // tests search the dump for the markup (token classes) it contains.
+      if (!n.html.empty()) {
+        os << std::string(static_cast<size_t>(depth + 1) * 2, ' ') << n.html << "\n";
+      }
     }
     for (size_t i = 0; i < n.children.size(); ++i) dump_rec(os, n.children[i], depth + 1);
   }
@@ -139,14 +147,29 @@ void NullDom::remove(Node node) {
 
 void NullDom::clear(Node parent) {
   std::map<uint64_t, Impl::FakeNode>::iterator it = impl_->nodes.find(parent.id);
-  if (it != impl_->nodes.end()) it->second.children.clear();
+  if (it != impl_->nodes.end()) {
+    it->second.children.clear();
+    it->second.html.clear();
+  }
   calls_.push_back(Call{"clear", parent.id, ""});
 }
 
 void NullDom::set_text(Node node, const std::string& text) {
   std::map<uint64_t, Impl::FakeNode>::iterator it = impl_->nodes.find(node.id);
-  if (it != impl_->nodes.end()) it->second.text = text;
+  if (it != impl_->nodes.end()) {
+    it->second.text = text;
+    it->second.html.clear();  // textContent replaces any earlier innerHTML
+  }
   calls_.push_back(Call{"set_text", node.id, text});
+}
+
+void NullDom::set_html(Node node, const std::string& html) {
+  // No parser here: the markup is kept as the node's html and printed verbatim in
+  // dump(), so tests can search for token classes ("hl-kw"). That is all they
+  // need - the browser is the only backend that has to actually parse it.
+  std::map<uint64_t, Impl::FakeNode>::iterator it = impl_->nodes.find(node.id);
+  if (it != impl_->nodes.end()) it->second.html = html;
+  calls_.push_back(Call{"set_html", node.id, html});
 }
 
 void NullDom::set_attr(Node node, const std::string& key, const std::string& value) {

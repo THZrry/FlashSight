@@ -1159,3 +1159,32 @@ The process of project: P0 环境搭建 + P1 AppCore
     输出却有 23 个空行，撑出滚动条。
   - 219 用例 / 1955 断言（新增工作过程分组/时长、代码块行号与复制、规划独立列、
     子代理历史与时长、滚动状态）。
+
+<52>(SOLVED): 语法高亮（不用 re2c，一套手写扫描器 + 语言数据表）
+  - **为什么不用 re2c**：一个 C++ lexer 的 DFA 表约 30-60KB（每个状态 256 项），
+    几十种语言就是 2-4MB 二进制，只为"上色"；而且每种语言都要维护 .re 源文件、
+    加构建规则、保持同步。这里改成**一个手写扫描器 + 每语言一份 LangSpec 数据**
+    （注释标记、字符串形态、是否区分大小写、关键字表），加语言 = 表里加一行，
+    没有代码生成、没有新状态机。45+ 种语言全部源码约 40KB。
+  - **结构**：`src/common/fs_highlight.hpp/.cpp`。`Syntax` 分五个专用扫描器
+    （markup / css / json / markdown / diff）+ 通用扫描器；通用扫描器的行为由
+    `Flag` 位掩码驱动（块注释、嵌套注释、C 预处理、@注解、三引号、raw string、
+    `$变量`、反引号、Rust `#[attr]`）。关键字/类型用**懒建**的 unordered_set，
+    没人打开的语言一个字节都不花。
+  - **输出是字符串不是 DOM 树**：`to_html()` 直接产出
+    `<span class="hl-kw">…</span>`，配合新增的 `VNode::html` + `IDom::set_html`
+    （wasm innerHTML / Whale `whaleui_dom_set_inner_html` / Null 存原文供断言）。
+    200 行代码块若按 token 建节点是上千个，而且流式输出时 UI 每秒重绘数次，
+    每帧重新 diff 上千节点纯属浪费。`to_html_cached` 按 (语言, FNV-1a 内容哈希)
+    做 96 条 FIFO 缓存。
+  - **正确性靠 round-trip**：所有 span 文本拼接必须逐字节还原输入——高亮是显示层，
+    唯一不能做的事就是改变代码内容。测试覆盖未闭合字符串、孤立单引号、CRLF、
+    中文注释、非法代码、所有语言的交叉组合。
+  - **UI 接入**：`markdown_blocks` 的 `<pre>` 用 innerHTML 写高亮结果；
+    文件预览按**扩展名**猜语言（`lang_for_path`：Makefile/Dockerfile/CMakeLists
+    走整名匹配），未知扩展名退回纯文本。`ui.codeHighlight` 开关走 CSS
+    （`[data-code-highlight="0"] .hl-* { color: inherit }`），切换不需要重绘。
+  - **配色**：一套（代码块在浅色模式下也是深色底 `--code-bg`，再做浅色变体只会错），
+    12 个 token 类只改颜色，不加粗不变底色，长代码块才不吵。
+  - 234 用例 / 2370 断言（新增 14 个高亮用例 + 代码块/预览接入断言）。详见 current.md <52>。
+

@@ -1781,6 +1781,41 @@ FS_TEST(uiapp_file_click_opens_preview_tab) {
   EXPECT_TRUE(files_alive);
 }
 
+// The file preview is highlighted by EXTENSION: the panel has no fence label to
+// go on, so the language comes from the file name. An unknown extension must
+// fall back to plain text rather than guessing.
+FS_TEST(uiapp_preview_highlights_by_extension) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    s.active_pid = "p1";
+    s.side_tabs.clear();
+    SideTab t;
+    t.id = "pv1";
+    t.kind = "preview";
+    t.path = "src/engine.cpp";
+    t.preview_path = "src/engine.cpp";
+    t.loaded = true;
+    t.preview = "// engine\nint main() { return 0; }\n";
+    s.side_tabs.push_back(t);
+    s.active_side = "pv1";
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("hl-cm") != std::string::npos);
+  EXPECT_TRUE(d.find("hl-ty") != std::string::npos);
+  // unknown extension: rendered verbatim, no token spans
+  app.update([](AppState& s) {
+    s.side_tabs[0].path = "data/blob.unknownext";
+    s.side_tabs[0].preview = "int main() { return 0; }\n";
+  });
+  std::string p = dom.dump();
+  EXPECT_TRUE(p.find("hl-ty") == std::string::npos);
+  EXPECT_TRUE(p.find("int main()") != std::string::npos);
+}
+
 // Re-opening the same file focuses its tab instead of stacking duplicates.
 FS_TEST(uiapp_preview_reuses_tab_for_same_file) {
   NullDom dom;
@@ -2457,6 +2492,10 @@ FS_TEST(uiapp_code_block_has_gutter_and_copy) {
   EXPECT_TRUE(d.find("code-copy") != std::string::npos);
   // the gutter numbers the source lines, not the wrapped visual lines
   EXPECT_TRUE(d.find("1\n2") != std::string::npos);
+  // The block is highlighted in place: the <pre> holds token spans, written as
+  // one innerHTML string (a DOM node per token would be thousands of nodes).
+  EXPECT_TRUE(d.find("hl-ty") != std::string::npos);
+  EXPECT_TRUE(dom.count_of("set_html") > 0);
 }
 
 // The plan is its own column (a sibling of the chat), not a float inside it:

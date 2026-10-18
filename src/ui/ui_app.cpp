@@ -20,6 +20,7 @@
 #include <regex>
 
 #include "core/settings_store.hpp"
+#include "fs_highlight.hpp"
 #include "fs_i18n.hpp"
 #include "provider/model_naming.hpp"
 #include "term/fs_vt.hpp"
@@ -3415,8 +3416,22 @@ VNodePtr UiApp::build_side_panel() {
       }, "ghost"));
       body.add(head);
       H pre = el("pre", "file-preview-body");
-      pre.text(panel->loaded ? (panel->preview.empty() ? tr("（空文件）") : panel->preview)
-                             : tr("加载中…"));
+      if (!panel->loaded) {
+        pre.text(tr("加载中…"));
+      } else if (panel->preview.empty()) {
+        pre.text(tr("（空文件）"));
+      } else {
+        // Guess the language from the FILE NAME, not from a fence label: the
+        // preview has no language tag to go on. An unknown extension falls back
+        // to plain text, which is the right answer for a config or a log.
+        std::string lang = highlight::lang_for_path(rel);
+        if (!lang.empty()) {
+          pre.attr("data-lang", lang);
+          pre.html(highlight::to_html_cached(panel->preview, lang));
+        } else {
+          pre.text(panel->preview);
+        }
+      }
       body.add(pre);
     }
   } else if (kind == "git") {

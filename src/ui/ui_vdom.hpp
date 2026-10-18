@@ -201,6 +201,13 @@ struct VNode {
   // two separate DOM subtrees for the duration of the animation, instead of one
   // set of elements being given both animations at once.
   std::string exit_anim;
+  // Raw HTML content, written with innerHTML instead of child nodes. Only for
+  // text that is already markup and is expensive to build as nodes: a
+  // highlighted code block is one string of hundreds of spans, and creating
+  // thousands of DOM nodes for it (then re-patching them on every render while a
+  // turn streams) costs far more than handing the browser one parsed string.
+  // Children are ignored when this is set.
+  std::string html;
   std::vector<VAttr> attrs;
   std::vector<VStyle> styles;
   std::vector<VEvent> events;
@@ -274,6 +281,12 @@ class H {
   H add(const H& child) { return add(child.get()); }
   H text(const std::string& t) {
     n_->children.push_back(make_text(t));
+    return *this;
+  }
+  // Set raw HTML content (see VNode::html). The caller is responsible for
+  // escaping anything that came from the user; the highlighter does that itself.
+  H html(const std::string& h) {
+    n_->html = h;
     return *this;
   }
   VNodePtr get() const { return n_; }

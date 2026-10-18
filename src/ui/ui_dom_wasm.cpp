@@ -1039,6 +1039,12 @@ class WasmDom : public IDom {
     n.set("textContent", text);
   }
 
+  void set_html(Node node, const std::string& html) override {
+    val n = at(node);
+    if (n.isNull() || n.isUndefined()) return;
+    n.set("innerHTML", html);
+  }
+
   void set_attr(Node node, const std::string& key, const std::string& value) override {
     val n = at(node);
     if (n.isNull() || n.isUndefined()) return;

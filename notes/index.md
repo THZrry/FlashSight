@@ -1,4 +1,4 @@
-# FlashSight Notes
+﻿# FlashSight Notes
 
 The process of project: P0 环境搭建
 
@@ -229,3 +229,13 @@ The process of project: P0 环境搭建
   滚动位置保存与首次滚到底、窄屏 100%-20px、工作过程折叠组（步数/成败/时长/
   结束时刻）、代码块语言+行号+复制、子代理可展开对话记录与耗时、终端单行不再
   可滚且行动画改为整块淡入。219 用例 1955 断言。详见 current.md <51>。
+
+
+<52>(SOLVED): 语法高亮——不用 re2c（每语言 30-60KB DFA 表，几十种语言就 2-4MB），
+  改为「一套手写扫描器 + 每语言一行 LangSpec 数据」：Flag 位掩码驱动通用扫描器，
+  markup/css/json/markdown/diff 各一个专用分支，关键字懒建 set。输出是**一个
+  innerHTML 字符串**（新增 VNode::html + IDom::set_html），不是上千个 span 节点，
+  按 (语言, 内容哈希) 缓存 96 条。正确性靠 round-trip（拼接必须逐字节还原输入）。
+  接入聊天代码块与文件预览（按扩展名猜语言，未知退回纯文本）；开关走 CSS，
+  切换不重绘。234 用例 2370 断言。详见 current.md <52>。
+

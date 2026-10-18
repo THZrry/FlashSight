@@ -237,6 +237,12 @@ class WhaleDom : public IDom {
     whaleui_dom_set_text(s.el, text.c_str());
   }
 
+  void set_html(Node node, const std::string& html) override {
+    whaleui_dom_element_t* el = el_of(node);
+    if (!el) return;
+    whaleui_dom_set_inner_html(el, html.c_str());
+  }
+
   void set_attr(Node node, const std::string& key, const std::string& value) override {
     whaleui_dom_element_t* el = el_of(node);
     if (!el) return;

@@ -115,6 +115,9 @@ ui_shared = {
     "src/common/fs_json.cpp",
     "src/common/fs_log.cpp",
     "src/common/fs_i18n.cpp",
+    -- Syntax highlighting. Data-driven (one scanner + per-language word lists)
+    -- rather than a generated DFA per language: see fs_highlight.hpp for why.
+    "src/common/fs_highlight.cpp",
     -- Model-name coarse matching (thinking levels + brand icon). It has no
     -- dependencies beyond <string>/<vector> precisely so BOTH builds can compile
     -- it: the backend fills these in on model.list, and the wasm UI needs them to
