@@ -2,6 +2,7 @@
 #include "ui_components.hpp"
 
 #include <cstdio>
+#include <ctime>
 
 #include "fs_i18n.hpp"
 #include "icon_tables_gen.hpp"
@@ -497,8 +498,44 @@ H file_icon(const std::string& name, bool is_dir) {
 
 // ---------- chat ----------
 
+// "1.2s" / "1m 20s" / "1h 04m" - short enough for a row of metadata.
+std::string fmt_duration(int64_t ms) {
+  if (ms < 0) ms = 0;
+  int64_t sec = ms / 1000;
+  if (sec < 10) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1fs", static_cast<double>(ms) / 1000.0);
+    return std::string(buf);
+  }
+  if (sec < 60) return itos(static_cast<int>(sec)) + "s";
+  int64_t min = sec / 60;
+  int64_t rem = sec % 60;
+  if (min < 60) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%dm %02ds", static_cast<int>(min),
+                  static_cast<int>(rem));
+    return std::string(buf);
+  }
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%dh %02dm", static_cast<int>(min / 60),
+                static_cast<int>(min % 60));
+  return std::string(buf);
+}
+
+// "14:32" in local time: the finish time of a turn, compact.
+std::string fmt_clock(int64_t ms) {
+  if (ms <= 0) return std::string();
+  time_t t = static_cast<time_t>(ms / 1000);
+  struct tm* g = localtime(&t);
+  if (!g) return std::string();
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%02d:%02d", g->tm_hour, g->tm_min);
+  return std::string(buf);
+}
+
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
-               EventFn on_think_toggle) {  H wrap = el("div", "msg " + m.role);
+               EventFn on_think_toggle) {
+  H wrap = el("div", "msg " + m.role);
   if (m.role == "system") {
     wrap.add(el("div", "sys").text(m.text));
     return wrap;
@@ -511,48 +548,83 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     wrap.add(meta);
     return wrap;
   }
+  // ---- 工作过程: reasoning + tool calls, folded into ONE group ----
+  // The answer comes first in reading order: you look at what the model said,
+  // then open the process if you want to know how it got there. A turn with a
+  // dozen tool blocks used to be a wall of rows that buried the answer.
+  bool has_work = !m.thinking.empty() || !m.tools.empty();
+  if (has_work) {
+    int nfail = 0;
+    for (size_t i = 0; i < m.tools.size(); ++i) if (!m.tools[i].ok) ++nfail;
+    H work = el("div", m.work_open ? "work-block open" : "work-block");
+    H whead = el("div", "work-head");
+    if (on_think_toggle) {
+      whead.on(EventKind::kClick,
+               [on_think_toggle](const std::string&) { on_think_toggle("work"); });
+    }
+    whead.add(el("i", "fa fa-list-check"));
+    if (m.work_open) {
+      whead.add(el("span").text(tr("工作过程")));
+    } else {
+      // Collapsed: one line that says what happened, so the fold is informative
+      // instead of just hiding everything behind a caret.
+      std::string label = tr("工作过程");
+      if (!m.tools.empty()) {
+        label += " · " + itos(static_cast<int>(m.tools.size())) + tr(" 步");
+      }
+      if (nfail > 0) label += tr("（") + itos(nfail) + tr(" 次失败）");
+      whead.add(el("span").text(label));
+    }
+    whead.add(el("span", "grow"));
+    // When + how long: the wall-clock facts of this turn.
+    if (m.ended_at > 0) {
+      bool ok_turn = nfail == 0;
+      whead.add(el("span", ok_turn ? "work-done ok" : "work-done fail")
+                   .text(ok_turn ? tr("完成") : tr("有失败")));
+      if (m.started_at > 0 && m.ended_at >= m.started_at) {
+        whead.add(el("span", "work-dur dim").text(
+            fmt_duration(m.ended_at - m.started_at)));
+      }
+      whead.add(el("span", "work-time dim").text(fmt_clock(m.ended_at)));
+    }
+    whead.add(el("span", "think-caret").text(m.work_open ? "\u25be" : "\u25b8"));
+    work.add(whead);
+    if (m.work_open) {
+      H inner = el("div", "work-body");
+      if (!m.thinking.empty()) {
+        inner.add(el("div", "work-label").text(tr("思考")));
+        inner.add(el("pre", "think-body").text(m.thinking));
+      }
+      if (!m.tools.empty()) {
+        inner.add(el("div", "work-label").text(tr("工具调用")));
+        for (size_t i = 0; i < m.tools.size(); ++i) {
+          EventFn toggle = nullptr;
+          if (on_tool_toggle) {
+            EventFn base = on_tool_toggle;
+            std::string idx = itos(static_cast<int>(i));
+            toggle = [base, idx](const std::string& v) { base(idx + "\t" + v); };
+          }
+          inner.add(tool_block(m.tools[i], toggle));
+        }
+      }
+      work.add(inner);
+    }
+    wrap.add(work);
+  }
   // assistant: article-like, no bubble, no name
   H body = el("div", "article");
-  // Reasoning first, folded: it explains HOW the answer was reached and is long
-  // enough to push the answer off screen if it were shown open.
-  if (!m.thinking.empty()) {
-    H think = el("div", m.thinking_open ? "think-block open" : "think-block");
-    H thead = el("div", "think-head");
-    if (on_think_toggle) {
-      thead.on(EventKind::kClick,
-               [on_think_toggle](const std::string&) { on_think_toggle("toggle"); });
-    }
-    thead.add(el("i", "fa fa-brain"));
-    thead.add(el("span").text(tr("思考过程")));
-    thead.add(el("span", "grow"));
-    thead.add(el("span", "think-caret").text(m.thinking_open ? "\u25be" : "\u25b8"));
-    think.add(thead);
-    if (m.thinking_open) think.add(el("pre", "think-body").text(m.thinking));
-    body.add(think);
-  }
-  std::vector<H> blocks = markdown_blocks(m.text);
+  std::vector<H> blocks = markdown_blocks(m.text, on_copy);
   for (size_t i = 0; i < blocks.size(); ++i) body.add(blocks[i]);
   if (m.streaming) body.add(el("span", "caret"));
   wrap.add(body);
-  // flow blocks (tool calls etc.) fold, summary does not. The BLOCK INDEX is
-  // passed through the event value: with one handler on the message, a click on
-  // the fifth block must not toggle the first one.
-  for (size_t i = 0; i < m.tools.size(); ++i) {
-    EventFn toggle = nullptr;
-    if (on_tool_toggle) {
-      EventFn base = on_tool_toggle;
-      std::string idx = itos(static_cast<int>(i));
-      toggle = [base, idx](const std::string& v) { base(idx + "\t" + v); };
-    }
-    wrap.add(tool_block(m.tools[i], toggle));
-  }
   if (!m.summary.empty()) wrap.add(turn_summary(m.summary));
   H meta = el("div", "meta");
   if (!m.time.empty()) meta.add(el("span", "time").text(m.time));
   H cp = el("button", "mini-btn");
   cp.attr("type", "button");
   cp.text(tr("复制"));
-  cp.on(EventKind::kClick, on_copy);  meta.add(cp);
+  if (on_copy) cp.on(EventKind::kClick, on_copy);
+  meta.add(cp);
   wrap.add(meta);
   return wrap;
 }
@@ -560,7 +632,11 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
 H tool_block(const ToolBlock& b, EventFn on_toggle) {
   H d = el("div", b.expanded ? "tool-block open" : "tool-block");
   H head = el("div", "tb-head");
-  head.on(EventKind::kClick, [on_toggle](const std::string&) { on_toggle("toggle"); });
+  // A null handler must not kill the header: blocks without a toggle still have
+  // to render (and the caret must not vanish).
+  if (on_toggle) {
+    head.on(EventKind::kClick, [on_toggle](const std::string&) { on_toggle("toggle"); });
+  }
   head.add(el("span", b.ok ? "tb-ico ok" : "tb-ico err").text(b.ok ? "\u2713" : "\u2717"));
   head.add(el("span", "tb-name").text(b.name));
   head.add(el("span", "tb-sum").text(b.summary));
@@ -584,7 +660,7 @@ H turn_summary(const std::string& text) {
 
 // ---------- markdown-ish ----------
 
-std::vector<H> markdown_blocks(const std::string& text) {
+std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
   std::vector<H> out;
   std::vector<std::string> lines;
   {
@@ -615,10 +691,46 @@ std::vector<H> markdown_blocks(const std::string& text) {
         ++i;
       }
       if (i < lines.size()) ++i;  // closing fence
+      // A code block is a small artefact of its own: it has a language label,
+      // line numbers and a copy button. Without them you cannot tell what you
+      // are reading, cannot refer to "line 12", and cannot get the code out
+      // without selecting it by hand.
+      H box = el("div", "code-wrap");
+      H chead = el("div", "code-head");
+      chead.add(el("span", "code-lang").text(lang.empty() ? std::string("text") : lang));
+      chead.add(el("span", "grow"));
+      if (on_copy_code) {
+        std::string body = code;
+        H cp = el("button", "mini-btn code-copy");
+        cp.attr("type", "button");
+        cp.text(tr("复制"));
+        cp.on(EventKind::kClick,
+              [on_copy_code, body](const std::string&) { on_copy_code(body); });
+        chead.add(cp);
+      }
+      box.add(chead);
+      H body = el("div", "code-body");
+      // Line numbers are generated here, not in CSS counters: the <pre> holds
+      // the text verbatim (a counter would number wrapped visual lines).
+      int nlines = 0;
+      for (size_t k = 0; k < code.size(); ++k) {
+        if (code[k] == '\n') ++nlines;
+      }
+      if (nlines == 0 || code.empty() || code[code.size() - 1] != '\n') ++nlines;
+      H gutter = el("div", "code-lines");
+      std::string nums;
+      for (int n = 1; n <= nlines; ++n) {
+        if (n > 1) nums += "\n";
+        nums += itos(n);
+      }
+      gutter.text(nums);
+      body.add(gutter);
       H pre = el("pre", "code-block");
       if (!lang.empty()) pre.attr("data-lang", lang);
       pre.text(code);
-      out.push_back(pre);
+      body.add(pre);
+      box.add(body);
+      out.push_back(box);
       continue;
     }
     // heading

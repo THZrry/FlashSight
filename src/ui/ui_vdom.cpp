@@ -437,19 +437,49 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
     }
   }
 
-  // 4) if the remaining order already matches, nothing more to do
-  bool same = live.size() == desired.size();
-  if (same) {
-    for (size_t i = 0; i < desired.size(); ++i) {
-      if (!(live[i] == desired[i])) {
-        same = false;
-        break;
+  // 4) Fast path: the surviving children are already in the right relative
+  // order, so only the NEW ones have to be inserted.
+  //
+  // This is not an optimisation. `insertBefore` on a node that is already where
+  // it belongs still detaches and re-inserts it, which RESETS the scroll
+  // position of every scroll container inside it and restarts its CSS
+  // animations. Reordering the whole child list on every structural change
+  // (adding the plan panel, appending a message) therefore scrolled the chat
+  // back to the top and made the sidebar's entrance animation restart forever.
+  // The common case - append something - must not touch a single existing node.
+  {
+    std::vector<Node> desired_set = desired;
+    size_t li = 0;
+    bool subsequence = true;
+    for (size_t i = 0; i < desired.size() && subsequence; ++i) {
+      bool is_live = false;
+      for (size_t k = 0; k < live.size(); ++k) {
+        if (live[k] == desired[i]) { is_live = true; break; }
+      }
+      if (!is_live) continue;  // a new node: not part of the old order
+      // the next surviving child in DOM order must be the next live node
+      if (li < live.size() && live[li] == desired[i]) {
+        ++li;
+      } else {
+        subsequence = false;
       }
     }
-  }
-  if (same) {
-    neu->dom = oldv->dom;
-    return;
+    (void)desired_set;
+    if (subsequence && li == live.size()) {
+      neu->dom = oldv->dom;
+      // insert ONLY the newly created nodes, each before its nearest following
+      // sibling that is already attached (or append at the end).
+      for (size_t i = desired.size(); i-- > 0;) {
+        bool is_live = false;
+        for (size_t k = 0; k < live.size(); ++k) {
+          if (live[k] == desired[i]) { is_live = true; break; }
+        }
+        if (is_live) continue;
+        Node anchor = (i + 1 < desired.size()) ? desired[i + 1] : Node{0};
+        dom.insert_before(neu->dom, desired[i], anchor);
+      }
+      return;
+    }
   }
 
   // 5) reorder: walk back-to-front so each node's successor anchor is already

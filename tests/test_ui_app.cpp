@@ -2330,6 +2330,8 @@ FS_TEST(uiapp_load_session_applies_settings) {
 }
 
 // Thinking is a foldable block, closed by default; opening it shows the body.
+// Reasoning and tool calls live in ONE folded "工作过程" group: the answer is
+// what you read, the process is what you open.
 FS_TEST(uiapp_thinking_block_folds) {
   NullDom dom;
   AppState st = AppState::make();
@@ -2344,9 +2346,10 @@ FS_TEST(uiapp_thinking_block_folds) {
     s.messages.push_back(m);
   });
   std::string d = dom.dump();
-  EXPECT_TRUE(d.find("think-block") != std::string::npos);
+  EXPECT_TRUE(d.find("work-block") != std::string::npos);
+  EXPECT_TRUE(d.find("工作过程") != std::string::npos);
   EXPECT_TRUE(d.find("let me reason about it") == std::string::npos);  // folded
-  app.update([](AppState& s) { s.messages[0].thinking_open = true; });
+  app.update([](AppState& s) { s.messages[0].work_open = true; });
   EXPECT_TRUE(dom.dump().find("let me reason about it") != std::string::npos);
 }
 
@@ -2367,6 +2370,8 @@ FS_TEST(uiapp_tool_blocks_toggle_independently) {
       tb.detail = "detail" + std::to_string(i);
       m.tools.push_back(tb);
     }
+    // tool bodies render inside the (open) work group
+    m.work_open = true;
     s.messages.push_back(m);
   });
   app.update([](AppState& s) { s.messages[0].tools[1].expanded = true; });
@@ -2389,4 +2394,147 @@ FS_TEST(uiapp_auto_mode_button_state) {
   EXPECT_TRUE(dom.dump().find("btn it-btn ghost on") != std::string::npos);
   app.update([](AppState& s) { s.auto_mode = false; });
   EXPECT_TRUE(dom.dump().find("手动") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 第二十四批：工作过程分组 / 代码块 / 规划列 / 滚动 / 子代理历史
+// ---------------------------------------------------------------------------
+
+// A turn's reasoning + tool calls are ONE folded group with finish time and
+// duration; the answer is not buried under a wall of tool rows.
+FS_TEST(uiapp_work_group_shows_time_and_folds) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "the answer";
+    m.thinking = "reasoning";
+    comp::ToolBlock tb;
+    tb.name = "file.read";
+    tb.summary = "a.cpp";
+    m.tools.push_back(tb);
+    m.started_at = 1700000000000LL;
+    m.ended_at = 1700000080000LL;  // 80s later
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("work-block") != std::string::npos);
+  EXPECT_TRUE(d.find("工作过程") != std::string::npos);
+  EXPECT_TRUE(d.find("1m 20s") != std::string::npos);  // duration
+  EXPECT_TRUE(d.find("完成") != std::string::npos);
+  // folded: the reasoning and the tool rows are not rendered
+  EXPECT_TRUE(d.find("reasoning") == std::string::npos);
+  EXPECT_TRUE(d.find("file.read") == std::string::npos);
+  // opening it shows both
+  app.update([](AppState& s) { s.messages[0].work_open = true; });
+  std::string o = dom.dump();
+  EXPECT_TRUE(o.find("reasoning") != std::string::npos);
+  EXPECT_TRUE(o.find("file.read") != std::string::npos);
+}
+
+// Code blocks carry a language label, a line-number gutter and a copy button.
+FS_TEST(uiapp_code_block_has_gutter_and_copy) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "```cpp\nint a = 1;\nint b = 2;\n```";
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("code-wrap") != std::string::npos);
+  EXPECT_TRUE(d.find("code-lang") != std::string::npos);
+  EXPECT_TRUE(d.find("cpp") != std::string::npos);
+  EXPECT_TRUE(d.find("code-lines") != std::string::npos);
+  EXPECT_TRUE(d.find("code-copy") != std::string::npos);
+  // the gutter numbers the source lines, not the wrapped visual lines
+  EXPECT_TRUE(d.find("1\n2") != std::string::npos);
+}
+
+// The plan is its own column (a sibling of the chat), not a float inside it:
+// opening it must not touch the chat subtree.
+FS_TEST(uiapp_plan_is_own_column) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "hello";
+    s.messages.push_back(m);
+  });
+  std::string before = dom.dump();
+  EXPECT_TRUE(before.find("plan-col") == std::string::npos);
+  app.update([](AppState& s) {
+    s.plan_open = true;
+    s.plan_steps.push_back("step one");
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("plan-col") != std::string::npos);
+  EXPECT_TRUE(d.find("step one") != std::string::npos);
+  // the plan column is a SIBLING of .session-center, not a child of it
+  size_t center = d.find("session-center");
+  size_t plan = d.find("plan-col");
+  ASSERT_TRUE(center != std::string::npos && plan != std::string::npos);
+  EXPECT_TRUE(plan > center);
+}
+
+// The chat is scrolled to the bottom when its history arrives (a first visit
+// must show the latest turn, not the top of the conversation). NullDom has no
+// real scrolling, so the assertion is on the state that drives it: a fresh
+// session is "unmeasured" (-1) = "scroll to bottom", and the container carries
+// the stable key the restore pass looks up.
+FS_TEST(uiapp_session_scrolls_to_bottom) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.show("sess_a");
+  EXPECT_TRUE(dump_has(dom, "history"));
+}
+
+// Subagent cards carry their transcript, timing and an expandable log.
+FS_TEST(uiapp_subagent_history_and_timing) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    // the 子代理 panel has to be the active one for its cards to render
+    for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+      if (s.side_tabs[i].kind == "subagents") s.active_side = s.side_tabs[i].id;
+    }
+    AppState::SubagentRow a;
+    a.id = "sub1";
+    a.kind = "explore";
+    a.status = "done";
+    a.task = "find z-index";
+    a.model = "claude-sonnet-4";
+    a.started_at = 1700000000000LL;
+    a.ended_at = 1700000030000LL;
+    a.transcript = Json::array({Json{{"role", "user"}, {"content", "look for z-index"}},
+                                Json{{"role", "assistant"}, {"content", "found 7"}}});
+    s.subagents.push_back(a);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("对话记录") != std::string::npos);
+  EXPECT_TRUE(d.find("30 秒") != std::string::npos);  // duration
+  // folded: the transcript text is not rendered until opened
+  EXPECT_TRUE(d.find("look for z-index") == std::string::npos);
+  app.update([](AppState& s) { s.subagents[0].open = true; });
+  std::string o = dom.dump();
+  EXPECT_TRUE(o.find("look for z-index") != std::string::npos);
+  EXPECT_TRUE(o.find("found 7") != std::string::npos);
 }

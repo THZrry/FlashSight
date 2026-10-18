@@ -505,6 +505,12 @@ class WhaleDom : public IDom {
     // Needs a scrollTop/scrollTo element API in WhaleUI; see the doc.
   }
 
+  void copy_text(const std::string& text) override {
+    // WhaleUI has no clipboard API yet (see doc-internal/ui-whaleui.md);
+    // reporting a copy that did not happen would be worse than doing nothing.
+    (void)text;
+  }
+
   // ---- file picker (upload) ----------------------------------------------
 
   void bind_file_picker(Node node, const std::string& pid,

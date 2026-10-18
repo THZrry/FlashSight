@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -218,6 +219,23 @@ class IDom {
   }
   // Scroll `node` to the bottom (called after output when the view is pinned).
   virtual void scroll_to_bottom(Node node) { (void)node; }
+  // Read / write the vertical scroll offset. The chat history needs both: the
+  // offset is saved per session (so switching tabs does not lose your place) and
+  // restored on the way back.
+  virtual int scroll_top(Node node) {
+    (void)node;
+    return 0;
+  }
+  virtual void set_scroll_top(Node node, int top) {
+    (void)node;
+    (void)top;
+  }
+
+  // --- clipboard ---
+  // Copying text is a platform action (navigator.clipboard in the browser,
+  // Win32 clipboard on desktop), so it lives in the adapter like the file
+  // picker: the UI only says "copy this".
+  virtual void copy_text(const std::string& text) { (void)text; }
 
   // --- file picker (upload) ---
   // Clicking `node` opens the OS file chooser. The picked files are sent to the
@@ -326,6 +344,9 @@ class NullDom : public IDom {
                         std::function<void(const std::string&)> cb) override;
   void bind_scroll_pin(Node node, std::function<void(bool)> cb) override;
   void scroll_to_bottom(Node node) override;
+  int scroll_top(Node node) override;
+  void set_scroll_top(Node node, int top) override;
+  void copy_text(const std::string& text) override;
   void play_animation(Node node, const std::string& cls) override;
   void set_appearance(const Appearance& a) override;
   // test hook: the last appearance the app applied
@@ -374,6 +395,8 @@ class NullDom : public IDom {
   void fire_outside_click_for_test() {
     if (outside_cb_) outside_cb_();
   }
+  // test hook: the last text the app asked to copy
+  const std::string& last_copied_for_test() const { return last_copied_; }
   // test hook: simulate the end of a vertical splitter drag
   void fire_vsplit_for_test(int height) {
     if (vsplit_cb_) vsplit_cb_(height);
@@ -412,6 +435,9 @@ class NullDom : public IDom {
   std::function<void(const std::string&)> tab_drag_cb_;
   std::function<void()> outside_cb_;
   std::vector<std::function<void()> > scheduled_;
+  std::string last_copied_;
+  // test hook: scroll offsets recorded per node id
+  std::map<uint64_t, int> scroll_tops_;
   std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;

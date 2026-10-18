@@ -139,6 +139,10 @@ struct AppState {
   // history actually arrives - otherwise a slow load plays the animation over
   // an empty page and it is gone before there is anything to see.
   bool session_loaded = false;
+  // Chat scroll offset for this session. Saved when leaving the tab and put back
+  // on the way in; a first visit starts at the BOTTOM (the latest turn is what
+  // you came for, not the beginning of the conversation).
+  int hist_scroll = -1;  // -1 = never measured: start at the bottom
   std::string model;
   int model_index = 0;
   std::string permission = "permissive";
@@ -231,6 +235,15 @@ struct AppState {
     std::string kind;
     std::string status;
     std::string task;
+    std::string model;
+    std::string summary;
+    int64_t started_at = 0;
+    int64_t ended_at = 0;
+    // Full transcript (the record's `full`): a subagent's conversation does not
+    // belong in the main chat, but it must be READABLE - otherwise "what did it
+    // actually do" has no answer.
+    Json transcript = Json::array();
+    bool open = false;      // transcript expanded in the sidebar
   };
   std::vector<SubagentRow> subagents;
 
@@ -429,6 +442,7 @@ struct SessionView {
   bool loaded = false;  // history/panels fetched from the backend yet?
   std::vector<comp::ChatMsg> messages;
   bool session_loaded = false;
+  int hist_scroll = -1;  // chat scroll offset (see AppState::hist_scroll)
   std::string session_input;
   std::vector<std::string> attachments;
   // 空 = 还没选模型。凭空给一个 gpt-4o-mini 会让人以为它已经配好且能用，而

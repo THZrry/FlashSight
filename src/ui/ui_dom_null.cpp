@@ -287,6 +287,21 @@ void NullDom::scroll_to_bottom(Node node) {
   calls_.push_back(Call{"scroll_to_bottom", node.id, ""});
 }
 
+int NullDom::scroll_top(Node node) {
+  std::map<uint64_t, int>::const_iterator it = scroll_tops_.find(node.id);
+  return it == scroll_tops_.end() ? 0 : it->second;
+}
+
+void NullDom::set_scroll_top(Node node, int top) {
+  scroll_tops_[node.id] = top;
+  calls_.push_back(Call{"set_scroll_top", node.id, std::to_string(top)});
+}
+
+void NullDom::copy_text(const std::string& text) {
+  last_copied_ = text;
+  calls_.push_back(Call{"copy_text", 0, text});
+}
+
 void NullDom::play_animation(Node node, const std::string& cls) {
   if (cls.empty()) return;
   played_anims_.push_back(cls);

@@ -308,7 +308,48 @@ FS_TEST(comp_markdown_blocks) {
   EXPECT_EQ(blocks[0].get()->tag, std::string("h1"));
   EXPECT_EQ(blocks[1].get()->tag, std::string("p"));
   EXPECT_EQ(blocks[2].get()->tag, std::string("ul"));
-  EXPECT_EQ(blocks[3].get()->tag, std::string("pre"));
+  // A code block is a wrapper now: language label + gutter + copy button around
+  // the <pre>. The <pre> is the second child (after the header).
+  ASSERT_TRUE(blocks[3].get()->tag == std::string("div"));
+  {
+    const VNodePtr& box = blocks[3].get();
+    bool has_pre = false;
+    bool has_gutter = false;
+    bool has_head = false;
+    for (size_t i = 0; i < box->children.size(); ++i) {
+      const std::string& c = box->children[i]->tag;
+      if (c == "div") {
+        for (size_t j = 0; j < box->children[i]->attrs.size(); ++j) {
+          if (box->children[i]->attrs[j].key == "class") {
+            if (box->children[i]->attrs[j].value.find("code-head") != std::string::npos) {
+              has_head = true;
+            }
+            if (box->children[i]->attrs[j].value.find("code-lines") != std::string::npos) {
+              has_gutter = true;
+            }
+          }
+        }
+      }
+    }
+    // the <pre> and the line-number gutter live one level deeper, inside
+    // .code-body (a flex row: gutter | code)
+    for (size_t i = 0; i < box->children.size(); ++i) {
+      if (box->children[i]->tag != "div") continue;
+      for (size_t k = 0; k < box->children[i]->children.size(); ++k) {
+        const VNodePtr& inner = box->children[i]->children[k];
+        if (inner->tag == "pre") has_pre = true;
+        for (size_t j = 0; j < inner->attrs.size(); ++j) {
+          if (inner->attrs[j].key == "class" &&
+              inner->attrs[j].value.find("code-lines") != std::string::npos) {
+            has_gutter = true;
+          }
+        }
+      }
+    }
+    EXPECT_TRUE(has_head);
+    EXPECT_TRUE(has_gutter);
+    EXPECT_TRUE(has_pre);
+  }
   bool has_strong = false;
   for (size_t i = 0; i < blocks[1].get()->children.size(); ++i) {
     if (blocks[1].get()->children[i]->tag == "strong") has_strong = true;

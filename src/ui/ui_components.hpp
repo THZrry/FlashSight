@@ -119,6 +119,13 @@ struct ChatMsg {
   std::string thinking;
   bool thinking_open = false;
   std::vector<ToolBlock> tools;  // flow blocks rendered after the text
+  // 工作过程: reasoning + tool calls folded into ONE group above the answer.
+  // A turn with a dozen tool blocks used to be a wall of rows; the answer is
+  // what you read, the process is what you open when curious.
+  bool work_open = false;
+  // When the turn ended and how long it took (ms since epoch; 0 = unknown).
+  int64_t started_at = 0;
+  int64_t ended_at = 0;
   std::string summary;           // turn summary (not folded, no border)
 };
 
@@ -131,8 +138,10 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
 H turn_summary(const std::string& text);
 
 // Simple markdown-ish article rendering: fenced code, headings, lists,
-// paragraphs, inline `code` / **bold** / *italic*.
-std::vector<H> markdown_blocks(const std::string& text);
+// paragraphs, inline `code` / **bold** / *italic*. `on_copy_code` (optional)
+// receives a code block's text when its copy button is pressed.
+std::vector<H> markdown_blocks(const std::string& text,
+                               EventFn on_copy_code = nullptr);
 
 // ---------- overlays ----------
 H modal(const std::string& title, const std::vector<H>& body,

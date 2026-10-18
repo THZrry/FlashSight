@@ -1124,3 +1124,38 @@ The process of project: P0 环境搭建 + P1 AppCore
     （两次 setModel + setThinking + setPermission）、5 步计划。
   - 214 用例 / 1928 断言（新增：会话设置回填、思考折叠、工具块独立折叠、
     自动挡状态）。
+
+<51>(SOLVED): 框架重排 bug（一连串"抽搐/重建/滚动丢失"的总根因）+ 会话页信息设计。
+  - **框架根因**：`patch_children` 的 reorder 循环对**每一个**子节点都调用
+    `insert_before`，即使它已经在正确位置。DOM 的 insertBefore 会把节点先摘下来
+    再插回去，于是：滚动容器位置被重置、CSS 动画重播、节点被"重建"。
+    这一条同时解释了"点规划把 chat history 重建了""滚动位置没保存""侧栏动画
+    先出现在垂直 50% 再跳位""点 diffWrite 反复切换侧栏"。修复：先判断存活子节点
+    是否已是目标顺序的子序列，是则只插入**新建**的节点（append 场景完全不碰
+    已有节点）；`WasmDom::insert_before` 也加了"已在位则 no-op"的守卫。
+  - **规划面板**：从 `.session-center` 里的 absolute 浮层改成**独立一列**
+    （`.plan-col`，258px，chat 与侧栏之间）。它不再是 chat 布局的一部分，开关
+    只改变列宽，历史节点与滚动位置都不动。实测：打开后 `.history`/`.history-inner`
+    的 DOM 身份不变，9 条消息节点全部保留。
+  - **滚动位置**：`hist_scroll` 进 SessionView（每会话独立）。离开标签时读取、
+    返回时写回；首次进入（-1）滚到**底部**。历史加载完成后再滚一次（此前滚的
+    是空页面）。同时去掉 `.history` 的 `scroll-behavior: smooth`——它让程序化
+    `scrollTop` 变成动画，既读不回来也会和恢复互相打架。
+  - **宽度**：`.history-inner` 的 `max-width: 50%` 改成
+    `min(50%, calc(100% - 20px))`，窄列不再被 50% 卡死。
+  - **工作过程**：思考 + 工具调用合并成一个折叠组（`.work-block`），默认收起。
+    折叠时显示"N 步 · 完成/有失败 · 时长 · 结束时刻"，展开后分"思考/工具调用"
+    两段。`ChatMsg` 增加 `work_open` / `started_at` / `ended_at`；
+    `SessionManager::append_turn` 落库时补 `ts` 与 `startedAt`（结束时间与时长
+    只能从数据里来，不能靠 mtime 猜）。
+  - **代码块**：`.code-wrap` = 语言标签 + 行号槽 + 复制按钮 + `<pre>`。行号是真
+    元素（CSS counter 会数到折行后的视觉行）。复制走新的 `IDom::copy_text`
+    （浏览器 `navigator.clipboard` + textarea 回退；Whale 暂不支持）。
+  - **子代理历史**：`SubagentRow` 增加 transcript / started_at / ended_at /
+    model / summary / open；`subagent.list` 本来就带 `full`，现在解析并渲染成
+    可展开的对话记录（角色 + 内容），卡片头显示模型、已运行/耗时与结束时刻。
+  - **终端**：去掉每行 `.ts-row` 的入场动画（一行终端会"往上抖"，40 行会播 40 次
+    动画），改为整块 `.ts-lines` 淡入；同时裁掉网格末尾的空行——新终端只有一行
+    输出却有 23 个空行，撑出滚动条。
+  - 219 用例 / 1955 断言（新增工作过程分组/时长、代码块行号与复制、规划独立列、
+    子代理历史与时长、滚动状态）。

@@ -60,7 +60,8 @@ std::string color_css(int32_t rgb) {
 // A terminal grid (terminal.grid reply) as plain text: one line per row, the
 // runs concatenated. This is what the overview shows, so escape sequences are
 // already resolved by the engine and never reach the screen.
-std::string term_grid_text(const Json& grid) {  if (!grid.is_object()) return std::string();
+std::string term_grid_text(const Json& grid) {
+  if (!grid.is_object()) return std::string();
   const Json& lines = grid["lines"];
   if (!lines.is_array()) return std::string();
   std::string out;
@@ -342,6 +343,25 @@ std::string thinking_label(const std::string& v) {
 // 注意基准：会话时间来自后端 full.json 的 mtime（真实墙上时间），而这里的
 // now_ms() 是**单调时钟**（steady_clock / performance.now()），两者原点不同。
 // 所以这里用系统墙上时间做差，不能拿 now_ms() 去减 mtime，否则会算出天量偏差。
+// 时长（"1 分 12 秒"）：结束时间减去开始时间；还没结束时用 now。
+std::string session_duration(int64_t from_ms, int64_t to_ms) {
+  if (from_ms <= 0) return std::string();
+  int64_t end = to_ms > 0 ? to_ms : static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count());
+  int64_t d = end - from_ms;
+  if (d < 0) d = 0;
+  int64_t sec = d / 1000;
+  if (sec < 60) return itos(static_cast<int>(sec)) + tr(" 秒");
+  int64_t min = sec / 60;
+  if (min < 60) {
+    int64_t rem = sec % 60;
+    return itos(static_cast<int>(min)) + tr(" 分 ") + itos(static_cast<int>(rem)) + tr(" 秒");
+  }
+  return itos(static_cast<int>(min / 60)) + tr(" 小时 ") +
+         itos(static_cast<int>(min % 60)) + tr(" 分");
+}
+
 std::string rel_time(int64_t ms) {
   if (ms <= 0) return std::string();
   int64_t now_wall = static_cast<int64_t>(
@@ -600,6 +620,7 @@ void UiApp::save_session_view(const std::string& sid) {
   SessionView& v = views_.get_or_create(sid);
   v.messages = st_.messages;
   v.session_loaded = st_.session_loaded;
+  v.hist_scroll = st_.hist_scroll;
   v.session_input = st_.session_input;
   v.model = st_.model;
   v.model_index = st_.model_index;
@@ -645,6 +666,7 @@ void UiApp::load_session_view(const std::string& sid) {
   views_.restore(sid, &v);  // keeps the defaults when the key is new
   st_.messages = v.messages;
   st_.session_loaded = v.session_loaded;
+  st_.hist_scroll = v.hist_scroll;
   st_.session_input = v.session_input;
   st_.model = v.model;
   // 会话自己还没选过模型时，用设置里的会话默认模型（如果配了）。仍然为空就
@@ -705,6 +727,12 @@ void UiApp::switch_tab(const std::string& id, int dir) {
     leaving = st_.active_tab;
   }
   if (id == st_.active_tab && last_session_key_ == leaving && leaving == id) return;
+  // Save the chat scroll offset BEFORE stashing the view: the payload is what
+  // restore() puts back, so reading it later would store the default.
+  {
+    VNodePtr h = find_by_key(tree_, "chat-history");
+    if (h && h->dom.valid()) st_.hist_scroll = dom_.scroll_top(h->dom);
+  }
   if (!leaving.empty()) save_session_view(leaving);
   // Any open transient popup belongs to the tab being left. Leaving it up is how
   // the model picker "stayed glued" across a tab switch.
@@ -742,6 +770,16 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   load_session_view(sid);
   last_session_key_ = sid;
   render();
+  // Scroll: a first visit starts at the BOTTOM (you came for the latest turn);
+  // a return visit goes back to where you were. Done after the patch, because
+  // the node has to exist before it can be scrolled.
+  {
+    VNodePtr h = find_by_key(tree_, "chat-history");
+    if (h && h->dom.valid()) {
+      if (st_.hist_scroll >= 0) dom_.set_scroll_top(h->dom, st_.hist_scroll);
+      else dom_.scroll_to_bottom(h->dom);
+    }
+  }
   // "Has a stashed view" is NOT the same as "its history was fetched": leaving
   // a tab always stashes a default view, so this used to skip the fetch on the
   // way back to a session that had never loaded (the composer then showed an
@@ -793,6 +831,8 @@ void UiApp::load_session(const std::string& sid) {
       // Reasoning is part of the stored turn when the provider returned it.
       m.thinking = jsonutil::get<std::string>(t, "thinking",
                      jsonutil::get<std::string>(t, "reasoning", ""));
+      m.started_at = jsonutil::get_int(t, "startedAt", 0);
+      m.ended_at = jsonutil::get_int(t, "ts", 0);
       // Tool calls become the flow blocks under the message: without this a
       // reloaded session lost every "read file / edit / diff" block and looked
       // like the model answered out of thin air.
@@ -880,6 +920,17 @@ void UiApp::load_session(const std::string& sid) {
       // animation over an empty page, so it was over before content arrived)
       st_.session_loaded = true;
       render();
+      // The history just arrived, so whatever we scrolled to before was either
+      // an empty page or the previous content's height. Opening a session must
+      // land on the latest message, and a return visit must land on the saved
+      // offset - both are only meaningful once the messages exist.
+      {
+        VNodePtr h = find_by_key(tree_, "chat-history");
+        if (h && h->dom.valid()) {
+          if (st_.hist_scroll >= 0) dom_.set_scroll_top(h->dom, st_.hist_scroll);
+          else dom_.scroll_to_bottom(h->dom);
+        }
+      }
     }
     load_terminals(sid);
     // file panels load their own directory when they become active (see
@@ -1098,6 +1149,16 @@ void UiApp::load_subagents(const std::string& sid) {
       row.kind = jsonutil::get<std::string>(a, "kind", "");
       row.status = jsonutil::get<std::string>(a, "status", "");
       row.task = jsonutil::get<std::string>(a, "task", "");
+      row.model = jsonutil::get<std::string>(a, "model", "");
+      row.summary = jsonutil::get<std::string>(a, "summary", "");
+      row.started_at = jsonutil::get_int(a, "startedAt", 0);
+      row.ended_at = jsonutil::get_int(a, "endedAt", 0);
+      row.transcript = a.contains("full") ? a["full"] : Json::array();
+      // Keep an expanded transcript open across a refresh (the panel polls while
+      // a subagent runs; collapsing under the cursor is worse than a stale row).
+      for (size_t k = 0; k < st_.subagents.size(); ++k) {
+        if (st_.subagents[k].id == row.id) row.open = st_.subagents[k].open;
+      }
       rows.push_back(row);
     }
     update([&](AppState& s) { s.subagents = rows; });
@@ -2681,13 +2742,18 @@ VNodePtr UiApp::build_session() {
   // ---- center column: history (centered column) + composer ----
   H center = el("div", "session-center");
   H hist = el("div", "history");
+  hist.key("chat-history");  // scroll position is saved/restored by this key
   H hist_inner = el("div", "history-inner");
   if (st_.messages.empty()) {
     hist_inner.add(comp::empty_state(tr("开始新的对话。输入消息后 Enter 发送。"), "", nullptr));
   }
   for (size_t i = 0; i < st_.messages.size(); ++i) {
     comp::ChatMsg m = st_.messages[i];
-    hist_inner.add(comp::chat_message(m, [this](const std::string&) { toast(tr("已复制")); },
+    hist_inner.add(comp::chat_message(m, [this, i](const std::string&) {
+      // Really copy: the toast used to be the whole feature.
+      if (i < st_.messages.size()) dom_.copy_text(st_.messages[i].text);
+      toast(tr("已复制"));
+    },
                                       [this, i](const std::string& v) {
       // The value carries "<blockIndex>\t<action>": a message can have many
       // foldable blocks, and clicking one must not toggle the first.
@@ -2703,7 +2769,15 @@ VNodePtr UiApp::build_session() {
         }
       });
     },
-                                      [this, i](const std::string&) {
+                                      [this, i](const std::string& v) {
+      // "work" toggles the whole group (reasoning + tools) at once; a bare
+      // "\t<action>" would mean the thinking block alone.
+      if (v == "work") {
+        update([&](AppState& s) {
+          if (i < s.messages.size()) s.messages[i].work_open = !s.messages[i].work_open;
+        });
+        return;
+      }
       update([&](AppState& s) {
         if (i < s.messages.size()) s.messages[i].thinking_open = !s.messages[i].thinking_open;
       });
@@ -3015,13 +3089,21 @@ VNodePtr UiApp::build_session() {
   }
   center.add(comp_box);
 
-  // plan panel floats over the history's left edge (absolute, inside center)
+  mid.add(center);
+
+  // plan panel: its OWN column, not a float inside the chat.
+  // It used to be absolutely positioned inside .session-center, which made the
+  // chat column its containing block: opening it forced the chat column to
+  // re-layout, and the timeline read as "the plan is part of the conversation".
+  // It is a sibling column now - toggle it and the chat just gets narrower.
   if (st_.plan_open) {
-    H plan = el("div", "plan-float");
-    plan.anim("pop");
+    H plan = el("div", "plan-col");
+    plan.key("plan-col");
+    plan.anim(anim::kSlideLeft);
     H phead = el("div", "plan-head");
     phead.add(el("span", "plan-title").text(tr("任务规划")));
-    phead.add(comp::icon_button("\u2715", "收起", [this](const std::string&) {
+    phead.add(el("span", "grow"));
+    phead.add(comp::icon_button("\u2715", tr("收起"), [this](const std::string&) {
       update([&](AppState& s) { s.plan_open = false; });
     }));
     plan.add(phead);
@@ -3034,10 +3116,8 @@ VNodePtr UiApp::build_session() {
       step.add(el("span", "plan-text").text(st_.plan_steps[i]));
       plan.add(step);
     }
-    center.add(plan);
+    mid.add(plan);
   }
-
-  mid.add(center);
 
   // ---- divider + collapsible side panel ----
   H split = el("div", st_.side_collapsed ? "side-splitter collapsed" : "side-splitter");
@@ -3198,8 +3278,60 @@ VNodePtr UiApp::build_side_panel() {
                    .text(a.status == "running" ? "●" : "✓"));
       head.add(el("span", "sa-kind").text(a.kind));
       head.add(el("span", "sa-id dim").text(a.id));
+      if (!a.model.empty()) head.add(comp::badge(a.model));
+      head.add(el("span", "grow"));
+      // Timing: "what is still running, and how long did the finished ones
+      // take" is the question this panel exists to answer.
+      if (a.status == "running") {
+        head.add(el("span", "sa-time dim").text(
+            a.started_at > 0 ? (tr("已运行 ") + session_duration(a.started_at, 0))
+                             : std::string()));
+      } else if (a.ended_at > 0) {
+        head.add(el("span", "sa-time dim").text(
+            session_duration(a.started_at, a.ended_at) + "  ·  " +
+            rel_time(a.ended_at)));
+      }
       card.add(head);
       card.add(el("div", "sa-task").text(a.task));
+      // Transcript: the subagent's own conversation, folded. It is kept out of
+      // the main chat on purpose, but the user must be able to read it.
+      if (!a.transcript.is_array() || a.transcript.is_array()) {
+        if (a.transcript.is_array() && a.transcript.size() > 0) {
+          H trow = el("div", "sa-history-toggle");
+          std::string id = a.id;
+          trow.on(EventKind::kClick, [this, id](const std::string&) {
+            update([&](AppState& s) {
+              for (size_t k = 0; k < s.subagents.size(); ++k) {
+                if (s.subagents[k].id == id) s.subagents[k].open = !s.subagents[k].open;
+              }
+            });
+          });
+          trow.add(el("span", "sa-caret").text(a.open ? "\u25be" : "\u25b8"));
+          trow.add(el("span").text(tr("对话记录") + " · " +
+                                   itos(static_cast<int>(a.transcript.size()))));
+          card.add(trow);
+          if (a.open) {
+            H log = el("div", "sa-history");
+            for (size_t k = 0; k < a.transcript.size(); ++k) {
+              const Json& e = a.transcript[k];
+              std::string role = jsonutil::get<std::string>(e, "role", "");
+              std::string text = jsonutil::get<std::string>(e, "content",
+                                 jsonutil::get<std::string>(e, "text", ""));
+              if (text.empty()) {
+                text = jsonutil::get<std::string>(e, "summary", "");
+              }
+              if (role.empty() && text.empty()) continue;
+              H line = el("div", "sa-hline " + (role.empty() ? std::string("note") : role));
+              line.add(el("span", "sa-hrole").text(role));
+              line.add(el("span", "sa-hbody").text(text));
+              log.add(line);
+            }
+            card.add(log);
+          }
+        } else if (!a.summary.empty()) {
+          card.add(el("div", "sa-summary").text(a.summary));
+        }
+      }
       H acts = el("div", "sa-actions");
       acts.add(comp::button(tr("引导"), [this, i](const std::string&) {
         if (i >= st_.subagents.size()) return;
@@ -3455,7 +3587,9 @@ VNodePtr UiApp::build_terminal_drawer() {
     // not - the rows were reused, so nothing was ever created.
     H lines_box = el("div", "ts-lines");
     lines_box.key("term-lines:" + st_.term_tab);
-    lines_box.anim(anim::kEnter);
+    // The BLOCK animates (a fade), not each row: rows are text on a grid, and a
+    // per-row translate made a one-line terminal wobble its single line upward.
+    lines_box.anim(anim::kFade);
     const Json* grid = nullptr;
     std::map<std::string, Json>::const_iterator gi = st_.term_grids.find(st_.term_tab);
     if (gi != st_.term_grids.end()) grid = &gi->second;
@@ -3469,7 +3603,29 @@ VNodePtr UiApp::build_terminal_drawer() {
       // the cursor's line in the combined buffer, then its index in `lines`
       int cursor_line = scrollback + cy - from;
       if (lines.is_array()) {
-        for (size_t y = 0; y < lines.size(); ++y) {
+        // A terminal screen is always rows x cols: a fresh terminal has ONE line
+        // of output and 23 blank ones. Drawing all of them made the surface
+        // taller than its box, so a one-line terminal had a scrollbar. Trailing
+        // blank rows are not content - drop them, but never the row the cursor
+        // is on (the cursor must stay visible even on an empty screen).
+        size_t last = lines.size();
+        while (last > 0) {
+          const Json& runs = lines[last - 1];
+          bool blank = true;
+          if (runs.is_array()) {
+            for (size_t k = 0; k < runs.size(); ++k) {
+              if (!jsonutil::get<std::string>(runs[k], "t", "").empty()) {
+                blank = false;
+                break;
+              }
+            }
+          }
+          if (!blank) break;
+          if (cursor_visible && static_cast<int>(last - 1) == cursor_line) break;
+          --last;
+        }
+        if (last == 0) last = 1;  // an empty screen still shows its cursor row
+        for (size_t y = 0; y < last; ++y) {
           H row = el("div", "ts-row");
           row.style("height", "1.28em");
           const Json& runs = lines[y];

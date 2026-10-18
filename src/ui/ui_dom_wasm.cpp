@@ -719,6 +719,46 @@ EM_JS(void, fs_dom_scroll_bottom, (int node_id), {
   el.scrollTop = el.scrollHeight;
 });
 
+EM_JS(int, fs_dom_scroll_top, (int node_id), {
+  var el = globalThis.__fsNodes[node_id];
+  return el ? (el.scrollTop | 0) : 0;
+});
+
+EM_JS(void, fs_dom_set_scroll_top, (int node_id, int top), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  // Assigning scrollTop animates when the element has `scroll-behavior: smooth`
+  // (the history does). Restoring a position must be instant, or the user sees
+  // the chat scroll by itself after every tab switch.
+  var prev = el.style.scrollBehavior;
+  el.style.scrollBehavior = 'auto';
+  el.scrollTop = top;
+  el.style.scrollBehavior = prev;
+});
+
+EM_JS(void, fs_dom_copy_text, (const char* text), {
+  var s = UTF8ToString(text);
+  if (!s) return;
+  // navigator.clipboard needs a secure context and a user gesture; the local
+  // server is http://127.0.0.1, which counts as secure. Fall back to the old
+  // textarea trick when the API is missing so copy never silently does nothing.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(s).catch(function () { legacyCopy(s); });
+  } else {
+    legacyCopy(s);
+  }
+  function legacyCopy(t) {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+});
+
 // Restart a mount-only animation on a node that already exists. The CSS class is
 // already on it (the app declares it every render), so simply leaving it there
 // does nothing: the animation ran once when the node was created. Removing the
@@ -964,10 +1004,17 @@ class WasmDom : public IDom {
   void insert_before(Node parent, Node child, Node ref) override {
     val p = at(parent), c = at(child), r = at(ref);
     if (p.isNull() || p.isUndefined() || c.isNull() || c.isUndefined()) return;
+    // "Already there" must be a no-op. insertBefore on a node that is already in
+    // position still detaches and re-attaches it, which resets the scroll
+    // position of every scroll container inside and restarts CSS animations.
     if (r.isNull() || r.isUndefined()) {
+      val last = p["lastChild"];
+      if (!last.isNull() && !last.isUndefined() && last == c) return;
       p.call<void>("appendChild", c);
       return;
     }
+    val next = c["nextSibling"];
+    if (!next.isNull() && !next.isUndefined() && next == r) return;
     p.call<void>("insertBefore", c, r);
   }
 
@@ -1173,6 +1220,18 @@ class WasmDom : public IDom {
 
   void scroll_to_bottom(Node node) override {
     fs_dom_scroll_bottom(static_cast<int>(node.id));
+  }
+
+  int scroll_top(Node node) override {
+    return fs_dom_scroll_top(static_cast<int>(node.id));
+  }
+
+  void set_scroll_top(Node node, int top) override {
+    fs_dom_set_scroll_top(static_cast<int>(node.id), top);
+  }
+
+  void copy_text(const std::string& text) override {
+    fs_dom_copy_text(text.c_str());
   }
 
   void play_animation(Node node, const std::string& cls) override {

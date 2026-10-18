@@ -229,7 +229,26 @@ FsResult SessionManager::delete_session(const std::string& sid) {
 FsResult SessionManager::append_turn(const std::string& sid, const Json& turn) {
   FsResult r = load_full_checked(sid, nullptr);
   if (!r.ok()) return r;
-  return make_store(sid).append_turn(sid, turn);
+  // Stamp every turn with when it was written. The UI shows "finished at /
+  // took 1m 20s" per turn, and that is only knowable if the time is stored with
+  // the turn - recomputing it from file mtimes gives one number per session.
+  Json t = turn;
+  int64_t now = clock_ ? clock_->now_ms() : WallClock().now_ms();
+  if (!t.contains("ts") || !t["ts"].is_number()) t["ts"] = now;
+  if (!t.contains("startedAt")) {
+    // A turn's start is the previous turn's end; the first turn of a session
+    // starts now (unknown otherwise) so the duration is never negative.
+    Json full;
+    if (load_full(sid, &full).ok() && full.contains("turns") &&
+        full["turns"].is_array() && !full["turns"].empty()) {
+      const Json& prev = full["turns"][full["turns"].size() - 1];
+      int64_t prev_ts = jsonutil::get_int(prev, "ts", 0);
+      t["startedAt"] = prev_ts > 0 ? prev_ts : now;
+    } else {
+      t["startedAt"] = now;
+    }
+  }
+  return make_store(sid).append_turn(sid, t);
 }
 
 FsResult SessionManager::append_system_op(const std::string& sid, const std::string& op,
