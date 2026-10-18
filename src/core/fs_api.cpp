@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "core/folder_picker.hpp"
+#include "fs_git.hpp"
 #include "fs_path.hpp"
 #include "tools/skill_registry.hpp"
 
@@ -895,11 +896,117 @@ void FsApi::stop_terminal_poller() {
   poller_.reset();
 }
 
+// ----- git.* -----
+// The Git panel is a VIEW of the project directory, so every method resolves
+// the pid to a path here rather than trusting a path from the UI. A project
+// that is not a git repository is a normal state, not an error: the panel says
+// "not a repository" and offers nothing to do.
+namespace {
+std::vector<std::string> json_paths(const Json& paths) {
+  std::vector<std::string> out;
+  if (!paths.is_array()) return out;
+  for (size_t i = 0; i < paths.size(); ++i) {
+    if (paths[i].is_string()) out.push_back(paths[i].get<std::string>());
+  }
+  return out;
+}
+}  // namespace
+
+FsResult FsApi::git_status(const std::string& pid) {
+  std::string path = path_for(pid);
+  if (path.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  git::Status st = git::status(path);
+  Json j = Json::object();
+  j["ok"] = st.ok;
+  j["isRepo"] = st.is_repo;
+  j["root"] = st.root;
+  j["branch"] = st.branch;
+  j["upstream"] = st.upstream;
+  j["ahead"] = st.ahead;
+  j["behind"] = st.behind;
+  j["detached"] = st.detached;
+  j["clean"] = st.clean;
+  j["operation"] = st.operation;
+  j["error"] = st.error;
+  Json arr = Json::array();
+  for (size_t i = 0; i < st.changes.size(); ++i) {
+    const git::FileChange& c = st.changes[i];
+    Json f = Json::object();
+    f["path"] = c.path;
+    f["origPath"] = c.orig_path;
+    f["index"] = std::string(1, c.index_status);
+    f["work"] = std::string(1, c.work_status);
+    f["staged"] = c.staged();
+    f["untracked"] = c.untracked();
+    f["conflicted"] = c.conflicted();
+    arr.push_back(f);
+  }
+  j["changes"] = arr;
+  return FsResult::success(j);
+}
+
+FsResult FsApi::git_diff(const std::string& pid, const std::string& path,
+                         bool staged) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::diff(root, path, staged));
+}
+
+FsResult FsApi::git_show_head(const std::string& pid, const std::string& path) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::show_head(root, path));
+}
+
+FsResult FsApi::git_log(const std::string& pid, int maxCount) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::log(root, maxCount));
+}
+
+FsResult FsApi::git_branches(const std::string& pid) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::branches(root));
+}
+
+FsResult FsApi::git_stage(const std::string& pid, const Json& paths) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::stage(root, json_paths(paths)));
+}
+
+FsResult FsApi::git_unstage(const std::string& pid, const Json& paths) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::unstage(root, json_paths(paths)));
+}
+
+FsResult FsApi::git_stage_all(const std::string& pid) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::stage_all(root));
+}
+
+FsResult FsApi::git_commit(const std::string& pid, const std::string& message,
+                           bool amend) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::commit(root, message, amend));
+}
+
+FsResult FsApi::git_discard(const std::string& pid, const Json& paths) {
+  std::string root = path_for(pid);
+  if (root.empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
+  return FsResult::success(git::discard(root, json_paths(paths)));
+}
+
 // ----- usage.* -----
 FsResult FsApi::usage_query(const Json& filter) {
   UsageFilter f;
   f.provider = jsonutil::get<std::string>(filter, "provider", "");
   f.model = jsonutil::get<std::string>(filter, "model", "");
+  f.sid = jsonutil::get<std::string>(filter, "sid", "");
   f.from = jsonutil::get_int(filter, "from", 0);
   f.to = jsonutil::get_int(filter, "to", 0);
   UsageSummary sum = usage_->query(f);

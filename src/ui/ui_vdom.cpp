@@ -500,6 +500,12 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
 }
 
 void patch_node(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
+  // Same VNode object on both sides: nothing to do. A caller that memoises a
+  // subtree (the chat reuses one VNode per unchanged message) hands the SAME
+  // pointer back, and without this check the diff would still walk the entire
+  // subtree comparing strings to itself - which is exactly the cost the cache
+  // exists to avoid.
+  if (oldv.get() == neu.get()) return;
   neu->dom = oldv->dom;
   if (neu->is_text()) {
     if (oldv->text != neu->text) dom.set_text(neu->dom, neu->text);

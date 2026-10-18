@@ -1188,3 +1188,41 @@ The process of project: P0 环境搭建 + P1 AppCore
     12 个 token 类只改颜色，不加粗不变底色，长代码块才不吵。
   - 234 用例 / 2370 断言（新增 14 个高亮用例 + 代码块/预览接入断言）。详见 current.md <52>。
 
+
+<53>(SOLVED): 历史不重算（业务缓存 + 框架短路）+ Git 面板接真后端 + 用量面板去假数据
+  - **为什么历史不能每帧重算**：`build_session` 每次 render 都把整段历史重新解析
+    （markdown → VNode），流式输出时每秒重绘数次；几百轮会话等于每秒把整份历史
+    重新解析、再 diff 一遍自己。两处修复：
+    1) **业务级**：`ChatMsg::rev` 版本号 + `msg_nodes_` 缓存（key = sid+index）。
+       未变化的消息交回**同一个 VNode 指针**，只有真正变的那条被重建。校验用
+       rev + 轻量签名（长度/折叠位，不做字符串比较）——因为状态也会被 handler
+       和测试直接改，只靠调用方自觉 bump 版本号，漏一处就会静默显示旧内容。
+       已固化的一轮 rev 永远不变，二次打开会话的代价降到一次 map 查找。
+    2) **框架级**：`patch_node` 增加同指针短路。缓存复用同一对象时，diff 否则仍会
+       遍历整棵子树和自己比字符串——正是缓存要省掉的那笔开销。
+    流式 delta / tool.update / turn.done / 折叠点击都会 bump rev；`turn.done` 还会
+    让该会话的用量重新拉取（这一轮花了 token）。
+    测试 `uiapp_history_is_not_rebuilt` 断言：追加一条只重建那一条、空渲染零重建、
+    改一条只重建那一条。
+  - **Git 后端**：新增 `src/common/fs_git.hpp/.cpp`，走 git CLI（零依赖，不引
+    libgit2）。`git -C <repo> <args>` 用参数向量 + 平台转义，路径**永远**不能
+    被当成选项（`--force`、`../x` 直接拒绝，有测试）。stderr 单独写临时文件，
+    不并进 stdout——否则 git 的 "LF will be replaced by CRLF" 警告会污染 diff
+    解析。状态用 `--porcelain=v1 -z --branch` 解析（含 ahead/behind、游离 HEAD、
+    merge/rebase 进行中标记）。10 个方法：status/diff/showHead/log/branches +
+    stage/unstage/stageAll/commit/discard，`FsApi::git_*` 全部按 pid 解析路径，
+    UI 不碰仓库路径。
+  - **两个真 bug**（都是浏览器实测出来的）：
+    * 未跟踪文件点开显示"没有差异"——`git diff` 比的是工作区与**索引**，未跟踪
+      文件没有索引项。改为渲染成整文件 `+` 的 diff（就是暂存会记录的内容）。
+    * "全部暂存"用的是 `git add -u`，不含未跟踪文件，但面板把它们列出来了。
+      改 `-A`，并加测试断言列出的每一项都被暂存。
+  - **侧栏 Git 面板**：分支/↑↓/进行中操作、已暂存与未暂存两组、单文件暂存/取消/
+    撤销、diff 用 `diff` 语言高亮、仅在暂存非空时出现提交框（提交空内容是个错误，
+    摆着按钮只会诱发那次点击）。
+  - **用量面板去假数据**：原来写死 `42%` / `¥0.21` / `12.4K / 3.1K`。现在
+    `UsageRow` 带 `sid`（provider 调用时从 `req.session_id` 写入），新增
+    `usage.session`，侧栏显示真实的累计 tokens/成本；上下文水位由 UI 按模型族
+    窗口估算（未知模型显示 "—" 而不是编一个百分比）。
+  - 252 用例 / 2509 断言（新增 10 个 git 用例、5 个 UI 用例）。详见 current.md <53>。
+

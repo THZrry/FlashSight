@@ -13,6 +13,7 @@ namespace fs {
 Json usage_row_to_json(const UsageRow& r) {
   Json j = Json::object();
   j["ts"] = r.ts;
+  if (!r.sid.empty()) j["sid"] = r.sid;
   if (!r.provider.empty()) j["provider"] = r.provider;
   if (!r.model.empty()) j["model"] = r.model;
   if (r.in) j["in"] = r.in;
@@ -29,6 +30,7 @@ Json usage_row_to_json(const UsageRow& r) {
 UsageRow usage_row_from_json(const Json& j) {
   UsageRow r;
   r.ts = jsonutil::get_int(j, "ts", 0);
+  r.sid = jsonutil::get<std::string>(j, "sid", "");
   r.provider = jsonutil::get<std::string>(j, "provider", "");
   r.model = jsonutil::get<std::string>(j, "model", "");
   r.in = jsonutil::get_int(j, "in", 0);
@@ -63,6 +65,7 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
     UsageRow r = usage_row_from_json(j);
     if (!filter.provider.empty() && r.provider != filter.provider) continue;
     if (!filter.model.empty() && r.model != filter.model) continue;
+    if (!filter.sid.empty() && r.sid != filter.sid) continue;
     if (filter.from && r.ts < filter.from) continue;
     if (filter.to && r.ts > filter.to) continue;
     ++sum.calls;
@@ -122,6 +125,7 @@ FsResult UsageStore::export_csv(const UsageFilter& filter,
     UsageRow r = usage_row_from_json(j);
     if (!filter.provider.empty() && r.provider != filter.provider) continue;
     if (!filter.model.empty() && r.model != filter.model) continue;
+    if (!filter.sid.empty() && r.sid != filter.sid) continue;
     if (filter.from && r.ts < filter.from) continue;
     if (filter.to && r.ts > filter.to) continue;
     csv += csv_escape(r.provider) + "," + csv_escape(r.model) + "," +

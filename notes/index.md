@@ -239,3 +239,9 @@ The process of project: P0 环境搭建
   接入聊天代码块与文件预览（按扩展名猜语言，未知退回纯文本）；开关走 CSS，
   切换不重绘。234 用例 2370 断言。详见 current.md <52>。
 
+
+<53>(SOLVED): 历史不重算（ChatMsg::rev + VNode 缓存 + 框架同指针短路）+ Git 面板接
+  真后端（git CLI，status/diff/stage/commit，含未跟踪文件 diff 与 add -A 两个真
+  bug）+ 用量面板去掉写死的 42%/¥0.21/12.4K，改用带 sid 的 usage.session。
+  252 用例 2509 断言。详见 current.md <53>。
+

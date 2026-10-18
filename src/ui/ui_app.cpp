@@ -18,6 +18,7 @@
 #include <cstring>
 #include <map>
 #include <regex>
+#include <set>
 
 #include "core/settings_store.hpp"
 #include "fs_highlight.hpp"
@@ -42,6 +43,20 @@ std::string tr(const std::string& zh) { return i18n::tr(zh); }
 std::string itos(int v) {
   char buf[32];
   std::snprintf(buf, sizeof(buf), "%d", v);
+  return std::string(buf);
+}
+
+// Token counts are read at a glance, not compared digit by digit: 12.4K is
+// more useful in a 360px panel than 12437.
+std::string fmt_tokens(int64_t n) {
+  char buf[32];
+  if (n >= 1000000) {
+    std::snprintf(buf, sizeof(buf), "%.1fM", static_cast<double>(n) / 1000000.0);
+  } else if (n >= 1000) {
+    std::snprintf(buf, sizeof(buf), "%.1fK", static_cast<double>(n) / 1000.0);
+  } else {
+    std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(n));
+  }
   return std::string(buf);
 }
 
@@ -633,6 +648,9 @@ void UiApp::save_session_view(const std::string& sid) {
   v.suspended = st_.suspended;
   v.context_pct = st_.context_pct;
   v.session_cost = st_.session_cost;
+  v.session_tokens_in = st_.session_tokens_in;
+  v.session_tokens_out = st_.session_tokens_out;
+  v.session_usage_loaded = st_.session_usage_loaded;
   v.side_tabs = st_.side_tabs;
   v.active_side = st_.active_side;
   v.side_seq = st_.side_seq;
@@ -689,6 +707,9 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.suspended = v.suspended;
   st_.context_pct = v.context_pct;
   st_.session_cost = v.session_cost;
+  st_.session_tokens_in = v.session_tokens_in;
+  st_.session_tokens_out = v.session_tokens_out;
+  st_.session_usage_loaded = v.session_usage_loaded;
   st_.side_tabs = v.side_tabs;
   st_.active_side = v.active_side;
   st_.side_seq = v.side_seq;
@@ -834,6 +855,10 @@ void UiApp::load_session(const std::string& sid) {
                      jsonutil::get<std::string>(t, "reasoning", ""));
       m.started_at = jsonutil::get_int(t, "startedAt", 0);
       m.ended_at = jsonutil::get_int(t, "ts", 0);
+      // A loaded turn is FROZEN: it gets one revision and never changes again.
+      // That is what makes reopening a 300-turn session cheap - the second visit
+      // renders every message from the cache instead of re-parsing the history.
+      m.rev = next_msg_rev_++;
       // Tool calls become the flow blocks under the message: without this a
       // reloaded session lost every "read file / edit / diff" block and looked
       // like the model answered out of thin air.
@@ -1012,6 +1037,94 @@ void UiApp::load_usage() {
     update([&](AppState& s) {
       s.usage = r.data;
       s.usage_loaded = true;
+    });
+  });
+}
+
+// Context window for a model id, in tokens. 0 = unknown.
+//
+// Deliberately a small table of FAMILIES rather than a per-model list: model
+// names change weekly, and the exact window only feeds a percentage. An unknown
+// model returns 0 and the panel shows "—" instead of inventing a number.
+int model_context_window(const std::string& model_id) {
+  std::string m = model_id;
+  for (size_t i = 0; i < m.size(); ++i) {
+    m[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(m[i])));
+  }
+  if (m.empty()) return 0;
+  // Claude: 200K for the 3/3.5/4 families.
+  if (m.find("claude") != std::string::npos) return 200000;
+  // Gemini: 1M for 1.5/2.x.
+  if (m.find("gemini") != std::string::npos) return 1000000;
+  // GPT-4.1 / o-series / gpt-5: 200K-400K; use the conservative common value.
+  if (m.find("gpt-4.1") != std::string::npos) return 1000000;
+  if (m.find("gpt-4o") != std::string::npos) return 128000;
+  if (m.find("gpt-4") != std::string::npos) return 128000;
+  if (m.find("gpt-5") != std::string::npos) return 400000;
+  if (m.find("o1") != std::string::npos || m.find("o3") != std::string::npos ||
+      m.find("o4") != std::string::npos) {
+    return 200000;
+  }
+  if (m.find("deepseek") != std::string::npos) return 128000;
+  if (m.find("qwen") != std::string::npos) return 128000;
+  if (m.find("kimi") != std::string::npos || m.find("moonshot") != std::string::npos) {
+    return 256000;
+  }
+  if (m.find("glm") != std::string::npos) return 128000;
+  if (m.find("llama") != std::string::npos) return 128000;
+  if (m.find("mistral") != std::string::npos) return 128000;
+  return 0;
+}
+
+// Per-session usage: the side panel's "context level / this session's cost /
+// this turn's tokens" used to be hard-coded strings. The numbers come from the
+// same usage store the usage page reads, filtered by sid.
+//
+// The context level is computed here, not by the backend: it is a ratio of the
+// LAST request's input tokens to the model's context window, and only the UI
+// knows which model is selected. A model without a known window leaves it at -1
+// and the panel shows a placeholder instead of inventing a percentage.
+void UiApp::load_session_usage(const std::string& sid) {
+  if (sid.empty()) return;
+  call_async("usage.session", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    int64_t in = jsonutil::get_int(r.data, "totalIn", 0);
+    int64_t out = jsonutil::get_int(r.data, "totalOut", 0);
+    double cost = jsonutil::get_number(r.data, "totalCost", 0.0);
+    std::string kind = jsonutil::get<std::string>(r.data, "costKind", "unknown");
+    int64_t calls = jsonutil::get_int(r.data, "calls", 0);
+    int pct = -1;
+    // A model whose window we know turns the token count into a percentage.
+    int window = model_context_window(st_.model);
+    if (window > 0 && in > 0) {
+      pct = static_cast<int>((in * 100) / window);
+      if (pct > 100) pct = 100;
+    }
+    std::string cost_text;
+    if (kind == "money") {
+      char buf[32];
+      std::snprintf(buf, sizeof(buf), "¥%.2f", cost);
+      cost_text = buf;
+    } else if (calls > 0) {
+      cost_text = itos(static_cast<int>(calls)) + tr(" 次调用");
+    }
+    update([&](AppState& s) {
+      // The reply belongs to `sid`; do not paint it onto a different session
+      // that the user switched to while the request was in flight.
+      if (s.active_tab != sid) {
+        SessionView& v = views_.get_or_create(sid);
+        v.context_pct = pct;
+        v.session_cost = cost_text;
+        v.session_tokens_in = in;
+        v.session_tokens_out = out;
+        v.session_usage_loaded = true;
+        return;
+      }
+      s.context_pct = pct;
+      s.session_cost = cost_text;
+      s.session_tokens_in = in;
+      s.session_tokens_out = out;
+      s.session_usage_loaded = true;
     });
   });
 }
@@ -1199,6 +1312,190 @@ void UiApp::load_files(const std::string& tab_id, const std::string& pid,
   });
 }
 
+// ---- git panel ----------------------------------------------------------
+// The panel is a view of the ACTIVE session's project, addressed by pid. Every
+// call refreshes the panel's own copy of the status: two git panels can point
+// at two different projects, so nothing here reads global state.
+void UiApp::load_git(const std::string& tab_id) {
+  if (st_.active_pid.empty()) return;
+  std::string pid = st_.active_pid;
+  call_async("git.status", Json{{"pid", pid}}, [this, tab_id](const BackendResult& r) {
+    std::vector<SideTab::GitChange> rows;
+    bool ok = r.ok;
+    bool is_repo = false;
+    std::string root, branch, upstream, operation, error;
+    int ahead = 0, behind = 0;
+    bool detached = false;
+    if (ok) {
+      is_repo = jsonutil::get<bool>(r.data, "isRepo", false);
+      root = jsonutil::get<std::string>(r.data, "root", "");
+      branch = jsonutil::get<std::string>(r.data, "branch", "");
+      upstream = jsonutil::get<std::string>(r.data, "upstream", "");
+      operation = jsonutil::get<std::string>(r.data, "operation", "");
+      error = jsonutil::get<std::string>(r.data, "error", "");
+      ahead = static_cast<int>(jsonutil::get_int(r.data, "ahead", 0));
+      behind = static_cast<int>(jsonutil::get_int(r.data, "behind", 0));
+      detached = jsonutil::get<bool>(r.data, "detached", false);
+      const Json& arr = r.data.contains("changes") ? r.data["changes"] : Json::array();
+      if (arr.is_array()) {
+        for (size_t i = 0; i < arr.size(); ++i) {
+          SideTab::GitChange c;
+          c.path = jsonutil::get<std::string>(arr[i], "path", "");
+          c.orig_path = jsonutil::get<std::string>(arr[i], "origPath", "");
+          std::string idx = jsonutil::get<std::string>(arr[i], "index", " ");
+          std::string wk = jsonutil::get<std::string>(arr[i], "work", " ");
+          c.index = idx.empty() ? ' ' : idx[0];
+          c.work = wk.empty() ? ' ' : wk[0];
+          c.staged = jsonutil::get<bool>(arr[i], "staged", false);
+          c.untracked = jsonutil::get<bool>(arr[i], "untracked", false);
+          c.conflicted = jsonutil::get<bool>(arr[i], "conflicted", false);
+          if (!c.path.empty()) rows.push_back(c);
+        }
+      }
+    } else {
+      error = r.message;
+    }
+    update([&](AppState& s) {
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id != tab_id) continue;
+        SideTab& t = s.side_tabs[i];
+        t.git_loaded = true;
+        t.git_repo = is_repo;
+        t.git_root = root;
+        t.git_branch = branch;
+        t.git_upstream = upstream;
+        t.git_operation = operation;
+        t.git_error = error;
+        t.git_ahead = ahead;
+        t.git_behind = behind;
+        t.git_detached = detached;
+        t.git_changes = rows;
+        // The open diff may no longer exist (staged away, reverted, committed).
+        if (!t.git_diff_path.empty()) {
+          bool still = false;
+          for (size_t k = 0; k < rows.size(); ++k) {
+            if (rows[k].path == t.git_diff_path) still = true;
+          }
+          if (!still) {
+            t.git_diff_path.clear();
+            t.git_diff_text.clear();
+            t.git_diff_truncated = false;
+            t.git_diff_error.clear();
+          }
+        }
+        return;
+      }
+    });
+  });
+}
+
+void UiApp::load_git_diff(const std::string& tab_id, const std::string& path,
+                          bool staged) {
+  if (st_.active_pid.empty() || path.empty()) return;
+  std::string pid = st_.active_pid;
+  call_async("git.diff", Json{{"pid", pid}, {"path", path}, {"staged", staged}},
+             [this, tab_id, path, staged](const BackendResult& r) {
+    std::string text;
+    std::string error;
+    bool truncated = false;
+    if (r.ok) {
+      text = jsonutil::get<std::string>(r.data, "diff", "");
+      truncated = jsonutil::get<bool>(r.data, "truncated", false);
+      if (!jsonutil::get<bool>(r.data, "ok", true)) {
+        error = jsonutil::get<std::string>(r.data, "error", "");
+      }
+    } else {
+      error = r.message;
+    }
+    update([&](AppState& s) {
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id != tab_id) continue;
+        SideTab& t = s.side_tabs[i];
+        t.git_diff_path = path;
+        t.git_diff_staged = staged;
+        t.git_diff_text = text;
+        t.git_diff_truncated = truncated;
+        t.git_diff_error = error;
+        return;
+      }
+    });
+  });
+}
+
+void UiApp::git_stage_paths(const std::string& tab_id,
+                            const std::vector<std::string>& paths, bool stage) {
+  if (st_.active_pid.empty() || paths.empty()) return;
+  Json arr = Json::array();
+  for (size_t i = 0; i < paths.size(); ++i) arr.push_back(paths[i]);
+  std::string pid = st_.active_pid;
+  const char* method = stage ? "git.stage" : "git.unstage";
+  call_async(method, Json{{"pid", pid}, {"paths", arr}},
+             [this, tab_id](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("Git 操作失败：") + r.message);
+    } else if (!jsonutil::get<bool>(r.data, "ok", true)) {
+      toast(tr("Git 操作失败：") +
+            jsonutil::get<std::string>(r.data, "message", ""));
+    }
+    load_git(tab_id);
+  });
+}
+
+void UiApp::git_stage_all(const std::string& tab_id) {
+  if (st_.active_pid.empty()) return;
+  std::string pid = st_.active_pid;
+  call_async("git.stageAll", Json{{"pid", pid}}, [this, tab_id](const BackendResult& r) {
+    if (!r.ok || !jsonutil::get<bool>(r.data, "ok", true)) {
+      toast(tr("暂存失败：") + (r.ok ? jsonutil::get<std::string>(r.data, "message", "")
+                                    : r.message));
+    }
+    load_git(tab_id);
+  });
+}
+
+void UiApp::git_discard_paths(const std::string& tab_id,
+                              const std::vector<std::string>& paths) {
+  if (st_.active_pid.empty() || paths.empty()) return;
+  Json arr = Json::array();
+  for (size_t i = 0; i < paths.size(); ++i) arr.push_back(paths[i]);
+  std::string pid = st_.active_pid;
+  call_async("git.discard", Json{{"pid", pid}, {"paths", arr}},
+             [this, tab_id](const BackendResult& r) {
+    if (!r.ok || !jsonutil::get<bool>(r.data, "ok", true)) {
+      toast(tr("撤销失败：") + (r.ok ? jsonutil::get<std::string>(r.data, "message", "")
+                                    : r.message));
+    }
+    load_git(tab_id);
+  });
+}
+
+void UiApp::git_commit(const std::string& tab_id, const std::string& message,
+                       bool amend) {
+  if (st_.active_pid.empty()) return;
+  if (message.empty()) {
+    toast(tr("提交信息不能为空"));
+    return;
+  }
+  std::string pid = st_.active_pid;
+  call_async("git.commit", Json{{"pid", pid}, {"message", message}, {"amend", amend}},
+             [this, tab_id](const BackendResult& r) {
+    bool ok = r.ok && jsonutil::get<bool>(r.data, "ok", true);
+    if (ok) {
+      std::string hash = jsonutil::get<std::string>(r.data, "hash", "");
+      toast(hash.empty() ? tr("已提交") : (tr("已提交 ") + hash));
+      update([&](AppState& s) {
+        for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+          if (s.side_tabs[i].id == tab_id) s.side_tabs[i].git_message.clear();
+        }
+      });
+    } else {
+      toast(tr("提交失败：") + (r.ok ? jsonutil::get<std::string>(r.data, "message", "")
+                                    : r.message));
+    }
+    load_git(tab_id);
+  });
+}
+
 // Preview one file inside a specific file panel.
 void UiApp::preview_file(const std::string& tab_id, const std::string& rel) {
   if (st_.active_pid.empty() || rel.empty()) return;
@@ -1266,10 +1563,14 @@ void UiApp::append_stream_delta(const std::string& text) {
     comp::ChatMsg m;
     m.role = "assistant";
     m.streaming = true;
+    m.rev = next_msg_rev_++;
     st_.messages.push_back(m);
   }
   st_.messages.back().text += text;
   st_.messages.back().streaming = true;
+  // The streaming message is the ONE that must be rebuilt on every delta; every
+  // message before it keeps its revision and is skipped by the render cache.
+  st_.messages.back().rev = next_msg_rev_++;
 }
 
 // Backend events are per-session (payload.sid). They must land in that
@@ -1289,13 +1590,29 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       comp::ChatMsg a;
       a.role = "assistant";
       a.streaming = true;
+      a.rev = next_msg_rev_++;
       m.push_back(a);
     }
     m.back().text += text;
     m.back().streaming = true;
+    m.back().rev = next_msg_rev_++;
   } else if (event == "turn.done") {
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
-    if (!m.empty() && m.back().role == "assistant") m.back().streaming = false;
+    if (!m.empty() && m.back().role == "assistant") {
+      m.back().streaming = false;
+      m.back().rev = next_msg_rev_++;
+    }
+    // The turn just spent tokens, so the side panel's cost/context numbers are
+    // stale. Refresh them for the session that actually ran.
+    std::string usage_sid = sid.empty() ? st_.active_tab : sid;
+    if (!usage_sid.empty()) {
+      if (is_active) {
+        st_.session_usage_loaded = false;
+      } else {
+        vp->session_usage_loaded = false;
+      }
+      load_session_usage(usage_sid);
+    }
   } else if (event == "tool.update") {
     std::string name = jsonutil::get<std::string>(payload, "name", "");
     bool ok = jsonutil::get<bool>(payload, "ok", true);
@@ -1306,6 +1623,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       tb.summary = ok ? "ok" : "failed";
       tb.ok = ok;
       m.back().tools.push_back(tb);
+      m.back().rev = next_msg_rev_++;
     }
   } else if (event == "subagent.done") {
     std::string id = jsonutil::get<std::string>(payload, "id", "");
@@ -2748,14 +3066,35 @@ VNodePtr UiApp::build_session() {
   if (st_.messages.empty()) {
     hist_inner.add(comp::empty_state(tr("开始新的对话。输入消息后 Enter 发送。"), "", nullptr));
   }
+  // Messages are rendered through a cache keyed by (sid, index). A session can
+  // hold hundreds of turns, and this loop runs on EVERY render - several times a
+  // second while a reply streams. Re-parsing every markdown block and rebuilding
+  // every node each time was the single largest cost in the app, and it also
+  // made the diff walk thousands of identical nodes.
+  //
+  // A message whose revision and signature are unchanged hands back the SAME
+  // VNode object, so the framework skips the subtree entirely (see patch_node).
+  // Only the message that actually changed is rebuilt - in the common case the
+  // streaming one. A solidified turn never changes again, so its cost drops to
+  // one map lookup.
+  const std::string msg_sid = st_.active_tab == "home" ? std::string() : st_.active_tab;
+  std::set<std::string> live_keys;
   for (size_t i = 0; i < st_.messages.size(); ++i) {
-    comp::ChatMsg m = st_.messages[i];
-    hist_inner.add(comp::chat_message(m, [this, i](const std::string&) {
+    const comp::ChatMsg& m = st_.messages[i];
+    std::string key = comp::chat_message_key(msg_sid, i);
+    live_keys.insert(key);
+    uint64_t sig = message_sig(m);
+    std::map<std::string, MsgNode>::iterator hit = msg_nodes_.find(key);
+    if (hit != msg_nodes_.end() && hit->second.rev == m.rev && hit->second.sig == sig) {
+      hist_inner.add(hit->second.node);
+      continue;
+    }
+    H node = comp::chat_message(m, [this, i](const std::string&) {
       // Really copy: the toast used to be the whole feature.
       if (i < st_.messages.size()) dom_.copy_text(st_.messages[i].text);
       toast(tr("已复制"));
     },
-                                      [this, i](const std::string& v) {
+                               [this, i](const std::string& v) {
       // The value carries "<blockIndex>\t<action>": a message can have many
       // foldable blocks, and clicking one must not toggle the first.
       size_t tab = v.find('\t');
@@ -2767,22 +3106,54 @@ VNodePtr UiApp::build_session() {
         if (i < s.messages.size() && block >= 0 &&
             block < static_cast<int>(s.messages[i].tools.size())) {
           s.messages[i].tools[block].expanded = !s.messages[i].tools[block].expanded;
+          s.messages[i].rev = next_msg_rev_++;  // only this message is rebuilt
         }
       });
     },
-                                      [this, i](const std::string& v) {
+                               [this, i](const std::string& v) {
       // "work" toggles the whole group (reasoning + tools) at once; a bare
       // "\t<action>" would mean the thinking block alone.
       if (v == "work") {
         update([&](AppState& s) {
-          if (i < s.messages.size()) s.messages[i].work_open = !s.messages[i].work_open;
+          if (i < s.messages.size()) {
+            s.messages[i].work_open = !s.messages[i].work_open;
+            s.messages[i].rev = next_msg_rev_++;
+          }
         });
         return;
       }
       update([&](AppState& s) {
-        if (i < s.messages.size()) s.messages[i].thinking_open = !s.messages[i].thinking_open;
+        if (i < s.messages.size()) {
+          s.messages[i].thinking_open = !s.messages[i].thinking_open;
+          s.messages[i].rev = next_msg_rev_++;
+        }
       });
-    }));
+    });
+    node.key(key);
+    MsgNode mn;
+    mn.node = node.get();
+    mn.rev = m.rev;
+    mn.sig = sig;
+    msg_nodes_[key] = mn;
+    hist_inner.add(node);
+  }
+  // Drop the cached nodes this session no longer uses (a rolled-back or
+  // reloaded history). Other sessions keep theirs, so switching back to a tab
+  // is also free - but the map is capped so a long-lived window cannot grow it
+  // without bound.
+  {
+    const std::string prefix = "msg:" + msg_sid + ":";
+    for (std::map<std::string, MsgNode>::iterator it = msg_nodes_.begin();
+         it != msg_nodes_.end();) {
+      if (it->first.compare(0, prefix.size(), prefix) == 0 &&
+          live_keys.find(it->first) == live_keys.end()) {
+        it = msg_nodes_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    const size_t kMaxCachedMessages = 4000;
+    while (msg_nodes_.size() > kMaxCachedMessages) msg_nodes_.erase(msg_nodes_.begin());
   }
   hist.add(hist_inner);
   center.add(hist);
@@ -3263,10 +3634,27 @@ VNodePtr UiApp::build_side_panel() {
   const std::string panel_id = panel ? panel->id : std::string();
 
   if (kind == "usage") {
-    body.add(comp::key_value(tr("上下文水位"), itos(st_.context_pct) + "%"));
-    body.add(comp::progress(st_.context_pct));
-    body.add(comp::key_value(tr("本会话成本"), st_.session_cost));
-    body.add(comp::key_value(tr("本轮 tokens"), "12.4K / 3.1K"));
+    // Every number here comes from usage.session; a value that has not loaded
+    // is shown as a placeholder, never as a plausible-looking constant.
+    if (!st_.session_usage_loaded && !st_.active_tab.empty() &&
+        st_.active_tab != "home") {
+      load_session_usage(st_.active_tab);
+    }
+    if (st_.context_pct < 0) {
+      body.add(comp::key_value(tr("上下文水位"), "—"));
+    } else {
+      body.add(comp::key_value(tr("上下文水位"), itos(st_.context_pct) + "%"));
+      body.add(comp::progress(st_.context_pct));
+    }
+    body.add(comp::key_value(tr("本会话成本"),
+                             st_.session_cost.empty() ? tr("—") : st_.session_cost));
+    if (st_.session_tokens_in >= 0) {
+      body.add(comp::key_value(tr("累计 tokens"),
+                               fmt_tokens(st_.session_tokens_in) + " / " +
+                                   fmt_tokens(st_.session_tokens_out)));
+    } else {
+      body.add(comp::key_value(tr("累计 tokens"), "—"));
+    }
   } else if (kind == "subagents") {
     if (st_.subagents.empty()) {
       body.add(comp::empty_state(tr("没有子代理在运行。"), "", nullptr));
@@ -3435,8 +3823,194 @@ VNodePtr UiApp::build_side_panel() {
       body.add(pre);
     }
   } else if (kind == "git") {
-    body.add(comp::empty_state(tr("Git 状态（需要项目为 git 仓库；git 工具尚未接线）"),
-                               "", nullptr));
+    // ---- Git panel ----
+    // Three states, and they are genuinely different: not a repository (nothing
+    // to do), a repository that failed to read (show git's own message), and a
+    // repository with a status. Collapsing them into one "no changes" message
+    // is how a broken repo looks healthy.
+    if (!panel || !panel->git_loaded) {
+      body.add(comp::empty_state(tr("读取 Git 状态…"), "", nullptr));
+      if (panel && !panel->git_loaded && !st_.active_pid.empty()) load_git(panel->id);
+    } else if (!panel->git_repo) {
+      body.add(comp::empty_state(
+          panel->git_error.empty()
+              ? tr("这个项目不是 Git 仓库。")
+              : (tr("无法读取 Git 状态：") + panel->git_error),
+          "", nullptr));
+    } else {
+      // --- header: branch / ahead-behind / operation in progress ---
+      H head = el("div", "git-head");
+      head.add(el("i", "fa fa-code-branch"));
+      if (panel->git_detached) {
+        head.add(el("span", "git-branch").text(tr("游离 HEAD")));
+      } else {
+        head.add(el("span", "git-branch").text(
+            panel->git_branch.empty() ? tr("（未知分支）") : panel->git_branch));
+      }
+      if (panel->git_ahead > 0) {
+        head.add(el("span", "git-ahead dim").text("\u2191" + itos(panel->git_ahead)));
+      }
+      if (panel->git_behind > 0) {
+        head.add(el("span", "git-behind dim").text("\u2193" + itos(panel->git_behind)));
+      }
+      head.add(el("span", "grow"));
+      head.add(comp::icon_button("\u21bb", tr("刷新"), [this, panel_id](const std::string&) {
+        load_git(panel_id);
+      }));
+      body.add(head);
+      if (!panel->git_operation.empty()) {
+        H op = el("div", "git-op");
+        op.add(el("span", "git-op-name").text(
+            tr("进行中的操作：") + panel->git_operation));
+        body.add(op);
+      }
+
+      // --- changed files: staged group first, then unstaged ---
+      // A single list with per-row checkboxes was the alternative; two groups
+      // are clearer because "what a commit would record" is the question this
+      // panel exists to answer.
+      std::vector<size_t> staged_idx, unstaged_idx;
+      for (size_t i = 0; i < panel->git_changes.size(); ++i) {
+        if (panel->git_changes[i].staged) staged_idx.push_back(i);
+        else unstaged_idx.push_back(i);
+      }
+      if (panel->git_changes.empty()) {
+        body.add(comp::empty_state(tr("工作区干净，没有待提交的改动。"), "", nullptr));
+      }
+      if (!staged_idx.empty()) {
+        H sec = el("div", "git-section");
+        sec.add(el("div", "git-section-head").text(
+            tr("已暂存") + " · " + itos(static_cast<int>(staged_idx.size()))));
+        for (size_t k = 0; k < staged_idx.size(); ++k) {
+          const SideTab::GitChange& c = panel->git_changes[staged_idx[k]];
+          H row = el("div", c.path == panel->git_diff_path && panel->git_diff_staged
+                                 ? "git-row open" : "git-row");
+          row.add(el("span", "git-code staged").text(
+              std::string(1, c.index == ' ' ? 'M' : c.index)));
+          std::string shown = c.path;
+          if (!c.orig_path.empty()) shown = c.orig_path + " \u2192 " + c.path;
+          row.add(el("span", "git-path").text(shown));
+          row.on(EventKind::kClick, [this, panel_id, c](const std::string&) {
+            load_git_diff(panel_id, c.path, true);
+          });
+          H acts = el("div", "git-row-acts");
+          std::string path = c.path;
+          acts.add(comp::icon_button("\u2212", tr("取消暂存"),
+                                     [this, panel_id, path](const std::string&) {
+            git_stage_paths(panel_id, std::vector<std::string>(1, path), false);
+          }));
+          row.add(acts);
+          sec.add(row);
+        }
+        body.add(sec);
+      }
+      if (!unstaged_idx.empty()) {
+        H sec = el("div", "git-section");
+        H shead = el("div", "git-section-head");
+        shead.add(el("span").text(
+            tr("未暂存") + " · " + itos(static_cast<int>(unstaged_idx.size()))));
+        shead.add(el("span", "grow"));
+        shead.add(comp::button(tr("全部暂存"), [this, panel_id](const std::string&) {
+          git_stage_all(panel_id);
+        }, "ghost"));
+        sec.add(shead);
+        for (size_t k = 0; k < unstaged_idx.size(); ++k) {
+          const SideTab::GitChange& c = panel->git_changes[unstaged_idx[k]];
+          H row = el("div", c.path == panel->git_diff_path && !panel->git_diff_staged
+                                 ? "git-row open" : "git-row");
+          if (c.conflicted) row.cls("conflict");
+          row.add(el("span", c.untracked ? "git-code untracked" : "git-code").text(
+              std::string(1, c.untracked ? '?' : (c.work == ' ' ? 'M' : c.work))));
+          row.add(el("span", "git-path").text(c.path));
+          row.on(EventKind::kClick, [this, panel_id, c](const std::string&) {
+            load_git_diff(panel_id, c.path, false);
+          });
+          H acts = el("div", "git-row-acts");
+          std::string path = c.path;
+          // Discard is destructive and cannot be undone, so it is a separate,
+          // clearly-labelled action rather than a hover icon next to stage.
+          if (!c.untracked) {
+            acts.add(comp::icon_button("\u21ba", tr("撤销改动"),
+                                       [this, panel_id, path](const std::string&) {
+              git_discard_paths(panel_id, std::vector<std::string>(1, path));
+            }));
+          }
+          acts.add(comp::icon_button("+", tr("暂存"),
+                                     [this, panel_id, path](const std::string&) {
+            git_stage_paths(panel_id, std::vector<std::string>(1, path), true);
+          }));
+          row.add(acts);
+          sec.add(row);
+        }
+        body.add(sec);
+      }
+
+      // --- diff of the selected file ---
+      if (!panel->git_diff_path.empty()) {
+        H dh = el("div", "git-diff-head");
+        dh.add(el("span", "git-diff-path").text(panel->git_diff_path));
+        dh.add(el("span", "grow"));
+        dh.add(el("span", "git-diff-side dim").text(
+            panel->git_diff_staged ? tr("已暂存") : tr("工作区")));
+        dh.add(comp::icon_button("\u2715", tr("关闭"), [this, panel_id](const std::string&) {
+          update([&](AppState& s) {
+            for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+              if (s.side_tabs[i].id == panel_id) {
+                s.side_tabs[i].git_diff_path.clear();
+                s.side_tabs[i].git_diff_text.clear();
+              }
+            }
+          });
+        }));
+        body.add(dh);
+        if (!panel->git_diff_error.empty()) {
+          body.add(comp::hint(tr("无法读取 diff：") + panel->git_diff_error));
+        } else if (panel->git_diff_text.empty()) {
+          body.add(comp::hint(tr("（这个文件没有差异）")));
+        } else {
+          H pre = el("pre", "git-diff");
+          pre.html(highlight::to_html_cached(panel->git_diff_text, "diff"));
+          body.add(pre);
+          if (panel->git_diff_truncated) {
+            body.add(comp::hint(tr("diff 过长，只显示前一部分。")));
+          }
+        }
+      }
+
+      // --- commit box ---
+      // Only shown when something is staged: committing nothing is an error, and
+      // offering the button anyway invites the click that produces it.
+      if (!staged_idx.empty()) {
+        H cbox = el("div", "git-commit");
+        H ta = comp::textarea(panel->git_message, tr("提交信息"),
+                              [this, panel_id](const std::string& v) {
+          update([&](AppState& s) {
+            for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+              if (s.side_tabs[i].id == panel_id) s.side_tabs[i].git_message = v;
+            }
+          });
+        },
+                              [this, panel_id](const std::string&) {
+          std::string msg;
+          for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
+            if (st_.side_tabs[i].id == panel_id) msg = st_.side_tabs[i].git_message;
+          }
+          git_commit(panel_id, msg, false);
+        });
+        ta.key("git-message:" + panel_id);
+        cbox.add(ta);
+        H acts = el("div", "git-commit-acts");
+        acts.add(comp::button(tr("提交"), [this, panel_id](const std::string&) {
+          std::string msg;
+          for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
+            if (st_.side_tabs[i].id == panel_id) msg = st_.side_tabs[i].git_message;
+          }
+          git_commit(panel_id, msg, false);
+        }, "primary"));
+        cbox.add(acts);
+        body.add(cbox);
+      }
+    }
   } else if (kind == "ops") {
     if (st_.session_ops.empty()) {
       body.add(comp::empty_state(tr("暂无操作记录（systemOps）。"), "", nullptr));
@@ -5557,6 +6131,7 @@ void UiApp::send_message() {
     m.role = "user";
     m.text = shown;
     m.time = "刚刚";
+    m.rev = next_msg_rev_++;
     s.messages.push_back(m);
     s.session_input.clear();
     s.attachments.clear();
@@ -5573,6 +6148,7 @@ void UiApp::send_message() {
       a.role = "assistant";
       a.text = "（未绑定会话后端）这是原型回复。\n\n- 事件已接通\n- 组件由 VNode diff 增量更新\n";
       a.time = "刚刚";
+      a.rev = next_msg_rev_++;
       s.messages.push_back(a);
     });
     return;
@@ -5591,6 +6167,34 @@ void UiApp::send_message() {
 }
 
 std::string UiApp::rel_time_for_test(int64_t ms) { return rel_time(ms); }
+
+// Fingerprint of everything that changes a message's rendered output. Sizes and
+// flags only - no string comparison, so this is a handful of adds per message.
+// A length change catches streamed text, tool results and thinking; the flags
+// catch every fold state.
+uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
+  uint64_t h = 1469598103934665603ULL;
+  auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ULL;
+  };
+  mix(m.text.size());
+  mix(m.thinking.size());
+  mix(m.tools.size());
+  mix(m.summary.size());
+  mix(m.time.size());
+  mix(static_cast<uint64_t>(m.work_open));
+  mix(static_cast<uint64_t>(m.thinking_open));
+  mix(static_cast<uint64_t>(m.streaming));
+  for (size_t i = 0; i < m.tools.size(); ++i) {
+    mix(m.tools[i].name.size());
+    mix(m.tools[i].summary.size());
+    mix(m.tools[i].detail.size());
+    mix(static_cast<uint64_t>(m.tools[i].expanded));
+    mix(static_cast<uint64_t>(m.tools[i].ok));
+  }
+  return h;
+}
 
 void UiApp::open_new_session() {
   // a real session needs a project; without one, fall back to a local tab
@@ -7180,6 +7784,8 @@ void UiApp::load_side_tab(const std::string& id) {
   }
   if (kind == "subagents") load_subagents(active_sid());
   if (kind == "files" && !st_.active_pid.empty()) load_files(id, st_.active_pid, path);
+  if (kind == "git" && !st_.active_pid.empty()) load_git(id);
+  if (kind == "usage") load_session_usage(active_sid());
 }
 // 侧栏标签拖拽排序：把 from 移到 to 的位置（其余保持相对顺序）。
 void UiApp::move_side_tab(const std::string& from, const std::string& to) {

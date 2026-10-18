@@ -151,9 +151,42 @@ UiApi::UiApi(FsApi* api) {
     return FsResult::success();
   });
 
+  // ---- git.* (side panel: status / diff / stage / commit) ----
+  // Everything is addressed by pid; the UI never builds a repository path.
+  reg("git.status", [api](const Json& a) { return api->git_status(s(a, "pid")); });
+  reg("git.diff", [api](const Json& a) {
+    return api->git_diff(s(a, "pid"), s(a, "path"), b(a, "staged", false));
+  });
+  reg("git.showHead", [api](const Json& a) {
+    return api->git_show_head(s(a, "pid"), s(a, "path"));
+  });
+  reg("git.log", [api](const Json& a) {
+    return api->git_log(s(a, "pid"), static_cast<int>(i(a, "maxCount", 30)));
+  });
+  reg("git.branches", [api](const Json& a) { return api->git_branches(s(a, "pid")); });
+  reg("git.stage", [api](const Json& a) {
+    return api->git_stage(s(a, "pid"), a.contains("paths") ? a["paths"] : Json::array());
+  });
+  reg("git.unstage", [api](const Json& a) {
+    return api->git_unstage(s(a, "pid"), a.contains("paths") ? a["paths"] : Json::array());
+  });
+  reg("git.stageAll", [api](const Json& a) { return api->git_stage_all(s(a, "pid")); });
+  reg("git.commit", [api](const Json& a) {
+    return api->git_commit(s(a, "pid"), s(a, "message"), b(a, "amend", false));
+  });
+  reg("git.discard", [api](const Json& a) {
+    return api->git_discard(s(a, "pid"), a.contains("paths") ? a["paths"] : Json::array());
+  });
+
   // ---- usage.* ----
   reg("usage.query", [api](const Json& a) {
     return api->usage_query(a.contains("filter") ? a["filter"] : Json::object());
+  });
+  // Per-session usage for the side panel: the same query with a sid filter, so
+  // "what has this conversation cost" has a real backend answer instead of a
+  // hard-coded number in the UI.
+  reg("usage.session", [api](const Json& a) {
+    return api->usage_query(Json{{"sid", s(a, "sid")}});
   });
   reg("usage.exportCsv", [api](const Json& a) {
     return api->usage_export_csv(a.contains("filter") ? a["filter"] : Json::object(),

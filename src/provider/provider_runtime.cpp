@@ -36,6 +36,7 @@ void ProviderRuntime::record_usage(const ChatRequest& req, const ChatResponse& r
   if (!usage_) return;
   UsageRow row;
   row.ts = clock_->now_ms();
+  row.sid = req.session_id;
   row.provider = conn_.id;
   row.model = req.model;
   row.in = resp.in_tokens;

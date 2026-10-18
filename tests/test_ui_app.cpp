@@ -2341,6 +2341,245 @@ class DemoBackend : public IUiBackend {
   std::function<void()> subscribe(BackendEvent) override { return []() {}; }
 };
 
+// Backend that answers the git.* methods with a fixed repository state, so the
+// panel can be asserted without a real repo on disk (the git CLI itself is
+// covered by test_git.cpp).
+class GitBackend : public IUiBackend {
+ public:
+  std::string last_method;
+  // Synchronous backend: one call can trigger another (a commit refreshes the
+  // status), so `last_method` alone cannot prove what was sent. The history
+  // keeps every method + args pair.
+  std::vector<std::string> methods;
+  std::vector<Json> args_history;
+  bool repo = true;
+
+  // The args of the most recent call to `method`.
+  Json args_for(const std::string& method) const {
+    for (size_t i = methods.size(); i-- > 0;) {
+      if (methods[i] == method) return args_history[i];
+    }
+    return Json::object();
+  }
+
+  BackendResult call(const std::string& method, const Json& args) override {
+    last_method = method;
+    methods.push_back(method);
+    args_history.push_back(args);
+    BackendResult r;
+    r.ok = true;
+    if (method == "git.status") {
+      r.data = Json{
+          {"ok", true},
+          {"isRepo", repo},
+          {"root", "C:/p"},
+          {"branch", "main"},
+          {"upstream", "origin/main"},
+          {"ahead", 2},
+          {"behind", 1},
+          {"detached", false},
+          {"clean", false},
+          {"operation", ""},
+          {"error", ""},
+          {"changes", Json::array(
+              {Json{{"path", "src/a.cpp"}, {"index", "M"}, {"work", " "},
+                    {"staged", true}, {"untracked", false}, {"conflicted", false}},
+               Json{{"path", "src/b.cpp"}, {"index", " "}, {"work", "M"},
+                    {"staged", false}, {"untracked", false}, {"conflicted", false}},
+               Json{{"path", "new.txt"}, {"index", "?"}, {"work", "?"},
+                    {"staged", false}, {"untracked", true}, {"conflicted", false}}})}};
+    } else if (method == "git.diff") {
+      r.data = Json{{"ok", true},
+                    {"truncated", false},
+                    {"diff", "diff --git a/src/b.cpp b/src/b.cpp\n-old\n+new\n"}};
+    } else if (method == "git.commit") {
+      r.data = Json{{"ok", true}, {"message", "committed"}, {"hash", "abc1234"}};
+    } else if (method == "git.stage" || method == "git.unstage" ||
+               method == "git.stageAll" || method == "git.discard") {
+      r.data = Json{{"ok", true}, {"message", "ok"}};
+    }
+    return r;
+  }
+  std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+};
+
+// Open a git panel on a seeded session; returns nothing, the app is the handle.
+static void seed_git_panel(UiApp& app, const std::string& pid) {
+  app.update([pid](AppState& s) {
+    seed_session(s, "sess_a");
+    s.active_pid = pid;
+    s.side_tabs.clear();
+    SideTab t;
+    t.id = "g1";
+    t.kind = "git";
+    t.title = "Git";
+    s.side_tabs.push_back(t);
+    s.active_side = "g1";
+  });
+}
+
+// The git panel is a real view: branch, ahead/behind, two change groups, and a
+// diff for the selected file. Each of those answers a different question, and
+// the panel must not collapse them into "no changes".
+FS_TEST(uiapp_git_panel_shows_status) {
+  NullDom dom;
+  AppState st = AppState::make();
+  GitBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  seed_git_panel(app, "p1");
+  app.load_side_tab("g1");
+  std::string d = dom.dump();
+  EXPECT_TRUE(backend.args_for("git.status").is_object());
+  EXPECT_TRUE(d.find("main") != std::string::npos);
+  EXPECT_TRUE(d.find("已暂存") != std::string::npos);
+  EXPECT_TRUE(d.find("未暂存") != std::string::npos);
+  EXPECT_TRUE(d.find("src/a.cpp") != std::string::npos);
+  EXPECT_TRUE(d.find("src/b.cpp") != std::string::npos);
+  EXPECT_TRUE(d.find("new.txt") != std::string::npos);
+  // a commit box only appears when something IS staged
+  EXPECT_TRUE(d.find("提交信息") != std::string::npos);
+}
+
+FS_TEST(uiapp_git_panel_not_a_repo) {
+  NullDom dom;
+  AppState st = AppState::make();
+  GitBackend backend;
+  backend.repo = false;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  seed_git_panel(app, "p1");
+  app.load_side_tab("g1");
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("不是 Git 仓库") != std::string::npos);
+  EXPECT_TRUE(d.find("提交信息") == std::string::npos);
+}
+
+// Selecting a file asks for ITS diff, and the staged/unstaged side is part of
+// the request - they are different questions with different answers.
+FS_TEST(uiapp_git_diff_request_carries_side) {
+  NullDom dom;
+  AppState st = AppState::make();
+  GitBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  seed_git_panel(app, "p1");
+  app.load_side_tab("g1");
+  app.load_git_diff("g1", "src/b.cpp", false);
+  Json sent = backend.args_for("git.diff");
+  EXPECT_EQ(jsonutil::get<std::string>(sent, "path", ""), std::string("src/b.cpp"));
+  EXPECT_FALSE(jsonutil::get<bool>(sent, "staged", true));
+  std::string d = dom.dump();
+  // The diff is highlighted as a diff: added/removed lines are token classes.
+  EXPECT_TRUE(d.find("hl-ad") != std::string::npos);
+  EXPECT_TRUE(d.find("hl-de") != std::string::npos);
+  EXPECT_TRUE(d.find("src/b.cpp") != std::string::npos);
+}
+
+// Committing sends the typed message and clears the draft on success.
+FS_TEST(uiapp_git_commit_sends_message) {
+  NullDom dom;
+  AppState st = AppState::make();
+  GitBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  seed_git_panel(app, "p1");
+  app.load_side_tab("g1");
+  app.update([](AppState& s) { s.side_tabs[0].git_message = "fix the thing"; });
+  app.git_commit("g1", "fix the thing", false);
+  Json sent = backend.args_for("git.commit");
+  EXPECT_EQ(jsonutil::get<std::string>(sent, "message", ""),
+            std::string("fix the thing"));
+  // the draft is cleared and the panel re-reads its status
+  EXPECT_TRUE(app.state().side_tabs[0].git_message.empty());
+  EXPECT_TRUE(backend.args_for("git.status").is_object());
+  EXPECT_EQ(backend.last_method, std::string("git.status"));
+}
+
+// Staging is addressed by pid + path, never by a repository path built in the
+// UI: the backend owns the resolution.
+FS_TEST(uiapp_git_stage_sends_pid_and_paths) {
+  NullDom dom;
+  AppState st = AppState::make();
+  GitBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  seed_git_panel(app, "p1");
+  app.git_stage_paths("g1", std::vector<std::string>(1, "src/b.cpp"), true);
+  Json sent = backend.args_for("git.stage");
+  EXPECT_EQ(jsonutil::get<std::string>(sent, "pid", ""), std::string("p1"));
+  ASSERT_TRUE(sent.contains("paths") && sent["paths"].is_array());
+  EXPECT_EQ(sent["paths"][0].get<std::string>(), std::string("src/b.cpp"));
+  // a stage refreshes the panel's status afterwards
+  EXPECT_EQ(backend.last_method, std::string("git.status"));
+}
+
+// The 用量 panel used to show hard-coded numbers (42% / ¥0.21 / 12.4K). It now
+// reads usage.session: before any data arrives every value is a placeholder, and
+// after it arrives the panel shows the real totals.
+FS_TEST(uiapp_usage_panel_uses_real_session_usage) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class UsageBackend : public IUiBackend {
+   public:
+    std::string sid;
+    int calls = 0;
+    BackendResult call(const std::string& method, const Json& args) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "usage.session") {
+        ++calls;
+        sid = jsonutil::get<std::string>(args, "sid", "");
+        r.data = Json{{"totalIn", 12437},
+                      {"totalOut", 3100},
+                      {"totalCost", 0.21},
+                      {"costKind", "money"},
+                      {"calls", 3}};
+      } else if (method == "session.get") {
+        r.data = Json{{"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}}},
+                      {"turns", Json::array()}};
+      } else if (method == "project.list" || method == "session.list") {
+        r.data = Json::array();
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.show("sess_a");
+  // A known model turns the token count into a percentage; without a model the
+  // panel leaves it unknown rather than guessing a window.
+  app.update([](AppState& s) { s.model = "claude-sonnet-4"; });
+  app.load_session_usage("sess_a");
+  EXPECT_EQ(backend.sid, std::string("sess_a"));
+  EXPECT_TRUE(app.state().session_usage_loaded);
+  EXPECT_EQ(app.state().session_tokens_in, int64_t(12437));
+  EXPECT_EQ(app.state().session_tokens_out, int64_t(3100));
+  EXPECT_TRUE(app.state().session_cost.find("0.21") != std::string::npos);
+  std::string d = dom.dump();
+  // 12.4K is what a person reads in a 360px panel
+  EXPECT_TRUE(d.find("12.4K") != std::string::npos);
+  EXPECT_TRUE(d.find("3.1K") != std::string::npos);
+  // 12437 / 200000 = 6%
+  EXPECT_EQ(app.state().context_pct, 6);
+}
+
+// With no usage data the panel must say so, not show a plausible-looking number.
+FS_TEST(uiapp_usage_panel_has_no_fake_numbers) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("上下文水位") != std::string::npos);
+  EXPECT_TRUE(d.find("42%") == std::string::npos);
+  EXPECT_TRUE(d.find("12.4K") == std::string::npos);
+  EXPECT_TRUE(d.find("¥0.21") == std::string::npos);
+}
+
 // load_session must apply the session's OWN settings: the composer showed
 // "choose model" on a session that already had one, and sending used the wrong
 // model after a reload.
@@ -2496,6 +2735,76 @@ FS_TEST(uiapp_code_block_has_gutter_and_copy) {
   // one innerHTML string (a DOM node per token would be thousands of nodes).
   EXPECT_TRUE(d.find("hl-ty") != std::string::npos);
   EXPECT_TRUE(dom.count_of("set_html") > 0);
+}
+
+// Collect every VNode whose key starts with `prefix` (depth-first). The chat
+// message keys are internal, so the test reads them from the tree itself.
+static void collect_msg_nodes(const VNodePtr& v, const std::string& prefix,
+                              std::vector<VNodePtr>* out) {
+  if (!v) return;
+  if (v->key.compare(0, prefix.size(), prefix) == 0) out->push_back(v);
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    collect_msg_nodes(v->children[i], prefix, out);
+  }
+}
+
+// A session can hold hundreds of turns, so a render must NOT rebuild the ones
+// that did not change. Three things are asserted:
+//   1) an unchanged message hands back the SAME VNode (which is what lets the
+//      framework skip the subtree entirely),
+//   2) appending a message rebuilds only that message, and
+//   3) changing one message rebuilds exactly that one.
+// Without this, every render re-parsed every markdown block and the diff then
+// compared thousands of nodes against themselves.
+FS_TEST(uiapp_history_is_not_rebuilt) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    for (int i = 0; i < 5; ++i) {
+      comp::ChatMsg m;
+      m.role = "assistant";
+      m.text = "turn " + std::to_string(i) + "\n\n```cpp\nint x = " +
+               std::to_string(i) + ";\n```\n";
+      s.messages.push_back(m);
+    }
+  });
+  std::vector<VNodePtr> before;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &before);
+  ASSERT_TRUE(before.size() == 5);
+  // add one more message: the earlier ones must keep their exact objects
+  app.update([](AppState& s) {
+    comp::ChatMsg m;
+    m.role = "user";
+    m.text = "one more";
+    s.messages.push_back(m);
+  });
+  std::vector<VNodePtr> after;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &after);
+  ASSERT_TRUE(after.size() == 6);
+  for (size_t i = 0; i < before.size(); ++i) {
+    EXPECT_TRUE(after[i].get() == before[i].get());
+  }
+  // ...and a plain re-render with nothing changed rebuilds nothing at all
+  app.update([](AppState&) {});
+  std::vector<VNodePtr> again;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &again);
+  ASSERT_TRUE(again.size() == 6);
+  for (size_t i = 0; i < after.size(); ++i) {
+    EXPECT_TRUE(again[i].get() == after[i].get());
+  }
+  // changing ONE message rebuilds exactly that one
+  app.update([](AppState& s) { s.messages[2].text += " edited"; });
+  std::vector<VNodePtr> edited;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &edited);
+  ASSERT_TRUE(edited.size() == 6);
+  EXPECT_TRUE(edited[2].get() != again[2].get());
+  for (size_t i = 0; i < edited.size(); ++i) {
+    if (i == 2) continue;
+    EXPECT_TRUE(edited[i].get() == again[i].get());
+  }
 }
 
 // The plan is its own column (a sibling of the chat), not a float inside it:

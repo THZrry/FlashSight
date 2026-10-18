@@ -81,6 +81,39 @@ struct SideTab {
   bool loaded = false;
   std::string preview_path;
   std::string preview;
+
+  // ---- git panel (one per panel: two git panels can show two repos) ----
+  struct GitChange {
+    std::string path;
+    std::string orig_path;
+    char index = ' ';
+    char work = ' ';
+    bool staged = false;
+    bool untracked = false;
+    bool conflicted = false;
+  };
+  bool git_loaded = false;
+  bool git_repo = false;
+  std::string git_root;
+  std::string git_branch;
+  std::string git_upstream;
+  std::string git_operation;   // merge / rebase / ... ("" = none)
+  std::string git_error;
+  int git_ahead = 0;
+  int git_behind = 0;
+  bool git_detached = false;
+  std::vector<GitChange> git_changes;
+  // The file whose diff is open ("" = none). `git_diff_staged` picks which side:
+  // the index diff is what a commit would record, the work-tree diff is what is
+  // still un-staged, and they are genuinely different questions.
+  std::string git_diff_path;
+  bool git_diff_staged = false;
+  std::string git_diff_text;
+  bool git_diff_truncated = false;
+  std::string git_diff_error;
+  // Commit message draft. Kept per panel so switching away does not lose typing.
+  std::string git_message;
+  bool git_busy = false;
 };
 
 // Terminal entry for the selector.
@@ -149,11 +182,17 @@ struct AppState {
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
-  int context_pct = 42;
+  // Context water level + per-session cost/tokens, all from usage.session.
+  // -1 / "" mean "not loaded yet": the panel shows a placeholder rather than a
+  // made-up number (it used to display a hard-coded 42% and ¥0.21).
+  int context_pct = -1;
   // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
   // （粗匹配 + 用户在模型设置里的覆盖），不是全局固定枚举。
   std::string thinking;
-  std::string session_cost = "¥0.21";
+  std::string session_cost;
+  int64_t session_tokens_in = -1;
+  int64_t session_tokens_out = 0;
+  bool session_usage_loaded = false;
 
   // ---- side panel ----
   std::vector<SideTab> side_tabs;
@@ -454,11 +493,14 @@ struct SessionView {
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
-  int context_pct = 42;
+  int context_pct = -1;
   // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
   // （粗匹配 + 用户在模型设置里的覆盖），不是全局固定枚举。
   std::string thinking;
-  std::string session_cost = "¥0.21";
+  std::string session_cost;
+  int64_t session_tokens_in = -1;
+  int64_t session_tokens_out = 0;
+  bool session_usage_loaded = false;
 
   std::vector<SideTab> side_tabs;
   std::string active_side = "usage";
@@ -541,6 +583,8 @@ class UiApp {
   void load_sessions(size_t project_index);
   // Load usage summary into the usage page.
   void load_usage();
+  // Load per-session usage for the side panel (context level, cost, tokens).
+  void load_session_usage(const std::string& sid);
   // Load provider list + detected shells into settings.
   void load_providers();
   void load_shells();
@@ -551,6 +595,18 @@ class UiApp {
                   const std::string& rel);
   // Read one file for a preview panel.
   void preview_file(const std::string& tab_id, const std::string& rel);
+  // ---- git panel ----
+  // Refresh status for one git panel (branch / ahead-behind / changed files).
+  void load_git(const std::string& tab_id);
+  // Fetch the diff for one path into that panel (staged selects the index side).
+  void load_git_diff(const std::string& tab_id, const std::string& path, bool staged);
+  // Stage / unstage / discard / commit. Each refreshes the panel on success.
+  void git_stage_paths(const std::string& tab_id, const std::vector<std::string>& paths,
+                       bool stage);
+  void git_stage_all(const std::string& tab_id);
+  void git_discard_paths(const std::string& tab_id,
+                         const std::vector<std::string>& paths);
+  void git_commit(const std::string& tab_id, const std::string& message, bool amend);
   // Open a file's contents in its OWN side tab (not inline under the tree).
   void open_file_preview(const std::string& rel);
   // Loaders for the settings sections.
@@ -749,6 +805,29 @@ class UiApp {
   // on AppState are the live copy of whichever scope is active.
   KeyedStore<SessionView> views_;
   std::string last_session_key_;  // sid whose view the flat fields currently hold
+  // Rendered message nodes, keyed by "msg:<sid>:<index>". A session can hold
+  // hundreds of turns; without this every render re-parsed every markdown block
+  // and rebuilt every node, and the diff then compared all of them against
+  // themselves. A message that did not change hands back the SAME VNode, so the
+  // framework's pointer-equality short circuit skips the whole subtree.
+  //
+  // Validity is checked by revision AND a cheap structural signature. The
+  // revision is the fast path (a streamed delta bumps it); the signature exists
+  // because state is also mutated directly by handlers and tests, and a cache
+  // that silently served a stale node whenever someone forgot to bump a number
+  // would be a very unpleasant bug.
+  struct MsgNode {
+    VNodePtr node;
+    uint64_t rev = 0;
+    uint64_t sig = 0;
+  };
+  std::map<std::string, MsgNode> msg_nodes_;
+  // Monotonic revision source: every mutation (a streamed delta, a fold toggle,
+  // a freshly loaded history) takes a NEW number.
+  uint64_t next_msg_rev_ = 1;
+  // Cheap fingerprint of the fields that affect a message's rendering: sizes and
+  // flags only, no string comparisons.
+  static uint64_t message_sig(const comp::ChatMsg& m);
   // 方向感知：这次切页是"前进"还是"后退"。前进（去了一个不在访问栈里的页）
   // 从右侧滑入，后退（回到栈顶那一页，比如关掉标签回到来处）从左侧滑入，方向
   // 与实际导航方向一致。在 switch_tab 里按 tab_history 判定，build_shell 读它

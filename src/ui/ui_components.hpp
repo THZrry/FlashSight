@@ -127,12 +127,24 @@ struct ChatMsg {
   int64_t started_at = 0;
   int64_t ended_at = 0;
   std::string summary;           // turn summary (not folded, no border)
+  // Bumped by whoever mutates this message. The chat view memoises one rendered
+  // VNode per message and reuses it while this number is unchanged: a session
+  // can hold hundreds of turns, and re-parsing every markdown block and
+  // rebuilding every node four times a second (while a reply streams) is pure
+  // waste. A solidified turn keeps its rev forever and is never rebuilt again.
+  uint64_t rev = 0;
 };
 
 // One chat message. user -> right bubble; assistant -> article, no bubble;
 // system -> centered dim line. Actions appear on hover (CSS).
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
                EventFn on_think_toggle = nullptr);
+
+// Stable identity for one rendered message: a keyed VNode is what lets the
+// framework match (and therefore skip) a subtree across renders. The key is
+// deliberately independent of the message CONTENT - a rebuild keeps the same
+// key so the node is patched in place instead of being recreated.
+std::string chat_message_key(const std::string& sid, size_t index);
 
 // Turn summary: NOT folded, no border (per user feedback).
 H turn_summary(const std::string& text);

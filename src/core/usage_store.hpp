@@ -15,6 +15,8 @@ namespace fs {
 struct UsageFilter {
   std::string provider;  // 空 = 不筛
   std::string model;
+  // 只看某个会话的记录。侧栏"用量"问的是"这次对话花了多少"，全局总计答不了。
+  std::string sid;
   int64_t from = 0;     // 0 = 不限
   int64_t to = 0;       // 0 = 不限
   std::string provider_model;  // 以 "provider:model" 保留，聚合按 provider+model 两组分开
@@ -22,6 +24,9 @@ struct UsageFilter {
 
 struct UsageRow {
   int64_t ts = 0;
+  // The session this call belongs to. Recorded with the row so the side panel
+  // can answer "what has THIS conversation cost" without a second index.
+  std::string sid;
   std::string provider;
   std::string model;
   int64_t in = 0, out = 0, cache = 0;

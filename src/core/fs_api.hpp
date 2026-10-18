@@ -132,6 +132,19 @@ class FsApi {
   // 事件（UI 不再手动轮询）。宿主定时调用（桌面线程 / 浏览器定时器）。
   void terminal_tick();
 
+  // ----- git.*（侧栏 Git 面板；git CLI，只读为主 + 四个显式写操作）-----
+  // 所有方法都接 pid：路径由后端解析，UI 永远不自己拼仓库路径。
+  FsResult git_status(const std::string& pid);
+  FsResult git_diff(const std::string& pid, const std::string& path, bool staged);
+  FsResult git_show_head(const std::string& pid, const std::string& path);
+  FsResult git_log(const std::string& pid, int maxCount);
+  FsResult git_branches(const std::string& pid);
+  FsResult git_stage(const std::string& pid, const Json& paths);
+  FsResult git_unstage(const std::string& pid, const Json& paths);
+  FsResult git_stage_all(const std::string& pid);
+  FsResult git_commit(const std::string& pid, const std::string& message, bool amend);
+  FsResult git_discard(const std::string& pid, const Json& paths);
+
   // ----- usage.* -----
   FsResult usage_query(const Json& filter);
   FsResult usage_export_csv(const Json& filter, const std::string& path);
