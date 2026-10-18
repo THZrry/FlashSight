@@ -242,6 +242,15 @@ class IDom {
     (void)cls;
   }
 
+  // Run `cb` after `ms` milliseconds. Used to remove a subtree once its exit
+  // animation has played: that deadline is wall-clock work, not a render, and
+  // tying it to the render pump meant a node could stay in the DOM for as long
+  // as nothing else re-rendered.
+  virtual void schedule(int ms, std::function<void()> cb) {
+    (void)ms;
+    if (cb) cb();  // backends without timers run it now (no animations there)
+  }
+
   // Can this backend keep a removed subtree alive for its exit animation? The
   // framework asks before delaying a removal: a backend without CSS animations
   // (NullDom, unit tests) must remove immediately, or a test that closes a tab
@@ -304,6 +313,7 @@ class NullDom : public IDom {
   void bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) override;
   void place_popup(Node popup, Node anchor) override;
   void bind_outside_click(Node popup, std::function<void()> cb) override;
+  void schedule(int ms, std::function<void()> cb) override;
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override;
   void bind_drop_zone(Node node,
@@ -320,6 +330,12 @@ class NullDom : public IDom {
   void set_appearance(const Appearance& a) override;
   // test hook: the last appearance the app applied
   const Appearance& appearance_for_test() const { return appearance_; }
+  // test hook: run every pending scheduled callback (tests have no timers)
+  void run_scheduled_for_test() {
+    std::vector<std::function<void()> > pending = scheduled_;
+    scheduled_.clear();
+    for (size_t i = 0; i < pending.size(); ++i) pending[i]();
+  }
   // test hook: animations the framework asked to (re)play
   const std::vector<std::string>& played_animations() const { return played_anims_; }
   // test hook: simulate the user scrolling the pinned node
@@ -395,6 +411,7 @@ class NullDom : public IDom {
   std::function<void(int)> nav_split_cb_;
   std::function<void(const std::string&)> tab_drag_cb_;
   std::function<void()> outside_cb_;
+  std::vector<std::function<void()> > scheduled_;
   std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;

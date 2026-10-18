@@ -79,18 +79,6 @@ const std::vector<std::string>& all() {
 // animation, instead of one set of elements receiving both at once.
 namespace {
 
-struct PendingExit {
-  IDom* dom;
-  Node node;
-  int64_t deadline_ms;  // 0 = not stamped yet (the sweep stamps it)
-  int64_t ttl_ms;
-};
-
-std::vector<PendingExit>& pending_exits() {
-  static std::vector<PendingExit> v;
-  return v;
-}
-
 std::string class_attr_of(const VNode& n) {
   for (size_t i = 0; i < n.attrs.size(); ++i) {
     if (n.attrs[i].key == "class") return n.attrs[i].value;
@@ -109,7 +97,8 @@ std::string without_anim_classes(const std::string& cls) {
     size_t e = cls.find(' ', i);
     if (e == std::string::npos) e = cls.size();
     std::string tok = cls.substr(i, e - i);
-    if (!tok.empty() && tok.compare(0, 5, "anim-") != 0) {
+    if (!tok.empty() && tok.compare(0, 5, "anim-") != 0 &&
+        tok != "page-exit" && tok != "exiting") {
       if (!out.empty()) out += " ";
       out += tok;
     }
@@ -163,41 +152,35 @@ void start_exit(IDom& dom, const VNodePtr& oldv) {
     return;
   }
   if (intent == anim::kExitLeft || intent == anim::kExitRight) page = true;
+  // The EXIT must start immediately: the node's own animation-delay belongs to
+  // the entrance it played when it was created (.2s stagger), and inheriting it
+  // here would hold the old page still for .2s before it even starts leaving -
+  // while the incoming page is also waiting. That freeze is what made the
+  // reverse transition look broken.
+  dom.set_style(oldv->dom, "animation-delay", "0s");
+  dom.set_style(oldv->dom, "animation-fill-mode", "forwards");
   std::string c = without_anim_classes(cls);
   if (!c.empty()) c += " ";
   c += page ? "page-exit " : "exiting ";
   c += anim_cls;
   dom.set_attr(oldv->dom, "class", c);
   dom.play_animation(oldv->dom, anim_cls);
-  PendingExit p;
-  p.dom = &dom;
-  p.node = oldv->dom;
-  p.deadline_ms = 0;
-  p.ttl_ms = page ? 240 : 180;
-  pending_exits().push_back(p);
+  // The cleanup is a wall-clock deadline. Driving it from the render pump meant
+  // a node could survive on screen until the next render - and a background tab
+  // whose timers the browser throttles kept it for seconds.
+  Node dying = oldv->dom;
+  dom.schedule(page ? 320 : 220, [&dom, dying]() { dom.remove(dying); });
 }
 
 }  // namespace
 
 void sweep_exits(IDom& dom, int64_t now_ms) {
-  std::vector<PendingExit>& v = pending_exits();
-  for (size_t i = 0; i < v.size();) {
-    if (v[i].dom != &dom) {
-      ++i;
-      continue;
-    }
-    if (v[i].deadline_ms == 0) {
-      v[i].deadline_ms = now_ms + v[i].ttl_ms;
-      ++i;
-      continue;
-    }
-    if (now_ms >= v[i].deadline_ms) {
-      dom.remove(v[i].node);
-      v.erase(v.begin() + static_cast<long>(i));
-    } else {
-      ++i;
-    }
-  }
+  // Retained for callers that still run a render pump: exits themselves are
+  // scheduled by the adapter (IDom::schedule), so there is nothing left to
+  // sweep here. Kept as a no-op instead of removing the call sites, which are
+  // also the ones that keep the animation clock honest in tests.
+  (void)dom;
+  (void)now_ms;
 }
 
 void EventBus::retain(const std::vector<int>& keep) {

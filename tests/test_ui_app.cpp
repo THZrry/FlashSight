@@ -2221,7 +2221,7 @@ FS_TEST(uiapp_session_status_dots) {
   EXPECT_TRUE(d.find("ps-dot running") != std::string::npos);
 }
 
-FS_TEST(uiapp_nav_filter_and_sort) {
+FS_TEST(uiapp_nav_sort_and_search_icon) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
@@ -2232,15 +2232,12 @@ FS_TEST(uiapp_nav_filter_and_sort) {
     s.settings_values["ui.tabs"] = Json{{"value", "left"}};
   });
   app.apply_appearance();
+  // Sorting stays in the rail (it is three short words)...
   EXPECT_TRUE(dump_has(dom, "nav-sort-btn"));
-  // the rail's own search box (key is a diff identity, not a DOM attribute, so
-  // the assertion is on the placeholder the user actually sees)
-  EXPECT_TRUE(dump_has(dom, "搜索会话"));
-  // a query hides non-matching sessions
-  app.update([](AppState& s) { s.nav_filter = "zzz"; });
-  EXPECT_TRUE(dump_has(dom, "没有匹配的会话"));
-  app.update([](AppState& s) { s.nav_filter = "UI"; });
-  EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
+  // ...but search does NOT: a text box in a 240px rail squeezed the session
+  // titles away. The rail carries an icon that jumps to the search page.
+  EXPECT_FALSE(dump_has(dom, "搜索会话"));
+  EXPECT_TRUE(dump_has(dom, "magnifying-glass"));
   // sorting by title is a stable reorder (no crash, same rows)
   app.update([](AppState& s) { s.session_sort = "title"; });
   EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
@@ -2280,4 +2277,116 @@ FS_TEST(uiapp_model_picker_dismisses_on_outside_click) {
   EXPECT_TRUE(dom.count_of("place_popup") >= 1);
   dom.fire_outside_click_for_test();
   EXPECT_FALSE(app.state().model_picker_open);
+}
+
+// ---------------------------------------------------------------------------
+// 第二十三批：演示会话渲染（思考块 / 工具块 / 会话设置回填）
+// ---------------------------------------------------------------------------
+
+// A backend that answers session.get with real session settings and turns that
+// carry thinking + tool calls - the shape the demo session has.
+class DemoBackend : public IUiBackend {
+ public:
+  BackendResult call(const std::string& method, const Json&) override {
+    BackendResult r;
+    r.ok = true;
+    if (method == "session.get") {
+      r.data = Json{
+          {"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}, {"cwd", "/tmp/p"}}},
+          {"sessionSettings", Json{{"model", "claude-sonnet-4"},
+                                   {"thinking", "high"},
+                                   {"filePerm", "approve"},
+                                   {"autoMode", true}}},
+          {"turns", Json::array()}};
+    } else if (method == "project.list" || method == "session.list") {
+      r.data = Json::array();
+    }
+    return r;
+  }
+  std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+};
+
+// load_session must apply the session's OWN settings: the composer showed
+// "choose model" on a session that already had one, and sending used the wrong
+// model after a reload.
+FS_TEST(uiapp_load_session_applies_settings) {
+  NullDom dom;
+  AppState st = AppState::make();
+  DemoBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.show("home");
+  app.show("sess_a");  // first visit -> load_session
+  EXPECT_EQ(app.state().model, std::string("claude-sonnet-4"));
+  EXPECT_EQ(app.state().thinking, std::string("high"));
+  EXPECT_EQ(app.state().permission, std::string("approve"));
+  EXPECT_EQ(app.state().perm_index, 0);
+  EXPECT_TRUE(app.state().auto_mode);
+  // the composer shows the model, not the placeholder
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("claude-sonnet-4") != std::string::npos);
+  EXPECT_FALSE(d.find("还没有选择模型") != std::string::npos);
+}
+
+// Thinking is a foldable block, closed by default; opening it shows the body.
+FS_TEST(uiapp_thinking_block_folds) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "answer";
+    m.thinking = "let me reason about it";
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("think-block") != std::string::npos);
+  EXPECT_TRUE(d.find("let me reason about it") == std::string::npos);  // folded
+  app.update([](AppState& s) { s.messages[0].thinking_open = true; });
+  EXPECT_TRUE(dom.dump().find("let me reason about it") != std::string::npos);
+}
+
+// A tool block's body only appears when THAT block is expanded.
+FS_TEST(uiapp_tool_blocks_toggle_independently) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "x";
+    for (int i = 0; i < 3; ++i) {
+      comp::ToolBlock tb;
+      tb.name = "tool" + std::to_string(i);
+      tb.detail = "detail" + std::to_string(i);
+      m.tools.push_back(tb);
+    }
+    s.messages.push_back(m);
+  });
+  app.update([](AppState& s) { s.messages[0].tools[1].expanded = true; });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("detail1") != std::string::npos);
+  EXPECT_TRUE(d.find("detail0") == std::string::npos);
+  EXPECT_TRUE(d.find("detail2") == std::string::npos);
+}
+
+// Auto mode paints the toggle as "on" (the label reads 自动).
+FS_TEST(uiapp_auto_mode_button_state) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.auto_mode = true;
+  });
+  EXPECT_TRUE(dom.dump().find("btn it-btn ghost on") != std::string::npos);
+  app.update([](AppState& s) { s.auto_mode = false; });
+  EXPECT_TRUE(dom.dump().find("手动") != std::string::npos);
 }

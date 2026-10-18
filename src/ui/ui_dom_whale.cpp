@@ -383,6 +383,13 @@ class WhaleDom : public IDom {
     });
   }
 
+  void schedule(int ms, std::function<void()> cb) override {
+    if (!cb) return;
+    Pending* p = new Pending();
+    p->sched = std::move(cb);
+    whaleui_set_timeout(&WhaleDom::run_sched, p, ms);
+  }
+
   void bind_vsplitter(Node splitter, Node panel,
                       std::function<void(int)> on_resize) override {
     bind_drag(vbar_, el_of(splitter), el_of(panel), true, on_resize);
@@ -971,6 +978,7 @@ class WhaleDom : public IDom {
   struct Pending {
     whaleui_dom_element_t* el = nullptr;
     std::string cls;
+    std::function<void()> sched;  // one-shot work (post-animation cleanup)
   };
 
   static void apply_pending_anim(double ts, void* ud) {
@@ -979,6 +987,15 @@ class WhaleDom : public IDom {
     if (!p) return;
     whaleui_dom_class_add(p->el, p->cls.c_str());
     delete p;
+  }
+
+  static void run_sched(double ts, void* ud) {
+    (void)ts;
+    Pending* p = static_cast<Pending*>(ud);
+    if (!p) return;
+    std::function<void()> fn = std::move(p->sched);
+    delete p;
+    if (fn) fn();
   }
 
   whaleui_app_t* app_ = nullptr;

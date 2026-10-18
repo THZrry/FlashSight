@@ -396,8 +396,20 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
 // position:relative), NOT the viewport. Mixing the two put the picker half a
 // screen away from its button. Everything below is computed in the popup's own
 // containing block.
-EM_JS(void, fs_dom_place_popup, (int popup_node, int anchor_node), {
-  var pop = globalThis.__fsNodes[popup_node];
+// One-shot timer: run fs_ui_timeout(cb_id) after `ms`. Used for the cleanup
+// that removes a subtree once its exit animation has played. Kept on the JS side
+// because C++ has no event loop of its own here, and because a background tab
+// throttles setTimeout (which is fine: the cleanup only needs to happen before
+// the user looks again).
+EM_JS(void, fs_dom_timeout, (int ms, int cb_id), {
+  setTimeout(function () {
+    if (typeof Module !== 'undefined' && Module._fs_ui_timeout) {
+      Module._fs_ui_timeout(cb_id);
+    }
+  }, ms);
+});
+
+EM_JS(void, fs_dom_place_popup, (int popup_node, int anchor_node), {  var pop = globalThis.__fsNodes[popup_node];
   var anchor = globalThis.__fsNodes[anchor_node];
   if (!pop || !anchor) return;
   var a = anchor.getBoundingClientRect();
@@ -831,6 +843,16 @@ int& outside_seq() {
   return s;
 }
 
+// one-shot timer callbacks (post-animation cleanup)
+std::map<int, std::function<void()> >& sched_cbs() {
+  static std::map<int, std::function<void()> > m;
+  return m;
+}
+int& sched_seq() {
+  static int s = 0;
+  return s;
+}
+
 // vertical (bottom panel height) resize callbacks
 std::map<int, std::function<void(int)> >& vsplit_cbs() {
   static std::map<int, std::function<void(int)> > m;
@@ -1161,6 +1183,12 @@ class WasmDom : public IDom {
   // what lets the old page and the new page coexist during a tab switch.
   bool supports_exit_animations() const override { return true; }
 
+  void schedule(int ms, std::function<void()> cb) override {
+    if (!cb) return;
+    sched_cbs()[++sched_seq()] = std::move(cb);
+    fs_dom_timeout(ms, sched_seq());
+  }
+
   void set_appearance(const Appearance& a) override {
     fs_dom_appearance(a.palette.c_str(), a.mode.c_str(), a.font.c_str(),
                       a.mono.c_str(), a.font_size, a.code_highlight ? 1 : 0,
@@ -1233,6 +1261,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_outside_click(int cb_id) {
   std::map<int, std::function<void()> >::iterator it = outside_cbs().find(cb_id);
   if (it == outside_cbs().end() || !it->second) return;
   it->second();
+}
+
+// Called from JS (fs_dom_timeout) after the requested delay.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_timeout(int cb_id) {
+  std::map<int, std::function<void()> >::iterator it = sched_cbs().find(cb_id);
+  if (it == sched_cbs().end()) return;
+  std::function<void()> fn = it->second;
+  sched_cbs().erase(it);  // one-shot: never fires twice
+  if (fn) fn();
 }
 
 // Called from JS (fs_dom_vsplitter) when a drag ends, with the final height.

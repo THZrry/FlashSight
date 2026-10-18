@@ -742,7 +742,18 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   load_session_view(sid);
   last_session_key_ = sid;
   render();
-  if (!had_view) load_session(sid);  // first visit: pull history + panels
+  // "Has a stashed view" is NOT the same as "its history was fetched": leaving
+  // a tab always stashes a default view, so this used to skip the fetch on the
+  // way back to a session that had never loaded (the composer then showed an
+  // empty model and no messages). Ask the restored view itself.
+  //
+  // Re-fetching on every visit is deliberate: the message list is the truth on
+  // disk, and another tab (or the model itself) may have appended turns since
+  // this view was stashed. The render is a no-op when nothing changed.
+  bool loaded = views_.get_or_create(sid).loaded;
+  (void)had_view;
+  (void)loaded;
+  load_session(sid);
 }
 
 void UiApp::open_session(const std::string& sid, const std::string& title) {
@@ -779,6 +790,24 @@ void UiApp::load_session(const std::string& sid) {
       m.role = role;
       m.text = jsonutil::get<std::string>(t, "text",
                  jsonutil::get<std::string>(t, "streamSummary", ""));
+      // Reasoning is part of the stored turn when the provider returned it.
+      m.thinking = jsonutil::get<std::string>(t, "thinking",
+                     jsonutil::get<std::string>(t, "reasoning", ""));
+      // Tool calls become the flow blocks under the message: without this a
+      // reloaded session lost every "read file / edit / diff" block and looked
+      // like the model answered out of thin air.
+      if (role == "assistant" && t.contains("toolCalls") && t["toolCalls"].is_array()) {
+        const Json& tc = t["toolCalls"];
+        for (size_t k = 0; k < tc.size(); ++k) {
+          comp::ToolBlock tb;
+          tb.name = jsonutil::get<std::string>(tc[k], "name", "");
+          std::string args = tc[k].contains("args") ? tc[k]["args"].dump(2) : "";
+          tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
+          tb.detail = args;
+          tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
+          if (!tb.name.empty()) m.tools.push_back(tb);
+        }
+      }
       if (role == "assistant" && t.contains("keyPoints") && t["keyPoints"].is_array()) {
         for (size_t k = 0; k < t["keyPoints"].size(); ++k) {
           if (!m.summary.empty()) m.summary += "\n";
@@ -819,11 +848,33 @@ void UiApp::load_session(const std::string& sid) {
     v.session_ops = ops;
     v.session_calls = calls;
     if (!pid.empty()) v.active_pid = pid;
+    // The session's OWN settings (model / thinking / permission / auto mode) come
+    // with the same reply. Without this the composer showed "choose model" on a
+    // session that already had one, and sending used the wrong model.
+    Json ss = r.data.contains("sessionSettings") && r.data["sessionSettings"].is_object()
+                  ? r.data["sessionSettings"]
+                  : Json::object();
+    {
+      std::string m = jsonutil::get<std::string>(ss, "model", "");
+      if (!m.empty()) v.model = m;
+      v.thinking = jsonutil::get<std::string>(ss, "thinking", "");
+      std::string perm = jsonutil::get<std::string>(ss, "filePerm", "");
+      if (!perm.empty()) {
+        v.permission = perm;
+        v.perm_index = perm == "approve" ? 0 : perm == "full" ? 2 : 1;
+      }
+      if (ss.contains("autoMode")) v.auto_mode = jsonutil::get<bool>(ss, "autoMode", true);
+    }
     if (st_.active_tab == sid) {
       st_.messages = msgs;
       st_.session_ops = ops;
       st_.session_calls = calls;
       if (!pid.empty()) st_.active_pid = pid;
+      st_.model = v.model;
+      st_.thinking = v.thinking;
+      st_.permission = v.permission;
+      st_.perm_index = v.perm_index;
+      st_.auto_mode = v.auto_mode;
       // the page's animation replay token: the page animates again now that
       // there is actually something to look at (a slow load used to play the
       // animation over an empty page, so it was over before content arrived)
@@ -1319,10 +1370,6 @@ void UiApp::render() {
         VNodePtr np = new_slot->children[0];
         if (op && np && op->key != np->key) {
           op->exit_anim = (page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft;
-          // Stagger: the outgoing page gets a head start, the incoming one waits
-          // until it is ~80% gone. Starting both at t=0 made the two pages cross
-          // and the whole switch read as noise.
-          add_class(np, "page-stagger");
         }
       }
     }
@@ -1675,6 +1722,14 @@ VNodePtr UiApp::build_page_slot() {
     pg_anim = (page_dir_ == "-1") ? anim::kSlideRight : anim::kSlideLeft;
   }
   add_anim(page, pg_anim ? pg_anim : anim::kView);
+  // Stagger: the incoming page waits until the outgoing one is ~80% gone.
+  // Expressed INLINE rather than as a class: it is re-applied by every render
+  // during the transition (so a mid-transition re-render cannot drop it and make
+  // the entrance jump to its end) and the next switch simply overwrites it (so
+  // the delay cannot leak into a later animation).
+  H pageh(page);
+  pageh.style("animation-delay", page_dir_.empty() ? "0s" : ".2s");
+  if (!page_dir_.empty()) pageh.style("animation-fill-mode", "backwards");
   page->exit_anim = (page_id == "new")
                         ? anim::kExitFade
                         : ((page_dir_ == "-1") ? anim::kExitRight : anim::kExitLeft);
@@ -1745,14 +1800,9 @@ VNodePtr UiApp::build_nav_rail() {
   }));
   rail.add(head);
 
-  // 搜索框 + 排序/筛选：导航栏里列表会越来越长，没有这两样只能靠肉眼找。
+  // 排序/筛选保留在栏里（它很短），但搜索不放在这里：左栏本来就窄，塞一个
+  // 输入框会把会话标题挤到只剩几个字。点放大镜跳到全局搜索页。
   H tools = el("div", "nav-tools");
-  H nsearch = comp::search_box(st_.nav_filter, tr("搜索会话…"),
-                               [this](const std::string& v) {
-    update([&](AppState& s) { s.nav_filter = v; });
-  });
-  nsearch.key("nav-filter-input");
-  tools.add(nsearch);
   H sortrow = el("div", "nav-sort");
   const char* sortLabels[3] = {"最近", "名称", "状态"};
   const char* sortVals[3] = {"", "title", "status"};
@@ -1781,28 +1831,13 @@ VNodePtr UiApp::build_nav_rail() {
     body.add(comp::empty_state(tr("还没有项目。"), tr("打开文件夹"),
                                [this](const std::string&) { pick_and_open_folder(); }));
   }
-  // 过滤 + 排序：导航栏会越来越长，没有这两样只能靠肉眼找。
-  std::string nf = st_.nav_filter;
-  std::string nfl = nf;
-  for (size_t i = 0; i < nfl.size(); ++i) {
-    nfl[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(nfl[i])));
-  }
-  auto nav_match = [&nfl](const std::string& hay) {
-    if (nfl.empty()) return true;
-    std::string h = hay;
-    for (size_t i = 0; i < h.size(); ++i) {
-      h[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(h[i])));
-    }
-    return h.find(nfl) != std::string::npos;
-  };
+  // 排序：导航栏会越来越长，没有排序只能靠肉眼找。搜索不在这里——见上面
+  // 放大镜的说明（左栏太窄，输入框会把标题挤没）。
   size_t nav_hits = 0;
   for (size_t i = 0; i < st_.projects.size(); ++i) {
     const ProjectCard& p = st_.projects[i];
-    bool proj_match = nav_match(p.name);
     std::vector<ProjectCard::SessionRow> rows;
-    for (size_t k = 0; k < p.sessions.size(); ++k) {
-      if (proj_match || nav_match(p.sessions[k].title)) rows.push_back(p.sessions[k]);
-    }
+    for (size_t k = 0; k < p.sessions.size(); ++k) rows.push_back(p.sessions[k]);
     if (rows.empty()) continue;
     // sort: 最近 (default, already sorted by backend) / 名称 / 状态
     if (st_.session_sort == "title") {
@@ -1903,8 +1938,8 @@ VNodePtr UiApp::build_home() {
       if (!st_.usage_loaded) load_usage();
     }
   }));
-  // 搜索入口：三个页签之外的一个图标，点开是独立的搜索页（不是弹窗——搜索结果
-  // 本身要占满一屏，而且它值得一个可以直接跳转的地址）。
+  // 搜索入口放在标题栏最右端（不是紧跟页签）：它是"整页"的动作，右对齐才
+  // 不会随着页签文字长度左右浮动。
   H sbtn = comp::icon_button("magnifying-glass", tr("搜索"), [this](const std::string&) {
     update([&](AppState& s) { s.home_tab = 3; });
   });
@@ -2653,12 +2688,24 @@ VNodePtr UiApp::build_session() {
   for (size_t i = 0; i < st_.messages.size(); ++i) {
     comp::ChatMsg m = st_.messages[i];
     hist_inner.add(comp::chat_message(m, [this](const std::string&) { toast(tr("已复制")); },
+                                      [this, i](const std::string& v) {
+      // The value carries "<blockIndex>\t<action>": a message can have many
+      // foldable blocks, and clicking one must not toggle the first.
+      size_t tab = v.find('\t');
+      int block = 0;
+      if (tab != std::string::npos) {
+        block = std::atoi(v.substr(0, tab).c_str());
+      }
+      update([&](AppState& s) {
+        if (i < s.messages.size() && block >= 0 &&
+            block < static_cast<int>(s.messages[i].tools.size())) {
+          s.messages[i].tools[block].expanded = !s.messages[i].tools[block].expanded;
+        }
+      });
+    },
                                       [this, i](const std::string&) {
       update([&](AppState& s) {
-        if (i < s.messages.size() && !s.messages[i].tools.empty()) {
-          // toggle the first block (prototype: single block toggling)
-          s.messages[i].tools[0].expanded = !s.messages[i].tools[0].expanded;
-        }
+        if (i < s.messages.size()) s.messages[i].thinking_open = !s.messages[i].thinking_open;
       });
     }));
   }

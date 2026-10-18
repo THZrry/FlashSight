@@ -113,13 +113,19 @@ struct ChatMsg {
   std::string text;
   std::string time;      // small, hover-revealed
   bool streaming = false;
+  // Reasoning text, when the provider returned it (or a stored turn carries it).
+  // Rendered as a foldable block BEFORE the answer: it is context, not the
+  // answer, and it is long enough to bury the answer if shown open.
+  std::string thinking;
+  bool thinking_open = false;
   std::vector<ToolBlock> tools;  // flow blocks rendered after the text
   std::string summary;           // turn summary (not folded, no border)
 };
 
 // One chat message. user -> right bubble; assistant -> article, no bubble;
 // system -> centered dim line. Actions appear on hover (CSS).
-H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle);
+H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
+               EventFn on_think_toggle = nullptr);
 
 // Turn summary: NOT folded, no border (per user feedback).
 H turn_summary(const std::string& text);

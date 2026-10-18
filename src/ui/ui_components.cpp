@@ -497,8 +497,8 @@ H file_icon(const std::string& name, bool is_dir) {
 
 // ---------- chat ----------
 
-H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle) {
-  H wrap = el("div", "msg " + m.role);
+H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
+               EventFn on_think_toggle) {  H wrap = el("div", "msg " + m.role);
   if (m.role == "system") {
     wrap.add(el("div", "sys").text(m.text));
     return wrap;
@@ -513,13 +513,38 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle) {
   }
   // assistant: article-like, no bubble, no name
   H body = el("div", "article");
+  // Reasoning first, folded: it explains HOW the answer was reached and is long
+  // enough to push the answer off screen if it were shown open.
+  if (!m.thinking.empty()) {
+    H think = el("div", m.thinking_open ? "think-block open" : "think-block");
+    H thead = el("div", "think-head");
+    if (on_think_toggle) {
+      thead.on(EventKind::kClick,
+               [on_think_toggle](const std::string&) { on_think_toggle("toggle"); });
+    }
+    thead.add(el("i", "fa fa-brain"));
+    thead.add(el("span").text(tr("思考过程")));
+    thead.add(el("span", "grow"));
+    thead.add(el("span", "think-caret").text(m.thinking_open ? "\u25be" : "\u25b8"));
+    think.add(thead);
+    if (m.thinking_open) think.add(el("pre", "think-body").text(m.thinking));
+    body.add(think);
+  }
   std::vector<H> blocks = markdown_blocks(m.text);
   for (size_t i = 0; i < blocks.size(); ++i) body.add(blocks[i]);
   if (m.streaming) body.add(el("span", "caret"));
   wrap.add(body);
-  // flow blocks (tool calls etc.) fold, summary does not
+  // flow blocks (tool calls etc.) fold, summary does not. The BLOCK INDEX is
+  // passed through the event value: with one handler on the message, a click on
+  // the fifth block must not toggle the first one.
   for (size_t i = 0; i < m.tools.size(); ++i) {
-    wrap.add(tool_block(m.tools[i], on_tool_toggle));
+    EventFn toggle = nullptr;
+    if (on_tool_toggle) {
+      EventFn base = on_tool_toggle;
+      std::string idx = itos(static_cast<int>(i));
+      toggle = [base, idx](const std::string& v) { base(idx + "\t" + v); };
+    }
+    wrap.add(tool_block(m.tools[i], toggle));
   }
   if (!m.summary.empty()) wrap.add(turn_summary(m.summary));
   H meta = el("div", "meta");

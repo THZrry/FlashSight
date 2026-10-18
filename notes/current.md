@@ -1090,3 +1090,37 @@ The process of project: P0 环境搭建 + P1 AppCore
     backdrop（在设置里那个 backdrop 会盖住字段本身）。
   - 210 用例 / 1913 断言（新增搜索页、状态点、左栏筛选排序、侧栏排序、
     选择器关闭）。
+
+<50>(SOLVED): 动画时序根因、侧栏/主页搜索归位、演示会话。
+  - **反向动画"淡入没跟着跑"**：离场节点继承了自己入场时的 `animation-delay`
+    （.2s stagger），于是旧页先僵住 .2s 才开始退；新页也在等，两边叠成"卡一下
+    再跳"。现在离场时显式写 `animation-delay:0s` + `fill:forwards`。
+  - **"有概率还是很急促"**：stagger 之前是加 class，而 `render()` 里那次
+    "按本次移动盖章"只在 diff 前加一次；任何一次过渡中的重渲染都会重建 VNode
+    并丢掉这个 class，入场动画于是从延迟态跳到终点。改成**内联样式**
+    （`animation-delay` / `animation-fill-mode`），每次渲染都会重新写上，下一次
+    切换直接覆盖，既不丢也不泄漏。
+  - **离场节点清理**：原来靠 render pump 的 `sweep_exits`，后台标签页的定时器被
+    浏览器节流时节点会滞留数秒（表现是"旧的还在"）。`IDom` 新增 `schedule()`
+    （wasm 用 `setTimeout` + `fs_ui_timeout`，Whale 用 `whaleui_set_timeout`，
+    Null 队列化供测试触发），离场后按动画时长自己删。`sweep_exits` 保留为空实现。
+  - **侧栏搜索**：左栏那个输入框太挤（会把会话标题压没），改成放大镜图标跳到
+    全局搜索页；排序（最近/名称/状态）留在栏里。
+  - **主页搜索右对齐**：`.home-head` 改成 `position:relative`，搜索按钮
+    `position:absolute; right:14px`。之前作为 flex 兄弟节点跟着页签文字宽度浮动。
+  - **会话设置回填**：`load_session` 现在读 `sessionSettings`（model / thinking /
+    filePerm / autoMode）并写进视图与当前扁平状态——之前打开已有会话时输入框显示
+    "选择模型"，发送还会用错模型。顺带修 `switch_tab` 用"有没有 stash 过 view"
+    判断是否拉历史的 bug（离开时会 stash 默认 view，导致回到一个从没加载过的
+    会话时跳过 `load_session`），现在每次进入都重读，磁盘是事实来源。
+  - **思考过程**：`ChatMsg` 增加 `thinking` / `thinking_open`，渲染成回答上方的
+    折叠块（默认收起，点标题展开）。后端 turn 里的 `thinking`/`reasoning` 字段
+    会带进消息。
+  - **工具块按索引折叠**：一个消息里可能有十几个块，之前点击任何一块都切换第一块。
+    现在事件值携带 `<index>\t<action>`。
+  - **演示会话**：`temp/make_demo_session.py` 生成 `s_d00d000001`（projA），9 轮、
+    7 段思考、19 个工具块（read/diffWrite/write/terminal/ask/todo/subagent）、
+    5 种语言代码块（cpp/python/rust/ts/go）、1 次失败重试、4 条 systemOps
+    （两次 setModel + setThinking + setPermission）、5 步计划。
+  - 214 用例 / 1928 断言（新增：会话设置回填、思考折叠、工具块独立折叠、
+    自动挡状态）。

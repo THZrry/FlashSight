@@ -114,7 +114,6 @@ struct AppState {
   // 只改变它和中间栏之间的分配，右侧栏位置不动。
   bool nav_collapsed = false;
   int nav_width = 240;  // px
-  std::string nav_filter;  // rail search box (session title / project)
 
   // ---- home ----
   int home_tab = 1;  // 0 探索 / 1 项目 / 2 用量统计 / 3 搜索

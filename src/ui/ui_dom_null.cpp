@@ -232,6 +232,15 @@ void NullDom::bind_outside_click(Node popup, std::function<void()> cb) {
   calls_.push_back(Call{"bind_outside_click", popup.id, ""});
 }
 
+void NullDom::schedule(int ms, std::function<void()> cb) {
+  // No timers in a test: queue the callback so run_scheduled_for_test can fire
+  // it, which keeps "the leaving node is eventually removed" observable without
+  // a real clock.
+  (void)ms;
+  scheduled_.push_back(std::move(cb));
+  calls_.push_back(Call{"schedule", 0, ""});
+}
+
 void NullDom::bind_vsplitter(Node splitter, Node panel,
                              std::function<void(int)> on_resize) {
   vsplit_cb_ = on_resize;
