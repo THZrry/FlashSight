@@ -94,6 +94,16 @@ class FsApi {
   FsResult session_refresh_config(const std::string& sid);
   FsResult session_append_turn(const std::string& sid, const Json& turn);
   FsResult session_get(const std::string& sid);
+  // Everything about a session EXCEPT its turns: meta, sessionSettings,
+  // systemOps. The UI loads the turns separately (and paged), so it must not
+  // pull the whole transcript just to learn the model or the pid.
+  FsResult session_info(const std::string& sid);
+  // Paginated history. A long session is hundreds of turns; loading all of them
+  // to show the last twenty wastes both disk and UI work. `before` is an index
+  // into the turn array (exclusive upper bound), so the UI pages backwards from
+  // the end:
+  //   session.turns {sid, before?, limit?} -> {turns, total, hasMore}
+  FsResult session_turns(const std::string& sid, int before, int limit);
   // P3: send/append/suspend/resume/cancelWake（AgentHost）
   // model / thinking: the composer's current selection. Passing them with the
   // message means a send is never routed with a stale model just because the
@@ -144,6 +154,13 @@ class FsApi {
   FsResult git_stage_all(const std::string& pid);
   FsResult git_commit(const std::string& pid, const std::string& message, bool amend);
   FsResult git_discard(const std::string& pid, const Json& paths);
+
+  // ----- command.*（输入框"命令"菜单；列表由后端提供，UI 不硬编码）-----
+  // 一条命令 = 名字 + 标题 + 说明 + action。action 是 "ui:<x>"（UI 自己处理，
+  // 比如打开规划面板）或一个后端方法名（"session.suspend"）。UI 只负责渲染
+  // 列表并执行 action，加一条命令不需要改前端。
+  FsResult command_list(const std::string& sid);
+  FsResult command_run(const std::string& sid, const std::string& name);
 
   // ----- usage.* -----
   FsResult usage_query(const Json& filter);

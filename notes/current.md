@@ -1226,3 +1226,84 @@ The process of project: P0 环境搭建 + P1 AppCore
     窗口估算（未知模型显示 "—" 而不是编一个百分比）。
   - 252 用例 / 2509 断言（新增 10 个 git 用例、5 个 UI 用例）。详见 current.md <53>。
 
+<54>(WIP): 界面细节四修 + 历史分页 + 接线盘点
+  - **history 宽度**：`max-width: 50%` + 窄容器时切到 `calc(100% - 20px)`。
+    注意**不能**写成 `min-width: calc(100% - 20px)`——CSS 的取用宽度是
+    `max(min-width, min(max-width, width))`，min-width 永远赢，会变成任何宽度都满宽。
+    这个切换本质是不连续的，所以用 `.session-center` 上的 container query
+    （它才是真正会变窄的盒子；媒体查询问的是视口，侧栏一开就答错）。
+    实测：宽 914px 时列宽 840px（≈100%-20），窄 334px 时列宽 260px（同样 ≈100%-20），
+    两者与输入框左右边完全对齐（composer 与 history 的百分比基准差 44px 的 padding）。
+  - **规划面板回到悬浮窗**：`.plan-float`（absolute，左上），但仍是 `.history` 的
+    **兄弟节点**而不是子节点——放回 history 内部会重建整个聊天子树并丢滚动位置。
+    点开它不再改变列宽（列是"第二个侧栏"的观感，已撤掉）。
+  - **侧栏标签动画**：body 移入 `.side-content`（absolute inset 0），切换时旧
+    body 播 `anim-exit-left` 留在原地、新 body 播 `anim-slide-left` 且延迟 .18s，
+    形成真正的双 view 错峰。两个坑：
+    * 退出节点不消失：`_fs_ui_timeout` 没在 `-sEXPORTED_FUNCTIONS` 里，`schedule`
+      的回调永远不会触发——加了导出，气泡 2 个 → 1 个。
+    * 错峰延迟中途被清掉：第二次渲染（面板数据到达）时"上一个 key"已等于当前 key，
+      新树不再带 inline delay，`patch_attrs` 就把活动节点的 delay 清成 0s，动画
+      从头重播 → 看起来"闪一下就到位"。改为在整个进入窗口内**每帧重写** delay
+      （`side_entering_key_` + 480ms 后清除标志）。
+  - **历史分页**：
+    * 后端新增 `session.turns {sid, before?, limit?}` → `{turns, start, total, hasMore}`，
+      以及 `session.info`（除 turns 外的 meta/settings/systemOps），打开会话不再
+      传输整份历史只为读模型名。
+    * 首屏只取最后 30 轮；滚到顶部（24px 容差）取上一页并**前插**；`hasMore=false`
+      后不再请求。
+    * 前插保持阅读位置：记录"距底部距离"（`scrollHeight - scrollTop`），插完按新的
+      scrollHeight 反算 scrollTop——按 scrollTop 锚定会正好跳动插入内容的高度。
+    * **前插不重建**（关键）：消息身份从"向量下标"改成**会话内绝对轮次号** `uid`。
+      下标身份会让每次前插把所有 key 整体挪位，整段历史重建，正好违背"固化历史不重建"。
+      测试断言前插后旧消息仍是同一批 VNode 对象。
+  - **贴底跟随**：`hist_follow` 由滚动边界事件驱动——到底部开、向上滚立刻关；
+    流式 delta / tool.update / turn.done 之后（render 之后才有新 scrollHeight）
+    若仍在贴底则滚到底。读历史时新内容绝不把视图拽下去。
+  - **命令菜单后端化**：新增 `command.list` / `command.run`。
+    每条命令 = `name + title + description + action`，action 是 `ui:<x>`（UI 自己处理：
+    打开规划/新建会话/打开某个面板）或一个后端方法名（`session.suspend` 等）；
+    skill（kind=skill）自动并入同一列表。UI 不再硬编码任何命令，之前只列 skill
+    而且把内置 MCP（browser-control / lsp）也列进去了——它们没有 /name 调用形式。
+  - **过程高度**：思考与工作过程都限 `min(10 行, 半页)` 并可滚动
+    （`.think-body` / `.work-body`），展开过程不会把答案顶出视野。
+  - **上下文水位改为精确值**：不再按模型名估算窗口。
+    * `/models` 响应里读 `context_length` / `context_window` / `max_context_length` /
+      `max_model_len`（含 `top_provider` 嵌套）写入 `caps.context_len`；
+    * `usage.query` 返回 `lastIn`（最后一次请求的 prompt tokens）、`contextWindow`、
+      `lastModel/lastProvider`（UsageSummary 新增 last 行）；
+    * 侧栏 = `lastIn / contextWindow`；任一缺失就显示 "—"，不编造分母。
+  - 255 用例 / 2580 断言。
+  - **接线盘点**（120 个方法，UI 已用 72 个）：未接的 48 个里，多数是"设计上不该由
+    UI 直接调用"的（lock.*、tool.invoke、steering.*、workflow.* 由 agent 侧驱动，
+    subagent.spawn 由模型调用）。真正属于"界面应该有、还没做"的见下一轮清单。
+
+<55>(TODO): 下一轮接线清单（按优先级）
+  A. 会话生命周期（界面已有入口但没接全）
+     1. session.fork（从某一轮分叉）—— 消息 hover 菜单
+     2. session.rollback（回滚到某一轮）—— 同上，需确认框
+     3. session.continue（中断后带引导续跑）—— loop.interrupted 提示条上的按钮
+     4. session.cancelWake + session.suspend/resume 的状态回显（挂起按钮当前只发 suspend）
+     5. session.setEnterSend（设置项"Enter 发送"目前只写设置，没下发会话）
+  B. 会话列表与历史
+     6. session.forget（忘记某会话的哪一级：菜单/记忆）
+     7. session.refreshConfig（模型/权限变更后刷新 provider 运行时）
+  C. Git 面板续做（后端已就位）
+     8. git.log（提交历史列表）
+     9. git.branches（分支列表 + 切换提示，切换本身需要新后端方法）
+     10. git.showHead（diff 的"旧版本"对照视图）
+     11. git.stage / git.unstage 的单文件入口已在用，补"按 hunk 暂存"需要新后端
+  D. 用量
+     12. usage.exportCsv（用量页的"导出 CSV"按钮）
+     13. model.allEnabled 作为模型选择器的数据源（目前用 provider.listModels 聚合）
+  E. Skill / MCP 管理
+     14. skill.setEnabled / skill.remove / skill.create（设置-Skill 页目前只能导入和加载）
+     15. mcp.import（设置-MCP 页缺"从目录导入"）
+  F. 设置
+     16. settings.unset（"恢复默认"按钮）
+     17. settings.setIgnoreGlobal（项目级忽略全局设置）
+     18. thinking.setLang（思考语言选择器的写入口）
+  G. 其它
+     19. workflow.*（工作流页整页未做；后端 define/list/start/get/retryStep/skipStep/steer 全在）
+     20. plan.update / plan.review（规划面板只读，不能编辑步骤或评审）
+     21. terminal.show / terminal.setEncoding（终端详情与编码切换）

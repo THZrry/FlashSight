@@ -62,6 +62,12 @@ UiApi::UiApi(FsApi* api) {
     return api->session_rename(s(a, "sid"), s(a, "title"));
   });
   reg("session.get", [api](const Json& a) { return api->session_get(s(a, "sid")); });
+  reg("session.info", [api](const Json& a) { return api->session_info(s(a, "sid")); });
+  // Paged history: the UI loads the newest page and prepends older ones.
+  reg("session.turns", [api](const Json& a) {
+    return api->session_turns(s(a, "sid"), static_cast<int>(i(a, "before", -1)),
+                              static_cast<int>(i(a, "limit", 30)));
+  });
   reg("session.fork", [api](const Json& a) {
     return api->session_fork(s(a, "sid"), s(a, "turnId"));
   });
@@ -176,6 +182,12 @@ UiApi::UiApi(FsApi* api) {
   });
   reg("git.discard", [api](const Json& a) {
     return api->git_discard(s(a, "pid"), a.contains("paths") ? a["paths"] : Json::array());
+  });
+
+  // ---- command.* (composer "命令" menu) ----
+  reg("command.list", [api](const Json& a) { return api->command_list(s(a, "sid")); });
+  reg("command.run", [api](const Json& a) {
+    return api->command_run(s(a, "sid"), s(a, "name"));
   });
 
   // ---- usage.* ----

@@ -736,6 +736,33 @@ EM_JS(void, fs_dom_set_scroll_top, (int node_id, int top), {
   el.style.scrollBehavior = prev;
 });
 
+EM_JS(int, fs_dom_scroll_height, (int node_id), {
+  var el = globalThis.__fsNodes[node_id];
+  return el ? (el.scrollHeight | 0) : 0;
+});
+
+EM_JS(void, fs_dom_scroll_edges, (int node_id, int cb_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  el.__fsEdgesCb = cb_id;
+  if (el.__fsEdgesInit) return;
+  el.__fsEdgesInit = true;
+  function report() {
+    if (typeof Module === 'undefined' || !Module._fs_ui_scroll_edges) return;
+    // 24px of slack: "the top" has to be reachable by an ordinary wheel nudge,
+    // and sub-pixel layout makes an exact 0 rare.
+    var atTop = el.scrollTop <= 24;
+    var atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+    Module._fs_ui_scroll_edges(el.__fsEdgesCb, atTop ? 1 : 0, atBottom ? 1 : 0);
+  }
+  el.addEventListener('scroll', report, { passive: true });
+});
+
+EM_JS(int, fs_dom_client_height, (int node_id), {
+  var el = globalThis.__fsNodes[node_id];
+  return el ? (el.clientHeight | 0) : 0;
+});
+
 EM_JS(void, fs_dom_copy_text, (const char* text), {
   var s = UTF8ToString(text);
   if (!s) return;
@@ -929,6 +956,16 @@ std::map<int, std::function<void(bool)> >& scroll_pin_cbs() {
   return m;
 }
 int& scroll_pin_seq() {
+  static int s = 0;
+  return s;
+}
+
+// scroll-edge callbacks (the chat: "reached the top" / "reached the bottom")
+std::map<int, std::function<void(bool, bool)> >& scroll_edges_cbs() {
+  static std::map<int, std::function<void(bool, bool)> > m;
+  return m;
+}
+int& scroll_edges_seq() {
   static int s = 0;
   return s;
 }
@@ -1228,12 +1265,28 @@ class WasmDom : public IDom {
     fs_dom_scroll_bottom(static_cast<int>(node.id));
   }
 
+  void bind_scroll_edges(Node node,
+                         std::function<void(bool, bool)> cb) override {
+    int cb_id = ++scroll_edges_seq();
+    scroll_edges_cbs().clear();
+    scroll_edges_cbs()[cb_id] = std::move(cb);
+    fs_dom_scroll_edges(static_cast<int>(node.id), cb_id);
+  }
+
   int scroll_top(Node node) override {
     return fs_dom_scroll_top(static_cast<int>(node.id));
   }
 
   void set_scroll_top(Node node, int top) override {
     fs_dom_set_scroll_top(static_cast<int>(node.id), top);
+  }
+
+  int scroll_height(Node node) override {
+    return fs_dom_scroll_height(static_cast<int>(node.id));
+  }
+
+  int client_height(Node node) override {
+    return fs_dom_client_height(static_cast<int>(node.id));
   }
 
   void copy_text(const std::string& text) override {
@@ -1373,6 +1426,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_scroll_pin(int cb_id, int at_bottom) 
       scroll_pin_cbs().find(cb_id);
   if (it == scroll_pin_cbs().end() || !it->second) return;
   it->second(at_bottom != 0);
+}
+
+// Called from JS (fs_dom_scroll_edges) when the chat scrolls.
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_scroll_edges(int cb_id, int at_top,
+                                                        int at_bottom) {
+  std::map<int, std::function<void(bool, bool)> >::iterator it =
+      scroll_edges_cbs().find(cb_id);
+  if (it == scroll_edges_cbs().end() || !it->second) return;
+  it->second(at_top != 0, at_bottom != 0);
 }
 
 // Called from JS (fs_dom_key_input) with a JSON key description.

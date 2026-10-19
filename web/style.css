@@ -1047,6 +1047,10 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   flex: 1; min-width: 0; min-height: 0;
   display: flex; flex-direction: column;
   position: relative;   /* anchor for the floating plan panel */
+  /* Query container for the reading column: "is there room for a 50% column?"
+     is a question about THIS box, not about the viewport (the side panel can be
+     open, the nav rail can be expanded), so a media query would answer wrong. */
+  container-type: inline-size;
 }
 
 .history {
@@ -1058,16 +1062,28 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
      were animated by it, so the position could not be READ back and a restore
      fought the animation. Jumping is also what those two cases want. */
 }
-/* conversation column: centered. On a wide window it is capped at half the
-   width (long lines are unreadable), but "half" is a MAXIMUM, not the width:
-   in a narrow column 50% plus the panel leaves a strip too narrow to read, so
-   the column simply uses the space it has minus a small margin. */
+/* conversation column: centered, half the width when there is room.
+   `max-width: 50%` keeps lines readable on a wide window. As soon as 50% would
+   be a squeezed strip (narrow window, side panel open, nav rail expanded) the
+   column switches to nearly the full width.
+   NOTE: this cannot be written as `min-width: calc(100% - 20px)`. In CSS the
+   used width is max(min-width, min(max-width, width)), so a min-width of
+   "100% - 20px" always beats max-width 50% - the column would be full width at
+   EVERY size. The switch is genuinely discontinuous, so it is a container query
+   on .session-center (the box that actually shrinks, unlike the viewport). */
 .history-inner {
   width: 100%;
-  max-width: min(50%, calc(100% - 20px));
-  min-width: 0;
+  max-width: 50%;
   margin: 0 auto;
   display: flex; flex-direction: column; gap: 18px;
+}
+@container (max-width: 1119px) {
+  .history-inner { max-width: calc(100% - 20px); }
+  /* Same edges as the conversation. The composer is a child of .session-center
+     (which has no side padding) while .history-inner sits inside .history's
+     22px padding, so the two percentages have different bases: subtract the
+     difference. Higher specificity because the base .composer rule comes later. */
+  .session-center .composer { max-width: calc(100% - 64px); }
 }
 
 /* chat messages: user = bubble, assistant = article (no bubble/name).
@@ -1129,12 +1145,19 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .think-head:hover { color: var(--text); }
 .think-caret { color: var(--text-faint); font-size: 10px; }
 .think-head .fa { font-size: 11px; color: var(--text-faint); }
+/* Reasoning is long and can be very long. Showing a capped window (about ten
+   lines, never more than half the viewport) with its own scroll keeps the answer
+   in view while still letting the process be read; the fold above it is the
+   primary control, this is the "open but don't take over" state.
+   `min(10 * 1.55em, 50vh)` states both limits literally: ten lines at the
+   block's own line-height, or half the page, whichever is smaller. */
 .think-body {
   margin: 0; padding: 9px 12px;
   font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
   color: var(--text-dim);
   white-space: pre-wrap; word-break: break-word;
-  max-height: 260px; overflow: auto;
+  max-height: min(10 * 1.55em, 50vh);
+  overflow: auto;
 }
 
 /* article typography */
@@ -1258,7 +1281,15 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .work-done.ok { color: var(--ok); }
 .work-done.fail { color: var(--err); }
 .work-dur, .work-time { font-size: 11px; font-family: var(--mono); }
-.work-body { padding: 2px 10px 10px; border-top: 1px solid var(--border); }
+.work-body {
+  padding: 2px 10px 10px;
+  border-top: 1px solid var(--border);
+  /* The whole process (reasoning + every tool block) can be enormous. Cap it to
+     about ten lines or half the page - whichever is smaller - and let it scroll:
+     an open fold must never push the answer out of view. */
+  max-height: min(10 * 1.55em + 3em, 50vh);
+  overflow: auto;
+}
 .work-label {
   font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
   color: var(--text-faint);
@@ -1266,7 +1297,7 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .work-body .think-body {
   margin: 0;
-  max-height: 220px;
+  max-height: min(10 * 1.55em, 40vh);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
@@ -1400,8 +1431,19 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .ptab.add { color: var(--text-dim); }
 .ptab.add:hover { color: var(--text); }
 .side-body {
-  flex: 1; overflow: auto; padding: 10px;
+  /* Absolute inside .side-content so a leaving panel and an entering panel can
+     overlap for one animation. In normal flow they would each take half the
+     column for ~200ms - which is exactly the "jump" the tab switch showed. */
+  position: absolute; inset: 0;
+  overflow: auto; padding: 10px;
   display: flex; flex-direction: column; gap: 8px;
+}
+/* the scrolling area of the panel; gives the exiting/entering bodies a common
+   containing block that excludes the tab strip */
+.side-content {
+  flex: 1; min-height: 0;
+  position: relative;
+  overflow: hidden;
 }
 .side-actions { display: flex; gap: 8px; margin-top: 4px; }
 
@@ -1591,10 +1633,12 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .composer {
   flex: none;
   position: relative;   /* anchor for the "/" picker overlay */
-  /* same sizing as .history-inner so the input lines up with the conversation */
+  /* Same width as .history-inner, which sits inside .history's 22px side
+     padding: the composer is a child of .session-center, so its percentage
+     basis is 44px wider. Subtracting it keeps the input and the conversation
+     on exactly the same edges at every width. */
   width: 100%;
-  max-width: 50%;
-  min-width: min(320px, calc(100% - 20px));
+  max-width: calc(50% - 22px);
   margin: 0 auto 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -1759,11 +1803,17 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   animation: anim-pop .12s ease-out;
 }
 .skill-menu-item {
+  display: flex; align-items: baseline; gap: 8px;
   padding: 6px 10px; border-radius: var(--radius);
   cursor: pointer; font-size: 12.5px;
 }
 .skill-menu-item:hover { background: var(--hover); }
-.skill-menu-name { font-family: var(--mono); }
+.skill-menu-name { font-family: var(--mono); flex: none; }
+.skill-menu-title { flex: none; }
+.skill-menu-desc {
+  min-width: 0; font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* ============================ terminal bar (bottom) ============================ */
 .terminal-bar {
@@ -2698,22 +2748,23 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
 .menu-item { padding: 6px 12px; cursor: pointer; font-size: 13px; }
 .menu-item:hover { background: var(--sel); }
 
-/* plan panel: its own column between the chat and the side panel.
-   It used to be an absolute float inside .session-center, which (a) made it
-   part of the chat's layout and (b) forced the chat column to re-layout when it
-   appeared. A real column just takes width away. */
-.plan-col {
-  flex: none;
-  width: 258px;
-  min-width: 0;
-  align-self: stretch;
-  display: flex; flex-direction: column;
-  border-right: 1px solid var(--border);
-  background: var(--panel);
-  padding: 10px 12px;
+/* plan panel: a floating overlay, NOT a column.
+   It is a SIBLING of .history (not a child), so opening it does not touch the
+   transcript subtree or its scroll position; it is absolutely positioned, so it
+   also does not take width away from the conversation. (It was briefly a real
+   column, which read like a second side panel - not what was asked for.) */
+.plan-float {
+  position: absolute;
+  left: 14px; top: 14px;
+  width: 240px; max-height: 70%;
   overflow: auto;
+  z-index: 5;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  box-shadow: var(--pop);
+  padding: 10px 12px;
 }
-.plan-col .plan-head { position: sticky; top: 0; background: var(--panel); z-index: 1; }
 .plan-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .plan-head .plan-title { flex: 1; margin-bottom: 0; }
 .plan-head .icon-btn { width: 20px; height: 20px; font-size: 12px; }

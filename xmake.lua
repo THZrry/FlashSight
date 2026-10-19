@@ -201,7 +201,7 @@ target("fs_ui_wasm")
     set_extension(".js")
     add_ldflags("-lembind", "-sALLOW_MEMORY_GROWTH=1", "-sDISABLE_EXCEPTION_CATCHING=0",
                 "--no-entry", {force = true})
-    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_vsplit,_fs_ui_key,_fs_ui_key_input,_fs_ui_cell_size,_fs_ui_file_pick,_fs_ui_scroll_pin,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
+    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_vsplit,_fs_ui_key,_fs_ui_key_input,_fs_ui_cell_size,_fs_ui_file_pick,_fs_ui_scroll_pin,_fs_ui_scroll_edges,_fs_ui_timeout,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
                 {force = true})
     add_ldflags("-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8",
                 {force = true})
@@ -257,6 +257,18 @@ function whaleui_link()
 
     add_linkdirs(libdir)
     add_links("whaleui-full")
+    -- SDL3_image is a STATIC archive and calls into SDL3, so it must appear
+    -- BEFORE -lSDL3 on the command line. It cannot go through add_ldflags():
+    -- xmake emits absolute .a paths after every -l entry, which put it last and
+    -- the link failed with "undefined reference to SDL_SeekIO" (IMG.c.obj).
+    -- Registering it as a link with its own -L keeps the order explicit.
+    local sdl3_image = find_pkg_lib("libsdl3_image", "libSDL3_image.a")
+    if sdl3_image then
+        add_linkdirs(path.directory(sdl3_image))
+        add_links("SDL3_image")
+    else
+        print("[whaleui] warning: libsdl3_image not found under " .. pkg)
+    end
     -- SDL3 / SDL3_ttf: prebuilt import libs (they load their DLLs at run time)
     if os.isdir(path.join(whaleui_dir, "3rdparty/sdl3/lib")) then
         add_linkdirs(path.join(whaleui_dir, "3rdparty/sdl3/lib"))
@@ -266,11 +278,10 @@ function whaleui_link()
         add_linkdirs(path.join(whaleui_dir, "3rdparty/sdl3_ttf/lib"))
         add_links("SDL3_ttf")
     end
-    -- static xrepo dependencies, in dependency order
+    -- remaining static xrepo dependencies (no SDL dependency, order irrelevant)
     local statics = {
         {name = "lexbor", lib = "liblexbor_static.a"},
         {name = "utf8proc", lib = "libutf8proc.a"},
-        {name = "libsdl3_image", lib = "libSDL3_image.a"},
     }
     for _, e in ipairs(statics) do
         local lib = find_pkg_lib(e.name, e.lib)
@@ -499,7 +510,13 @@ target("flashsight")
     set_languages("c++14")
     add_includedirs(includedirs)
     add_files("src/main.cpp")
-    add_deps("fs_core", "fs_ui")
+    -- fs_ui BEFORE fs_core: ui_app.cpp calls into fs_core (fs::highlight,
+    -- settings_store, fs_vt), so the linker must see fs_ui's undefined
+    -- references while fs_core is still ahead of it on the command line.
+    -- With the old order (-lfs_core -lfs_ui) it failed with
+    -- "undefined reference to fs::highlight::lang_for_path" - the browser
+    -- build never noticed because nothing there pulls ui_app.cpp.obj in.
+    add_deps("fs_ui", "fs_core")
     if whaleui_on then
         -- The desktop UI reads web/style.css through the VFS at run time, so the
         -- assets must exist next to the exe; they are tracked as inputs so a CSS
@@ -520,7 +537,9 @@ target("fs_tests")
     set_languages("c++14")
     add_includedirs(includedirs)
     add_files(dir_files("tests"))
-    add_deps("fs_core", "fs_ui")
+    -- same link order as `flashsight`: the tests link UiApp, which calls into
+    -- fs_core (see the note there)
+    add_deps("fs_ui", "fs_core")
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")

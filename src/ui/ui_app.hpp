@@ -167,15 +167,32 @@ struct AppState {
   // mixing it into the message made it impossible to tell what was attached).
   std::vector<std::string> attachments;
   std::vector<comp::ChatMsg> messages;
-  // the active session's history has been fetched. Used as the page animation's
-  // replay token: the page animates when it is created, and again when the
-  // history actually arrives - otherwise a slow load plays the animation over
-  // an empty page and it is gone before there is anything to see.
+  // Paging: a session can hold hundreds of turns, so only the newest
+  // `kHistoryPage` are loaded initially. Scrolling to the top asks for the
+  // previous page; those turns are then FROZEN (one rev each, never re-parsed).
+  // `history_total` is how many turns exist on disk, so the UI knows when it has
+  // reached the beginning.
+  int history_total = 0;
+  // Absolute index (into the stored turn array) of the OLDEST loaded turn. This
+  // is NOT messages.size(): a page can skip turns that are not user/assistant,
+  // and starting the next page from the count would re-fetch the same range.
+  int history_start = 0;
+  bool history_has_more = false;
+  bool history_loading_older = false;
+  // The scroll anchor recorded before prepending older turns: the distance from
+  // the bottom. Restoring it keeps the reader looking at the same line.
+  int history_anchor_from_bottom = -1;
+  // The page animation's replay token (see session_loaded).
   bool session_loaded = false;
   // Chat scroll offset for this session. Saved when leaving the tab and put back
   // on the way in; a first visit starts at the BOTTOM (the latest turn is what
   // you came for, not the beginning of the conversation).
   int hist_scroll = -1;  // -1 = never measured: start at the bottom
+  // Is the view pinned to the end? Turned on when the user lands at the bottom,
+  // off as soon as they scroll up. New output only follows the end while this is
+  // true - yanking the view down while someone reads history is worse than not
+  // following.
+  bool hist_follow = true;
   std::string model;
   int model_index = 0;
   std::string permission = "permissive";
@@ -226,7 +243,16 @@ struct AppState {
   std::vector<CallRow> session_calls;     // toolCalls flattened from turns
   // ---- composer / skill picker ----
   bool skill_menu_open = false;
-  std::vector<std::string> skill_menu;    // skill names for the "/" picker
+  // The command menu's contents come from command.list (backend), so the UI has
+  // no hard-coded list to keep in sync.
+  struct CommandRow {
+    std::string name;
+    std::string title;
+    std::string description;
+    std::string action;  // "ui:..." or a backend method name
+    std::string group;   // "builtin" | "skill"
+  };
+  std::vector<CommandRow> command_menu;
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
@@ -481,7 +507,16 @@ struct SessionView {
   bool loaded = false;  // history/panels fetched from the backend yet?
   std::vector<comp::ChatMsg> messages;
   bool session_loaded = false;
+  int history_total = 0;
+  // Absolute index (into the stored turn array) of the OLDEST loaded turn. This
+  // is NOT messages.size(): a page can skip turns that are not user/assistant,
+  // and starting the next page from the count would re-fetch the same range.
+  int history_start = 0;
+  bool history_has_more = false;
+  bool history_loading_older = false;
+  int history_anchor_from_bottom = -1;
   int hist_scroll = -1;  // chat scroll offset (see AppState::hist_scroll)
+  bool hist_follow = true;  // pinned to the end (see AppState::hist_follow)
   std::string session_input;
   std::vector<std::string> attachments;
   // 空 = 还没选模型。凭空给一个 gpt-4o-mini 会让人以为它已经配好且能用，而
@@ -515,7 +550,7 @@ struct SessionView {
   std::vector<AppState::CallRow> session_calls;
 
   bool skill_menu_open = false;
-  std::vector<std::string> skill_menu;
+  std::vector<AppState::CommandRow> command_menu;
 
   std::vector<TermItem> terminals;
   std::string active_term;
@@ -609,9 +644,11 @@ class UiApp {
   void git_commit(const std::string& tab_id, const std::string& message, bool amend);
   // Open a file's contents in its OWN side tab (not inline under the tree).
   void open_file_preview(const std::string& rel);
+  // Execute one entry of the composer's command menu. "ui:*" actions are handled
+  // here; anything else is a backend action (a skill load, suspend, ...).
+  void run_command(const AppState::CommandRow& cmd);
   // Loaders for the settings sections.
-  void load_preset_agents();
-  void load_skills();
+  void load_preset_agents();  void load_skills();
   void load_provider_templates();
   void load_mcp_tools();
   void load_settings_section(const std::string& section);
@@ -833,7 +870,11 @@ class UiApp {
   // 与实际导航方向一致。在 switch_tab 里按 tab_history 判定，build_shell 读它
   // 选动画意图。"1"=前进，"-1"=后退，空=默认。
   std::string page_dir_;
-
+  // The body currently playing its entrance. A switch triggers several renders
+  // (the click, then the panel's own data load); re-deriving "am I entering?"
+  // from the previous key on every render made the second render drop the delay
+  // mid-animation, which is why the panel snapped in instead of sliding.
+  std::string side_entering_key_;
   // backend event handler (bound in mount)
   void on_backend_event(const std::string& event, const Json& payload);
   // route a session-scoped event into that session's view (active or stashed)
@@ -851,8 +892,17 @@ class UiApp {
   void load_session_view(const std::string& sid);
   // switch to `id`, saving the current tab's view and restoring the target's
   void switch_tab(const std::string& id, int dir = 0);
-  // pull history + system ops + tool calls for a session into its view
+  // pull a session's info + its NEWEST page of history into its view
   void load_session(const std::string& sid);
+  // prepend the previous page of history (called when the user scrolls to the top)
+  void load_older_history();
+  // keep a pinned view at the end after content was appended (call AFTER render)
+  void follow_history_if_pinned();
+  // Turn JSON -> ChatMsg (frozen, one revision). abs_index is the turn's
+  // position in the stored session and becomes the message's stable identity.
+  comp::ChatMsg turn_to_message(const Json& t, int64_t abs_index);
+  // how many turns one page holds
+  static const int kHistoryPage = 30;
 
   // ---- page builders (return the page body for the active tab) ----
   VNodePtr build_shell();

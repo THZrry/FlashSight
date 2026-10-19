@@ -45,6 +45,11 @@ struct UsageSummary {
   int64_t total_in = 0, total_out = 0, total_cache = 0;
   double total_cost = 0;
   std::string cost_kind;  // 依占比最高的列
+  // The most recent row matching the filter. The context water level is the
+  // LAST request's prompt tokens (that is what "how full is the window" means),
+  // not the sum over the whole session - so the aggregate keeps it separately.
+  UsageRow last;
+  bool has_last = false;
   // provider×model 聚合阶梯（key = "provider::model"）
   std::map<std::string, UsageRow> by_provider_model;
   // time 桶（按天 ts/86400000）

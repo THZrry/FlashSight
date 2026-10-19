@@ -245,3 +245,11 @@ The process of project: P0 环境搭建
   bug）+ 用量面板去掉写死的 42%/¥0.21/12.4K，改用带 sid 的 usage.session。
   252 用例 2509 断言。详见 current.md <53>。
 
+<54>(WIP): 界面四修 + 历史分页（前插不重建）+ 命令菜单后端化 + 上下文改精确值。
+  宽度用 max-width 50% + container query 切 100%-20px（min-width 会永远赢，写不得）；
+  规划回悬浮窗但仍不与 history 同层；侧栏切换改为双 view 错峰（修 _fs_ui_timeout
+  未导出、错峰延迟被二次渲染清掉两个真 bug）；历史首屏 30 轮、上拉前插、
+  消息身份改绝对轮次号 uid 使前插不重建、贴底才跟随；命令菜单由 command.list
+  提供（含 skill），UI 零硬编码；思考/过程限 10 行半页可滚；上下文水位 =
+  上次请求 prompt tokens / API 报告的 context_length。255 用例 2580 断言。
+  current.md <54> 末尾附下一轮接线清单 <55>（21 项，按优先级分组）。

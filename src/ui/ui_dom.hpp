@@ -227,6 +227,14 @@ class IDom {
   }
   // Scroll `node` to the bottom (called after output when the view is pinned).
   virtual void scroll_to_bottom(Node node) { (void)node; }
+  // Report where `node` is scrolled to, whenever it moves: (at_top, at_bottom).
+  // The chat needs both: at_top asks for the previous page of history, at_bottom
+  // means new output must keep following the end.
+  virtual void bind_scroll_edges(Node node,
+                                 std::function<void(bool at_top, bool at_bottom)> cb) {
+    (void)node;
+    (void)cb;
+  }
   // Read / write the vertical scroll offset. The chat history needs both: the
   // offset is saved per session (so switching tabs does not lose your place) and
   // restored on the way back.
@@ -237,6 +245,17 @@ class IDom {
   virtual void set_scroll_top(Node node, int top) {
     (void)node;
     (void)top;
+  }
+  // Scroll geometry, for "keep the reading position while older turns are
+  // prepended": the app records (scrollHeight - scrollTop) before inserting and
+  // restores that distance afterwards. Only the DOM knows these numbers.
+  virtual int scroll_height(Node node) {
+    (void)node;
+    return 0;
+  }
+  virtual int client_height(Node node) {
+    (void)node;
+    return 0;
   }
 
   // --- clipboard ---
@@ -353,8 +372,12 @@ class NullDom : public IDom {
                         std::function<void(const std::string&)> cb) override;
   void bind_scroll_pin(Node node, std::function<void(bool)> cb) override;
   void scroll_to_bottom(Node node) override;
+  void bind_scroll_edges(Node node,
+                         std::function<void(bool, bool)> cb) override;
   int scroll_top(Node node) override;
   void set_scroll_top(Node node, int top) override;
+  int scroll_height(Node node) override;
+  int client_height(Node node) override;
   void copy_text(const std::string& text) override;
   void play_animation(Node node, const std::string& cls) override;
   void set_appearance(const Appearance& a) override;
@@ -371,6 +394,15 @@ class NullDom : public IDom {
   // test hook: simulate the user scrolling the pinned node
   void fire_scroll_pin_for_test(bool at_bottom) {
     if (scroll_pin_cb_) scroll_pin_cb_(at_bottom);
+  }
+  // test hook: simulate the chat being scrolled to one of its edges
+  void fire_scroll_edges_for_test(bool at_top, bool at_bottom) {
+    if (scroll_edges_cb_) scroll_edges_cb_(at_top, at_bottom);
+  }
+  // test hook: give a node a layout size (NullDom has no layout engine)
+  void set_scroll_geometry_for_test(Node n, int scroll_height, int client_height) {
+    scroll_heights_[n.id] = scroll_height;
+    client_heights_[n.id] = client_height;
   }
   // test hook: simulate a file picker completing
   void fire_file_pick_for_test(const std::string& reply) {
@@ -447,12 +479,15 @@ class NullDom : public IDom {
   std::string last_copied_;
   // test hook: scroll offsets recorded per node id
   std::map<uint64_t, int> scroll_tops_;
+  std::map<uint64_t, int> scroll_heights_;
+  std::map<uint64_t, int> client_heights_;
   std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
   std::function<void(const KeyPress&)> key_input_cb_;
   std::function<void(int, int)> cell_size_cb_;
   std::function<void(const std::string&)> file_pick_cb_;
   std::function<void(bool)> scroll_pin_cb_;
+  std::function<void(bool, bool)> scroll_edges_cb_;
   std::vector<std::string> played_anims_;
   Appearance appearance_;
   // test hook: the node the app treats as focused

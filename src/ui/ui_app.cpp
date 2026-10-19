@@ -637,6 +637,11 @@ void UiApp::save_session_view(const std::string& sid) {
   v.messages = st_.messages;
   v.session_loaded = st_.session_loaded;
   v.hist_scroll = st_.hist_scroll;
+  v.hist_follow = st_.hist_follow;
+  v.history_total = st_.history_total;
+  v.history_start = st_.history_start;
+  v.history_has_more = st_.history_has_more;
+  v.history_loading_older = false;  // an in-flight page belongs to the old view
   v.session_input = st_.session_input;
   v.model = st_.model;
   v.model_index = st_.model_index;
@@ -660,7 +665,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.session_ops = st_.session_ops;
   v.session_calls = st_.session_calls;
   v.skill_menu_open = st_.skill_menu_open;
-  v.skill_menu = st_.skill_menu;
+  v.command_menu = st_.command_menu;
   v.terminals = st_.terminals;
   v.active_term = st_.active_term;
   v.terminal_open = st_.terminal_open;
@@ -686,6 +691,11 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.messages = v.messages;
   st_.session_loaded = v.session_loaded;
   st_.hist_scroll = v.hist_scroll;
+  st_.hist_follow = v.hist_follow;
+  st_.history_total = v.history_total;
+  st_.history_start = v.history_start;
+  st_.history_has_more = v.history_has_more;
+  st_.history_loading_older = false;
   st_.session_input = v.session_input;
   st_.model = v.model;
   // 会话自己还没选过模型时，用设置里的会话默认模型（如果配了）。仍然为空就
@@ -719,7 +729,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.session_ops = v.session_ops;
   st_.session_calls = v.session_calls;
   st_.skill_menu_open = false;
-  st_.skill_menu = v.skill_menu;
+  st_.command_menu = v.command_menu;
   st_.terminals = v.terminals;
   st_.active_term = v.active_term;
   st_.terminal_open = v.terminal_open;
@@ -835,53 +845,60 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
   switch_tab(sid);  // restores an existing view, or fetches on first visit
 }
 
-// fetch history + system ops + tool calls for a session into its view
+// Turn JSON -> ChatMsg. `abs_index` is the turn's position in the STORED
+// session; it becomes the message's stable identity, so paging backwards does
+// not renumber (and therefore rebuild) what is already on screen.
+//
+// Loaded turns are FROZEN: each gets one revision and never changes again,
+// which is what makes reopening a long session cheap (the render cache serves
+// every message instead of re-parsing it).
+comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
+  comp::ChatMsg m;
+  m.uid = abs_index;
+  m.role = jsonutil::get<std::string>(t, "role", "");
+  m.text = jsonutil::get<std::string>(t, "text",
+             jsonutil::get<std::string>(t, "streamSummary", ""));
+  // Reasoning is part of the stored turn when the provider returned it.
+  m.thinking = jsonutil::get<std::string>(t, "thinking",
+                 jsonutil::get<std::string>(t, "reasoning", ""));
+  m.started_at = jsonutil::get_int(t, "startedAt", 0);
+  m.ended_at = jsonutil::get_int(t, "ts", 0);
+  m.rev = next_msg_rev_++;
+  // Tool calls become the flow blocks under the message: without this a
+  // reloaded session lost every "read file / edit / diff" block and looked
+  // like the model answered out of thin air.
+  if (m.role == "assistant" && t.contains("toolCalls") && t["toolCalls"].is_array()) {
+    const Json& tc = t["toolCalls"];
+    for (size_t k = 0; k < tc.size(); ++k) {
+      comp::ToolBlock tb;
+      tb.name = jsonutil::get<std::string>(tc[k], "name", "");
+      std::string args = tc[k].contains("args") ? tc[k]["args"].dump(2) : "";
+      tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
+      tb.detail = args;
+      tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
+      if (!tb.name.empty()) m.tools.push_back(tb);
+    }
+  }
+  if (m.role == "assistant" && t.contains("keyPoints") && t["keyPoints"].is_array()) {
+    for (size_t k = 0; k < t["keyPoints"].size(); ++k) {
+      if (!m.summary.empty()) m.summary += "\n";
+      if (t["keyPoints"][k].is_string()) m.summary += t["keyPoints"][k].get<std::string>();
+    }
+  }
+  return m;
+}
+
+// fetch a session's INFO + its newest page of history into its view.
+//
+// Only the newest page is loaded: a session can hold hundreds of turns and the
+// screen shows the last few. Older turns are fetched on demand (load_older) and
+// then behave exactly like the first page - frozen, cached, never re-parsed.
 void UiApp::load_session(const std::string& sid) {
   if (sid.empty()) return;
-  call_async("session.get", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+  // Two independent requests: the info (small, needed for the composer) and the
+  // last page of turns. They land in either order.
+  call_async("session.info", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
     if (!r.ok) return;
-    const Json& turns = r.data.contains("turns") ? r.data["turns"] : Json::array();
-    std::vector<comp::ChatMsg> msgs;
-    for (size_t i = 0; i < turns.size(); ++i) {
-      const Json& t = turns[i];
-      std::string role = jsonutil::get<std::string>(t, "role", "");
-      if (role != "user" && role != "assistant") continue;
-      comp::ChatMsg m;
-      m.role = role;
-      m.text = jsonutil::get<std::string>(t, "text",
-                 jsonutil::get<std::string>(t, "streamSummary", ""));
-      // Reasoning is part of the stored turn when the provider returned it.
-      m.thinking = jsonutil::get<std::string>(t, "thinking",
-                     jsonutil::get<std::string>(t, "reasoning", ""));
-      m.started_at = jsonutil::get_int(t, "startedAt", 0);
-      m.ended_at = jsonutil::get_int(t, "ts", 0);
-      // A loaded turn is FROZEN: it gets one revision and never changes again.
-      // That is what makes reopening a 300-turn session cheap - the second visit
-      // renders every message from the cache instead of re-parsing the history.
-      m.rev = next_msg_rev_++;
-      // Tool calls become the flow blocks under the message: without this a
-      // reloaded session lost every "read file / edit / diff" block and looked
-      // like the model answered out of thin air.
-      if (role == "assistant" && t.contains("toolCalls") && t["toolCalls"].is_array()) {
-        const Json& tc = t["toolCalls"];
-        for (size_t k = 0; k < tc.size(); ++k) {
-          comp::ToolBlock tb;
-          tb.name = jsonutil::get<std::string>(tc[k], "name", "");
-          std::string args = tc[k].contains("args") ? tc[k]["args"].dump(2) : "";
-          tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
-          tb.detail = args;
-          tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
-          if (!tb.name.empty()) m.tools.push_back(tb);
-        }
-      }
-      if (role == "assistant" && t.contains("keyPoints") && t["keyPoints"].is_array()) {
-        for (size_t k = 0; k < t["keyPoints"].size(); ++k) {
-          if (!m.summary.empty()) m.summary += "\n";
-          if (t["keyPoints"][k].is_string()) m.summary += t["keyPoints"][k].get<std::string>();
-        }
-      }
-      msgs.push_back(m);
-    }
     std::string pid = r.data.contains("meta")
                           ? jsonutil::get<std::string>(r.data["meta"], "pid", "")
                           : "";
@@ -895,24 +912,8 @@ void UiApp::load_session(const std::string& sid) {
         ops.push_back(o);
       }
     }
-    std::vector<AppState::CallRow> calls;
-    for (size_t i = 0; i < turns.size(); ++i) {
-      if (!turns[i].contains("toolCalls") || !turns[i]["toolCalls"].is_array()) continue;
-      const Json& tc = turns[i]["toolCalls"];
-      for (size_t k = 0; k < tc.size(); ++k) {
-        AppState::CallRow c;
-        c.name = jsonutil::get<std::string>(tc[k], "name", "");
-        c.args = tc[k].contains("args") ? tc[k]["args"].dump() : "";
-        calls.push_back(c);
-      }
-    }
-    // write into the session's view; mirror to the flat fields only when the
-    // user is still looking at it (a slow reply must not clobber another tab)
     SessionView& v = views_.get_or_create(sid);
-    v.loaded = true;
-    v.messages = msgs;
     v.session_ops = ops;
-    v.session_calls = calls;
     if (!pid.empty()) v.active_pid = pid;
     // The session's OWN settings (model / thinking / permission / auto mode) come
     // with the same reply. Without this the composer showed "choose model" on a
@@ -920,27 +921,53 @@ void UiApp::load_session(const std::string& sid) {
     Json ss = r.data.contains("sessionSettings") && r.data["sessionSettings"].is_object()
                   ? r.data["sessionSettings"]
                   : Json::object();
-    {
-      std::string m = jsonutil::get<std::string>(ss, "model", "");
-      if (!m.empty()) v.model = m;
-      v.thinking = jsonutil::get<std::string>(ss, "thinking", "");
-      std::string perm = jsonutil::get<std::string>(ss, "filePerm", "");
-      if (!perm.empty()) {
-        v.permission = perm;
-        v.perm_index = perm == "approve" ? 0 : perm == "full" ? 2 : 1;
-      }
-      if (ss.contains("autoMode")) v.auto_mode = jsonutil::get<bool>(ss, "autoMode", true);
+    std::string m = jsonutil::get<std::string>(ss, "model", "");
+    if (!m.empty()) v.model = m;
+    v.thinking = jsonutil::get<std::string>(ss, "thinking", "");
+    std::string perm = jsonutil::get<std::string>(ss, "filePerm", "");
+    if (!perm.empty()) {
+      v.permission = perm;
+      v.perm_index = perm == "approve" ? 0 : perm == "full" ? 2 : 1;
     }
+    if (ss.contains("autoMode")) v.auto_mode = jsonutil::get<bool>(ss, "autoMode", true);
     if (st_.active_tab == sid) {
-      st_.messages = msgs;
       st_.session_ops = ops;
-      st_.session_calls = calls;
       if (!pid.empty()) st_.active_pid = pid;
       st_.model = v.model;
       st_.thinking = v.thinking;
       st_.permission = v.permission;
       st_.perm_index = v.perm_index;
       st_.auto_mode = v.auto_mode;
+    }
+    render();
+  });
+  call_async("session.turns", Json{{"sid", sid}, {"before", -1}, {"limit", kHistoryPage}},
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    const Json& turns = r.data.contains("turns") ? r.data["turns"] : Json::array();
+    std::vector<comp::ChatMsg> msgs;
+    int start = static_cast<int>(jsonutil::get_int(r.data, "start", 0));
+    for (size_t i = 0; i < turns.size(); ++i) {
+      comp::ChatMsg m = turn_to_message(turns[i], start + static_cast<int64_t>(i));
+      if (m.role == "user" || m.role == "assistant") msgs.push_back(m);
+    }
+    int total = static_cast<int>(jsonutil::get_int(r.data, "total", msgs.size()));
+    bool has_more = jsonutil::get<bool>(r.data, "hasMore", false);
+    // write into the session's view; mirror to the flat fields only when the
+    // user is still looking at it (a slow reply must not clobber another tab)
+    SessionView& v = views_.get_or_create(sid);
+    v.loaded = true;
+    v.messages = msgs;
+    v.history_total = total;
+    v.history_start = start;
+    v.history_has_more = has_more;
+    v.history_loading_older = false;
+    if (st_.active_tab == sid) {
+      st_.messages = msgs;
+      st_.history_total = total;
+      st_.history_start = start;
+      st_.history_has_more = has_more;
+      st_.history_loading_older = false;
       // the page's animation replay token: the page animates again now that
       // there is actually something to look at (a slow load used to play the
       // animation over an empty page, so it was over before content arrived)
@@ -959,8 +986,77 @@ void UiApp::load_session(const std::string& sid) {
       }
     }
     load_terminals(sid);
-    // file panels load their own directory when they become active (see
-    // load_side_tab), so nothing to prefetch here
+  });
+}
+
+// Fetch the page BEFORE the oldest loaded turn and prepend it.
+//
+// The reading position is preserved by anchoring to the distance from the
+// BOTTOM: prepending changes scrollHeight but not that distance, so restoring it
+// keeps the same line under the reader's eye. (Anchoring to scrollTop would jump
+// by exactly the height of the inserted content.)
+void UiApp::load_older_history() {
+  const std::string sid = st_.active_tab;
+  if (sid.empty() || sid == "home" || st_.history_loading_older) return;
+  if (!st_.history_has_more) return;
+  int before = st_.history_start;
+  if (before <= 0) return;
+  st_.history_loading_older = true;
+  // record the anchor while the layout still reflects the OLD content
+  {
+    VNodePtr h = find_by_key(tree_, "chat-history");
+    if (h && h->dom.valid()) {
+      int sh = dom_.scroll_height(h->dom);
+      int st_top = dom_.scroll_top(h->dom);
+      st_.history_anchor_from_bottom = sh > 0 ? (sh - st_top) : -1;
+    }
+  }
+  call_async("session.turns",
+             Json{{"sid", sid}, {"before", before}, {"limit", kHistoryPage}},
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) {
+      update([&](AppState& s) { s.history_loading_older = false; });
+      return;
+    }
+    const Json& turns = r.data.contains("turns") ? r.data["turns"] : Json::array();
+    std::vector<comp::ChatMsg> older;
+    int start = static_cast<int>(jsonutil::get_int(r.data, "start", 0));
+    for (size_t i = 0; i < turns.size(); ++i) {
+      comp::ChatMsg m = turn_to_message(turns[i], start + static_cast<int64_t>(i));
+      if (m.role == "user" || m.role == "assistant") older.push_back(m);
+    }
+    bool has_more = jsonutil::get<bool>(r.data, "hasMore", false);
+    SessionView& v = views_.get_or_create(sid);
+    int anchor = -1;
+    if (st_.active_tab == sid) {
+      anchor = st_.history_anchor_from_bottom;
+      // prepend to the flat copy and to the stashed one, so a tab switch keeps it
+      st_.messages.insert(st_.messages.begin(), older.begin(), older.end());
+      st_.history_has_more = has_more;
+      st_.history_start = start;
+      st_.history_loading_older = false;
+      st_.history_anchor_from_bottom = -1;
+      v.messages = st_.messages;
+      v.history_has_more = has_more;
+      v.history_start = start;
+      v.history_loading_older = false;
+      render();
+      if (anchor >= 0) {
+        VNodePtr h = find_by_key(tree_, "chat-history");
+        if (h && h->dom.valid()) {
+          int sh = dom_.scroll_height(h->dom);
+          dom_.set_scroll_top(h->dom, sh - anchor);
+        }
+      }
+      // NOTE: rendering does NOT fire a scroll event, so no further page is
+      // requested here; the next request only comes from a real user scroll.
+    } else {
+      // the user moved on: still keep the page, just do not disturb the view
+      v.messages.insert(v.messages.begin(), older.begin(), older.end());
+      v.history_has_more = has_more;
+      v.history_start = start;
+      v.history_loading_older = false;
+    }
   });
 }
 
@@ -1041,49 +1137,13 @@ void UiApp::load_usage() {
   });
 }
 
-// Context window for a model id, in tokens. 0 = unknown.
-//
-// Deliberately a small table of FAMILIES rather than a per-model list: model
-// names change weekly, and the exact window only feeds a percentage. An unknown
-// model returns 0 and the panel shows "—" instead of inventing a number.
-int model_context_window(const std::string& model_id) {
-  std::string m = model_id;
-  for (size_t i = 0; i < m.size(); ++i) {
-    m[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(m[i])));
-  }
-  if (m.empty()) return 0;
-  // Claude: 200K for the 3/3.5/4 families.
-  if (m.find("claude") != std::string::npos) return 200000;
-  // Gemini: 1M for 1.5/2.x.
-  if (m.find("gemini") != std::string::npos) return 1000000;
-  // GPT-4.1 / o-series / gpt-5: 200K-400K; use the conservative common value.
-  if (m.find("gpt-4.1") != std::string::npos) return 1000000;
-  if (m.find("gpt-4o") != std::string::npos) return 128000;
-  if (m.find("gpt-4") != std::string::npos) return 128000;
-  if (m.find("gpt-5") != std::string::npos) return 400000;
-  if (m.find("o1") != std::string::npos || m.find("o3") != std::string::npos ||
-      m.find("o4") != std::string::npos) {
-    return 200000;
-  }
-  if (m.find("deepseek") != std::string::npos) return 128000;
-  if (m.find("qwen") != std::string::npos) return 128000;
-  if (m.find("kimi") != std::string::npos || m.find("moonshot") != std::string::npos) {
-    return 256000;
-  }
-  if (m.find("glm") != std::string::npos) return 128000;
-  if (m.find("llama") != std::string::npos) return 128000;
-  if (m.find("mistral") != std::string::npos) return 128000;
-  return 0;
-}
-
 // Per-session usage: the side panel's "context level / this session's cost /
-// this turn's tokens" used to be hard-coded strings. The numbers come from the
-// same usage store the usage page reads, filtered by sid.
-//
-// The context level is computed here, not by the backend: it is a ratio of the
-// LAST request's input tokens to the model's context window, and only the UI
-// knows which model is selected. A model without a known window leaves it at -1
-// and the panel shows a placeholder instead of inventing a percentage.
+// this session's tokens". Every number is a FACT the provider reported:
+//   * context level = the LAST request's prompt tokens / the model's context
+//     window (from /models, or the model settings when the API does not say).
+//     No estimate from the model name - a made-up denominator is worse than
+//     showing nothing.
+//   * cost / tokens = the usage rows recorded for this session.
 void UiApp::load_session_usage(const std::string& sid) {
   if (sid.empty()) return;
   call_async("usage.session", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
@@ -1093,11 +1153,11 @@ void UiApp::load_session_usage(const std::string& sid) {
     double cost = jsonutil::get_number(r.data, "totalCost", 0.0);
     std::string kind = jsonutil::get<std::string>(r.data, "costKind", "unknown");
     int64_t calls = jsonutil::get_int(r.data, "calls", 0);
+    int64_t last_in = jsonutil::get_int(r.data, "lastIn", 0);
+    int64_t window = jsonutil::get_int(r.data, "contextWindow", 0);
     int pct = -1;
-    // A model whose window we know turns the token count into a percentage.
-    int window = model_context_window(st_.model);
-    if (window > 0 && in > 0) {
-      pct = static_cast<int>((in * 100) / window);
+    if (window > 0 && last_in > 0) {
+      pct = static_cast<int>((last_in * 100) / window);
       if (pct > 100) pct = 100;
     }
     std::string cost_text;
@@ -1128,7 +1188,6 @@ void UiApp::load_session_usage(const std::string& sid) {
     });
   });
 }
-
 void UiApp::load_providers() {
   call_async("provider.listProviders", Json::object(), [this](const BackendResult& r) {
     std::vector<AppState::ProviderRow> rows;
@@ -1564,13 +1623,30 @@ void UiApp::append_stream_delta(const std::string& text) {
     m.role = "assistant";
     m.streaming = true;
     m.rev = next_msg_rev_++;
+    // Newest message in the session: distinct from every loaded turn.
+    m.uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
     st_.messages.push_back(m);
+    st_.history_total += 1;
   }
   st_.messages.back().text += text;
   st_.messages.back().streaming = true;
   // The streaming message is the ONE that must be rebuilt on every delta; every
   // message before it keeps its revision and is skipped by the render cache.
   st_.messages.back().rev = next_msg_rev_++;
+  follow_history_if_pinned();
+}
+
+// New content grows the transcript; if the reader is at the end, stay at the end.
+//
+// This runs AFTER the render that added the content, because only then does the
+// container know its new scrollHeight. `hist_follow` is the whole decision: it is
+// set by the scroll-edge report (true at the bottom, false as soon as the user
+// scrolls away), so a streamed reply never drags the view down while someone is
+// reading older turns.
+void UiApp::follow_history_if_pinned() {
+  if (!st_.hist_follow) return;
+  VNodePtr h = find_by_key(tree_, "chat-history");
+  if (h && h->dom.valid()) dom_.scroll_to_bottom(h->dom);
 }
 
 // Backend events are per-session (payload.sid). They must land in that
@@ -1586,12 +1662,16 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   if (event == "stream.delta") {
     std::string text = jsonutil::get<std::string>(payload, "text", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
+    int& total = is_active ? st_.history_total : vp->history_total;
     if (m.empty() || m.back().role != "assistant") {
       comp::ChatMsg a;
       a.role = "assistant";
       a.streaming = true;
       a.rev = next_msg_rev_++;
+      // Newest message of this session: a uid no loaded turn can have.
+      a.uid = total + static_cast<int64_t>(m.size());
       m.push_back(a);
+      ++total;
     }
     m.back().text += text;
     m.back().streaming = true;
@@ -1707,6 +1787,11 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.toast_deadline_ms = now_ms() + kToastMs;
   }
   render();
+  // AFTER the render: only now does the container know its new scrollHeight, so
+  // a pinned view can stay at the end while a reply streams in.
+  if (event == "stream.delta" || event == "tool.update" || event == "turn.done") {
+    follow_history_if_pinned();
+  }
 }
 
 void UiApp::show(const std::string& tab_id) {
@@ -1770,6 +1855,25 @@ void UiApp::render() {
     // broken. With no binding there is nothing to drag and nothing to persist.
     VNodePtr bar = find_by_key(tree_, "side-splitter");
     VNodePtr side = find_by_key(tree_, "side-panel");
+    // (re)wire the chat's scroll edges. Two jobs, both keyed off the SAME
+    // report so they cannot disagree:
+    //   * at_top    -> the user wants older turns; load the previous page.
+    //   * at_bottom -> new output keeps following the end. Following is a
+    //     PERSISTENT flag: it is turned on when the user lands at the bottom and
+    //     off as soon as they scroll away, so a streamed reply never yanks the
+    //     view down while someone is reading history.
+    {
+      VNodePtr hist = find_by_key(tree_, "chat-history");
+      if (hist && hist->dom.valid()) {
+        dom_.bind_scroll_edges(hist->dom, [this](bool at_top, bool at_bottom) {
+          if (at_bottom) st_.hist_follow = true;
+          else st_.hist_follow = false;
+          if (at_top && st_.history_has_more && !st_.history_loading_older) {
+            load_older_history();
+          }
+        });
+      }
+    }
     if (bar && side && !st_.side_collapsed && bar->dom.valid() && side->dom.valid()) {
       // persist the dragged width into state so it survives tab switches and
       // node re-creation (the inline width alone is lost with the node)
@@ -3081,7 +3185,11 @@ VNodePtr UiApp::build_session() {
   std::set<std::string> live_keys;
   for (size_t i = 0; i < st_.messages.size(); ++i) {
     const comp::ChatMsg& m = st_.messages[i];
-    std::string key = comp::chat_message_key(msg_sid, i);
+    // Identity: the message's own uid when it has one (loaded turns), else a
+    // position-derived fallback for live messages appended this session. Live
+    // messages are always at the END, so their position is stable.
+    int64_t uid = m.uid != 0 ? m.uid : (1000000000LL + static_cast<int64_t>(i));
+    std::string key = comp::chat_message_key(msg_sid, uid);
     live_keys.insert(key);
     uint64_t sig = message_sig(m);
     std::map<std::string, MsgNode>::iterator hit = msg_nodes_.find(key);
@@ -3158,6 +3266,36 @@ VNodePtr UiApp::build_session() {
   hist.add(hist_inner);
   center.add(hist);
 
+  // plan panel: a floating overlay that is a SIBLING of the history, not a
+  // child of it and not a column. Two constraints, both from feedback:
+  //   * it must not live inside the transcript subtree, or opening it would
+  //     rebuild/relayout the chat and lose the reading position;
+  //   * it must not be a column, because then it reads like a second side panel.
+  // Absolute inside .session-center (its positioned ancestor) gives exactly the
+  // old floating behaviour while keeping it out of the history's subtree.
+  if (st_.plan_open) {
+    H plan = el("div", "plan-float");
+    plan.key("plan-float");
+    plan.anim(anim::kPop);
+    H phead = el("div", "plan-head");
+    phead.add(el("span", "plan-title").text(tr("任务规划")));
+    phead.add(el("span", "grow"));
+    phead.add(comp::icon_button("\u2715", tr("收起"), [this](const std::string&) {
+      update([&](AppState& s) { s.plan_open = false; });
+    }));
+    plan.add(phead);
+    if (st_.plan_steps.empty()) {
+      plan.add(el("div", "plan-empty dim").text(tr("暂无规划步骤")));
+    }
+    for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
+      H step = el("div", "plan-step");
+      step.add(el("span", "plan-no").text(itos(static_cast<int>(i + 1))));
+      step.add(el("span", "plan-text").text(st_.plan_steps[i]));
+      plan.add(step);
+    }
+    center.add(plan);
+  }
+
   // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");
   // ---- attachments: ABOVE the input, never inside it ----
@@ -3200,21 +3338,27 @@ VNodePtr UiApp::build_session() {
   left_tools.add(upload);
   left_tools.add(comp::icon_text_button("wand-magic-sparkles", tr("命令"),
                                         [this](const std::string&) {
-    // list skills; picking one inserts "/<name>" into the composer
-    call_async("skill.list", Json::object(), [this](const BackendResult& r) {
+    // The command list comes from the BACKEND (command.list): built-in actions
+    // plus the user-callable skills. Nothing here is hard-coded, so adding a
+    // command is a backend change only.
+    call_async("command.list", Json{{"sid", active_sid()}},
+               [this](const BackendResult& r) {
       if (!r.ok) return;
-      std::vector<std::string> names;
-      const Json& arr = r.data.contains("skills") ? r.data["skills"] : r.data;
+      std::vector<AppState::CommandRow> rows;
+      const Json& arr = r.data.contains("commands") ? r.data["commands"] : r.data;
       if (arr.is_array()) {
         for (size_t i = 0; i < arr.size(); ++i) {
-          std::string n = arr[i].is_string()
-                              ? arr[i].get<std::string>()
-                              : jsonutil::get<std::string>(arr[i], "name", "");
-          if (!n.empty()) names.push_back(n);
+          AppState::CommandRow row;
+          row.name = jsonutil::get<std::string>(arr[i], "name", "");
+          row.title = jsonutil::get<std::string>(arr[i], "title", row.name);
+          row.description = jsonutil::get<std::string>(arr[i], "description", "");
+          row.action = jsonutil::get<std::string>(arr[i], "action", "");
+          row.group = jsonutil::get<std::string>(arr[i], "group", "");
+          if (!row.name.empty()) rows.push_back(row);
         }
       }
       update([&](AppState& s) {
-        s.skill_menu = names;
+        s.command_menu = rows;
         s.skill_menu_open = true;
       });
     });
@@ -3410,23 +3554,22 @@ VNodePtr UiApp::build_session() {
     comp_box.add(dismiss);
     H pop = el("div", "skill-menu");
     pop.key("skill-menu");
-    if (st_.skill_menu.empty()) {
-      pop.add(el("div", "skill-menu-item dim").text(tr("（暂无 skill）")));
+    if (st_.command_menu.empty()) {
+      pop.add(el("div", "skill-menu-item dim").text(tr("（暂无命令）")));
     }
-    for (size_t i = 0; i < st_.skill_menu.size(); ++i) {
-      std::string name = st_.skill_menu[i];
+    for (size_t i = 0; i < st_.command_menu.size(); ++i) {
+      const AppState::CommandRow cmd = st_.command_menu[i];
       H it = el("div", "skill-menu-item");
-      it.on(EventKind::kClick, [this, name](const std::string&) {
-        update([&](AppState& s) {
-          s.skill_menu_open = false;
-          if (!s.session_input.empty() && s.session_input.back() != ' ') s.session_input += " ";
-          s.session_input += "/" + name;
-        });
-        // write the new value straight to the textarea (no render while typing)
-        VNodePtr ta2 = find_by_key(tree_, "session-input");
-        if (ta2 && ta2->dom.valid()) dom_.set_attr(ta2->dom, "value", st_.session_input);
+      it.on(EventKind::kClick, [this, cmd](const std::string&) {
+        run_command(cmd);
       });
-      it.add(el("span", "skill-menu-name").text("/" + name));
+      it.add(el("span", "skill-menu-name").text("/" + cmd.name));
+      if (!cmd.title.empty() && cmd.title != cmd.name) {
+        it.add(el("span", "skill-menu-title").text(cmd.title));
+      }
+      if (!cmd.description.empty()) {
+        it.add(el("span", "skill-menu-desc dim").text(cmd.description));
+      }
       pop.add(it);
     }
     H close = el("div", "skill-menu-item dim");
@@ -3462,34 +3605,6 @@ VNodePtr UiApp::build_session() {
   center.add(comp_box);
 
   mid.add(center);
-
-  // plan panel: its OWN column, not a float inside the chat.
-  // It used to be absolutely positioned inside .session-center, which made the
-  // chat column its containing block: opening it forced the chat column to
-  // re-layout, and the timeline read as "the plan is part of the conversation".
-  // It is a sibling column now - toggle it and the chat just gets narrower.
-  if (st_.plan_open) {
-    H plan = el("div", "plan-col");
-    plan.key("plan-col");
-    plan.anim(anim::kSlideLeft);
-    H phead = el("div", "plan-head");
-    phead.add(el("span", "plan-title").text(tr("任务规划")));
-    phead.add(el("span", "grow"));
-    phead.add(comp::icon_button("\u2715", tr("收起"), [this](const std::string&) {
-      update([&](AppState& s) { s.plan_open = false; });
-    }));
-    plan.add(phead);
-    if (st_.plan_steps.empty()) {
-      plan.add(el("div", "plan-empty dim").text(tr("暂无规划步骤")));
-    }
-    for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
-      H step = el("div", "plan-step");
-      step.add(el("span", "plan-no").text(itos(static_cast<int>(i + 1))));
-      step.add(el("span", "plan-text").text(st_.plan_steps[i]));
-      plan.add(step);
-    }
-    mid.add(plan);
-  }
 
   // ---- divider + collapsible side panel ----
   H split = el("div", st_.side_collapsed ? "side-splitter collapsed" : "side-splitter");
@@ -3611,15 +3726,52 @@ VNodePtr UiApp::build_side_panel() {
     page.add(acts);
     side.add(page);
     H sbody = el("div", "side-body");
-    side.add(sbody);
+    H scontent = el("div", "side-content");
+    scontent.add(sbody);
+    side.add(scontent);
     return side.get();
   }
 
+  // The body lives inside .side-content (absolute, inset 0) so that switching
+  // panels can keep the OLD body in the DOM for one animation while the new one
+  // enters - the same two-view transition the pages use. Without the wrapper the
+  // two bodies would stack in normal flow and each take half the height.
+  H content = el("div", "side-content");
+  content.key("side-content");
   H body = el("div", "side-body");
   // 侧栏面板内容按面板 key 化：切换面板时整块重新创建并播放进场动画。原来
   // body 是一个无 key 的稳定节点，切换只是原地换字，看起来像"闪了一下"。
+  //
+  // The direction is HORIZONTAL, matching where the panel came from: a vertical
+  // rise inside a right-hand panel reads as the content jumping up. The exit
+  // intent is declared too, so the old body slides out while the new one slides
+  // in (a real two-view swap) instead of fading in place under the new one.
   body.key("side-body:" + st_.active_side);
-  body.anim(anim::kEnter).anim_key("side:" + st_.active_side);
+  body.anim(anim::kSlideLeft).anim_key("side:" + st_.active_side);
+  body.exit(anim::kExitLeft);
+  // Stagger, exactly like the page transition: the incoming panel waits until
+  // the outgoing one is ~80% gone. Without the delay both bodies move at once
+  // and the switch reads as a flicker rather than a swap.
+  //
+  // The style is re-applied on EVERY render while the entrance is still running
+  // (side_entering_key_). The first version only added it on the render that
+  // created the node; the second render (the panel's data landing) then produced
+  // a tree WITHOUT the inline delay, and patch_attrs cleared the live node's
+  // delay - so the animation restarted with 0s and the panel snapped in.
+  // The flag is dropped once the stagger + slide has certainly finished.
+  {
+    std::string body_key = "side-body:" + st_.active_side;
+    if (side_entering_key_ != body_key) {
+      side_entering_key_ = body_key;
+      dom_.schedule(480, [this, body_key]() {
+        if (side_entering_key_ == body_key) side_entering_key_.clear();
+      });
+    }
+    if (!side_entering_key_.empty() && side_entering_key_ == body_key) {
+      body.style("animation-delay", ".18s");
+      body.style("animation-fill-mode", "backwards");
+    }
+  }
   // The active panel, so each panel can read ITS OWN state (two file panels sit
   // in two different directories; sharing one set of fields would make them
   // fight over it).
@@ -4034,7 +4186,8 @@ VNodePtr UiApp::build_side_panel() {
   } else {
     body.add(comp::empty_state(tr("面板内容"), "", nullptr));
   }
-  side.add(body);
+  content.add(body);
+  side.add(content);
   return side.get();
 }
 
@@ -4597,6 +4750,62 @@ void UiApp::load_settings_section(const std::string& section) {
   if (section == "terminal" && st_.shell_rows.empty()) {
     load_shells();
   }
+}
+
+// Execute a command picked from the composer's menu.
+//
+// "ui:<x>" actions belong to the UI (opening a panel, starting a session) and
+// are the ONLY names this function knows. Everything else is a backend action:
+// a skill to load, or a session operation. The split matters because the list
+// itself comes from the backend - a new command needs no frontend change unless
+// it is genuinely a UI action.
+void UiApp::run_command(const AppState::CommandRow& cmd) {
+  update([&](AppState& s) { s.skill_menu_open = false; });
+  const std::string& action = cmd.action;
+  if (action.compare(0, 3, "ui:") == 0) {
+    std::string what = action.substr(3);
+    if (what == "plan") {
+      bool open = !st_.plan_open;
+      std::string sid = active_sid();
+      update([&](AppState& s) { s.plan_open = open; });
+      if (open && !sid.empty()) {
+        call_async("plan.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
+          if (!r.ok) return;
+          std::vector<std::string> steps;
+          const Json& tree = r.data.contains("plan") ? r.data["plan"] : r.data;
+          if (tree.is_array()) {
+            for (size_t i = 0; i < tree.size(); ++i) {
+              std::string t = jsonutil::get<std::string>(tree[i], "title", "");
+              if (!t.empty()) steps.push_back(t);
+            }
+          }
+          update([&](AppState& s) { s.plan_steps = steps; });
+        });
+      }
+      return;
+    }
+    if (what == "new-session") {
+      open_new_session();
+      return;
+    }
+    if (what.compare(0, 6, "panel:") == 0) {
+      update([&](AppState& s) { s.side_collapsed = false; });
+      open_or_focus_side_tab(what.substr(6));
+      return;
+    }
+    toast(tr("未知命令：") + cmd.name);
+    return;
+  }
+  // Backend action: a skill load or a session operation.
+  std::string sid = active_sid();
+  call_async("command.run", Json{{"sid", sid}, {"name", cmd.name}},
+             [this, cmd](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("命令失败：") + r.message);
+      return;
+    }
+    toast(tr("已执行：") + cmd.name);
+  });
 }
 
 void UiApp::load_preset_agents() {
@@ -6126,13 +6335,19 @@ void UiApp::send_message() {
   if (text.empty()) text = shown;   // attachments only: the paths are the message
   std::string sid = active_sid();
   // echo the user's message immediately (optimistic; the assistant text streams in)
+  // A message sent now is newer than everything loaded from disk. Its uid is
+  // derived from the absolute history position so it stays distinct from the
+  // loaded turns (which use indices 0..history_total-1).
+  int64_t next_live_uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
   update([&](AppState& s) {
     comp::ChatMsg m;
     m.role = "user";
     m.text = shown;
     m.time = "刚刚";
     m.rev = next_msg_rev_++;
+    m.uid = next_live_uid;
     s.messages.push_back(m);
+    s.history_total += 1;  // one more turn now exists on disk
     s.session_input.clear();
     s.attachments.clear();
   });

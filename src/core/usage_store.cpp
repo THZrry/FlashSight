@@ -69,6 +69,10 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
     if (filter.from && r.ts < filter.from) continue;
     if (filter.to && r.ts > filter.to) continue;
     ++sum.calls;
+    if (!sum.has_last || r.ts >= sum.last.ts) {
+      sum.last = r;
+      sum.has_last = true;
+    }
     sum.total_in += r.in;
     sum.total_out += r.out;
     sum.total_cache += r.cache;

@@ -522,6 +522,59 @@ FsResult FsApi::session_get(const std::string& sid) {
   return r;
 }
 
+// Everything except the transcript. Kept separate so opening a long session does
+// not transfer (and then discard) hundreds of turns just to read the model name.
+FsResult FsApi::session_info(const std::string& sid) {
+  Json full;
+  FsResult r = sessions_->load_full(sid, &full);
+  if (!r.ok()) return r;
+  Json out = Json::object();
+  if (full.contains("meta")) out["meta"] = full["meta"];
+  if (full.contains("sessionSettings")) out["sessionSettings"] = full["sessionSettings"];
+  out["systemOps"] = full.contains("systemOps") && full["systemOps"].is_array()
+                         ? full["systemOps"]
+                         : Json::array();
+  out["turnCount"] = full.contains("turns") && full["turns"].is_array()
+                         ? static_cast<int>(full["turns"].size())
+                         : 0;
+  // Same self-healing as session_get: a dangling pid is recovered from meta.cwd.
+  if (out.contains("meta") && out["meta"].is_object()) {
+    std::string pid = jsonutil::get<std::string>(out["meta"], "pid", "");
+    if (!pid.empty() && path_for(pid).empty()) {
+      std::string cwd = jsonutil::get<std::string>(out["meta"], "cwd", "");
+      std::string fresh = cwd.empty() ? "" : proj_->pid_by_path(cwd);
+      if (!fresh.empty()) out["meta"]["pid"] = fresh;
+    }
+  }
+  return FsResult::success(out);
+}
+
+// Paginated history. Turns are stored oldest-first; the UI pages BACKWARDS from
+// the end (the latest turn is what you open a session for).
+//
+// `before` is an exclusive upper bound into the array; -1 means "from the end".
+// The slice is returned with its absolute start index so the client can keep
+// prepending without guessing.
+FsResult FsApi::session_turns(const std::string& sid, int before, int limit) {
+  Json full;
+  FsResult r = sessions_->load_full(sid, &full);
+  if (!r.ok()) return r;
+  const Json& turns = full.contains("turns") && full["turns"].is_array()
+                          ? full["turns"]
+                          : Json::array();
+  int total = static_cast<int>(turns.size());
+  if (limit <= 0) limit = 30;
+  int end = (before < 0 || before > total) ? total : before;
+  int start = end - limit;
+  if (start < 0) start = 0;
+  Json slice = Json::array();
+  for (int i = start; i < end; ++i) slice.push_back(turns[i]);
+  return FsResult::success(Json{{"turns", slice},
+                                {"start", start},
+                                {"total", total},
+                                {"hasMore", start > 0}});
+}
+
 // ----- P3: send/append/suspend/resume/cancelWake -----
 FsResult FsApi::session_send(const std::string& sid, const std::string& text,
                              const Json& attachments, const std::string& model,
@@ -1001,6 +1054,62 @@ FsResult FsApi::git_discard(const std::string& pid, const Json& paths) {
   return FsResult::success(git::discard(root, json_paths(paths)));
 }
 
+// ----- command.* -----
+// The composer's "命令" menu. The LIST lives here, not in the UI: a command is
+// a name + a description + an action, and the action is either "ui:<something>"
+// (the UI owns it, e.g. opening the plan panel) or a backend method to call.
+// Adding a command therefore does not touch the frontend at all.
+//
+// Skills (kind == "skill") are appended to the same list, so "/<skill>" and the
+// built-in commands are discovered in one place.
+FsResult FsApi::command_list(const std::string& sid) {
+  (void)sid;
+  Json arr = Json::array();
+  auto add = [&arr](const std::string& name, const std::string& title,
+                    const std::string& desc, const std::string& action,
+                    const std::string& group) {
+    arr.push_back(Json{{"name", name}, {"title", title}, {"description", desc},
+                       {"action", action}, {"group", group}});
+  };
+  // Built-in commands. `action` is the contract the UI executes.
+  add("plan", "规划面板", "打开/关闭任务规划", "ui:plan", "builtin");
+  add("new", "新建会话", "在当前项目新建一个会话", "ui:new-session", "builtin");
+  add("files", "文件面板", "打开项目文件树", "ui:panel:files", "builtin");
+  add("git", "Git 面板", "打开 Git 状态与变更", "ui:panel:git", "builtin");
+  add("suspend", "挂起", "挂起当前任务（可继续）", "session.suspend", "builtin");
+  add("resume", "继续", "继续被挂起的任务", "session.resume", "builtin");
+  add("usage", "用量面板", "上下文水位与本会话成本", "ui:panel:usage", "builtin");
+
+  // Skills: the user-callable ones only (kind == "skill"; built-in MCP entries
+  // are model-invoked and have no "/name" form).
+  ThinkLang lang = parse_think_lang(agent_host_->thinking_lang());
+  Json skills = agent_host_->skills().list_json(lang);
+  if (skills.is_array()) {
+    for (size_t i = 0; i < skills.size(); ++i) {
+      if (jsonutil::get<std::string>(skills[i], "kind", "skill") != "skill") continue;
+      if (!jsonutil::get<bool>(skills[i], "enabled", true)) continue;
+      std::string name = jsonutil::get<std::string>(skills[i], "name", "");
+      if (name.empty()) continue;
+      add(name, jsonutil::get<std::string>(skills[i], "title", name),
+          jsonutil::get<std::string>(skills[i], "description", ""),
+          "skill:" + name, "skill");
+    }
+  }
+  return FsResult::success(Json{{"commands", arr}});
+}
+
+// Execute a command by name. Skills are loaded (their body becomes context for
+// the next turn); built-in actions are dispatched by name.
+FsResult FsApi::command_run(const std::string& sid, const std::string& name) {
+  if (name.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty command");
+  if (name == "suspend") return session_suspend(sid);
+  if (name == "resume") return session_resume(sid);
+  // Anything else that is not a UI-owned action must be a skill.
+  FsResult r = skill_load(name);
+  if (r.ok()) return r;
+  return FsResult::error(ErrCode::kNotFound, "unknown command: " + name);
+}
+
 // ----- usage.* -----
 FsResult FsApi::usage_query(const Json& filter) {
   UsageFilter f;
@@ -1042,6 +1151,21 @@ FsResult FsApi::usage_query(const Json& filter) {
     days[std::to_string(kv.first)] = e;
   }
   out["byDay"] = days;
+  // The LAST request's prompt tokens and the model's context window: together
+  // they are the context water level. Both are FACTS from the API (usage block
+  // and /models), never an estimate from the model name.
+  if (sum.has_last) {
+    out["lastIn"] = sum.last.in;
+    out["lastOut"] = sum.last.out;
+    out["lastModel"] = sum.last.model;
+    out["lastProvider"] = sum.last.provider;
+    int64_t window = 0;
+    if (!sum.last.provider.empty() && !sum.last.model.empty()) {
+      ModelEntry me = model_table_->resolve(sum.last.provider, sum.last.model);
+      window = me.caps.context_len;
+    }
+    out["contextWindow"] = window;
+  }
   return FsResult::success(out);
 }
 FsResult FsApi::usage_export_csv(const Json& filter, const std::string& path) {

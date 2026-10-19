@@ -203,7 +203,24 @@ ModelTable::FetchResult ModelTable::fetch_models(const std::string& provider_id,
       m.id = id;
       m.display = id;
       m.from_api = true;
-      // API 不一定给能力标签：保守置 tool_use=true（OpenAI chat 形态默认支持工具）；
+      // Context window when the endpoint reports it (OpenRouter: context_length;
+      // others: context_window / max_context_length / max_model_len, sometimes
+      // nested under top_provider). The UI's context water level is computed
+      // from THIS value, so it must not be guessed from the model name when the
+      // API actually tells us.
+      const char* kCtxKeys[] = {"context_length", "context_window",
+                                "max_context_length", "max_model_len"};
+      for (size_t k = 0; k < sizeof(kCtxKeys) / sizeof(kCtxKeys[0]); ++k) {
+        int64_t n = jsonutil::get_int(e, kCtxKeys[k], 0);
+        if (n <= 0 && e.contains("top_provider") && e["top_provider"].is_object()) {
+          n = jsonutil::get_int(e["top_provider"], kCtxKeys[k], 0);
+        }
+        if (n > 0) {
+          m.caps.context_len = n;
+          break;
+        }
+      }
+      // API 不一定给能力标签：保守置 tool_use=true（[OI] chat 形态默认支持工具）；
       // 用户可在设置里手动改（provider.md §4 允许覆盖）
       m.caps.tool_use = true;
       models.push_back(m);

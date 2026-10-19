@@ -310,6 +310,12 @@ void NullDom::scroll_to_bottom(Node node) {
   calls_.push_back(Call{"scroll_to_bottom", node.id, ""});
 }
 
+void NullDom::bind_scroll_edges(Node node,
+                                std::function<void(bool, bool)> cb) {
+  scroll_edges_cb_ = cb;
+  calls_.push_back(Call{"bind_scroll_edges", node.id, ""});
+}
+
 int NullDom::scroll_top(Node node) {
   std::map<uint64_t, int>::const_iterator it = scroll_tops_.find(node.id);
   return it == scroll_tops_.end() ? 0 : it->second;
@@ -318,6 +324,18 @@ int NullDom::scroll_top(Node node) {
 void NullDom::set_scroll_top(Node node, int top) {
   scroll_tops_[node.id] = top;
   calls_.push_back(Call{"set_scroll_top", node.id, std::to_string(top)});
+}
+
+// No layout here, so these report the geometry the app has "measured": tests set
+// it through set_scroll_geometry_for_test when they need a non-zero container.
+int NullDom::scroll_height(Node node) {
+  std::map<uint64_t, int>::const_iterator it = scroll_heights_.find(node.id);
+  return it == scroll_heights_.end() ? 0 : it->second;
+}
+
+int NullDom::client_height(Node node) {
+  std::map<uint64_t, int>::const_iterator it = client_heights_.find(node.id);
+  return it == client_heights_.end() ? 0 : it->second;
 }
 
 void NullDom::copy_text(const std::string& text) {

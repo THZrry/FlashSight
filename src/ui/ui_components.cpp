@@ -536,13 +536,14 @@ std::string fmt_clock(int64_t ms) {
 }
 
 // Stable identity for one rendered message (see chat_message_key in the header).
-// Index-based on purpose: a rebuilt message keeps its key, so the framework
-// patches it in place rather than tearing down and recreating the node.
-std::string chat_message_key(const std::string& sid, size_t index) {
+// Derived from `uid`, NOT from the position in the vector: prepending an older
+// page shifts every index but leaves every uid alone, so nothing already on
+// screen is rebuilt.
+std::string chat_message_key(const std::string& sid, int64_t uid) {
   std::string k = "msg:";
   k += sid;
   k += ':';
-  k += itos(static_cast<int>(index));
+  k += itos(static_cast<int>(uid));
   return k;
 }
 

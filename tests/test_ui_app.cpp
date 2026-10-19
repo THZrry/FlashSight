@@ -67,6 +67,17 @@ void seed_session(AppState& s, const std::string& sid = "sess_a") {
 
 }  // namespace
 
+// Collect every VNode whose key starts with `prefix` (depth-first). The chat
+// message keys are internal, so the test reads them from the tree itself.
+static void collect_msg_nodes(const VNodePtr& v, const std::string& prefix,
+                              std::vector<VNodePtr>* out) {
+  if (!v) return;
+  if (v->key.compare(0, prefix.size(), prefix) == 0) out->push_back(v);
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    collect_msg_nodes(v->children[i], prefix, out);
+  }
+}
+
 FS_TEST(uiapp_mounts_home) {
   NullDom dom;
   AppState st = AppState::make();
@@ -276,7 +287,12 @@ FS_TEST(uiapp_escape_dismisses_skill_menu) {
   app.update([](AppState& s) { seed_session(s, "sess_a"); });
   app.update([](AppState& s) {
     s.skill_menu_open = true;
-    s.skill_menu.push_back("browser-control");
+    AppState::CommandRow c;
+    c.name = "browser-control";
+    c.title = "Browser Control";
+    c.action = "skill:browser-control";
+    c.group = "skill";
+    s.command_menu.push_back(c);
   });
   EXPECT_TRUE(dump_has(dom, "/browser-control"));
   dom.fire_key_for_test("Escape");
@@ -2325,7 +2341,9 @@ class DemoBackend : public IUiBackend {
   BackendResult call(const std::string& method, const Json&) override {
     BackendResult r;
     r.ok = true;
-    if (method == "session.get") {
+    // The composer's per-session settings arrive from session.info now (the
+    // transcript is paged separately, so session.get is no longer used here).
+    if (method == "session.get" || method == "session.info") {
       r.data = Json{
           {"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}, {"cwd", "/tmp/p"}}},
           {"sessionSettings", Json{{"model", "claude-sonnet-4"},
@@ -2530,11 +2548,16 @@ FS_TEST(uiapp_usage_panel_uses_real_session_usage) {
       if (method == "usage.session") {
         ++calls;
         sid = jsonutil::get<std::string>(args, "sid", "");
+        // lastIn / contextWindow are what the provider REPORTED: the water level
+        // is lastIn / contextWindow, never a name-based guess.
         r.data = Json{{"totalIn", 12437},
                       {"totalOut", 3100},
                       {"totalCost", 0.21},
                       {"costKind", "money"},
-                      {"calls", 3}};
+                      {"calls", 3},
+                      {"lastIn", 40000},
+                      {"lastOut", 800},
+                      {"contextWindow", 200000}};
       } else if (method == "session.get") {
         r.data = Json{{"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}}},
                       {"turns", Json::array()}};
@@ -2549,9 +2572,6 @@ FS_TEST(uiapp_usage_panel_uses_real_session_usage) {
   app.mount();
   app.update([](AppState& s) { seed_session(s, "sess_a"); });
   app.show("sess_a");
-  // A known model turns the token count into a percentage; without a model the
-  // panel leaves it unknown rather than guessing a window.
-  app.update([](AppState& s) { s.model = "claude-sonnet-4"; });
   app.load_session_usage("sess_a");
   EXPECT_EQ(backend.sid, std::string("sess_a"));
   EXPECT_TRUE(app.state().session_usage_loaded);
@@ -2562,8 +2582,39 @@ FS_TEST(uiapp_usage_panel_uses_real_session_usage) {
   // 12.4K is what a person reads in a 360px panel
   EXPECT_TRUE(d.find("12.4K") != std::string::npos);
   EXPECT_TRUE(d.find("3.1K") != std::string::npos);
-  // 12437 / 200000 = 6%
-  EXPECT_EQ(app.state().context_pct, 6);
+  // 40000 / 200000 = 20%: the LAST request against the window the API reported
+  EXPECT_EQ(app.state().context_pct, 20);
+}
+
+// No reported window (the endpoint does not list context_length) => the level
+// stays unknown rather than being estimated from the model name.
+FS_TEST(uiapp_context_level_needs_a_reported_window) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class NoWindowBackend : public IUiBackend {
+   public:
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "usage.session") {
+        r.data = Json{{"totalIn", 5000}, {"totalOut", 100}, {"calls", 1},
+                      {"lastIn", 5000}, {"contextWindow", 0}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); s.model = "some-model"; });
+  app.load_session_usage("sess_a");
+  EXPECT_TRUE(app.state().session_usage_loaded);
+  EXPECT_EQ(app.state().context_pct, -1);
+  // The panel renders the placeholder, not a percentage.
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("上下文水位") != std::string::npos);
+  EXPECT_TRUE(d.find("—") != std::string::npos);
+  EXPECT_TRUE(d.find("20%") == std::string::npos);
 }
 
 // With no usage data the panel must say so, not show a plausible-looking number.
@@ -2578,6 +2629,115 @@ FS_TEST(uiapp_usage_panel_has_no_fake_numbers) {
   EXPECT_TRUE(d.find("42%") == std::string::npos);
   EXPECT_TRUE(d.find("12.4K") == std::string::npos);
   EXPECT_TRUE(d.find("¥0.21") == std::string::npos);
+}
+
+// A long session must not load (or re-parse) its whole transcript: the first
+// page is the NEWEST N turns, scrolling to the top asks for the previous page,
+// and the reading position is preserved across the prepend.
+FS_TEST(uiapp_history_pages_backwards) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class PagedBackend : public IUiBackend {
+   public:
+    int total = 75;
+    std::vector<int> requested_before;
+    BackendResult call(const std::string& method, const Json& args) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.info") {
+        r.data = Json{{"meta", Json{{"sid", "s"}, {"pid", "p1"}}},
+                      {"sessionSettings", Json::object()},
+                      {"systemOps", Json::array()}};
+      } else if (method == "session.turns") {
+        int before = static_cast<int>(jsonutil::get_int(args, "before", -1));
+        int limit = static_cast<int>(jsonutil::get_int(args, "limit", 30));
+        requested_before.push_back(before);
+        int end = before < 0 ? total : before;
+        int start = end - limit;
+        if (start < 0) start = 0;
+        Json arr = Json::array();
+        for (int i = start; i < end; ++i) {
+          arr.push_back(Json{{"role", i % 2 == 0 ? "user" : "assistant"},
+                             {"text", "turn " + std::to_string(i)}});
+        }
+        r.data = Json{{"turns", arr}, {"start", start}, {"total", total},
+                      {"hasMore", start > 0}};
+      } else if (method == "project.list" || method == "session.list") {
+        r.data = Json::array();
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "s"); });
+  app.show("s");
+  // first page = the NEWEST turns, and the UI knows there are older ones
+  EXPECT_EQ(app.message_count(), size_t(30));
+  EXPECT_EQ(app.state().history_total, 75);
+  EXPECT_TRUE(app.state().history_has_more);
+  ASSERT_TRUE(backend.requested_before.size() == 1);
+  EXPECT_EQ(backend.requested_before[0], -1);
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("turn 74") != std::string::npos);   // newest present
+  EXPECT_TRUE(d.find("turn 10") == std::string::npos);   // older page not loaded
+  // snapshot the VNodes of the first page: the prepend below must not touch them
+  std::vector<VNodePtr> before_nodes;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &before_nodes);
+  ASSERT_TRUE(before_nodes.size() == 30);
+
+  // scrolling to the top asks for the page before the OLDEST LOADED turn (45,
+  // not the message count: the first page was the newest 30 of 75)
+  dom.fire_scroll_edges_for_test(true, false);
+  EXPECT_EQ(backend.requested_before.size(), size_t(2));
+  EXPECT_EQ(backend.requested_before[1], 45);
+  EXPECT_EQ(app.message_count(), size_t(60));
+  EXPECT_TRUE(app.state().history_has_more);
+  // The prepended turns are frozen (each has its own rev) and, crucially, the
+  // messages that were ALREADY on screen kept their VNodes: identity is the
+  // turn's absolute index, not its position in the vector, so a prepend does not
+  // shift every key and rebuild the whole transcript.
+  std::vector<VNodePtr> now;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &now);
+  ASSERT_TRUE(now.size() == 60);
+  for (size_t i = 0; i < before_nodes.size(); ++i) {
+    EXPECT_TRUE(now[i + 30].get() == before_nodes[i].get());
+  }
+  std::string d2 = dom.dump();
+  EXPECT_TRUE(d2.find("turn 25") != std::string::npos);
+  EXPECT_TRUE(d2.find("turn 74") != std::string::npos);
+
+  // the last page reports hasMore=false, so no further request is made
+  dom.fire_scroll_edges_for_test(true, false);
+  EXPECT_EQ(backend.requested_before.size(), size_t(3));
+  EXPECT_EQ(app.message_count(), size_t(75));
+  EXPECT_FALSE(app.state().history_has_more);
+  dom.fire_scroll_edges_for_test(true, false);
+  EXPECT_EQ(backend.requested_before.size(), size_t(3));  // no more pages
+}
+
+// New output only follows the end while the reader is AT the end.
+FS_TEST(uiapp_history_follows_only_when_pinned) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  EXPECT_TRUE(app.state().hist_follow);  // a fresh session follows the end
+  // the user scrolls up to read: following stops
+  dom.fire_scroll_edges_for_test(false, false);
+  EXPECT_FALSE(app.state().hist_follow);
+  dom.clear_calls();
+  // streamed output arrives while the reader is away from the end
+  app.on_backend_event_for_test("stream.delta", Json{{"sid", "sess_a"}, {"text", "more"}});
+  EXPECT_EQ(dom.count_of("scroll_to_bottom"), 0);
+  // back at the bottom: following resumes
+  dom.fire_scroll_edges_for_test(false, true);
+  EXPECT_TRUE(app.state().hist_follow);
+  dom.clear_calls();
+  app.on_backend_event_for_test("stream.delta", Json{{"sid", "sess_a"}, {"text", "more"}});
+  EXPECT_TRUE(dom.count_of("scroll_to_bottom") > 0);
 }
 
 // load_session must apply the session's OWN settings: the composer showed
@@ -2737,17 +2897,16 @@ FS_TEST(uiapp_code_block_has_gutter_and_copy) {
   EXPECT_TRUE(dom.count_of("set_html") > 0);
 }
 
-// Collect every VNode whose key starts with `prefix` (depth-first). The chat
-// message keys are internal, so the test reads them from the tree itself.
-static void collect_msg_nodes(const VNodePtr& v, const std::string& prefix,
-                              std::vector<VNodePtr>* out) {
-  if (!v) return;
-  if (v->key.compare(0, prefix.size(), prefix) == 0) out->push_back(v);
-  for (size_t i = 0; i < v->children.size(); ++i) {
-    collect_msg_nodes(v->children[i], prefix, out);
-  }
-}
 
+
+// A session can hold hundreds of turns, so a render must NOT rebuild the ones
+// that did not change. Three things are asserted:
+//   1) an unchanged message hands back the SAME VNode (which is what lets the
+//      framework skip the subtree entirely),
+//   2) appending a message rebuilds only that message, and
+//   3) changing one message rebuilds exactly that one.
+// Without this, every render re-parsed every markdown block and the diff then
+// compared thousands of nodes against themselves.
 // A session can hold hundreds of turns, so a render must NOT rebuild the ones
 // that did not change. Three things are asserted:
 //   1) an unchanged message hands back the SAME VNode (which is what lets the
@@ -2807,9 +2966,11 @@ FS_TEST(uiapp_history_is_not_rebuilt) {
   }
 }
 
-// The plan is its own column (a sibling of the chat), not a float inside it:
-// opening it must not touch the chat subtree.
-FS_TEST(uiapp_plan_is_own_column) {
+// The plan is a floating OVERLAY, but it is a sibling of the history rather
+// than a child of it: opening it must not rebuild the transcript or its scroll
+// state, and it must not take width away from the conversation (a column read
+// like a second side panel).
+FS_TEST(uiapp_plan_floats_without_touching_history) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
@@ -2822,19 +2983,26 @@ FS_TEST(uiapp_plan_is_own_column) {
     s.messages.push_back(m);
   });
   std::string before = dom.dump();
-  EXPECT_TRUE(before.find("plan-col") == std::string::npos);
+  EXPECT_TRUE(before.find("plan-float") == std::string::npos);
+  std::vector<VNodePtr> msgs_before;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &msgs_before);
+  ASSERT_TRUE(msgs_before.size() == 1);
+
   app.update([](AppState& s) {
     s.plan_open = true;
     s.plan_steps.push_back("step one");
   });
   std::string d = dom.dump();
-  EXPECT_TRUE(d.find("plan-col") != std::string::npos);
+  EXPECT_TRUE(d.find("plan-float") != std::string::npos);
   EXPECT_TRUE(d.find("step one") != std::string::npos);
-  // the plan column is a SIBLING of .session-center, not a child of it
-  size_t center = d.find("session-center");
-  size_t plan = d.find("plan-col");
-  ASSERT_TRUE(center != std::string::npos && plan != std::string::npos);
-  EXPECT_TRUE(plan > center);
+  // it is a floating overlay, not a column that takes width
+  EXPECT_TRUE(d.find("plan-col") == std::string::npos);
+  // ...and it is NOT inside the history subtree: the message node is the same
+  // object, so opening the plan rebuilt nothing.
+  std::vector<VNodePtr> msgs_after;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &msgs_after);
+  ASSERT_TRUE(msgs_after.size() == 1);
+  EXPECT_TRUE(msgs_after[0].get() == msgs_before[0].get());
 }
 
 // The chat is scrolled to the bottom when its history arrives (a first visit

@@ -133,6 +133,12 @@ struct ChatMsg {
   // rebuilding every node four times a second (while a reply streams) is pure
   // waste. A solidified turn keeps its rev forever and is never rebuilt again.
   uint64_t rev = 0;
+  // Stable identity, independent of position in the vector. Loaded turns use
+  // their ABSOLUTE index in the stored session, so prepending an older page
+  // does not change the identity of anything already on screen (an index-based
+  // key would shift every message and rebuild the whole transcript on every
+  // page load). 0 = fall back to the position.
+  int64_t uid = 0;
 };
 
 // One chat message. user -> right bubble; assistant -> article, no bubble;
@@ -141,10 +147,10 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
                EventFn on_think_toggle = nullptr);
 
 // Stable identity for one rendered message: a keyed VNode is what lets the
-// framework match (and therefore skip) a subtree across renders. The key is
-// deliberately independent of the message CONTENT - a rebuild keeps the same
-// key so the node is patched in place instead of being recreated.
-std::string chat_message_key(const std::string& sid, size_t index);
+// framework match (and therefore skip) a subtree across renders. `uid` must be
+// stable across reordering (loaded turns use their absolute index), so
+// prepending older history does not invalidate the cache for newer messages.
+std::string chat_message_key(const std::string& sid, int64_t uid);
 
 // Turn summary: NOT folded, no border (per user feedback).
 H turn_summary(const std::string& text);
