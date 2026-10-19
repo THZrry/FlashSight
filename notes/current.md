@@ -1307,3 +1307,54 @@ The process of project: P0 环境搭建 + P1 AppCore
      19. workflow.*（工作流页整页未做；后端 define/list/start/get/retryStep/skipStep/steer 全在）
      20. plan.update / plan.review（规划面板只读，不能编辑步骤或评审）
      21. terminal.show / terminal.setEncoding（终端详情与编码切换）
+
+<56>(SOLVED): 接线完成（21 项清单全部接上，UI 覆盖率 122 中 102）
+  - **前置缺陷**：`append_turn` 从不写 `turnId`，而 fork/rollback/forget 都按
+    turnId 找轮次——三个接口存在但永远返回 "turn not found"。现在落库时补
+    `t_<hex>`，并且测试断言 id 唯一、可被 rollback 定位。
+  - **A 会话生命周期**：
+    * 消息 hover 出「分叉 / 回滚到这里 / 忘记」。分叉后直接打开新会话（分叉完
+      还要去项目列表里找它，等于没分叉）；回滚走确认框（会撤销文件改动），
+      确认框的按钮文字按动作变化（删除/回滚/撤销/忘记），并且带第二个参数
+      `confirm_arg`（turnId）——通用"删除"标签配通用动作正是确认框要防的事。
+    * `loop.interrupted` 不再是转瞬即逝的 toast：composer 顶部常驻一条
+      「任务已中断 / 继续 / 忽略」，继续走 `session.continue`。
+    * 挂起按钮改为等后端确认后再变标签，并 `session.loopState` 回读真实状态；
+      `AgentHost::loop_state` 把"已请求挂起"优先报成 `suspended`（否则按钮会
+      在用户按下后跳回"挂起"）。挂起时额外出现「取消唤醒」。
+    * Enter 行为重新接回：设置项写 `session.default.enterSend` 并下发
+      `session.setEnterSend`；textarea 带 `data-enter-send`，DOM 适配器的 keydown
+      按它决定 Enter 是发送还是换行（以前这个设置被删掉就是因为"没效果"，
+      而没效果的原因是 key 处理器根本不读它）。
+    * 切换模型后补 `session.refreshConfig` + 重算上下文水位。
+  - **C Git**：面板加了「改动 / 历史 / 分支」三视图（一个 tab，三个问题）。
+    历史来自 `git.log`，分支来自 `git.branches`（切换分支会动文件，故意只展示
+    并提示去终端执行）；diff 头加「对照 HEAD」用 `git.showHead` 看改动前的整份
+    内容。
+  - **D 用量**：导出 CSV 按钮（`usage.exportCsv`）。空路径以前会写到进程启动
+    目录——没人找得到；现在后端默认写 `<data>/exports/usage-<ts>.csv` 并回传
+    路径。模型选择器改用 `model.allEnabled`（跨 provider 一次取全，行上带
+    providerId，切换供应商零请求）。
+  - **E Skill/MCP**：Skill 卡片有启用开关和删除（仅用户导入的），新增「新建」
+    表单（名称/标题/正文 → `skill.create`）；MCP 页「手动导入」改走
+    `mcp.import`（整目录导入），不再假装走单条添加。
+  - **F 设置**：文件页加「恢复默认」（`settings.unset` 清黑白名单与自动 git
+    init）和项目级「忽略全局设置」（`settings.setIgnoreGlobal`，状态从
+    settings.dump 的 `ignoreGlobal` 读回，不是猜的）；思考语言写入时同步
+    `thinking.setLang`，后端缓存的 skill 描述语言才会立刻变。
+  - **G 其它**：
+    * 新增「工作流」侧栏面板：运行中的 run + 每步状态 + 失败步的「重试/跳过」
+      与运行步的「引导」，以及可启动的定义列表。为此补了 `workflow.runs`
+      （按 sid 列 run；之前只有 workflow.get(runId)，UI 无从发现 run）。
+    * 规划面板可编辑：逐步内联编辑、删除、添加步骤，均整体写回 `plan.update`；
+      底部有评审（通过/驳回/按意见修改 → `plan.review`）。
+    * 终端标签加「编码」按钮，循环 系统默认 → UTF-8 → GBK，走
+      `terminal.show` + `terminal.setEncoding`。
+  - **仍未接的 20 个**（都是"不该由 UI 直接调用"）：`lock.*`（权限门的内部锁）、
+    `tool.invoke` / `subagent.spawn` / `steering.*`（模型侧调用）、
+    `workflow.define`（定义由内置表提供，暂无编辑器）、`session.get`（已被
+    info+turns 取代）、`session.open/close/append`（内部生命周期）、
+    `project.get` / `settings.get`（dump 已覆盖）、`browser.load`（skill 加载走
+    command.run）。这些保留为接口，不算缺口。
+  - 268 用例 / 2667 断言（新增 7 个 wiring 用例 + 6 个 UI 用例）。
+

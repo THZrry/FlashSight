@@ -253,3 +253,12 @@ The process of project: P0 环境搭建
   提供（含 skill），UI 零硬编码；思考/过程限 10 行半页可滚；上下文水位 =
   上次请求 prompt tokens / API 报告的 context_length。255 用例 2580 断言。
   current.md <54> 末尾附下一轮接线清单 <55>（21 项，按优先级分组）。
+<56>(SOLVED): 21 项接线清单全部接上。核心前提：append_turn 从不写 turnId，
+  fork/rollback/forget 三个接口其实是死的——已补。新增消息级分叉/回滚/忘记、
+  中断常驻条+继续、挂起状态回读+取消唤醒、Enter 行为真正生效、切模型刷新运行时；
+  Git 三视图（改动/历史/分支）+ HEAD 对照；用量导出 CSV + 跨 provider 模型列表；
+  Skill 启停/删除/新建 + MCP 目录导入；设置恢复默认 + 项目忽略全局 + 思考语言下发；
+  工作流侧栏面板（含新增 workflow.runs）+ 规划内联编辑/评审 + 终端编码。
+  UI 覆盖 122 个方法中的 102，其余 20 个均为内部/模型侧接口。268 用例 2667 断言。
+  详见 current.md <56>。
+

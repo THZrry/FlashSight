@@ -59,6 +59,11 @@ class AgentLoop {
 
   // 状态查询
   LoopState state() const { return state_; }
+  // Suspension is a REQUEST, not a state: the loop may still be finishing the
+  // tool it is running. The UI needs the flag to render the button (and to know
+  // that "resume" is the meaningful action), so it is exposed separately from
+  // the coarse state.
+  bool suspend_requested() const { return suspend_requested_; }
 
   // 会话级属性更新（FsApi 读 sessionSettings 后传入）
   void set_permission(const std::string& perm) { opts_.permission = perm; }

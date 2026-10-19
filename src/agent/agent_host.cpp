@@ -314,6 +314,11 @@ bool AgentHost::is_running(const std::string& sid) const {
 std::string AgentHost::loop_state(const std::string& sid) const {
   auto it = loops_.find(sid);
   if (it == loops_.end() || !it->second) return "idle";
+  // A suspend request outranks the coarse state: from the user's point of view
+  // the task IS suspended the moment they pressed the button, even if the loop
+  // is still winding down the current tool. Reporting "toolCalling" would make
+  // the button flip back to "挂起" right after they pressed it.
+  if (it->second->suspend_requested()) return "suspended";
   return loop_state_str(it->second->state());
 }
 

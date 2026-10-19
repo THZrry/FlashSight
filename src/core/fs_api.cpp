@@ -608,6 +608,11 @@ FsResult FsApi::session_cancel_wake(const std::string& sid) {
   return agent_host_->cancel_wake(sid);
 }
 
+FsResult FsApi::session_loop_state(const std::string& sid) {
+  std::string state = agent_host_ ? agent_host_->loop_state(sid) : "idle";
+  return FsResult::success(Json{{"sid", sid}, {"state", state}});
+}
+
 // addon2 任务健壮性：打断后续接
 FsResult FsApi::session_continue(const std::string& sid, const std::string& guidance) {
   return agent_host_->continue_task(sid, guidance);
@@ -1172,9 +1177,22 @@ FsResult FsApi::usage_export_csv(const Json& filter, const std::string& path) {
   UsageFilter f;
   f.provider = jsonutil::get<std::string>(filter, "provider", "");
   f.model = jsonutil::get<std::string>(filter, "model", "");
+  f.sid = jsonutil::get<std::string>(filter, "sid", "");
   f.from = jsonutil::get_int(filter, "from", 0);
   f.to = jsonutil::get_int(filter, "to", 0);
-  return usage_->export_csv(f, ghc::filesystem::path(path));
+  // No path from the UI (the browser cannot pick one): write into the data root
+  // under a timestamped name and report it back. An empty path used to mean
+  // "current working directory", which for a desktop app is wherever it happened
+  // to be launched from - a file nobody would find.
+  ghc::filesystem::path out(path);
+  if (out.empty()) {
+    int64_t now = clock_ ? clock_->now_ms() : WallClock().now_ms();
+    out = root_ / "exports" /
+          ("usage-" + std::to_string(now) + ".csv");
+  }
+  FsResult r = usage_->export_csv(f, out);
+  if (!r.ok()) return r;
+  return FsResult::success(Json{{"path", out.string()}});
 }
 FsResult FsApi::usage_record(const Json& row) { return usage_->record(row); }
 
@@ -1298,6 +1316,18 @@ FsResult FsApi::workflow_define(const Json& def) { return workflows_->define(def
 
 FsResult FsApi::workflow_list() {
   return FsResult::success(Json{{"defs", workflows_->list_defs()}});
+}
+
+FsResult FsApi::workflow_runs(const std::string& sid) {
+  Json arr = Json::array();
+  std::vector<WorkflowRun*> runs = workflows_->runs_for_sid(sid);
+  for (size_t i = 0; i < runs.size(); ++i) {
+    if (!runs[i]) continue;
+    Json j = runs[i]->to_json();
+    j["graph"] = runs[i]->graph_json();
+    arr.push_back(j);
+  }
+  return FsResult::success(Json{{"runs", arr}});
 }
 
 FsResult FsApi::workflow_start(const std::string& sid, const std::string& name) {

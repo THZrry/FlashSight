@@ -111,6 +111,30 @@ struct SideTab {
   std::string git_diff_text;
   bool git_diff_truncated = false;
   std::string git_diff_error;
+  // "changes" (the default) | "log" | "branches". The panel is one tab with
+  // three views instead of three panels: they all answer "what is the state of
+  // this repository", and stacking tabs for that would bury the file list.
+  std::string git_view = "changes";
+  struct GitCommit {
+    std::string hash;
+    std::string short_hash;
+    std::string author;
+    std::string subject;
+    int64_t time = 0;
+  };
+  std::vector<GitCommit> git_commits;
+  bool git_log_loaded = false;
+  struct GitBranch {
+    std::string name;
+    bool current = false;
+  };
+  std::vector<GitBranch> git_branch_rows;
+  bool git_branches_loaded = false;
+  // The committed version of the diffed file (git.showHead), shown side by side
+  // with the working copy when the user asks for "before".
+  bool git_show_head = false;
+  std::string git_head_text;
+  bool git_head_exists = false;
   // Commit message draft. Kept per panel so switching away does not lose typing.
   std::string git_message;
   bool git_busy = false;
@@ -199,6 +223,14 @@ struct AppState {
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
+  // The loop was interrupted (model failed / user stopped it). Shows a bar with
+  // a "继续" action: the backend can resume from the saved point, and a toast
+  // alone left the user with nothing to press.
+  bool interrupted = false;
+  // "enter" (default) or "ctrlEnter": whether plain Enter sends. It is a SESSION
+  // setting, and the DOM adapter reads it from the textarea's data-enter-send
+  // attribute, so it must live in the session state.
+  std::string enter_send = "enter";
   // Context water level + per-session cost/tokens, all from usage.session.
   // -1 / "" mean "not loaded yet": the panel shows a placeholder rather than a
   // made-up number (it used to display a hard-coded 42% and ¥0.21).
@@ -312,6 +344,32 @@ struct AppState {
   };
   std::vector<SubagentRow> subagents;
 
+  // ---- workflows (long-task pipelines) ----
+  struct WorkflowDefRow {
+    std::string name;
+    std::string description;
+    int steps = 0;
+  };
+  struct WorkflowStepRow {
+    std::string id;
+    std::string name;
+    std::string state;   // pending|running|done|failed|skipped
+    int attempts = 0;
+    std::string error;
+  };
+  struct WorkflowRunRow {
+    std::string id;
+    std::string name;
+    std::string state;   // pending|running|done|failed
+    std::vector<WorkflowStepRow> steps;
+    bool open = true;
+  };
+  std::vector<WorkflowDefRow> workflow_defs;
+  bool workflow_defs_loaded = false;
+  std::vector<WorkflowRunRow> workflow_runs;
+  bool workflow_runs_loaded = false;
+  bool workflows_inflight = false;
+
   // ---- settings / 外观 ----
   // Read from the settings store (ui.theme / ui.font / ui.codeHighlight) and
   // pushed to the DOM adapter, which owns the CSS variables.
@@ -370,6 +428,9 @@ struct AppState {
   struct ModelRow {
     std::string id;
     std::string display;
+    // Which provider this model belongs to. model.allEnabled returns models
+    // across providers, so a row has to carry its owner.
+    std::string provider;
     std::string icon;          // lobe-icons 键（空 = 用通用图标）
     bool enabled = true;
     bool user_set = false;     // 用户保存过 -> 可删除
@@ -446,12 +507,20 @@ struct AppState {
     std::string dir;
     std::string kind;      // "skill" (callable as /name) | "mcp" (built-in MCP)
     bool loadable = true;
+    bool enabled = true;
+    bool user = false;     // imported/created by the user: may be deleted
   };
   std::vector<SkillRow> skills;            // skill.list result
   bool skills_loaded = false;
   bool skills_inflight = false;            // request in flight (build-driven load)
   std::string skill_filter;                // 本地搜索（列表可能很长）
   std::string skill_new_dir;
+  // Inline "new skill" form: a user skill is name + title + body, and the body
+  // is what the model receives when it loads it.
+  bool skill_creating = false;
+  std::string skill_new_name;
+  std::string skill_new_title;
+  std::string skill_new_body;
   // ---- settings / MCP 与外部工具 ----
   struct McpRow {
     std::string name;
@@ -485,11 +554,18 @@ struct AppState {
   int ask_id = 0;           // ask tool id (0 = permission prompt, not ask tool)
   // Generic confirm modal. Deleting a session is destructive, so it must not
   // fire straight from a click; `kind` says what to do on OK.
-  std::string confirm_kind;   // "session" | ""
+  std::string confirm_kind;   // "session" | "rollback" | "forget" | ""
   std::string confirm_id;
+  std::string confirm_arg;    // second value (turnId / permission level)
   std::string confirm_text;
   bool plan_open = false;
   std::vector<std::string> plan_steps;
+  // Inline plan editing: -1 = no step being edited. The plan is user-editable,
+  // not just model output, so the panel needs an edit path.
+  int plan_editing = -1;
+  std::string plan_edit_text;
+  std::string plan_new_text;
+  std::string plan_review_text;
   std::string toast;
   int64_t toast_deadline_ms = 0;  // pump() clears the toast after this
 
@@ -528,6 +604,8 @@ struct SessionView {
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
+  bool interrupted = false;
+  std::string enter_send = "enter";
   int context_pct = -1;
   // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
   // （粗匹配 + 用户在模型设置里的覆盖），不是全局固定枚举。
@@ -551,6 +629,11 @@ struct SessionView {
 
   bool skill_menu_open = false;
   std::vector<AppState::CommandRow> command_menu;
+
+  std::vector<AppState::WorkflowDefRow> workflow_defs;
+  bool workflow_defs_loaded = false;
+  std::vector<AppState::WorkflowRunRow> workflow_runs;
+  bool workflow_runs_loaded = false;
 
   std::vector<TermItem> terminals;
   std::string active_term;
@@ -579,6 +662,12 @@ struct SessionView {
 
   bool plan_open = false;
   std::vector<std::string> plan_steps;
+  // Inline plan editing: -1 = no step being edited. The plan is user-editable,
+  // not just model output, so the panel needs an edit path.
+  int plan_editing = -1;
+  std::string plan_edit_text;
+  std::string plan_new_text;
+  std::string plan_review_text;
 };
 
 // UiApp: owns the render loop. backend_ is the transport to the core
@@ -625,6 +714,8 @@ class UiApp {
   void load_shells();
   // Load subagents for a session.
   void load_subagents(const std::string& sid);
+  // Workflows: definitions (what can be started) and runs (what is happening).
+  void load_workflows(const std::string& sid);
   // Load a file panel's directory (the panel keeps its own path/entries).
   void load_files(const std::string& tab_id, const std::string& pid,
                   const std::string& rel);
@@ -642,11 +733,25 @@ class UiApp {
   void git_discard_paths(const std::string& tab_id,
                          const std::vector<std::string>& paths);
   void git_commit(const std::string& tab_id, const std::string& message, bool amend);
+  // Log / branches / HEAD views of the same panel (the backend is one repo).
+  void load_git_log(const std::string& tab_id);
+  void load_git_branches(const std::string& tab_id);
+  void load_git_head(const std::string& tab_id, const std::string& path);
   // Open a file's contents in its OWN side tab (not inline under the tree).
   void open_file_preview(const std::string& rel);
   // Execute one entry of the composer's command menu. "ui:*" actions are handled
   // here; anything else is a backend action (a skill load, suspend, ...).
   void run_command(const AppState::CommandRow& cmd);
+  // A per-turn action from the message menu: "fork" | "rollback" | "forget".
+  void turn_action(size_t message_index, const std::string& action);
+  // Session operations addressed by a turn (the turn id lives on the message).
+  void rollback_to_turn(const std::string& sid, const std::string& turn_id);
+  void forget_turn(const std::string& sid, const std::string& turn_id);
+  void fork_from_turn(const std::string& sid, const std::string& turn_id);
+  // Ask the backend for this session's loop state (idle / suspended / ...) and
+  // mirror it into `suspended`. The button label follows the BACKEND, not the
+  // click: suspension is a request that the loop may take a moment to honour.
+  void refresh_loop_state(const std::string& sid);
   // Loaders for the settings sections.
   void load_preset_agents();  void load_skills();
   void load_provider_templates();

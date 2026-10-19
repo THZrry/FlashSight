@@ -146,6 +146,7 @@ const SideKind kSideKinds[] = {
     // inline block pushed the tree out of view.
     {"preview", "预览", "文件内容（可多开）", true},
     {"git", "Git", "Git 状态与变更（可多开）", true},
+    {"workflow", "工作流", "长任务的分步执行状态", false},
     {"ops", "操作", "本会话的系统操作记录", true},
     {"calls", "调用", "模型发起的工具调用", true},
 };
@@ -651,6 +652,8 @@ void UiApp::save_session_view(const std::string& sid) {
   v.thinking = st_.thinking;
   v.attachments = st_.attachments;
   v.suspended = st_.suspended;
+  v.interrupted = st_.interrupted;
+  v.enter_send = st_.enter_send;
   v.context_pct = st_.context_pct;
   v.session_cost = st_.session_cost;
   v.session_tokens_in = st_.session_tokens_in;
@@ -683,6 +686,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.subagents = st_.subagents;
   v.plan_open = st_.plan_open;
   v.plan_steps = st_.plan_steps;
+  v.plan_editing = -1;  // a transient edit does not survive a tab switch
 }
 
 void UiApp::load_session_view(const std::string& sid) {
@@ -715,6 +719,8 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.thinking = v.thinking;
   st_.attachments = v.attachments;
   st_.suspended = v.suspended;
+  st_.interrupted = v.interrupted;
+  st_.enter_send = v.enter_send;
   st_.context_pct = v.context_pct;
   st_.session_cost = v.session_cost;
   st_.session_tokens_in = v.session_tokens_in;
@@ -747,6 +753,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.subagents = v.subagents;
   st_.plan_open = v.plan_open;
   st_.plan_steps = v.plan_steps;
+  st_.plan_editing = -1;
 }
 
 void UiApp::switch_tab(const std::string& id, int dir) {
@@ -855,6 +862,7 @@ void UiApp::open_session(const std::string& sid, const std::string& title) {
 comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   comp::ChatMsg m;
   m.uid = abs_index;
+  m.turn_id = jsonutil::get<std::string>(t, "turnId", "");
   m.role = jsonutil::get<std::string>(t, "role", "");
   m.text = jsonutil::get<std::string>(t, "text",
              jsonutil::get<std::string>(t, "streamSummary", ""));
@@ -930,6 +938,10 @@ void UiApp::load_session(const std::string& sid) {
       v.perm_index = perm == "approve" ? 0 : perm == "full" ? 2 : 1;
     }
     if (ss.contains("autoMode")) v.auto_mode = jsonutil::get<bool>(ss, "autoMode", true);
+    {
+      std::string es = jsonutil::get<std::string>(ss, "enterSend", "enter");
+      v.enter_send = es == "ctrlEnter" ? "ctrlEnter" : "enter";
+    }
     if (st_.active_tab == sid) {
       st_.session_ops = ops;
       if (!pid.empty()) st_.active_pid = pid;
@@ -938,6 +950,7 @@ void UiApp::load_session(const std::string& sid) {
       st_.permission = v.permission;
       st_.perm_index = v.perm_index;
       st_.auto_mode = v.auto_mode;
+      st_.enter_send = v.enter_send;
     }
     render();
   });
@@ -1292,6 +1305,66 @@ void UiApp::load_mcp_tools() {
   });
 }
 
+// Workflows: definitions + runs for the active session.
+//
+// A workflow is a pipeline of steps, each spawning subagents; the panel answers
+// "which step is running, which failed, can I retry/skip/steer it". The backend
+// already has all of that (workflow.*), so this is a view over it.
+void UiApp::load_workflows(const std::string& sid) {
+  if (st_.workflows_inflight) return;
+  st_.workflows_inflight = true;
+  call_async("workflow.list", Json::object(), [this](const BackendResult& r) {
+    std::vector<AppState::WorkflowDefRow> defs;
+    if (r.ok && r.data.contains("defs") && r.data["defs"].is_array()) {
+      const Json& arr = r.data["defs"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        AppState::WorkflowDefRow d;
+        d.name = jsonutil::get<std::string>(arr[i], "name", "");
+        d.description = jsonutil::get<std::string>(arr[i], "description", "");
+        if (arr[i].contains("steps") && arr[i]["steps"].is_array()) {
+          d.steps = static_cast<int>(arr[i]["steps"].size());
+        }
+        if (!d.name.empty()) defs.push_back(d);
+      }
+    }
+    update([&](AppState& s) {
+      s.workflow_defs = defs;
+      s.workflow_defs_loaded = true;
+    });
+  });
+  call_async("workflow.runs", Json{{"sid", sid}},
+             [this](const BackendResult& r) {
+    std::vector<AppState::WorkflowRunRow> runs;
+    if (r.ok && r.data.contains("runs") && r.data["runs"].is_array()) {
+      const Json& arr = r.data["runs"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        AppState::WorkflowRunRow run;
+        run.id = jsonutil::get<std::string>(arr[i], "id", "");
+        run.name = jsonutil::get<std::string>(arr[i], "name", "");
+        run.state = jsonutil::get<std::string>(arr[i], "state", "");
+        if (arr[i].contains("steps") && arr[i]["steps"].is_array()) {
+          const Json& steps = arr[i]["steps"];
+          for (size_t k = 0; k < steps.size(); ++k) {
+            AppState::WorkflowStepRow st;
+            st.id = jsonutil::get<std::string>(steps[k], "id", "");
+            st.name = jsonutil::get<std::string>(steps[k], "name", "");
+            st.state = jsonutil::get<std::string>(steps[k], "state", "pending");
+            st.attempts = static_cast<int>(jsonutil::get_int(steps[k], "attempts", 0));
+            st.error = jsonutil::get<std::string>(steps[k], "error", "");
+            if (!st.id.empty()) run.steps.push_back(st);
+          }
+        }
+        if (!run.id.empty()) runs.push_back(run);
+      }
+    }
+    update([&](AppState& s) {
+      s.workflow_runs = runs;
+      s.workflow_runs_loaded = true;
+    });
+    st_.workflows_inflight = false;
+  });
+}
+
 void UiApp::load_shells() {
   call_async("settings.detectShells", Json::object(), [this](const BackendResult& r) {
     std::vector<AppState::ShellRow> rows;
@@ -1475,6 +1548,85 @@ void UiApp::load_git_diff(const std::string& tab_id, const std::string& path,
         t.git_diff_text = text;
         t.git_diff_truncated = truncated;
         t.git_diff_error = error;
+        return;
+      }
+    });
+  });
+}
+
+void UiApp::load_git_log(const std::string& tab_id) {
+  if (st_.active_pid.empty()) return;
+  std::string pid = st_.active_pid;
+  call_async("git.log", Json{{"pid", pid}, {"maxCount", 40}},
+             [this, tab_id](const BackendResult& r) {
+    std::vector<SideTab::GitCommit> rows;
+    if (r.ok && r.data.contains("commits") && r.data["commits"].is_array()) {
+      const Json& arr = r.data["commits"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        SideTab::GitCommit c;
+        c.hash = jsonutil::get<std::string>(arr[i], "hash", "");
+        c.short_hash = jsonutil::get<std::string>(arr[i], "short", "");
+        c.author = jsonutil::get<std::string>(arr[i], "author", "");
+        c.subject = jsonutil::get<std::string>(arr[i], "subject", "");
+        c.time = jsonutil::get_int(arr[i], "time", 0);
+        if (!c.hash.empty()) rows.push_back(c);
+      }
+    }
+    update([&](AppState& s) {
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id != tab_id) continue;
+        s.side_tabs[i].git_commits = rows;
+        s.side_tabs[i].git_log_loaded = true;
+        return;
+      }
+    });
+  });
+}
+
+void UiApp::load_git_branches(const std::string& tab_id) {
+  if (st_.active_pid.empty()) return;
+  std::string pid = st_.active_pid;
+  call_async("git.branches", Json{{"pid", pid}}, [this, tab_id](const BackendResult& r) {
+    std::vector<SideTab::GitBranch> rows;
+    if (r.ok && r.data.contains("branches") && r.data["branches"].is_array()) {
+      const Json& arr = r.data["branches"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        SideTab::GitBranch b;
+        b.name = jsonutil::get<std::string>(arr[i], "name", "");
+        b.current = jsonutil::get<bool>(arr[i], "current", false);
+        if (!b.name.empty()) rows.push_back(b);
+      }
+    }
+    update([&](AppState& s) {
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id != tab_id) continue;
+        s.side_tabs[i].git_branch_rows = rows;
+        s.side_tabs[i].git_branches_loaded = true;
+        return;
+      }
+    });
+  });
+}
+
+// The file's content at HEAD. Diff shows what CHANGED; this shows what it
+// changed FROM, which is the other half of reading a modification.
+void UiApp::load_git_head(const std::string& tab_id, const std::string& path) {
+  if (st_.active_pid.empty() || path.empty()) return;
+  std::string pid = st_.active_pid;
+  call_async("git.showHead", Json{{"pid", pid}, {"path", path}},
+             [this, tab_id](const BackendResult& r) {
+    std::string text;
+    bool exists = false;
+    if (r.ok) {
+      exists = jsonutil::get<bool>(r.data, "exists", false);
+      text = jsonutil::get<std::string>(r.data, "content", "");
+    }
+    update([&](AppState& s) {
+      for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+        if (s.side_tabs[i].id != tab_id) continue;
+        s.side_tabs[i].git_show_head = true;
+        s.side_tabs[i].git_head_text = text;
+        s.side_tabs[i].git_head_exists = exists;
         return;
       }
     });
@@ -1783,8 +1935,18 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.toast = "任务清单已更新";
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "loop.interrupted") {
+    // A bare toast is a dead end: the task stopped and the only useful next
+    // action ("continue from here") had no button. The flag shows a persistent
+    // bar above the composer until the user continues or sends something new.
+    st_.interrupted = true;
     st_.toast = "已中断（可继续）";
     st_.toast_deadline_ms = now_ms() + kToastMs;
+  } else if (event == "loop.state") {
+    std::string state = jsonutil::get<std::string>(payload, "state", "");
+    if (state == "resumed" || state == "turnDone" || state == "idle") {
+      st_.interrupted = false;
+    }
+    if (!sid.empty()) refresh_loop_state(sid);
   }
   render();
   // AFTER the render: only now does the container know its new scrollHeight, so
@@ -2934,6 +3096,34 @@ VNodePtr UiApp::build_home_usage() {
     ranges.add(b);
   }
   panel.add(ranges);
+  // Export: the numbers on this page are a view of the usage log, and the log is
+  // what people take into a spreadsheet. The filter is the same one the page is
+  // showing (scope + range), so the file matches what is on screen.
+  {
+    H acts = el("div", "usage-actions");
+    acts.add(comp::icon_text_button("file-export", tr("导出 CSV"), [this](const std::string&) {
+      Json filter = Json::object();
+      if (!st_.usage_scope.empty()) filter["provider"] = st_.usage_scope;
+      static const int kDays[4] = {1, 7, 30, 0};
+      int days = kDays[st_.usage_range < 0 || st_.usage_range > 3 ? 1 : st_.usage_range];
+      if (days > 0) {
+        int64_t now = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        filter["from"] = now - static_cast<int64_t>(days) * 86400 * 1000;
+      }
+      call_async("usage.exportCsv", Json{{"filter", filter}},
+                 [this](const BackendResult& r) {
+        if (!r.ok) {
+          toast(tr("导出失败：") + r.message);
+          return;
+        }
+        std::string path = jsonutil::get<std::string>(r.data, "path", "");
+        toast(path.empty() ? tr("已导出") : (tr("已导出到 ") + path));
+      });
+    }, "ghost"));
+    panel.add(acts);
+  }
 
   // ---- totals ----
   H head = el("div", "usage-head");
@@ -3236,6 +3426,9 @@ VNodePtr UiApp::build_session() {
           s.messages[i].rev = next_msg_rev_++;
         }
       });
+    },
+                               [this, i](const std::string& v) {
+      turn_action(i, v);
     });
     node.key(key);
     MsgNode mn;
@@ -3290,14 +3483,162 @@ VNodePtr UiApp::build_session() {
     for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
       H step = el("div", "plan-step");
       step.add(el("span", "plan-no").text(itos(static_cast<int>(i + 1))));
-      step.add(el("span", "plan-text").text(st_.plan_steps[i]));
+      if (st_.plan_editing == static_cast<int>(i)) {
+        // Inline edit: the plan is the user's too, not just the model's. Editing
+        // writes the whole tree back (plan.update replaces it), so the step list
+        // stays the single source of truth.
+        H input = comp::text_input(st_.plan_edit_text, tr("步骤内容"),
+                                   [this](const std::string& v) {
+          st_.plan_edit_text = v;
+        });
+        input.key("plan-edit-input");
+        step.add(input);
+        step.add(comp::icon_button("\u2713", tr("保存"), [this](const std::string&) {
+          std::string sid = active_sid();
+          std::vector<std::string> steps = st_.plan_steps;
+          int idx = st_.plan_editing;
+          if (idx >= 0 && idx < static_cast<int>(steps.size())) {
+            steps[idx] = st_.plan_edit_text;
+          }
+          Json tree = Json::array();
+          for (size_t k = 0; k < steps.size(); ++k) {
+            tree.push_back(Json{{"title", steps[k]}, {"done", false}});
+          }
+          update([&](AppState& s) {
+            s.plan_steps = steps;
+            s.plan_editing = -1;
+          });
+          if (!sid.empty()) {
+            call_async("plan.update", Json{{"sid", sid}, {"plan", tree}},
+                       [this](const BackendResult& r) {
+              if (!r.ok) toast(tr("保存失败：") + r.message);
+            });
+          }
+        }));
+        step.add(comp::icon_button("\u2715", tr("取消"), [this](const std::string&) {
+          update([&](AppState& s) { s.plan_editing = -1; });
+        }));
+      } else {
+        step.add(el("span", "plan-text").text(st_.plan_steps[i]));
+        int idx = static_cast<int>(i);
+        H acts = el("div", "plan-step-acts");
+        acts.add(comp::icon_button("pen", tr("编辑"), [this, idx](const std::string&) {
+          update([&](AppState& s) {
+            s.plan_editing = idx;
+            s.plan_edit_text = idx >= 0 && idx < static_cast<int>(s.plan_steps.size())
+                                   ? s.plan_steps[idx] : std::string();
+          });
+        }));
+        acts.add(comp::icon_button("trash", tr("删除"), [this, idx](const std::string&) {
+          std::string sid = active_sid();
+          std::vector<std::string> steps = st_.plan_steps;
+          if (idx < 0 || idx >= static_cast<int>(steps.size())) return;
+          steps.erase(steps.begin() + idx);
+          Json tree = Json::array();
+          for (size_t k = 0; k < steps.size(); ++k) {
+            tree.push_back(Json{{"title", steps[k]}, {"done", false}});
+          }
+          update([&](AppState& s) { s.plan_steps = steps; });
+          if (!sid.empty()) {
+            call_async("plan.update", Json{{"sid", sid}, {"plan", tree}});
+          }
+        }));
+        step.add(acts);
+      }
       plan.add(step);
+    }
+    // Add a step: the plan is often drafted in the chat and then corrected here.
+    {
+      H add = el("div", "plan-add");
+      H input = comp::text_input(st_.plan_new_text, tr("添加步骤…"),
+                                 [this](const std::string& v) { st_.plan_new_text = v; });
+      input.key("plan-new-input");
+      add.add(input);
+      add.add(comp::icon_button("plus", tr("添加"), [this](const std::string&) {
+        if (st_.plan_new_text.empty()) return;
+        std::string sid = active_sid();
+        std::vector<std::string> steps = st_.plan_steps;
+        steps.push_back(st_.plan_new_text);
+        Json tree = Json::array();
+        for (size_t k = 0; k < steps.size(); ++k) {
+          tree.push_back(Json{{"title", steps[k]}, {"done", false}});
+        }
+        update([&](AppState& s) {
+          s.plan_steps = steps;
+          s.plan_new_text.clear();
+        });
+        if (!sid.empty()) {
+          call_async("plan.update", Json{{"sid", sid}, {"plan", tree}});
+        }
+      }));
+      plan.add(add);
+    }
+    // Review: approve / reject / revise. "revise" feeds the comment back to the
+    // model as guidance, which is the whole point of reviewing a plan.
+    if (!st_.plan_steps.empty()) {
+      H rev = el("div", "plan-review");
+      H comment = comp::text_input(st_.plan_review_text, tr("评审意见…"),
+                                   [this](const std::string& v) {
+        st_.plan_review_text = v;
+      });
+      comment.key("plan-review-input");
+      rev.add(comment);
+      auto send_review = [this](const std::string& verdict) {
+        std::string sid = active_sid();
+        if (sid.empty()) return;
+        call_async("plan.review",
+                   Json{{"sid", sid}, {"verdict", verdict}, {"comment", st_.plan_review_text}},
+                   [this, verdict](const BackendResult& r) {
+          if (!r.ok) {
+            toast(tr("评审失败：") + r.message);
+            return;
+          }
+          toast(verdict == "approve" ? tr("已通过")
+                : verdict == "reject" ? tr("已驳回") : tr("已提交修改意见"));
+          update([&](AppState& s) { s.plan_review_text.clear(); });
+        });
+      };
+      rev.add(comp::icon_button("\u2713", tr("通过"), [send_review](const std::string&) {
+        send_review("approve");
+      }));
+      rev.add(comp::icon_button("xmark", tr("驳回"), [send_review](const std::string&) {
+        send_review("reject");
+      }));
+      rev.add(comp::icon_button("pen-to-square", tr("按意见修改"), [send_review](const std::string&) {
+        send_review("revise");
+      }));
+      plan.add(rev);
     }
     center.add(plan);
   }
 
   // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");
+  // Interrupted task: a persistent bar with the action that actually helps.
+  // The loop can continue from its saved point, so this is one click instead of
+  // retyping the request.
+  if (st_.interrupted) {
+    H bar = el("div", "interrupt-bar");
+    bar.add(el("i", "fa fa-circle-exclamation"));
+    bar.add(el("span", "ib-text").text(tr("任务已中断")));
+    bar.add(el("span", "grow"));
+    bar.add(comp::button(tr("继续"), [this](const std::string&) {
+      std::string sid = active_sid();
+      if (sid.empty()) return;
+      call_async("session.continue", Json{{"sid", sid}, {"guidance", ""}},
+                 [this](const BackendResult& r) {
+        if (!r.ok) {
+          toast(tr("继续失败：") + r.message);
+          return;
+        }
+        update([&](AppState& s) { s.interrupted = false; });
+      });
+    }, "primary"));
+    bar.add(comp::button(tr("忽略"), [this](const std::string&) {
+      update([&](AppState& s) { s.interrupted = false; });
+    }, "ghost"));
+    comp_box.add(bar);
+  }
   // ---- attachments: ABOVE the input, never inside it ----
   // An attachment is not text: mixing @paths into the textarea meant you could
   // not tell what was typed from what was attached, and the "/" menu had to
@@ -3325,6 +3666,9 @@ VNodePtr UiApp::build_session() {
   },
                         [this](const std::string&) { send_message(); });
   ta.key("session-input");  // send_message() clears it directly after sending
+  // The adapter reads this to decide whether plain Enter sends (see the
+  // keyenter handler): the setting has to reach the DOM or it does nothing.
+  ta.attr("data-enter-send", st_.enter_send);
   comp_box.add(ta);
 
   H tools = el("div", "composer-tools");
@@ -3526,15 +3870,34 @@ VNodePtr UiApp::build_session() {
       return;
     }
     call_async(next ? "session.suspend" : "session.resume", Json{{"sid", sid}},
-               [this, next](const BackendResult& r) {
+               [this, next, sid](const BackendResult& r) {
       if (!r.ok) {
         toast(tr("操作失败：") + r.message);
         return;
       }
       update([&](AppState& s) { s.suspended = next; });
+      // Re-read the loop state: suspend is a REQUEST, so the authoritative
+      // answer ("suspended" vs still winding down) comes from the backend.
+      refresh_loop_state(sid);
     });
   }, "ghost");
   suspend.key("suspend-btn").cls("text-wide");
+  // Wake cancellation: a scheduled wake (a retry after a failure) would otherwise
+  // fire while the user is looking at a parked task. Only meaningful while the
+  // task is suspended, so it appears in that state only.
+  if (st_.suspended) {
+    H cancel_wake = comp::icon_text_button(
+        "bell-slash", tr("取消唤醒"), [this](const std::string&) {
+      std::string sid = active_sid();
+      if (sid.empty()) return;
+      call_async("session.cancelWake", Json{{"sid", sid}},
+                 [this](const BackendResult& r) {
+        toast(r.ok ? tr("已取消唤醒") : (tr("取消失败：") + r.message));
+      });
+    }, "ghost");
+    cancel_wake.key("cancel-wake-btn");
+    right_tools.add(cancel_wake);
+  }
   right_tools.add(suspend);
   H send = comp::icon_text_button("paper-plane", tr("发送"),
                                   [this](const std::string&) { send_message(); },
@@ -4008,6 +4371,8 @@ VNodePtr UiApp::build_side_panel() {
       head.add(el("span", "grow"));
       head.add(comp::icon_button("\u21bb", tr("刷新"), [this, panel_id](const std::string&) {
         load_git(panel_id);
+        load_git_log(panel_id);
+        load_git_branches(panel_id);
       }));
       body.add(head);
       if (!panel->git_operation.empty()) {
@@ -4017,6 +4382,76 @@ VNodePtr UiApp::build_side_panel() {
         body.add(op);
       }
 
+      // --- view switch: changes / history / branches ---
+      // One tab, three views: all three answer "what is the state of this
+      // repository", and three side-panel tabs for that would bury the file list.
+      {
+        H views = el("div", "git-views");
+        const char* labels[3] = {"改动", "历史", "分支"};
+        const char* keys[3] = {"changes", "log", "branches"};
+        for (int k = 0; k < 3; ++k) {
+          std::string key = keys[k];
+          bool active = panel->git_view == key ||
+                        (k == 0 && panel->git_view != "log" && panel->git_view != "branches");
+          H b = el("button", active ? "git-view-btn active" : "git-view-btn");
+          b.attr("type", "button");
+          b.text(tr(labels[k]));
+          b.on(EventKind::kClick, [this, panel_id, key](const std::string&) {
+            update([&](AppState& s) {
+              for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+                if (s.side_tabs[i].id == panel_id) s.side_tabs[i].git_view = key;
+              }
+            });
+            if (key == "log") load_git_log(panel_id);
+            if (key == "branches") load_git_branches(panel_id);
+          });
+          views.add(b);
+        }
+        body.add(views);
+      }
+
+      const bool view_changes = panel->git_view != "log" && panel->git_view != "branches";
+      if (panel->git_view == "log") {
+        if (!panel->git_log_loaded) {
+          body.add(comp::empty_state(tr("读取提交历史…"), "", nullptr));
+          load_git_log(panel_id);
+        } else if (panel->git_commits.empty()) {
+          body.add(comp::empty_state(tr("还没有提交。"), "", nullptr));
+        } else {
+          H list = el("div", "git-log");
+          for (size_t i = 0; i < panel->git_commits.size(); ++i) {
+            const SideTab::GitCommit& c = panel->git_commits[i];
+            H row = el("div", "git-log-row");
+            row.add(el("span", "git-hash").text(c.short_hash));
+            row.add(el("span", "git-subject").text(c.subject));
+            row.add(el("span", "grow"));
+            row.add(el("span", "git-log-meta dim").text(
+                c.author + (c.time > 0 ? (" · " + rel_time(c.time)) : "")));
+            list.add(row);
+          }
+          body.add(list);
+        }
+      } else if (panel->git_view == "branches") {
+        if (!panel->git_branches_loaded) {
+          body.add(comp::empty_state(tr("读取分支…"), "", nullptr));
+          load_git_branches(panel_id);
+        } else if (panel->git_branch_rows.empty()) {
+          body.add(comp::empty_state(tr("没有分支。"), "", nullptr));
+        } else {
+          H list = el("div", "git-branches");
+          for (size_t i = 0; i < panel->git_branch_rows.size(); ++i) {
+            const SideTab::GitBranch& b = panel->git_branch_rows[i];
+            H row = el("div", b.current ? "git-branch-row current" : "git-branch-row");
+            row.add(el("span", "git-branch-mark").text(b.current ? "\u2713" : ""));
+            row.add(el("span", "git-branch-name").text(b.name));
+            list.add(row);
+          }
+          // Switching branches changes files under the user's feet, so it is
+          // deliberately not a click on this list; the CLI is one command away.
+          body.add(comp::hint(tr("切换分支请在终端执行 git switch。")));
+          body.add(list);
+        }
+      } else {
       // --- changed files: staged group first, then unstaged ---
       // A single list with per-row checkboxes was the alternative; two groups
       // are clearer because "what a commit would record" is the question this
@@ -4104,17 +4539,51 @@ VNodePtr UiApp::build_side_panel() {
         dh.add(el("span", "grow"));
         dh.add(el("span", "git-diff-side dim").text(
             panel->git_diff_staged ? tr("已暂存") : tr("工作区")));
+        // "Before" view: the committed content of the same file. A diff tells
+        // you what changed; reading a change often needs the whole old version.
+        {
+          std::string p = panel->git_diff_path;
+          bool showing = panel->git_show_head;
+          dh.add(comp::icon_button(showing ? "\u25c0" : "\u2261",
+                                   showing ? tr("只看改动") : tr("对照 HEAD"),
+                                   [this, panel_id, p, showing](const std::string&) {
+            if (showing) {
+              update([&](AppState& s) {
+                for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+                  if (s.side_tabs[i].id == panel_id) {
+                    s.side_tabs[i].git_show_head = false;
+                    s.side_tabs[i].git_head_text.clear();
+                  }
+                }
+              });
+              return;
+            }
+            load_git_head(panel_id, p);
+          }));
+        }
         dh.add(comp::icon_button("\u2715", tr("关闭"), [this, panel_id](const std::string&) {
           update([&](AppState& s) {
             for (size_t i = 0; i < s.side_tabs.size(); ++i) {
               if (s.side_tabs[i].id == panel_id) {
                 s.side_tabs[i].git_diff_path.clear();
                 s.side_tabs[i].git_diff_text.clear();
+                s.side_tabs[i].git_show_head = false;
+                s.side_tabs[i].git_head_text.clear();
               }
             }
           });
         }));
         body.add(dh);
+        if (panel->git_show_head) {
+          if (!panel->git_head_exists) {
+            body.add(comp::hint(tr("HEAD 里没有这个文件（新增文件）。")));
+          } else {
+            H pre = el("pre", "git-head-pre");
+            pre.html(highlight::to_html_cached(
+                panel->git_head_text, highlight::lang_for_path(panel->git_diff_path)));
+            body.add(pre);
+          }
+        }
         if (!panel->git_diff_error.empty()) {
           body.add(comp::hint(tr("无法读取 diff：") + panel->git_diff_error));
         } else if (panel->git_diff_text.empty()) {
@@ -4161,6 +4630,109 @@ VNodePtr UiApp::build_side_panel() {
         }, "primary"));
         cbox.add(acts);
         body.add(cbox);
+      }
+      }  // end of the "changes" view
+    }
+  } else if (kind == "workflow") {
+    // ---- workflows: definitions you can start, runs in progress ----
+    if (!st_.workflow_defs_loaded) {
+      body.add(comp::empty_state(tr("读取工作流…"), "", nullptr));
+      load_workflows(active_sid());
+    } else {
+      if (st_.workflow_runs.empty()) {
+        body.add(comp::hint(tr("这个会话还没有运行中的工作流。")));
+      }
+      for (size_t i = 0; i < st_.workflow_runs.size(); ++i) {
+        AppState::WorkflowRunRow run = st_.workflow_runs[i];
+        H card = el("div", "wf-run");
+        H head = el("div", "wf-run-head");
+        std::string state_cls = run.state == "done" ? "ok"
+                                : run.state == "failed" ? "err"
+                                                        : "run";
+        head.add(el("span", "wf-dot " + state_cls));
+        head.add(el("span", "wf-run-name").text(run.name));
+        head.add(el("span", "grow"));
+        head.add(el("span", "wf-state dim").text(run.state));
+        card.add(head);
+        for (size_t k = 0; k < run.steps.size(); ++k) {
+          const AppState::WorkflowStepRow& st = run.steps[k];
+          H row = el("div", "wf-step " + st.state);
+          row.add(el("span", "wf-step-state").text(
+              st.state == "done" ? "\u2713" : st.state == "failed" ? "\u2717"
+                                    : st.state == "running" ? "\u25cf" : "\u25cb"));
+          row.add(el("span", "wf-step-name").text(st.name));
+          if (st.attempts > 0) {
+            row.add(el("span", "wf-attempts dim").text(
+                tr("第 ") + itos(st.attempts) + tr(" 次")));
+          }
+          if (!st.error.empty()) row.add(el("span", "wf-error dim").text(st.error));
+          H acts = el("div", "wf-step-acts");
+          if (st.state == "failed") {
+            std::string run_id = run.id, step_id = st.id;
+            acts.add(comp::icon_button("\u21bb", tr("重试"), [this, run_id, step_id](const std::string&) {
+              call_async("workflow.retryStep", Json{{"runId", run_id}, {"stepId", step_id}},
+                         [this](const BackendResult& r) {
+                if (!r.ok) toast(tr("重试失败：") + r.message);
+                load_workflows(active_sid());
+              });
+            }));
+            acts.add(comp::icon_button("\u21b7", tr("跳过"), [this, run_id, step_id](const std::string&) {
+              call_async("workflow.skipStep", Json{{"runId", run_id}, {"stepId", step_id}},
+                         [this](const BackendResult& r) {
+                if (!r.ok) toast(tr("跳过失败：") + r.message);
+                load_workflows(active_sid());
+              });
+            }));
+          }
+          if (st.state == "running") {
+            std::string run_id = run.id, step_id = st.id;
+            acts.add(comp::icon_button("comment-dots", tr("引导"), [this, run_id, step_id](const std::string&) {
+              call_async("workflow.steer", Json{{"runId", run_id}, {"stepId", step_id},
+                                                {"text", "继续"}},
+                         [this](const BackendResult& r) {
+                toast(r.ok ? tr("已发送引导") : (tr("引导失败：") + r.message));
+              });
+            }));
+          }
+          row.add(acts);
+          card.add(row);
+        }
+        body.add(card);
+      }
+
+      if (!st_.workflow_defs.empty()) {
+        body.add(comp::section_title(tr("可启动的工作流")));
+        for (size_t i = 0; i < st_.workflow_defs.size(); ++i) {
+          const AppState::WorkflowDefRow& d = st_.workflow_defs[i];
+          H row = el("div", "wf-def");
+          row.add(el("span", "wf-def-name").text(d.name));
+          row.add(el("span", "wf-def-steps dim").text(
+              itos(d.steps) + tr(" 步")));
+          row.add(el("span", "grow"));
+          std::string name = d.name;
+          row.add(comp::button(tr("启动"), [this, name](const std::string&) {
+            std::string sid = active_sid();
+            if (sid.empty()) {
+              toast(tr("先打开一个会话"));
+              return;
+            }
+            call_async("workflow.start", Json{{"sid", sid}, {"name", name}},
+                       [this](const BackendResult& r) {
+              if (!r.ok) {
+                toast(tr("启动失败：") + r.message);
+                return;
+              }
+              toast(tr("已启动"));
+              load_workflows(active_sid());
+            });
+          }, "primary"));
+          if (!d.description.empty()) {
+            row.attr("title", d.description);
+          }
+          body.add(row);
+        }
+      } else {
+        body.add(comp::empty_state(tr("还没有工作流定义。"), "", nullptr));
       }
     }
   } else if (kind == "ops") {
@@ -4496,6 +5068,24 @@ VNodePtr UiApp::build_terminal_drawer() {
         });
       });
     }));
+    // Encoding: a Windows shell emitting GBK is mojibake under UTF-8 decoding.
+    // terminal.show carries the current value, so the control reflects reality
+    // instead of remembering what was last clicked.
+    tb.add(comp::icon_button("language", tr("编码"),
+                             [this, tid](const std::string&) {
+      call_async("terminal.show", Json{{"tid", tid}},
+                 [this, tid](const BackendResult& r) {
+        std::string cur = r.ok ? jsonutil::get<std::string>(r.data, "encoding", "") : "";
+        // Cycle system-default -> UTF-8 -> GBK. A select inside a tab strip is
+        // not usable; three states are cheap to cycle.
+        std::string next = cur.empty() ? "UTF-8" : (cur == "UTF-8" ? "GBK" : "");
+        call_async("terminal.setEncoding", Json{{"tid", tid}, {"enc", next}},
+                   [this, next](const BackendResult& r2) {
+          toast(r2.ok ? (tr("编码：") + (next.empty() ? tr("系统默认") : next))
+                      : (tr("设置失败：") + r2.message));
+        });
+      });
+    }));
     side.add(tb);
   }
   // 新增: one click. The shell comes from settings (that is what "a terminal"
@@ -4628,6 +5218,14 @@ void UiApp::apply_settings(const Json& values) {
     st_.settings_values = values;
   }
   apply_saved_tab_order();
+  // Project-level "ignore global settings" is a property of the DUMP, not a
+  // global key: store it where the files page reads it so the toggle reflects
+  // the real state instead of always starting unchecked.
+  if (values.is_object() && values.contains("ignoreGlobal") &&
+      values["ignoreGlobal"].is_boolean()) {
+    st_.settings_values["settings.ignoreGlobal"] =
+        Json{{"value", values["ignoreGlobal"].get<bool>()}};
+  }
   // thinking language is host-side too
   std::string lang = sv_str(st_.settings_values, "model.thinkingLang", "");
   if (!lang.empty()) st_.thinking_lang = lang;
@@ -4808,6 +5406,98 @@ void UiApp::run_command(const AppState::CommandRow& cmd) {
   });
 }
 
+// A per-turn action from the message menu.
+//
+// "fork" branches the conversation at this turn (the new session keeps the turns
+// up to and including it); "rollback" reverts the files this turn and every
+// later turn touched and truncates the history there - destructive, so it asks
+// first; "forget" only marks the turn as not-for-context, which is reversible
+// informationally and needs no confirmation.
+void UiApp::turn_action(size_t message_index, const std::string& action) {
+  if (message_index >= st_.messages.size()) return;
+  const std::string turn_id = st_.messages[message_index].turn_id;
+  const std::string sid = st_.active_tab;
+  if (sid.empty() || sid == "home") return;
+  if (turn_id.empty()) {
+    toast(tr("这一轮没有可用的轮次 id"));
+    return;
+  }
+  if (action == "fork") {
+    fork_from_turn(sid, turn_id);
+    return;
+  }
+  if (action == "forget") {
+    forget_turn(sid, turn_id);
+    return;
+  }
+  if (action == "rollback") {
+    st_.confirm_kind = "rollback";
+    st_.confirm_id = sid;
+    st_.confirm_arg = turn_id;
+    st_.confirm_text = tr("回滚到这一轮？此轮及之后的文件改动会被撤销，历史也会被截断。");
+    render();
+    return;
+  }
+}
+
+void UiApp::fork_from_turn(const std::string& sid, const std::string& turn_id) {
+  call_async("session.fork", Json{{"sid", sid}, {"turnId", turn_id}},
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("分叉失败：") + r.message);
+      return;
+    }
+    std::string new_sid = jsonutil::get<std::string>(r.data, "sid", "");
+    if (new_sid.empty()) {
+      toast(tr("分叉失败：后端没有返回新会话"));
+      return;
+    }
+    // Open the branch immediately: forking and then having to find it in the
+    // project list would be a strange way to continue a train of thought.
+    open_session(new_sid, tr("分叉会话"));
+    for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
+  });
+}
+
+void UiApp::rollback_to_turn(const std::string& sid, const std::string& turn_id) {
+  call_async("session.rollback", Json{{"sid", sid}, {"turnId", turn_id}},
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("回滚失败：") + r.message);
+      return;
+    }
+    toast(tr("已回滚"));
+    // The transcript on disk changed; reload it rather than patching locally.
+    load_session(sid);
+  });
+}
+
+void UiApp::forget_turn(const std::string& sid, const std::string& turn_id) {
+  call_async("session.forget", Json{{"sid", sid}, {"scope", turn_id}},
+             [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("忘记失败：") + r.message);
+      return;
+    }
+    toast(tr("已忘记这一轮（不再进入上下文）"));
+  });
+}
+
+void UiApp::refresh_loop_state(const std::string& sid) {
+  if (sid.empty()) return;
+  call_async("session.loopState", Json{{"sid", sid}},
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    std::string state = jsonutil::get<std::string>(r.data, "state", "idle");
+    bool suspended = state == "suspended";
+    if (st_.active_tab != sid) {
+      views_.get_or_create(sid).suspended = suspended;
+      return;
+    }
+    update([&](AppState& s) { s.suspended = suspended; });
+  });
+}
+
 void UiApp::load_preset_agents() {
   call_async("subagent.presets", Json::object(), [this](const BackendResult& r) {
     std::vector<AppState::PresetRow> rows;
@@ -4852,6 +5542,8 @@ void UiApp::load_skills() {
             row.dir = jsonutil::get<std::string>(s, "dir", "");
             row.loadable = jsonutil::get<bool>(s, "loadable", true);
             row.kind = jsonutil::get<std::string>(s, "kind", "skill");
+            row.enabled = jsonutil::get<bool>(s, "enabled", true);
+            row.user = jsonutil::get<bool>(s, "user", false);
           }
           if (!row.name.empty()) rows.push_back(row);
         }
@@ -5515,6 +6207,9 @@ VNodePtr UiApp::build_settings() {
       std::string l = langs[idx < 0 || idx > 2 ? 0 : idx];
       update([&](AppState& s) { s.thinking_lang = l; });
       set_setting("model.thinkingLang", l);
+      // The backend caches the language for skill/MCP descriptions. Writing the
+      // setting alone left it at the old value until the next restart.
+      call_async("thinking.setLang", Json{{"lang", l.empty() ? "auto" : l}});
     }), tr("影响工具/skill 说明的双语选择")));
 
     body.add(comp::section_title(tr("压缩")));
@@ -5552,8 +6247,21 @@ VNodePtr UiApp::build_settings() {
         if (!r.ok) return;
         std::string path = jsonutil::get<std::string>(r.data, "path", "");
         if (path.empty()) return;
-        update([&](AppState& s) { s.mcp_new_dir = path; });
-        add_mcp();
+        // mcp.import reads a directory of MCP packages; it is the bulk form of
+        // add_mcp and does not need the per-entry dialog.
+        call_async("mcp.import", Json{{"dir", path}},
+                   [this](const BackendResult& r2) {
+          if (!r2.ok) {
+            toast(tr("导入失败：") + r2.message);
+            return;
+          }
+          int n = static_cast<int>(jsonutil::get_int(r2.data, "added", 0));
+          // mcp.import reports the whole registry rather than a count; say what
+          // happened without inventing a number the backend did not send.
+          if (n > 0) toast(tr("已导入 ") + itos(n) + tr(" 个 MCP"));
+          else toast(tr("已导入"));
+          load_mcp_tools();
+        });
       });
     }, "ghost"));
     body.add(head);
@@ -5638,6 +6346,17 @@ VNodePtr UiApp::build_settings() {
     // Skills are the ONLY "/命令" the user can type themselves (MCP commands and
     // subagents are model-invoked only), so this page is about what you can call.
     H head = el("div", "settings-actions");
+    head.add(comp::button(tr("新建"), [this](const std::string&) {
+      // A user skill is just a name + title + body; the body is what the model
+      // receives when it loads it. Creating one here avoids hand-editing a
+      // markdown file for what is often a two-line instruction.
+      update([&](AppState& s) {
+        s.skill_new_name.clear();
+        s.skill_new_title.clear();
+        s.skill_new_body.clear();
+        s.skill_creating = true;
+      });
+    }, "ghost"));
     head.add(comp::button(tr("自动探测"), [this](const std::string&) { detect_mcp(); },
                           "primary"));
     head.add(comp::button(tr("手动导入"), [this](const std::string&) {
@@ -5650,6 +6369,46 @@ VNodePtr UiApp::build_settings() {
       });
     }, "ghost"));
     body.add(head);
+    if (st_.skill_creating) {
+      H form = el("div", "mcp-card");
+      form.add(comp::field(tr("名称"), comp::text_input(
+          st_.skill_new_name, "my-skill", [this](const std::string& v) {
+        st_.skill_new_name = v;  // no re-render while typing
+      }), tr("用小写字母和连字符；调用时写 /名称")));
+      form.add(comp::field(tr("标题"), comp::text_input(
+          st_.skill_new_title, tr("显示名称"), [this](const std::string& v) {
+        st_.skill_new_title = v;
+      })));
+      form.add(comp::field(tr("内容"), comp::textarea(
+          st_.skill_new_body, tr("这个 skill 给模型的说明…"),
+          [this](const std::string& v) { st_.skill_new_body = v; },
+          nullptr)));
+      H acts = el("div", "settings-actions");
+      acts.add(comp::button(tr("创建"), [this](const std::string&) {
+        if (st_.skill_new_name.empty()) {
+          toast(tr("名称不能为空"));
+          return;
+        }
+        call_async("skill.create",
+                   Json{{"name", st_.skill_new_name},
+                        {"title", st_.skill_new_title},
+                        {"description", st_.skill_new_body.substr(0, 120)},
+                        {"body", st_.skill_new_body}},
+                   [this](const BackendResult& r) {
+          if (!r.ok) {
+            toast(tr("创建失败：") + r.message);
+            return;
+          }
+          update([&](AppState& s) { s.skill_creating = false; });
+          load_skills();
+        });
+      }, "primary"));
+      acts.add(comp::button(tr("取消"), [this](const std::string&) {
+        update([&](AppState& s) { s.skill_creating = false; });
+      }, "ghost"));
+      form.add(acts);
+      body.add(form);
+    }
     body.add(comp::search_box(st_.skill_filter, tr("搜索 Skill"),
                               [this](const std::string& v) {
       update([&](AppState& s) { s.skill_filter = v; });
@@ -5680,6 +6439,34 @@ VNodePtr UiApp::build_settings() {
           toast(r.ok ? (tr("已加载 skill：") + name) : (tr("加载失败：") + r.message));
         });
       }));
+      // Enable/disable: a disabled skill stays visible here (you can turn it back
+      // on) but stops being offered to the model and in the / command menu.
+      {
+        bool enabled = sk.enabled;
+        top.add(comp::toggle(enabled, "", [this, name, enabled](const std::string&) {
+          call_async("skill.setEnabled", Json{{"name", name}, {"enabled", !enabled}},
+                     [this](const BackendResult& r) {
+            if (!r.ok) {
+              toast(tr("操作失败：") + r.message);
+              return;
+            }
+            load_skills();
+          });
+        }));
+      }
+      if (sk.user) {
+        top.add(comp::icon_button("trash", tr("删除"), [this, name](const std::string&) {
+          call_async("skill.remove", Json{{"name", name}},
+                     [this](const BackendResult& r) {
+            if (!r.ok) {
+              toast(tr("删除失败：") + r.message);
+              return;
+            }
+            toast(tr("已删除"));
+            load_skills();
+          });
+        }));
+      }
       card.add(top);
       card.add(el("div", "mcp-card-path").text("/" + sk.name +
                                                (sk.dir.empty() ? "" : ("  ·  " + sk.dir))));
@@ -5954,9 +6741,36 @@ VNodePtr UiApp::build_settings() {
         set_setting("session.default.autoMode", v == "auto");
       }));
     }
-    // NOTE: "Enter 行为" was removed. It was a setting with no visible effect
-    // (the composer always sends on Enter) that also contradicted the 快捷键
-    // page, which claims Enter is the send key.
+    // Enter behaviour. It used to be removed because it had no visible effect -
+    // the composer always sent on Enter, so the setting was a lie. It is back
+    // now that it IS wired: the textarea carries data-enter-send, the DOM
+    // adapter's key handler reads it, and the value is pushed to the session
+    // (session.setEnterSend) so a reload keeps it.
+    body.add(comp::section_title(tr("Enter 行为")));
+    {
+      std::vector<comp::ChoiceOption> enter;
+      comp::ChoiceOption o;
+      o.value = "enter";
+      o.icon = "arrow-right-to-bracket";
+      o.title = tr("Enter 发送");
+      o.desc = tr("Shift+Enter 换行");
+      enter.push_back(o);
+      o.value = "ctrlEnter";
+      o.icon = "keyboard";
+      o.title = tr("Ctrl+Enter 发送");
+      o.desc = tr("Enter 直接换行，适合多行输入");
+      enter.push_back(o);
+      std::string cur = sv_str(st_.settings_values, "session.default.enterSend", "enter");
+      body.add(comp::choice_list(enter, cur == "ctrlEnter" ? "ctrlEnter" : "enter",
+                                 [this](const std::string& v) {
+        set_setting("session.default.enterSend", v);
+        std::string sid = active_sid();
+        update([&](AppState& s) { s.enter_send = v; });
+        if (!sid.empty()) {
+          call_async("session.setEnterSend", Json{{"sid", sid}, {"enterSend", v}});
+        }
+      }));
+    }
   } else if (sec == "network") {
     body.add(comp::section_title(tr("网络")));
     body.add(comp::field(tr("网络总开关"), comp::toggle(
@@ -6080,7 +6894,37 @@ VNodePtr UiApp::build_settings() {
       call_async("settings.set", Json{{"key", "permissions.files.whitelist"}, {"value", wlist}},
                  [this](const BackendResult& r) { toast(r.ok ? "已保存名单" : "保存失败"); });
     }, "primary"));
+    // "Reset to defaults" is the counterpart of every setting on this page: a
+    // value you cannot unset is a value you are stuck with (and the project-level
+    // ignore flag makes the global value invisible, not gone).
+    fsave.add(comp::button(tr("恢复默认"), [this](const std::string&) {
+      const char* keys[] = {"permissions.files.blacklist",
+                            "permissions.files.whitelist",
+                            "permissions.files.autoGitInit"};
+      for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        call_async("settings.unset", Json{{"key", keys[i]}});
+      }
+      update([&](AppState& s) {
+        s.file_blacklist_text.clear();
+        s.file_whitelist_text.clear();
+      });
+      toast(tr("已恢复默认"));
+    }, "ghost"));
     body.add(fsave);
+    if (!st_.active_pid.empty()) {
+      bool ignore = sv_bool(st_.settings_values, "settings.ignoreGlobal", false);
+      body.add(comp::field(tr("忽略全局设置"), comp::toggle(ignore, "", [this](const std::string&) {
+        bool cur = sv_bool(st_.settings_values, "settings.ignoreGlobal", false);
+        std::string pid = st_.active_pid;
+        update([&](AppState& s) {
+          s.settings_values["settings.ignoreGlobal"] = Json{{"value", !cur}};
+        });
+        call_async("settings.setIgnoreGlobal", Json{{"pid", pid}, {"ignore", !cur}},
+                   [this](const BackendResult& r) {
+          toast(r.ok ? tr("已更新") : (tr("更新失败：") + r.message));
+        });
+      }), tr("本项目只使用项目级设置，忽略全局设置")));
+    }
   } else if (sec == "environment") {
     // --- 环境 ---
     // 只有一张表：CLI 工具路径。原来还有一张"环境变量（PATH 追加）"，但它和
@@ -6287,24 +7131,39 @@ VNodePtr UiApp::build_overlays() {
   }
   // Generic confirm modal (destructive actions). Its own branch so a session
   // delete and a permission prompt can never be confused for each other.
+  //
+  // The OK label and the action both come from `confirm_kind`: rollback needs to
+  // read as "回滚" rather than "删除", and running the WRONG action because the
+  // label was generic is exactly the kind of thing a confirmation is supposed to
+  // prevent. `confirm_arg` carries the second value (a turnId, a permission
+  // level) since several of these need more than an id.
   if (!st_.confirm_kind.empty()) {
-    std::vector<H> body;
-    body.push_back(el("div").text(st_.confirm_text));
     std::string kind = st_.confirm_kind;
     std::string id = st_.confirm_id;
-    layer.add(comp::modal(tr("请确认"), body, tr("删除"),
-                          [this, kind, id](const std::string&) {
+    std::string arg = st_.confirm_arg;
+    std::string ok_label = tr("删除");
+    if (kind == "rollback") ok_label = tr("回滚");
+    else if (kind == "discard-turn") ok_label = tr("撤销");
+    else if (kind == "forget") ok_label = tr("忘记");
+    std::vector<H> body;
+    body.push_back(el("div").text(st_.confirm_text));
+    layer.add(comp::modal(tr("请确认"), body, ok_label,
+                          [this, kind, id, arg](const std::string&) {
       update([&](AppState& s) {
         s.confirm_kind.clear();
         s.confirm_id.clear();
+        s.confirm_arg.clear();
         s.confirm_text.clear();
       });
       if (kind == "session") delete_session(id);
+      else if (kind == "rollback") rollback_to_turn(id, arg);
+      else if (kind == "forget") forget_turn(id, arg);
     },
                           [this](const std::string&) {
       update([&](AppState& s) {
         s.confirm_kind.clear();
         s.confirm_id.clear();
+        s.confirm_arg.clear();
         s.confirm_text.clear();
       });
     }));
@@ -7075,7 +7934,12 @@ void UiApp::open_model_picker(const std::string& owner, const std::string& targe
 
 void UiApp::load_picker_models(const std::string& provider_id) {
   if (provider_id.empty()) return;
-  call_async("model.list", Json{{"providerId", provider_id}},
+  // model.allEnabled returns every enabled model across ALL providers, with the
+  // provider attached. The picker filters by provider in memory, so one request
+  // covers the whole popup (switching providers costs nothing) and the list is
+  // exactly what the session may use - the same source the backend resolves
+  // against, instead of a per-provider view that could disagree.
+  call_async("model.allEnabled", Json::object(),
              [this, provider_id](const BackendResult& r) {
     if (!r.ok) {
       update([&](AppState& s) { s.model_picker_status = "加载失败：" + r.message; });
@@ -7087,6 +7951,7 @@ void UiApp::load_picker_models(const std::string& provider_id) {
       for (size_t i = 0; i < arr.size(); ++i) {
         AppState::ModelRow row;
         parse_model_row(arr[i], &row);
+        row.provider = jsonutil::get<std::string>(arr[i], "providerId", "");
         if (!row.id.empty() && row.enabled) rows.push_back(row);
       }
     }
@@ -7113,7 +7978,16 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
     // the session's model
     update([&](AppState& s) { s.model = model_id; });
     if (!sid.empty()) {
-      call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}});
+      call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}},
+                 [this, sid](const BackendResult&) {
+        // The provider runtime caches per-session config (model, thinking,
+        // retry counters). Changing the model without refreshing it means the
+        // next turn can still be routed with the old one.
+        call_async("session.refreshConfig", Json{{"sid", sid}});
+        // The context window follows the model, so the water level must be
+        // recomputed (the old percentage belongs to the old window).
+        load_session_usage(sid);
+      });
     }
     toast(tr("已切换到 ") + model_id);
     return;
@@ -7220,6 +8094,12 @@ H UiApp::build_model_picker(const std::string& owner, const std::string& current
   std::vector<const AppState::ModelRow*> vis;
   for (size_t i = 0; i < st_.model_picker_models.size(); ++i) {
     const AppState::ModelRow& m = st_.model_picker_models[i];
+    // The list holds every enabled model; the left column selects which
+    // provider's models are shown.
+    if (!m.provider.empty() && !st_.model_picker_provider.empty() &&
+        m.provider != st_.model_picker_provider) {
+      continue;
+    }
     if (!st_.model_picker_query.empty()) {
       std::string ql = lower_ascii(st_.model_picker_query);
       if (lower_ascii(m.id + " " + m.display).find(ql) == std::string::npos) continue;
@@ -7265,7 +8145,9 @@ H UiApp::build_model_picker(const std::string& owner, const std::string& current
       H row = el("div", cur ? "mp-model active" : "mp-model");
       row.key("mpm-" + m.id);
       std::string mid = m.id;
-      std::string ppid = st_.model_picker_provider;
+      // The row carries its own provider (the list is cross-provider), which is
+      // also what the backend needs to resolve the model's capabilities.
+      std::string ppid = m.provider.empty() ? st_.model_picker_provider : m.provider;
       row.on(EventKind::kClick, [this, ppid, mid](const std::string&) {
         pick_model(ppid, mid);
       });
@@ -8000,6 +8882,7 @@ void UiApp::load_side_tab(const std::string& id) {
   if (kind == "subagents") load_subagents(active_sid());
   if (kind == "files" && !st_.active_pid.empty()) load_files(id, st_.active_pid, path);
   if (kind == "git" && !st_.active_pid.empty()) load_git(id);
+  if (kind == "workflow") load_workflows(active_sid());
   if (kind == "usage") load_session_usage(active_sid());
 }
 // 侧栏标签拖拽排序：把 from 移到 to 的位置（其余保持相对顺序）。

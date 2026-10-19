@@ -139,12 +139,17 @@ struct ChatMsg {
   // key would shift every message and rebuild the whole transcript on every
   // page load). 0 = fall back to the position.
   int64_t uid = 0;
+  // The stored turn's id. fork / rollback / forget all address a turn by this,
+  // so it must survive the trip from disk to the message menu.
+  std::string turn_id;
 };
 
 // One chat message. user -> right bubble; assistant -> article, no bubble;
 // system -> centered dim line. Actions appear on hover (CSS).
+// `on_turn_action` receives "fork" | "rollback" | "forget" for THIS turn; it is
+// how a message becomes a navigation point ("branch from here").
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
-               EventFn on_think_toggle = nullptr);
+               EventFn on_think_toggle = nullptr, EventFn on_turn_action = nullptr);
 
 // Stable identity for one rendered message: a keyed VNode is what lets the
 // framework match (and therefore skip) a subtree across renders. `uid` must be

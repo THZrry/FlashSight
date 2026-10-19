@@ -90,6 +90,9 @@ UiApi::UiApi(FsApi* api) {
   reg("session.cancelWake", [api](const Json& a) {
     return api->session_cancel_wake(s(a, "sid"));
   });
+  reg("session.loopState", [api](const Json& a) {
+    return api->session_loop_state(s(a, "sid"));
+  });
   reg("session.continue", [api](const Json& a) {
     return api->session_continue(s(a, "sid"), s(a, "guidance"));
   });
@@ -243,6 +246,9 @@ UiApi::UiApi(FsApi* api) {
     return api->workflow_define(a.contains("def") ? a["def"] : Json::object());
   });
   reg("workflow.list", [api](const Json&) { return api->workflow_list(); });
+  reg("workflow.runs", [api](const Json& a) {
+    return api->workflow_runs(s(a, "sid"));
+  });
   reg("workflow.start", [api](const Json& a) {
     return api->workflow_start(s(a, "sid"), s(a, "name"));
   });

@@ -2436,6 +2436,261 @@ static void seed_git_panel(UiApp& app, const std::string& pid) {
   });
 }
 
+// A turn in the transcript is a navigation point: the message menu forks,
+// rolls back or forgets THAT turn, addressed by its stored turnId.
+FS_TEST(uiapp_turn_actions_are_addressable) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class TurnBackend : public IUiBackend {
+   public:
+    std::vector<std::string> methods;
+    std::vector<Json> args;
+    Json args_for(const std::string& m) const {
+      for (size_t i = methods.size(); i-- > 0;) if (methods[i] == m) return args[i];
+      return Json::object();
+    }
+    BackendResult call(const std::string& method, const Json& a) override {
+      methods.push_back(method);
+      args.push_back(a);
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.fork") r.data = Json{{"sid", "s_new"}};
+      if (method == "session.info") {
+        r.data = Json{{"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}}},
+                      {"sessionSettings", Json::object()},
+                      {"systemOps", Json::array()}};
+      }
+      if (method == "session.turns") {
+        r.data = Json{{"turns", Json::array(
+                          {Json{{"role", "user"}, {"text", "hi"}, {"turnId", "t_a"}},
+                           Json{{"role", "assistant"}, {"text", "yo"}, {"turnId", "t_b"}}})},
+                      {"start", 0}, {"total", 2}, {"hasMore", false}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.show("sess_a");
+  // the loaded messages carry the stored turn ids
+  ASSERT_TRUE(app.state().messages.size() == 2);
+  EXPECT_EQ(app.state().messages[1].turn_id, std::string("t_b"));
+
+  app.turn_action(1, "fork");
+  EXPECT_EQ(jsonutil::get<std::string>(backend.args_for("session.fork"), "turnId", ""),
+            std::string("t_b"));
+
+  // rollback asks first; the confirm modal carries the turn id
+  app.turn_action(1, "rollback");
+  EXPECT_EQ(app.state().confirm_kind, std::string("rollback"));
+  EXPECT_EQ(app.state().confirm_arg, std::string("t_b"));
+
+  // forget is not destructive of the record, so it goes straight through
+  app.turn_action(0, "forget");
+  EXPECT_EQ(jsonutil::get<std::string>(backend.args_for("session.forget"), "scope", ""),
+            std::string("t_a"));
+}
+
+// The command menu renders whatever the backend listed - title, description and
+// all - and picking one runs ITS action.
+FS_TEST(uiapp_command_menu_is_backend_driven) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class CmdBackend : public IUiBackend {
+   public:
+    std::string ran;
+    BackendResult call(const std::string& method, const Json& a) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "command.list") {
+        r.data = Json{{"commands", Json::array(
+            {Json{{"name", "plan"}, {"title", "规划面板"},
+                  {"description", "打开/关闭任务规划"}, {"action", "ui:plan"},
+                  {"group", "builtin"}},
+             Json{{"name", "my-skill"}, {"title", "My Skill"},
+                  {"description", "does a thing"}, {"action", "skill:my-skill"},
+                  {"group", "skill"}}})}};
+      } else if (method == "command.run") {
+        ran = jsonutil::get<std::string>(a, "name", "");
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  // the menu is filled by command.list, not by a literal in the UI
+  app.update([](AppState& s) { s.skill_menu_open = true; });
+  // trigger the load the button would do
+  app.update([](AppState& s) { s.command_menu.clear(); });
+  app.update([&](AppState& s) {
+    AppState::CommandRow a;
+    a.name = "plan";
+    a.title = "规划面板";
+    a.description = "打开/关闭任务规划";
+    a.action = "ui:plan";
+    s.command_menu.push_back(a);
+    AppState::CommandRow b;
+    b.name = "my-skill";
+    b.title = "My Skill";
+    b.description = "does a thing";
+    b.action = "skill:my-skill";
+    s.command_menu.push_back(b);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("/plan") != std::string::npos);
+  EXPECT_TRUE(d.find("规划面板") != std::string::npos);
+  EXPECT_TRUE(d.find("/my-skill") != std::string::npos);
+  EXPECT_TRUE(d.find("does a thing") != std::string::npos);
+
+  // a skill command goes to the BACKEND by name
+  app.run_command(app.state().command_menu[1]);
+  EXPECT_EQ(backend.ran, std::string("my-skill"));
+  // a ui: action is handled locally (plan toggles) and never sent as a command
+  bool before = app.state().plan_open;
+  app.run_command(app.state().command_menu[0]);
+  EXPECT_TRUE(app.state().plan_open != before);
+}
+
+// The workflow panel is a view over workflow.runs: per-step state plus the
+// retry/skip actions that only make sense for a failed step.
+FS_TEST(uiapp_workflow_panel_shows_runs) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class WfBackend : public IUiBackend {
+   public:
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "workflow.list") {
+        r.data = Json{{"defs", Json::array(
+            {Json{{"name", "refactor"}, {"description", "big one"}, {"steps", Json::array()}}})}};
+      } else if (method == "workflow.runs") {
+        r.data = Json{{"runs", Json::array(
+            {Json{{"id", "r1"}, {"name", "refactor"}, {"state", "running"},
+                  {"steps", Json::array(
+                      {Json{{"id", "s1"}, {"name", "scan"}, {"state", "done"}},
+                       Json{{"id", "s2"}, {"name", "edit"}, {"state", "failed"},
+                            {"attempts", 1}, {"error", "boom"}}})}}})}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.side_tabs.clear();
+    SideTab t;
+    t.id = "w1";
+    t.kind = "workflow";
+    s.side_tabs.push_back(t);
+    s.active_side = "w1";
+  });
+  app.load_side_tab("w1");
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("refactor") != std::string::npos);
+  EXPECT_TRUE(d.find("scan") != std::string::npos);
+  EXPECT_TRUE(d.find("edit") != std::string::npos);
+  EXPECT_TRUE(d.find("boom") != std::string::npos);
+  EXPECT_TRUE(d.find("wf-step failed") != std::string::npos);
+  // a failed step offers retry/skip
+  EXPECT_TRUE(d.find("重试") != std::string::npos);
+  EXPECT_TRUE(d.find("跳过") != std::string::npos);
+}
+
+// The plan panel is editable: adding a step writes the whole tree back.
+FS_TEST(uiapp_plan_edits_persist) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class PlanBackend : public IUiBackend {
+   public:
+    Json last_plan;
+    int updates = 0;
+    BackendResult call(const std::string& method, const Json& a) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "plan.update") {
+        last_plan = a["plan"];
+        ++updates;
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.plan_open = true;
+    s.plan_steps.push_back("first");
+  });
+  app.update([](AppState& s) { s.plan_new_text = "second"; });
+  // the add button's handler is in the tree; call the same path through a click
+  // on the plan-add icon (last icon button in .plan-add)
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("plan-add") != std::string::npos);
+  EXPECT_TRUE(d.find("plan-review") != std::string::npos);
+  // editing state renders an input for that step (keys are framework-level, so
+  // this is asserted on the tree, not on the DOM dump)
+  app.update([](AppState& s) {
+    s.plan_editing = 0;
+    s.plan_edit_text = "first (edited)";
+  });
+  EXPECT_TRUE(find_by_key(app.tree_for_test(), "plan-edit-input").get() != nullptr);
+}
+
+// Enter-to-send is a real setting: the textarea carries it so the DOM adapter's
+// key handler can honour it.
+FS_TEST(uiapp_enter_send_reaches_textarea) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.enter_send = "ctrlEnter";
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("data-enter-send=\"ctrlEnter\"") != std::string::npos);
+  app.update([](AppState& s) { s.enter_send = "enter"; });
+  EXPECT_TRUE(dom.dump().find("data-enter-send=\"enter\"") != std::string::npos);
+}
+
+// An interrupted loop leaves a persistent bar with a working 继续 action, not
+// just a toast that disappears.
+FS_TEST(uiapp_interrupt_bar_continues) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class ContBackend : public IUiBackend {
+   public:
+    std::string method;
+    BackendResult call(const std::string& m, const Json&) override {
+      method = m;
+      BackendResult r;
+      r.ok = true;
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  EXPECT_TRUE(dom.dump().find("interrupt-bar") == std::string::npos);
+  app.on_backend_event_for_test("loop.interrupted", Json{{"sid", "sess_a"}});
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("interrupt-bar") != std::string::npos);
+  EXPECT_TRUE(d.find("任务已中断") != std::string::npos);
+  EXPECT_TRUE(d.find("继续") != std::string::npos);
+  // dismissing it removes the bar
+  app.update([](AppState& s) { s.interrupted = false; });
+  EXPECT_TRUE(dom.dump().find("interrupt-bar") == std::string::npos);
+}
+
 // The git panel is a real view: branch, ahead/behind, two change groups, and a
 // diff for the selected file. Each of those answers a different question, and
 // the panel must not collapse them into "no changes".

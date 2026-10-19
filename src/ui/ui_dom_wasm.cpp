@@ -60,11 +60,21 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
-    // Enter in a textarea sends unless Shift is held; other keydowns are not
-    // forwarded at all (so plain Enter-to-send still allows newlines).
+    // Enter behaviour is a PER-ELEMENT choice, not a global constant: the
+    // composer's "Enter 行为" setting says whether plain Enter sends or only
+    // Ctrl/Cmd+Enter does. Without reading it here the setting could never take
+    // effect (this handler is the only place the key is intercepted).
     if (name === 'keyenter') {
-      if (evt.key !== 'Enter' || evt.shiftKey) return;
-      evt.preventDefault();
+      if (evt.key !== 'Enter') return;
+      var mode = el.getAttribute && el.getAttribute('data-enter-send');
+      var ctrl = evt.ctrlKey || evt.metaKey;
+      if (mode === 'ctrlEnter') {
+        if (!ctrl) return;             // plain Enter must insert a newline
+        evt.preventDefault();
+      } else {
+        if (evt.shiftKey || ctrl) return;  // Shift/Ctrl+Enter insert newlines
+        evt.preventDefault();
+      }
     }
     var v = "";
     try {

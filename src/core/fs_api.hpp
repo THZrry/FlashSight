@@ -115,6 +115,10 @@ class FsApi {
   FsResult session_suspend(const std::string& sid);
   FsResult session_resume(const std::string& sid);
   FsResult session_cancel_wake(const std::string& sid);
+  // Live loop state for one session ("idle" | "suspended" | "planning" |
+  // "toolCalling" | "waiting" | "turnDone"). The composer's suspend button and
+  // the session status dots read this instead of guessing from local clicks.
+  FsResult session_loop_state(const std::string& sid);
   // addon2 任务健壮性：打断后续接（给原任务发引导并续跑）
   FsResult session_continue(const std::string& sid, const std::string& guidance);
   // approve 档权限门：批准/拒绝当前等待的 tool
@@ -188,6 +192,10 @@ class FsApi {
   // ----- workflow.*（addon2 长任务-工作流）-----
   FsResult workflow_define(const Json& def);
   FsResult workflow_list();
+  // Runs belonging to one session (the panel shows the live pipeline). A run is
+  // created by workflow.start; this is how the UI discovers the ones it did not
+  // start itself (another window, a resumed app).
+  FsResult workflow_runs(const std::string& sid);
   FsResult workflow_start(const std::string& sid, const std::string& name);
   FsResult workflow_get(const std::string& runId);
   FsResult workflow_retry_step(const std::string& runId, const std::string& stepId);

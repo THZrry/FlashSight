@@ -235,6 +235,13 @@ FsResult SessionManager::append_turn(const std::string& sid, const Json& turn) {
   Json t = turn;
   int64_t now = clock_ ? clock_->now_ms() : WallClock().now_ms();
   if (!t.contains("ts") || !t["ts"].is_number()) t["ts"] = now;
+  // Every turn needs a STABLE id: rollback / fork / forget all address a turn by
+  // it, and a turn without one could never be addressed at all (the previous
+  // version never wrote this field, so all three were dead on arrival).
+  if (!t.contains("turnId") || !t["turnId"].is_string() ||
+      t["turnId"].get<std::string>().empty()) {
+    t["turnId"] = "t_" + (rng_ ? rng_->hex(6) : XorShiftRandom(0).hex(6));
+  }
   if (!t.contains("startedAt")) {
     // A turn's start is the previous turn's end; the first turn of a session
     // starts now (unknown otherwise) so the duration is never negative.

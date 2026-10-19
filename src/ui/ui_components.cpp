@@ -548,7 +548,7 @@ std::string chat_message_key(const std::string& sid, int64_t uid) {
 }
 
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
-               EventFn on_think_toggle) {
+               EventFn on_think_toggle, EventFn on_turn_action) {
   H wrap = el("div", "msg " + m.role);
   if (m.role == "system") {
     wrap.add(el("div", "sys").text(m.text));
@@ -639,6 +639,25 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   cp.text(tr("复制"));
   if (on_copy) cp.on(EventKind::kClick, on_copy);
   meta.add(cp);
+  // Turn-scoped actions. They appear on hover (CSS) because a transcript should
+  // read as prose; they act on THIS turn, which is why they live on the message
+  // rather than in a global menu.
+  if (on_turn_action) {
+    H acts = el("div", "msg-actions");
+    auto act = [&acts, on_turn_action](const char* label, const char* value) {
+      H b = el("button", "mini-btn");
+      b.attr("type", "button");
+      b.text(tr(label));
+      b.on(EventKind::kClick, [on_turn_action, value](const std::string&) {
+        on_turn_action(value);
+      });
+      acts.add(b);
+    };
+    act("分叉", "fork");
+    act("回滚到这里", "rollback");
+    act("忘记", "forget");
+    meta.add(acts);
+  }
   wrap.add(meta);
   return wrap;
 }
