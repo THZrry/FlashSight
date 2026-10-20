@@ -2763,6 +2763,11 @@ VNodePtr UiApp::build_home_explore() {
 
   // --- MCP ---
   H mcp_sec = el("div", "explore-sec");
+  // Section cards rise in sequence (same intent as 项目 cards). The delay is
+  // per SECTION here, not per row: a capability list can be long, and a
+  // 40ms-per-row cascade would take a second to finish.
+  mcp_sec.style("animation-delay", "0ms");
+  mcp_sec.style("animation-fill-mode", "backwards");
   H mcp_head = el("div", "explore-sec-head");
   mcp_head.add(el("i", "fa fa-plug"));
   mcp_head.add(el("span").text(tr("MCP")));
@@ -2794,6 +2799,8 @@ VNodePtr UiApp::build_home_explore() {
 
   // --- Skill ---
   H sk_sec = el("div", "explore-sec");
+  sk_sec.style("animation-delay", "60ms");
+  sk_sec.style("animation-fill-mode", "backwards");
   H sk_head = el("div", "explore-sec-head");
   sk_head.add(el("i", "fa fa-wand-magic-sparkles"));
   sk_head.add(el("span").text(tr("Skill")));
@@ -2873,6 +2880,12 @@ VNodePtr UiApp::build_home_search() {
       std::string sid = s.sid;
       std::string title = s.title;
       H row = el("div", "search-row");
+      // Results cascade in like project cards (capped: a broad query can match
+      // dozens, and the last one should not appear a second later).
+      int stagger = static_cast<int>(hits - 1) * 30;
+      if (stagger > 240) stagger = 240;
+      row.style("animation-delay", itos(stagger) + "ms");
+      row.style("animation-fill-mode", "backwards");
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
@@ -2910,6 +2923,11 @@ VNodePtr UiApp::build_home_projects() {
   for (size_t i = 0; i < st_.projects.size(); ++i) {
     ProjectCard& p = st_.projects[i];
     H card = el("div", "proj-card");
+    // Stagger the rise: each card starts a beat after the previous one, so a
+    // list of them reads as a cascade instead of one block appearing. Capped so
+    // a long list does not take a second to finish.
+    card.style("animation-delay", itos(static_cast<int>(i) * 40) + "ms");
+    card.style("animation-fill-mode", "backwards");
 
     // ---- left: identity block ----
     // A monogram + name + path, then the numbers that matter, then the primary

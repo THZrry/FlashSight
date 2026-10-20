@@ -223,7 +223,12 @@
 /* --- component entry: things that appear in a list/panel ---
    These carry the intent in the markup (H::anim / add_anim); the selectors here
    are the ones whose parts are created by the diff rather than declared, so the
-   animation is attached by class instead of by hand at each call site. */
+   animation is attached by class instead of by hand at each call site.
+
+   The list below is "a CARD/ROW rising into place". It is what makes 项目 feel
+   alive: each card lifts 6px and fades in, and the rows of 探索 and 搜索 use the
+   SAME rule so all three lists behave alike. (The home sub-PAGE itself still
+   does the plain fade - these are the cards inside it.) */
 .msg,                     /* a chat message arriving */
 .proj-card,               /* project cards */
 .proj-session,
@@ -236,7 +241,11 @@
 .pv-item,
 .pv-tpl,
 .plan-step,
-.td-all-item { animation: anim-enter .14s cubic-bezier(.22,.61,.36,1); }
+.td-all-item,
+.explore-sec,             /* 探索: one section card */
+.explore-row,             /* 探索: one capability row */
+.search-row,              /* 搜索: one result */
+.explore-empty { animation: anim-enter .14s cubic-bezier(.22,.61,.36,1); }
 
 /* a list that grows: its rows stagger slightly instead of snapping in */
 .proj-sessions > .proj-session,

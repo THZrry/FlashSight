@@ -269,3 +269,20 @@ The process of project: P0 环境搭建
   相对路径；修 IDom::schedule 自增两次导致退场节点永不清理的真 bug。
   268 用例 2672 断言。详见 current.md <57>。
 
+
+<58>(SOLVED): 探索/搜索的卡片动画补回（和"项目"同源）
+  - 用户喜欢的是"项目"里**每张卡片各自上浮 6px + 淡入**（`.proj-card` 上的
+    `anim-enter`），不是整页动画。上一轮把四个子页统一成纯淡入时，只保留了
+    **页面级**的 `anim-fade`，而 探索/搜索 的条目从来没进过那条卡片规则，
+    所以看起来"又没动画了"。
+  - 修复：`.explore-sec`（区块卡）、`.explore-row`（能力行）、`.search-row`
+    （结果行）、`.explore-empty` 加入同一条 `anim-enter` 规则 —— 与 `.proj-card`
+    完全同一套动效，不再各写一份。
+  - 错开：项目卡片 40ms/张；探索按**区块**错开（0 / 60ms，不按行——能力列表
+    可能很长）；搜索 30ms/条，上限 240ms（宽查询不会让最后一条等一秒）。
+    延迟走 inline style + `animation-fill-mode: backwards`，避免元素先出现再跳。
+  - 页面级仍是纯 `anim-fade`（0.05s，无位移），两套动画分工明确：页面淡入、
+    内容卡片上浮。
+  - 实测：探索两个区块 delay 0s/0.06s、条目 transform translateY(6px)；
+    搜索三条 0/0.03/0.06s。268 用例 2672 断言。
+
