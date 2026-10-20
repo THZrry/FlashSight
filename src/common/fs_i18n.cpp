@@ -888,6 +888,11 @@ const Entry kEnTable[] = {
     {"取消唤醒", "Cancel wake"},
     {"已取消唤醒", "Wake cancelled"},
     {"取消失败：", "Cancel failed: "},
+    {"已中断：", "Interrupted: "},
+    {"后台运行中（终端 ", "Running in background ("},
+    {" 个）", " terminal(s))"},
+    {"复制相对路径", "Copy relative path"},
+    {"已复制路径", "Path copied"},
 };
 
 const int kEnCount = static_cast<int>(sizeof(kEnTable) / sizeof(kEnTable[0]));

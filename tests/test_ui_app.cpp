@@ -247,7 +247,7 @@ FS_TEST(uiapp_session_tabs_keep_their_own_state) {
   // open session B: its own (empty) view, its own default panel width
   app.open_session("sess_b", "会话B");
   EXPECT_EQ(app.state().messages.size(), size_t(0));
-  EXPECT_EQ(app.state().side_width, 360);  // the new default width
+  EXPECT_EQ(app.state().side_width, 420);  // the new default width
   app.update([](AppState& s) {
     comp::ChatMsg m;
     m.role = "user";
@@ -263,7 +263,7 @@ FS_TEST(uiapp_session_tabs_keep_their_own_state) {
   app.show("sess_b");
   ASSERT_TRUE(app.state().messages.size() == 1);
   EXPECT_EQ(app.state().messages[0].text, std::string("BBB"));
-  EXPECT_EQ(app.state().side_width, 360);  // the new default width  // B keeps its own default
+  EXPECT_EQ(app.state().side_width, 420);  // the new default width  // B keeps its own default
 }
 
 // The side-panel divider reports the final width, which must land in state.
@@ -2959,6 +2959,21 @@ FS_TEST(uiapp_history_pages_backwards) {
   for (size_t i = 0; i < before_nodes.size(); ++i) {
     EXPECT_TRUE(now[i + 30].get() == before_nodes[i].get());
   }
+  // ...and a cached node's handler still addresses ITS OWN message. Handlers
+  // used to capture the loop index; after a prepend that index pointed 30
+  // messages further down, so folding an old summary toggled a different turn
+  // (which looked like "the summary no longer opens").
+  //
+  // The identity is the message's uid, so resolving uid 74 after the prepend
+  // must still land on the message that carries uid 74.
+  int idx74 = app.find_message_by_uid_for_test(74);
+  ASSERT_TRUE(idx74 >= 0);
+  EXPECT_EQ(app.state().messages[idx74].uid, int64_t(74));
+  EXPECT_TRUE(app.state().messages[idx74].text.find("turn 74") != std::string::npos);
+  // ...and the OLDEST loaded turn (uid 45) is still addressable
+  int idx45 = app.find_message_by_uid_for_test(45);
+  ASSERT_TRUE(idx45 >= 0);
+  EXPECT_EQ(app.state().messages[idx45].uid, int64_t(45));
   std::string d2 = dom.dump();
   EXPECT_TRUE(d2.find("turn 25") != std::string::npos);
   EXPECT_TRUE(d2.find("turn 74") != std::string::npos);

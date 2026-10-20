@@ -446,6 +446,17 @@ FsResult FsApi::session_list(const std::string& pid) {
     // waiting-for-approval, failed and done. Loop state is live; lastError is
     // filled by list_sessions, which already reads each full.json.
     m["loopState"] = agent_host_ ? agent_host_->loop_state(sid) : "idle";
+    // Background activity: a terminal that is still running (and that the user
+    // has NOT closed the tab for) means work can still appear in this session
+    // even though no turn is in flight. The status dot uses this to show a
+    // distinct "background" colour instead of "idle".
+    int64_t live_terms = 0;
+    if (terminals_) {
+      for (auto& te : terminals_->list_for_session(sid)) {
+        if (te.status == TermStatus::kRunning) ++live_terms;
+      }
+    }
+    m["terminalCount"] = live_terms;
     int64_t mt = sessions_->full_mtime_ms(sid);
     if (mt > 0) m["updatedAt"] = mt;
     out.push_back(m);

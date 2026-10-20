@@ -653,6 +653,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.attachments = st_.attachments;
   v.suspended = st_.suspended;
   v.interrupted = st_.interrupted;
+  v.interrupt_reason = st_.interrupt_reason;
   v.enter_send = st_.enter_send;
   v.context_pct = st_.context_pct;
   v.session_cost = st_.session_cost;
@@ -720,6 +721,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.attachments = v.attachments;
   st_.suspended = v.suspended;
   st_.interrupted = v.interrupted;
+  st_.interrupt_reason = v.interrupt_reason;
   st_.enter_send = v.enter_send;
   st_.context_pct = v.context_pct;
   st_.session_cost = v.session_cost;
@@ -1090,6 +1092,7 @@ void UiApp::load_sessions(size_t project_index) {
       row.running = jsonutil::get<bool>(s, "running", false);
       row.loop_state = jsonutil::get<std::string>(s, "loopState", "");
       row.last_error = jsonutil::get<std::string>(s, "lastError", "");
+      row.terminal_count = static_cast<int>(jsonutil::get_int(s, "terminalCount", 0));
       if (!row.sid.empty()) rows.push_back(row);
     }
     // Most recently touched first: the list is a history, and the thing you want
@@ -1938,13 +1941,20 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // A bare toast is a dead end: the task stopped and the only useful next
     // action ("continue from here") had no button. The flag shows a persistent
     // bar above the composer until the user continues or sends something new.
+    //
+    // The REASON matters: "任务已中断" alone looks like a UI glitch when the real
+    // cause is a rejected API key or a 429. The backend puts it in `error`.
     st_.interrupted = true;
-    st_.toast = "已中断（可继续）";
+    st_.interrupt_reason = jsonutil::get<std::string>(payload, "error", "");
+    st_.toast = st_.interrupt_reason.empty()
+                    ? "已中断（可继续）"
+                    : ("已中断：" + st_.interrupt_reason);
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "loop.state") {
     std::string state = jsonutil::get<std::string>(payload, "state", "");
     if (state == "resumed" || state == "turnDone" || state == "idle") {
       st_.interrupted = false;
+      st_.interrupt_reason.clear();
     }
     if (!sid.empty()) refresh_loop_state(sid);
   }
@@ -2398,7 +2408,8 @@ VNodePtr UiApp::build_page_slot() {
 // 会话状态点：运行中=转圈、待确认=黄、报错=红、完成=蓝、空闲=空心。
 // 颜色是"这一格现在怎么样"的唯一提示，所以放在标题前面而不是 hover 里。
 H session_dot_with(const std::string& base, const std::string& loop_state,
-                   const std::string& last_error, bool running) {
+                   const std::string& last_error, bool running,
+                   int terminal_count = 0) {
   std::string cls = base;
   std::string title = tr("空闲");
   if (loop_state == "waiting") {
@@ -2410,6 +2421,12 @@ H session_dot_with(const std::string& base, const std::string& loop_state,
   } else if (!last_error.empty()) {
     cls += " failed";
     title = tr("上次运行出错");
+  } else if (terminal_count > 0) {
+    // Purple: background work. A live terminal can still print, and an
+    // auto-mode task can outlive the turn - neither is "idle", neither is a
+    // turn in flight.
+    cls += " background";
+    title = tr("后台运行中（终端 ") + itos(terminal_count) + tr(" 个）");
   } else if (!loop_state.empty() && loop_state != "idle") {
     cls += " done";
     title = tr("已完成");
@@ -2419,8 +2436,8 @@ H session_dot_with(const std::string& base, const std::string& loop_state,
   return d;
 }
 H session_dot(const std::string& loop_state, const std::string& last_error,
-              bool running) {
-  return session_dot_with("ps-dot", loop_state, last_error, running);
+              bool running, int terminal_count = 0) {
+  return session_dot_with("ps-dot", loop_state, last_error, running, terminal_count);
 }
 
 VNodePtr UiApp::build_nav_rail() {
@@ -2525,7 +2542,7 @@ VNodePtr UiApp::build_nav_rail() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      H nd = session_dot(s.loop_state, s.last_error, s.running);
+      H nd = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count);
       nd.cls("nav-dot");  // same colour rules, rail-sized
       row.add(nd);
       row.add(el("span", "nav-session-title").text(s.title));
@@ -2859,7 +2876,7 @@ VNodePtr UiApp::build_home_search() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      row.add(session_dot(s.loop_state, s.last_error, s.running));
+      row.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count));
       H txt = el("div", "search-row-text");
       txt.add(el("div", "search-row-title").text(s.title));
       txt.add(el("div", "search-row-sub dim").text(p.name + "  ·  " + p.path));
@@ -2976,7 +2993,7 @@ VNodePtr UiApp::build_home_projects() {
         // Inline rename: the row turns into an input. Enter commits, blur also
         // commits (clicking away is the normal way to finish), Esc cancels.
         H rrow = el("div", "proj-session renaming");
-        rrow.add(session_dot(s.loop_state, s.last_error, s.running));
+        rrow.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count));
         H inp = comp::text_input(s.rename_text, tr("会话名称"),
                                  [this, sid](const std::string& v) {
           update([&](AppState& st2) {
@@ -3006,7 +3023,7 @@ VNodePtr UiApp::build_home_projects() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      H dot = session_dot(s.loop_state, s.last_error, s.running);
+      H dot = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count);
       row.add(dot);
       row.add(el("span", "ps-title").text(s.title));
       row.add(el("span", "grow"));
@@ -3049,10 +3066,10 @@ VNodePtr UiApp::build_home_projects() {
 
 VNodePtr UiApp::build_home_usage() {
   H wrap = el("div", "usage-page");
-  // 每个区块整块滑入，行/柱子在下面再各自生长。原来整个页面渲染完就"啪"地全
-  // 出现，图表尤其像是静态图片：现在柱子和进度条从 0 长出来，数字行错开进场。
-  wrap.anim(anim::kEnter).anim_key("usage:" + itos(st_.usage_range) + ":" +
-                                   st_.usage_scope + (st_.usage_loaded ? ":1" : ":0"));
+  // The page's own entrance comes from build_home (anim::kFade), the same intent
+  // every other home sub-page uses. A second animation here overrode it and
+  // made this page alone enter with a different motion. The per-section stagger
+  // tokens below still drive the bars and rows.
 
   // ---- left: real scopes (总计 + one per provider) ----
   // The old list was a hardcoded array of three strings, one of which was
@@ -3387,12 +3404,17 @@ VNodePtr UiApp::build_session() {
       hist_inner.add(hit->second.node);
       continue;
     }
-    H node = comp::chat_message(m, [this, i](const std::string&) {
-      // Really copy: the toast used to be the whole feature.
-      if (i < st_.messages.size()) dom_.copy_text(st_.messages[i].text);
+    // Handlers address the message by UID, never by the loop index. A cached
+    // node keeps the closure it was built with, and prepending an older page
+    // shifts every index - so an index-captured handler would toggle (or copy,
+    // or fork) whatever message now happens to sit at that position. That is
+    // exactly why folding stopped working on older turns after scrolling up.
+    H node = comp::chat_message(m, [this, uid](const std::string&) {
+      int i = find_message_by_uid(uid);
+      if (i >= 0) dom_.copy_text(st_.messages[i].text);
       toast(tr("已复制"));
     },
-                               [this, i](const std::string& v) {
+                               [this, uid](const std::string& v) {
       // The value carries "<blockIndex>\t<action>": a message can have many
       // foldable blocks, and clicking one must not toggle the first.
       size_t tab = v.find('\t');
@@ -3400,20 +3422,24 @@ VNodePtr UiApp::build_session() {
       if (tab != std::string::npos) {
         block = std::atoi(v.substr(0, tab).c_str());
       }
+      int i = find_message_by_uid(uid);
+      if (i < 0) return;
       update([&](AppState& s) {
-        if (i < s.messages.size() && block >= 0 &&
+        if (i < static_cast<int>(s.messages.size()) && block >= 0 &&
             block < static_cast<int>(s.messages[i].tools.size())) {
           s.messages[i].tools[block].expanded = !s.messages[i].tools[block].expanded;
           s.messages[i].rev = next_msg_rev_++;  // only this message is rebuilt
         }
       });
     },
-                               [this, i](const std::string& v) {
+                               [this, uid](const std::string& v) {
       // "work" toggles the whole group (reasoning + tools) at once; a bare
       // "\t<action>" would mean the thinking block alone.
+      int i = find_message_by_uid(uid);
+      if (i < 0) return;
       if (v == "work") {
         update([&](AppState& s) {
-          if (i < s.messages.size()) {
+          if (i < static_cast<int>(s.messages.size())) {
             s.messages[i].work_open = !s.messages[i].work_open;
             s.messages[i].rev = next_msg_rev_++;
           }
@@ -3421,14 +3447,15 @@ VNodePtr UiApp::build_session() {
         return;
       }
       update([&](AppState& s) {
-        if (i < s.messages.size()) {
+        if (i < static_cast<int>(s.messages.size())) {
           s.messages[i].thinking_open = !s.messages[i].thinking_open;
           s.messages[i].rev = next_msg_rev_++;
         }
       });
     },
-                               [this, i](const std::string& v) {
-      turn_action(i, v);
+                               [this, uid](const std::string& v) {
+      int i = find_message_by_uid(uid);
+      if (i >= 0) turn_action(static_cast<size_t>(i), v);
     });
     node.key(key);
     MsgNode mn;
@@ -3621,6 +3648,9 @@ VNodePtr UiApp::build_session() {
     H bar = el("div", "interrupt-bar");
     bar.add(el("i", "fa fa-circle-exclamation"));
     bar.add(el("span", "ib-text").text(tr("任务已中断")));
+    if (!st_.interrupt_reason.empty()) {
+      bar.add(el("span", "ib-reason dim").text(st_.interrupt_reason));
+    }
     bar.add(el("span", "grow"));
     bar.add(comp::button(tr("继续"), [this](const std::string&) {
       std::string sid = active_sid();
@@ -3631,11 +3661,17 @@ VNodePtr UiApp::build_session() {
           toast(tr("继续失败：") + r.message);
           return;
         }
-        update([&](AppState& s) { s.interrupted = false; });
+        update([&](AppState& s) {
+          s.interrupted = false;
+          s.interrupt_reason.clear();
+        });
       });
     }, "primary"));
     bar.add(comp::button(tr("忽略"), [this](const std::string&) {
-      update([&](AppState& s) { s.interrupted = false; });
+      update([&](AppState& s) {
+        s.interrupted = false;
+        s.interrupt_reason.clear();
+      });
     }, "ghost"));
     comp_box.add(bar);
   }
@@ -4314,15 +4350,26 @@ VNodePtr UiApp::build_side_panel() {
       H head = el("div", "files-nav");
       head.add(el("span", "files-cwd").text(folder_basename(rel)));
       head.add(el("span", "grow"));
+      // Copy the project-relative path: that is the string the model and the
+      // terminal both understand ("src/core/a.cpp"), unlike an absolute path.
+      head.add(comp::icon_button("copy", tr("复制相对路径"), [this, rel](const std::string&) {
+        dom_.copy_text(rel);
+        toast(tr("已复制路径"));
+      }));
       head.add(comp::button(tr("刷新"), [this, panel_id, rel](const std::string&) {
         preview_file(panel_id, rel);
       }, "ghost"));
       body.add(head);
+      // Line numbers and content share ONE scroll container, so a number can
+      // never drift away from its line.
+      H box = el("div", "file-preview");
       H pre = el("pre", "file-preview-body");
       if (!panel->loaded) {
         pre.text(tr("加载中…"));
+        box.add(pre);
       } else if (panel->preview.empty()) {
         pre.text(tr("（空文件）"));
+        box.add(pre);
       } else {
         // Guess the language from the FILE NAME, not from a fence label: the
         // preview has no language tag to go on. An unknown extension falls back
@@ -4334,8 +4381,22 @@ VNodePtr UiApp::build_side_panel() {
         } else {
           pre.text(panel->preview);
         }
+        int nlines = 0;
+        for (size_t k = 0; k < panel->preview.size(); ++k) {
+          if (panel->preview[k] == '\n') ++nlines;
+        }
+        if (nlines == 0 || panel->preview[panel->preview.size() - 1] != '\n') ++nlines;
+        H gutter = el("div", "file-preview-lines");
+        std::string nums;
+        for (int n = 1; n <= nlines; ++n) {
+          if (n > 1) nums += "\n";
+          nums += itos(n);
+        }
+        gutter.text(nums);
+        box.add(gutter);
+        box.add(pre);
       }
-      body.add(pre);
+      body.add(box);
     }
   } else if (kind == "git") {
     // ---- Git panel ----
@@ -5404,6 +5465,18 @@ void UiApp::run_command(const AppState::CommandRow& cmd) {
     }
     toast(tr("已执行：") + cmd.name);
   });
+}
+
+int UiApp::find_message_by_uid(int64_t uid) const {
+  for (size_t i = 0; i < st_.messages.size(); ++i) {
+    // Same fallback the render loop uses, so a live message (uid 0) resolves to
+    // the same identity it was rendered with.
+    int64_t id = st_.messages[i].uid != 0
+                     ? st_.messages[i].uid
+                     : (1000000000LL + static_cast<int64_t>(i));
+    if (id == uid) return static_cast<int>(i);
+  }
+  return -1;
 }
 
 // A per-turn action from the message menu.

@@ -56,6 +56,10 @@ struct ProjectCard {
     // blue = done, red = failed, yellow = waiting for you, spinner = running.
     std::string loop_state;
     std::string last_error;
+    // Live terminals still running for this session. A session with a running
+    // terminal can still produce output while no turn is in flight, so it gets
+    // the "background" dot rather than "idle".
+    int terminal_count = 0;
     bool renaming = false;   // inline rename in progress
     std::string rename_text; // draft while renaming
   };
@@ -227,6 +231,9 @@ struct AppState {
   // a "继续" action: the backend can resume from the saved point, and a toast
   // alone left the user with nothing to press.
   bool interrupted = false;
+  // Why the loop stopped (provider error / HTTP status). Shown in the interrupt
+  // bar: "interrupted" without a reason reads like a UI bug.
+  std::string interrupt_reason;
   // "enter" (default) or "ctrlEnter": whether plain Enter sends. It is a SESSION
   // setting, and the DOM adapter reads it from the textarea's data-enter-send
   // attribute, so it must live in the session state.
@@ -254,7 +261,7 @@ struct AppState {
   // explanation), not a small popup: it is where new panels are discovered, and
   // a menu could not carry the descriptions. Picking one opens that panel.
   bool side_menu_open = false;
-  int side_width = 360;         // side panel width (px); persisted in state
+  int side_width = 420;         // side panel width (px); persisted in state
   bool side_collapsed = false;  // side panel hidden (toggle in the divider)
   // ---- side panel / 文件树 ----
   // The file tree state lives per PANEL (SideTab::path/entries/preview), because
@@ -605,6 +612,9 @@ struct SessionView {
   bool auto_mode = true;
   bool suspended = false;
   bool interrupted = false;
+  // Why the loop stopped (provider error / HTTP status). Shown in the interrupt
+  // bar: "interrupted" without a reason reads like a UI bug.
+  std::string interrupt_reason;
   std::string enter_send = "enter";
   int context_pct = -1;
   // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
@@ -619,7 +629,7 @@ struct SessionView {
   std::string active_side = "usage";
   int side_seq = 0;
   bool side_menu_open = false;
-  int side_width = 360;      // side panel width (px); persisted across switches
+  int side_width = 420;      // side panel width (px); persisted across switches
   bool side_collapsed = false;  // side panel hidden
 
   std::string active_pid;
@@ -742,6 +752,10 @@ class UiApp {
   // Execute one entry of the composer's command menu. "ui:*" actions are handled
   // here; anything else is a backend action (a skill load, suspend, ...).
   void run_command(const AppState::CommandRow& cmd);
+  // Index of the message whose stable uid matches (-1 when it is gone). Message
+  // handlers MUST resolve their target through this: a cached node keeps the
+  // closure it was built with, and prepending an older page shifts every index.
+  int find_message_by_uid(int64_t uid) const;
   // A per-turn action from the message menu: "fork" | "rollback" | "forget".
   void turn_action(size_t message_index, const std::string& action);
   // Session operations addressed by a turn (the turn id lives on the message).
@@ -900,6 +914,8 @@ class UiApp {
   size_t message_count() const { return st_.messages.size(); }
   // test hook: the relative-time formatter (a free function in the .cpp)
   static std::string rel_time_for_test(int64_t ms);
+  // test hook: resolve a message by its stable uid (see find_message_by_uid)
+  int find_message_by_uid_for_test(int64_t uid) const { return find_message_by_uid(uid); }
 
  private:
   IDom& dom_;

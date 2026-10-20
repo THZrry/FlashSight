@@ -367,6 +367,7 @@ html, body {
 .nav-dot.done { background: var(--accent); border-color: transparent; }
 .nav-dot.failed { background: var(--err); border-color: transparent; }
 .nav-dot.waiting { background: #d9a400; border-color: transparent; }
+.nav-dot.background { background: #a06cd5; border-color: transparent; }
 .nav-dot.running {
   border: 1.5px solid var(--border-strong);
   border-top-color: var(--accent);
@@ -796,6 +797,8 @@ html, body {
 .ps-dot.done { background: var(--accent); border-color: transparent; }
 .ps-dot.failed { background: var(--err); border-color: transparent; }
 .ps-dot.waiting { background: #d9a400; border-color: transparent; }
+/* Purple = background work (live terminal / auto-mode task still running). */
+.ps-dot.background { background: #a06cd5; border-color: transparent; }
 .ps-dot.running {
   border: none;
   background: none;
@@ -1128,6 +1131,11 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .interrupt-bar .fa { font-size: 12px; }
 .interrupt-bar .ib-text { font-weight: 600; }
+.interrupt-bar .ib-reason {
+  min-width: 0; font-size: 11.5px;
+  color: var(--warn-text); opacity: .85;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* per-turn actions (fork / rollback / forget). Hidden until the row is hovered:
    a transcript should read as prose, not as a toolbar. */
@@ -1484,12 +1492,31 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-size { font-family: var(--mono); font-size: 11px; }
 /* A preview now lives in its OWN panel tab, so it fills the panel instead of
-   being a capped block under the tree. */
-.file-preview-body {
-  margin: 0; padding: 8px 10px; overflow: auto;
+   being a capped block under the tree. The gutter and the code scroll together
+   (one flex row inside one scroller), so a number never drifts from its line. */
+.file-preview {
   flex: 1; min-height: 0;
+  display: flex;
+  overflow: auto;
+  background: var(--code-bg);
+}
+.file-preview-lines {
+  flex: none;
+  padding: 8px 8px 8px 10px;
+  text-align: right;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  color: var(--text-faint);
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  white-space: pre;
+  user-select: none;
+}
+.file-preview-body {
+  margin: 0; padding: 8px 10px; overflow: visible;
+  flex: 1; min-width: 0;
   background: var(--code-bg); color: var(--code-text);
-  font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 /* side panel: git - branch header, two change groups, diff, commit box */
@@ -1805,7 +1832,11 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 
 /* toolbar halves: what the message does (left) / what it is sent with (right) */
 .ct-left, .ct-right { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.ct-right { flex: none; }
+/* The right group is pushed to the far edge by its own margin, NOT by a spacer
+   element: the spacer is the first thing dropped in compact mode, and when it
+   went away the two halves collapsed together (buttons ended up on the left). */
+.ct-left { flex: 1 1 auto; }
+.ct-right { flex: none; margin-left: auto; }
 .composer-tools {
   display: flex; align-items: center; gap: 6px;
   /* NEVER wraps. The row has two modes (labelled / icon-only, chosen by the
@@ -1878,7 +1909,8 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
      essential (the icon already identifies the brand) */
   .model-pick-btn { max-width: 74px; padding: 0 6px; }
   .composer-tools .btn { padding-left: 7px; padding-right: 7px; }
-  /* the spacer has no room to spare in this mode */
+  /* The spacer element is hidden here, but the right group still keeps its
+     margin-left:auto (see .ct-right) so it stays pinned to the right edge. */
   .composer-tools .grow { display: none; }
 }
 

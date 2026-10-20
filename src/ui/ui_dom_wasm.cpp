@@ -1313,8 +1313,13 @@ class WasmDom : public IDom {
 
   void schedule(int ms, std::function<void()> cb) override {
     if (!cb) return;
-    sched_cbs()[++sched_seq()] = std::move(cb);
-    fs_dom_timeout(ms, sched_seq());
+    // Take the id ONCE. `sched_cbs()[++sched_seq()] = ...` followed by
+    // `fs_dom_timeout(ms, sched_seq())` increments twice: the callback was
+    // stored under N but the timer fired with N+1, so it never found its entry
+    // and the removal never happened - leaving exited pages in the DOM forever.
+    int id = ++sched_seq();
+    sched_cbs()[id] = std::move(cb);
+    fs_dom_timeout(ms, id);
   }
 
   void set_appearance(const Appearance& a) override {

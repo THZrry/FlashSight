@@ -262,3 +262,10 @@ The process of project: P0 环境搭建
   UI 覆盖 122 个方法中的 102，其余 20 个均为内部/模型侧接口。268 用例 2667 断言。
   详见 current.md <56>。
 
+<57>(SOLVED): 打磨批。翻页后 summary 点不开的真根因是消息 handler 捕获数组下标
+  （前插后整体位移）——改为按稳定 uid 解析；中断条现在显示后端失败原因；主页四页
+  动画按用户要求全部回退为纯淡入（删掉用量页多出的 anim-enter）；紧凑时右侧按钮用
+  margin-left:auto 靠右；新增紫点=后台在跑（terminalCount）；文件预览加行号与复制
+  相对路径；修 IDom::schedule 自增两次导致退场节点永不清理的真 bug。
+  268 用例 2672 断言。详见 current.md <57>。
+
