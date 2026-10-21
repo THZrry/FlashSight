@@ -131,6 +131,6 @@ WhaleUI `temp/incorrect2/`（`incorrect2.cpp` + `README.md`）。它们不影响
 
 ## 6. 回退
 
-`xmake f --whaleui=n` 即回到浏览器/HTTP 路径，两个后端并存互不影响
-（`ui_dom_whale.cpp` / `ui_main_whale.cpp` 整体在 `#ifdef FS_UI_WHALEUI` 内，
-`ui_server.cpp` 只在 `--whaleui=n` 时参与编译）。
+`xmake f --variant=web` 即回到浏览器/HTTP 路径。三个变体互相独立：变体宏只
+加在 `fs_ui_host`（两个后端文件）和 `flashsight`（`main.cpp`）上，所以切换
+只重编三个文件，不会互相污染。

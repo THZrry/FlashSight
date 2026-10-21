@@ -106,6 +106,15 @@ option("whaleui_libdir")
     set_description("Directory containing WhaleUI's built static library")
 option_end()
 
+-- WhaleUI checkout root. Only the SDL3 / SDL3_ttf import libs and DLLs are read
+-- from it (WhaleUI ships them under 3rdparty/), so it must point at a clone of
+-- the WhaleUI repo, not at the FlashSight tree. CI overrides this.
+option("whaleui_dir")
+    set_default("C:/aaa/WhaleUI")
+    set_showmenu(true)
+    set_description("WhaleUI checkout (supplies SDL3/SDL3_ttf libs and DLLs)")
+option_end()
+
 local variant = get_config("variant") or "web"
 local whaleui_on = variant == "whaleui"
 local webview_on = variant == "webview"
@@ -127,7 +136,7 @@ local webview_on = variant == "webview"
 -- SDL3_image, SDL3). WhaleUI built them from source; we link the same copies
 -- instead of declaring add_requires(), because re-installing lexbor needs a VS
 -- toolchain this machine does not have. Override if your xmake package cache is
--- elsewhere:  xmake f --whaleui=y --whaleui_pkgdir=D:/xmake/packages
+-- elsewhere:  xmake f --variant=whaleui --whaleui_pkgdir=D:/xmake/packages
 option("whaleui_pkgdir")
     set_default(path.join(os.getenv("LOCALAPPDATA") or "", ".xmake/packages"))
     set_showmenu(true)
@@ -416,7 +425,7 @@ target_end()
 -- to resolve (static-lib link order). Call inside a target scope.
 function whaleui_link()
     local libdir = get_config("whaleui_libdir")
-    local whaleui_dir = "C:/aaa/WhaleUI"
+    local whaleui_dir = get_config("whaleui_dir")
     local pkg = get_config("whaleui_pkgdir")
 
     -- find <name>/<version>/<hash>/lib/*.a in the xmake package cache
@@ -482,7 +491,7 @@ end
 -- Call inside a target scope; it installs the after_build hook itself.
 function whaleui_copy_dlls()
     local libdir = get_config("whaleui_libdir")
-    local whaleui_dir = "C:/aaa/WhaleUI"
+    local whaleui_dir = get_config("whaleui_dir")
     local dirs = {
         libdir,
         path.join(whaleui_dir, "3rdparty/sdl3/bin"),
@@ -859,7 +868,7 @@ target("flashsight")
     end
 
 -- ==========================================================================
--- webview host library (only with --webview=y).
+-- webview host library (only with --variant=webview).
 --
 -- `webview` (github.com/webview/webview, MIT) is a header + one .cc that opens
 -- a native window with the OS web engine:
@@ -905,7 +914,7 @@ if webview_on and not is_plat("wasm") then
             local gtk = find_package("pkgconfig::gtk+-3.0")
             local wk = find_package("pkgconfig::webkit2gtk-4.1")
             if not gtk or not wk then
-                raise("--webview=y on Linux needs libgtk-3-dev and libwebkit2gtk-4.1-dev " ..
+                raise("--variant=webview on Linux needs libgtk-3-dev and libwebkit2gtk-4.1-dev " ..
                       "(pkg-config must find gtk+-3.0 and webkit2gtk-4.1)")
             end
             for _, pkg in ipairs({gtk, wk}) do

@@ -1735,3 +1735,27 @@ The process of project: P0 环境搭建 + P1 AppCore
     样式且**没有** wasm（正确）；三个包分别产出，whaleui 包带上 `web/` 资源目录
     （WhaleUI 运行时从磁盘读 CSS，不打进 exe）。272 用例 2735 断言全过。
 
+<71>(SOLVED): GitHub Actions 重写（变体选择、资源断言、可选 WhaleUI job）。
+  - 上一批只改了本地构建，workflow 里还是 `--webview=y` / `build/web` 那套，等于
+    没做。这次补齐：
+  - **构建参数**改成 `--variant=web|webview`，两个变体在同一个 job 里先后编译
+    （同一输出目录、切变体只重编 3 个文件，分成两个 job 会把整个项目编两遍）。
+  - **可选变体**：`workflow_dispatch` 加 `variant` 输入（all/web/webview），
+    迭代时只编一个。
+  - **资源断言**（关键）：二进制里必须真的有 `#fs-root`、样式、以及 Web 版的
+    `fs_ui.wasm`；webview 版**不能**带 wasm（带了说明用错了变体的 pack）。查找按
+    `build/<plat>/<arch>/release` + 平台后缀，所以 macOS/Linux 也适用——上一版
+    写死了 `windows/x64/release` 和 `.exe`。
+  - **包数量断言**跟着变体选择走（之前固定要求 2 个包，单选变体时会误报）。
+  - **WhaleUI 独立可选 job**：它要 clone WhaleUI、先用它自己的 xmake 编
+    `libwhaleui-full`、再装 lexbor/utf8proc/SDL3/SDL3_ttf/SDL3_image 这些 xrepo
+    依赖，是另一个仓库和更长的构建，所以默认跳过，用仓库变量
+    `ENABLE_WHALEUI=true` 打开（`WHALEUI_REPO` 可换 fork）。`libwhaleui-full.a`
+    的路径用 `find` 定位而不是写死布局；`--whaleui_dir` 也提成 xmake 选项
+    （之前硬编码 `C:/aaa/WhaleUI`）。release job 用 `always()` + result 检查，
+    WhaleUI 跳过时不挡发布，跑了就等它并一起挂包。
+  - 顺带修掉 workflow 里过期的注释（mbedtls 早就是源码编译，不再是 xmake 包）。
+  - 实测：`python -c "yaml.safe_load(...)"` 解析通过，jobs = prepare/build/
+    whaleui/release，release needs 正确；把 CI 的资源断言脚本在本地跑了一遍
+    （`build/windows/x64/release` 下两个 exe 全部通过）；272 用例 2735 断言全过。
+

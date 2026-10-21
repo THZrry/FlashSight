@@ -2,15 +2,22 @@ name: build
 
 # Releases are cut from tags: `v0.1.0` (and pre-releases like `v0.2.0-rc1`).
 # Publishing a GitHub Release also triggers a build, so assets can be attached
-# to it after the fact. workflow_dispatch builds without publishing.
+# to it after the fact. workflow_dispatch builds without publishing, and can
+# build a single variant (`variant` input) to iterate faster.
 #
 #   Web      : one self-contained executable per platform (wasm UI embedded,
 #              served over the embedded HTTP server)
 #   Webview  : one executable per platform (native window via the OS web engine)
 #
-# WhaleUI is deliberately NOT built here: it needs a WhaleUI checkout and a
-# build of its engine, which this repo does not vendor. It stays a local
-# variant (build.bat whaleui) - see doc-internal/ui-whaleui.md.
+# Both are built in ONE job: they share the output directory and the executable
+# name carries the variant (flashsight-web / flashsight-webview), and switching
+# variants only recompiles the two backend files plus main.cpp. Building them
+# separately would compile the whole project twice.
+#
+# WhaleUI needs a WhaleUI checkout and a build of its engine, which this repo
+# does not vendor. It therefore runs in its own opt-in job: set the repository
+# variable ENABLE_WHALEUI=true (and WHALEUI_REPO if the fork differs) to turn it
+# on. See doc-internal/ui-whaleui.md.
 on:
   push:
     tags:
@@ -18,6 +25,15 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      variant:
+        description: "Which UI variant(s) to build"
+        type: choice
+        default: all
+        options:
+          - all
+          - web
+          - webview
 
 permissions:
   contents: write
@@ -195,10 +211,11 @@ jobs:
       - name: Fetch 3rdparty
         run: ${{ matrix.py }} scripts/fetch_3rdparty.py
 
-      # mbedtls is the one dependency not vendored in the repo: xmake's
-      # add_requires() installs it during configure (see mbedtls_link()).
-      # Fetching it here instead makes a package-repo failure show up as its
-      # own step rather than as a confusing compile error.
+      # mbedtls is built from SOURCE by the `mbedtls_src` target with the
+      # project toolchain (fetch_3rdparty.py downloads it). It is deliberately
+      # not an xmake package: a prebuilt archive produced by another compiler
+      # mixes two C runtimes, and every HTTPS request then crashed inside
+      # RtlFreeHeap. Nothing extra is needed here - just the sources.
 
       # ---- build ----------------------------------------------------------
       # The variant is a single valued option (`--variant=web|webview`), the
@@ -207,7 +224,23 @@ jobs:
       # carries the variant (flashsight-web / flashsight-webview), and the
       # variant macro only applies to the two backend files plus main.cpp, so
       # the second configure recompiles three files instead of the project.
+      #
+      # `want_*` mirrors the optional workflow_dispatch input so a manual run
+      # can build just one variant while iterating.
+      - name: Select variants
+        id: want
+        run: |
+          v="${{ github.event.inputs.variant }}"
+          if [ -z "$v" ] || [ "$v" = "all" ]; then v=all; fi
+          case "$v" in
+            all)     echo "web=1" >> "$GITHUB_OUTPUT"; echo "webview=1" >> "$GITHUB_OUTPUT" ;;
+            web)     echo "web=1" >> "$GITHUB_OUTPUT"; echo "webview=0" >> "$GITHUB_OUTPUT" ;;
+            webview) echo "web=0" >> "$GITHUB_OUTPUT"; echo "webview=1" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unknown variant '$v'"; exit 1 ;;
+          esac
+
       - name: Configure (web)
+        if: steps.want.outputs.web == '1'
         run: |
           args=(-y -m release --arch=${{ matrix.arch }} --variant=web)
           if [ -n "${{ matrix.toolchain }}" ]; then
@@ -220,9 +253,11 @@ jobs:
           xmake f "${args[@]}"
 
       - name: Build (web)
+        if: steps.want.outputs.web == '1'
         run: xmake -y
 
       - name: Configure (webview)
+        if: steps.want.outputs.webview == '1'
         run: |
           args=(-y -m release --arch=${{ matrix.arch }} --variant=webview)
           if [ -n "${{ matrix.toolchain }}" ]; then
@@ -235,37 +270,61 @@ jobs:
           xmake f "${args[@]}"
 
       - name: Build (webview)
+        if: steps.want.outputs.webview == '1'
         run: xmake -y
 
       # The two failures that actually shipped a broken package: a webview exe
       # with no embedded CSS (the asset pack had been overwritten by the web
       # variant's), and a "whaleui" package that was really the web build.
       # Both are cheap to assert here and impossible to notice afterwards.
+      #
+      # The lookup is deliberately platform-agnostic: the binary is
+      # flashsight-web.exe on Windows and flashsight-web elsewhere, and the
+      # output directory is build/<plat>/<arch>/<mode> (so macosx/arm64 and
+      # linux/x86_64 do not look like windows/x64).
       - name: Verify embedded assets
         run: |
           ${{ matrix.py }} - <<'PY'
           import pathlib, sys
-          rel = pathlib.Path("build/windows/x64/release")
-          if not rel.exists():
-              rel = next(pathlib.Path("build").glob("*/x64/release"))
-          web = rel / "flashsight-web.exe"
-          wv = rel / "flashsight-webview.exe"
-          for p in (web, wv):
-              if not p.exists():
-                  sys.exit("missing " + str(p))
-          # The stylesheet and the page are packed into every variant; a binary
-          # without them would open an empty window.
-          for p, needles in ((web, (b"#fs-root", b"fs_ui.wasm")),
-                             (wv, (b"#fs-root",))):
+
+          roots = sorted(p for p in pathlib.Path("build").glob("*/*/release")
+                         if p.is_dir())
+          if not roots:
+              sys.exit("no build/<plat>/<arch>/release directory found")
+          root = roots[0]
+          print("output dir:", root)
+
+          def find(variant):
+              for name in ("flashsight-%s.exe" % variant, "flashsight-%s" % variant):
+                  p = root / name
+                  if p.is_file():
+                      return p
+              return None
+
+          wanted = []
+          if "${{ steps.want.outputs.web }}" == "1":
+              wanted.append(("web", (b"#fs-root", b"fs_ui.wasm", b"--text-dim")))
+          if "${{ steps.want.outputs.webview }}" == "1":
+              wanted.append(("webview", (b"#fs-root", b"--text-dim")))
+          if not wanted:
+              sys.exit("no variant was selected")
+
+          for variant, needles in wanted:
+              p = find(variant)
+              if p is None:
+                  sys.exit("missing flashsight-%s in %s (build it with "
+                           "--variant=%s)" % (variant, root, variant))
               data = p.read_bytes()
               for n in needles:
                   if n not in data:
-                      sys.exit("%s is missing embedded asset %r" % (p.name, n))
+                      sys.exit("%s is missing embedded asset %r - the asset pack "
+                               "was not rebuilt for this variant" % (p.name, n))
+              # The webview build hosts the UI natively, so carrying the wasm
+              # bundle means the WRONG variant's asset pack was embedded.
+              if variant == "webview" and b"fs_ui.wasm" in data:
+                  sys.exit("%s embeds fs_ui.wasm; the web variant's asset pack "
+                           "was used" % p.name)
               print("%-28s %8.2f MB  assets ok" % (p.name, len(data) / 1e6))
-          # The webview build must NOT carry the wasm bundle (it hosts the UI
-          # natively); carrying it means the wrong variant's pack was used.
-          if b"fs_ui.wasm" in wv.read_bytes():
-              print("note: webview build embeds fs_ui.wasm (unexpected)")
           PY
 
       # ---- package --------------------------------------------------------
@@ -275,12 +334,16 @@ jobs:
       - name: Package
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
-          ${{ matrix.py }} scripts/package.py --variant web \
-            --build-dir build --out dist \
-            --version "$VERSION" --platform "${{ matrix.name }}"
-          ${{ matrix.py }} scripts/package.py --variant webview \
-            --build-dir build --out dist \
-            --version "$VERSION" --platform "${{ matrix.name }}"
+          if [ "${{ steps.want.outputs.web }}" = "1" ]; then
+            ${{ matrix.py }} scripts/package.py --variant web \
+              --build-dir build --out dist \
+              --version "$VERSION" --platform "${{ matrix.name }}"
+          fi
+          if [ "${{ steps.want.outputs.webview }}" = "1" ]; then
+            ${{ matrix.py }} scripts/package.py --variant webview \
+              --build-dir build --out dist \
+              --version "$VERSION" --platform "${{ matrix.name }}"
+          fi
 
       - name: Verify archives
         run: |
@@ -290,9 +353,16 @@ jobs:
           import pathlib, sys
           dist = pathlib.Path("dist")
           archives = sorted(p for p in dist.iterdir() if p.is_file())
-          if len(archives) != 2:
-              sys.exit("expected 2 archives, got %d: %s" %
-                       (len(archives), [a.name for a in archives]))
+          # A manual run can build a single variant, so the count follows what
+          # was actually requested rather than assuming both.
+          want = 0
+          if "${{ steps.want.outputs.web }}" == "1":
+              want += 1
+          if "${{ steps.want.outputs.webview }}" == "1":
+              want += 1
+          if len(archives) != want:
+              sys.exit("expected %d archives, got %d: %s" %
+                       (want, len(archives), [a.name for a in archives]))
           for a in archives:
               size = a.stat().st_size
               print("%-60s %8.2f MB" % (a.name, size / 1e6))
@@ -309,11 +379,136 @@ jobs:
           retention-days: 14
 
   # ------------------------------------------------------------------------
+  # WhaleUI variant (opt-in).
+  #
+  # FlashSight links WhaleUI's own engine, which this repo does not vendor: the
+  # job has to clone WhaleUI, build its static library, and let xmake install
+  # its xrepo dependencies (lexbor, utf8proc, SDL3, SDL3_ttf, SDL3_image). That
+  # is a different repository and a much longer build, so it is OFF by default.
+  #
+  # Enable with the repository variable ENABLE_WHALEUI=true; point
+  # WHALEUI_REPO at your fork if needed. Windows x86_64 only for now: that is
+  # the platform the engine has been built and tested on.
+  # ------------------------------------------------------------------------
+  whaleui:
+    needs: prepare
+    if: vars.ENABLE_WHALEUI == 'true'
+    name: windows-x86_64-whaleui
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+          actions-cache-folder: .xmake-cache
+
+      - name: Install MSYS2 mingw64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: false
+          install: mingw-w64-x86_64-gcc
+
+      - name: Set toolchain paths
+        run: |
+          echo "MINGW_DIR=C:/msys64/mingw64" >> "$GITHUB_ENV"
+          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+
+      # The engine lives in its own repository; check it out next to this one.
+      - name: Checkout WhaleUI
+        run: |
+          repo="${WHALEUI_REPO:-https://github.com/THZrry/WhaleUI.git}"
+          ref="${WHALEUI_REF:-main}"
+          echo "cloning $repo ($ref)"
+          git clone --depth 1 --branch "$ref" "$repo" ../WhaleUI \
+            || git clone --depth 1 "$repo" ../WhaleUI
+        env:
+          WHALEUI_REPO: ${{ vars.WHALEUI_REPO }}
+          WHALEUI_REF: ${{ vars.WHALEUI_REF }}
+
+      - name: Build WhaleUI
+        run: |
+          cd ../WhaleUI
+          # The xrepo packages (lexbor, utf8proc, SDL3, SDL3_ttf, SDL3_image)
+          # install during configure. libwhaleui-full is what FlashSight links.
+          # `-p mingw` makes the output land in build/mingw/<arch>/<mode>,
+          # which is the layout the local build uses too.
+          xmake f -y -p mingw -m release --toolchain=mingw --mingw="$MINGW_DIR"
+          xmake b -y whaleui-full
+
+      - name: Fetch 3rdparty (FlashSight)
+        run: python scripts/fetch_3rdparty.py
+
+      - name: Configure (whaleui)
+        run: |
+          # WhaleUI's output directory depends on how it was configured
+          # (build/<plat>/<arch>/<mode>, and the plat name differs between
+          # `-p mingw` and a host build), so locate the archive rather than
+          # hardcoding a layout.
+          LIB=$(find ../WhaleUI/build -name 'libwhaleui-full.a' | head -1)
+          if [ -z "$LIB" ]; then
+            echo "libwhaleui-full.a not found under ../WhaleUI/build"
+            exit 1
+          fi
+          LIBDIR=$(dirname "$LIB")
+          echo "whaleui libdir: $LIBDIR"
+          xmake f -y -m release --arch=x86_64 --toolchain=mingw \
+            --mingw="$MINGW_DIR" \
+            --variant=whaleui \
+            --whaleui_libdir="$LIBDIR" \
+            --whaleui_dir="$(cd ../WhaleUI && pwd)"
+
+      - name: Build (whaleui)
+        run: xmake -y
+
+      # WhaleUI reads its stylesheet from disk (through the engine's VFS), so
+      # the build copies web/ next to the exe and the package has to carry it.
+      - name: Verify assets and package
+        run: |
+          python - <<'PY'
+          import pathlib, sys
+          root = next(p for p in pathlib.Path("build").glob("*/*/release") if p.is_dir())
+          exe = root / "flashsight-whaleui.exe"
+          if not exe.is_file():
+              sys.exit("missing flashsight-whaleui.exe in %s" % root)
+          web = root / "web"
+          if not (web / "style.css").is_file():
+              sys.exit("web/style.css was not copied next to the exe")
+          print("whaleui exe ok, assets:", sorted(p.name for p in web.iterdir()))
+          PY
+          python scripts/package.py --variant whaleui \
+            --build-dir build --out dist \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --platform windows-x86_64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashsight-windows-x86_64-whaleui
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ------------------------------------------------------------------------
   # Attach every artifact to the release that triggered the run.
   # ------------------------------------------------------------------------
   release:
-    needs: [prepare, build]
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, build, whaleui]
+    # `whaleui` is opt-in (vars.ENABLE_WHALEUI), so it is normally SKIPPED and
+    # must not block the release. Listing it in `needs` still makes the release
+    # wait for it when it does run, so its archive is attached too.
+    if: |
+      always() &&
+      needs.prepare.result == 'success' && needs.build.result == 'success' &&
+      (needs.whaleui.result == 'success' || needs.whaleui.result == 'skipped') &&
+      (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

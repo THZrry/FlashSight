@@ -421,3 +421,15 @@ The process of project: P0 环境搭建
     真正执行过的调用；回填补上 tool_call id。新增 2 个用例。
   - 详见 current.md <70>。
 
+<71>(SOLVED): GitHub Actions 重写（变体选择 + 资源断言 + 可选 WhaleUI job）。
+  - 构建参数改为 `--variant=web|webview`（上一版 workflow 还写着 `--webview=y`
+    和 `build/web`，等于没跟上本地改动）；两个变体同一个 job 先后编。
+  - `workflow_dispatch` 增加 `variant` 输入，可只编一个变体。
+  - 资源断言：二进制必须含 `#fs-root` + 样式 + Web 版的 `fs_ui.wasm`；webview
+    版**不能**含 wasm（含了说明用错 pack）。查找按 `build/<plat>/<arch>/release`
+    与平台后缀，macOS/Linux 也适用。包数量断言跟随变体选择。
+  - WhaleUI 独立可选 job（`ENABLE_WHALEUI=true` 打开）：clone WhaleUI → 编
+    `libwhaleui-full` → 装 xrepo 依赖 → 编 FlashSight；库路径用 `find` 定位。
+    release 用 `always()` + result 检查，跳过时不挡发布。
+  - 详见 current.md <71>。
+

@@ -56,11 +56,26 @@ webview` 只重编 `ui_server.cpp`（资源头变了）+ 两个后端 + `main.cp
 
 `.github/workflows/build.yml` 按 tag（`v*`）与 `release: published` 触发，
 矩阵覆盖 Windows x86_64/arm64、macOS arm64、Linux x86_64/aarch64；每个 job
-用 `--variant=web` 和 `--variant=webview` 各编一次，`scripts/package.py`
-按变体名找可执行文件（找不到就报错并提示该编哪个变体，绝不退化成"随便找个
-flashsight*"），出两个包并挂到 release。构建后还会断言二进制里确实有内嵌
-资源（`#fs-root`、Web 版的 `fs_ui.wasm`），因为这两类问题在发布之后完全看不
-出来。WhaleUI 不在 CI 里（需要 WhaleUI 仓库与其引擎构建产物）。
+用 `--variant=web` 和 `--variant=webview` 各编一次（同一个输出目录，切变体只
+重编三个文件，所以放在一个 job 里而不是两个），`scripts/package.py` 按变体名
+找可执行文件——**找不到就报错并提示该编哪个变体，绝不退化成"随便找个
+flashsight*"**，那个 fallback 正是错的二进制进发布包的原因。
+
+构建后还有一道断言：二进制里必须真的有内嵌资源（`#fs-root`、样式、Web 版的
+`fs_ui.wasm`），且 webview 版**不能**带 wasm（带了说明用错了变体的 pack）。
+这类问题发布之后完全看不出来，只能在 CI 里拦。断言脚本按
+`build/<plat>/<arch>/release` 查找，可执行文件名按平台带不带 `.exe`，所以
+macOS / Linux 的 job 也适用。
+
+`workflow_dispatch` 支持只编一个变体（`variant: all|web|webview`），迭代时省
+一半时间。
+
+WhaleUI 是**可选的独立 job**（`whaleui`），默认跳过：它需要 clone WhaleUI
+仓库、先用它自己的 xmake 构建 `libwhaleui-full`，再让 xmake 装 lexbor /
+utf8proc / SDL3 / SDL3_ttf / SDL3_image 这些 xrepo 依赖——是另一个仓库、另一
+套依赖，时间也长得多。要打开就把仓库变量 `ENABLE_WHALEUI` 设为 `true`（换
+fork 用 `WHALEUI_REPO`）。release job 用 `always() + result 检查`，所以它被跳
+过时不会挡住发布，跑了就会等它并把它的包一起挂上去。
 
 依赖：`scripts/fetch_3rdparty.py`（幂等，Windows/macOS/Linux 通用），
 mbedtls 由 `mbedtls_src` 目标从源码编译（见文首说明）。
