@@ -135,9 +135,21 @@ class AgentLoop {
   // 等待中的工具（approve 门）
   std::string pending_tool_;
   Json pending_args_;
+  // Tool-call id from the model. The tool result must echo it back: without it
+  // the provider cannot match a result to its call and every tool round either
+  // errors or is silently ignored by the model.
+  std::string pending_call_id_;
+  std::string current_call_id_;
 
   // 当前 turn 的 tool 结果（供回填）
   Json pending_tool_results_ = Json::array();
+
+  // Tool calls EXECUTED during this turn, with their args and a one-line result
+  // summary. Persisted into the assistant turn: the model's own `tool_calls`
+  // only say what it ASKED for, so a reloaded session showed the request but
+  // never what the tool actually returned (the UI's expandable block had
+  // nothing to expand).
+  Json executed_calls_ = Json::array();
 
   // 连续输出（防过拟合检测用）
   std::vector<std::string> recent_outputs_;

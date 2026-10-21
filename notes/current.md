@@ -1689,3 +1689,49 @@ The process of project: P0 环境搭建 + P1 AppCore
     自动跳到新地址、SSE readyState=1、界面正常渲染。270 用例 2710 断言全过，
     web / webview 两个变体都编译通过。
 
+<70>(SOLVED): 变体构建全在 xmake 里 + webview 资源没嵌入 + tool call 没做。
+  - 用户指出三件事：① 自己编译时 webview 资源没嵌入；② 选 WhaleUI 却打包成 Web；
+    ③ 每次切变体都要全量重编（"把 main 提出来只需要重编一个文件才对"）；④ tool
+    call 完全没做。并且明确否掉了外部脚本路线："你不要做 build.bat，明明能在
+    xmake 里面完成非要外部搞这些"。
+  - **删掉 `build.bat`**。三个变体改成 xmake 的一个单值选项
+    `--variant=web|webview|whaleui`。两个布尔开关（`--webview` / `--whaleui`）
+    的毛病是它们会一起留在 `.xmake` 缓存里：`xmake f --whaleui=y` 不会清掉
+    `--webview`，于是 `variant` 退化成 web —— 这就是"选 WhaleUI 出来 Web 包"。
+    单值选项不可能自相矛盾。
+  - **产物名带变体**：`flashsight-web[.exe]` / `-webview` / `-whaleui`，同目录
+    共存，先编一个再编另一个不会覆盖。`scripts/package.py` 只接受对应变体的名字，
+    找不到就报错并提示该编哪个变体，**不再退化成"随便找个 flashsight*"**——正是
+    那个 fallback 让错的二进制进了发布包。
+  - **切变体只重编 3 个文件**：变体宏不再项目级 `add_defines`（那会进入每个编译
+    单元的命令行，改一次就全量重编）。现在拆成 `fs_ui`（共享 UI，无变体宏）+
+    `fs_ui_host`（选中变体的两个后端文件，有变体宏）+ `flashsight`（main.cpp，
+    有变体宏）。实测 `web ↔ webview` 只重编 `ui_server.cpp` + 2 个后端 +
+    `main.cpp`，约 7 秒。
+  - **webview 资源没嵌入的真因**：资源头以前写进 `src/ui/ui_assets_gen.hpp`，
+    所有变体共用一个文件名，后编的变体覆盖前一个的 pack，桌面版就可能拿到 Web
+    版的包（里面没有 `index.html` 的桌面形态）。现在生成头在 `build/gen/`，
+    目录跨变体固定（否则 include 路径变化同样会让整个 `fs_ui` 重编），并且只在
+    内容真的变化时才写盘（否则每次 build 都刷新 mtime，`ui_server.cpp` 白重编）。
+  - **链接顺序**：`fs_core` 现在由 `fs_ui` 自己 `add_deps`，`mbedtls_src` 由
+    `fs_core` 自己 `add_deps`。只在 exe 上并列声明三个依赖时，xmake 会把独立的
+    依赖按名字排序，`fs_core` 跑到 `fs_ui` 前面 → `fs::highlight::*` 全未定义；
+    mbedtls 同理。依赖边决定链接顺序，不是写在哪一行的问题。
+  - **tool call 全链路**（之前只有一行 `tool.update {name, ok}`）：
+    * `execute_tool` 先发 `tool.start {name, args}`，UI 立刻出现一行"运行中…"；
+      工具跑完再发 `tool.update {name, ok, summary, detail}`，**原地补全同一行**
+      （旧实现每次新建一个块，于是每个调用显示成"运行中"+"ok"两行）。
+    * `ToolBlock` 加 `running`，未完成时显示转圈而不是对勾（还没结论就不该打勾）。
+    * 落库的 assistant turn 现在存 `executed_calls_`（真正执行过的调用，含 args /
+      summary / detail），不再只存模型"想调"的 `tool_calls`。重开会话时
+      `turn_to_message` 优先读 `detail`，所以历史里的工具块也有内容可展开。
+    * 工具结果回填时补上 `id`（模型的 tool_call id）。没有它，provider 无法把
+      结果对回调用。
+    * 新增两个用例：`loop_tool_call_events_and_persist`（事件 + 落库）、
+      `uiapp_tool_call_start_and_complete`（start→update 原地补全、失败标红、
+      detail 保留）。
+  - 实测：三个变体都编译通过；资源断言脚本确认 `flashsight-web.exe` 里有
+    `#fs-root` + `fs_ui.wasm` + 样式，`flashsight-webview.exe` 里有 `#fs-root` +
+    样式且**没有** wasm（正确）；三个包分别产出，whaleui 包带上 `web/` 资源目录
+    （WhaleUI 运行时从磁盘读 CSS，不打进 exe）。272 用例 2735 断言全过。
+

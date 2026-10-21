@@ -698,14 +698,22 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
 }
 
 H tool_block(const ToolBlock& b, EventFn on_toggle) {
-  H d = el("div", b.expanded ? "tool-block open" : "tool-block");
+  std::string cls = "tool-block";
+  if (b.expanded) cls += " open";
+  if (b.running) cls += " running";
+  H d = el("div", cls);
   H head = el("div", "tb-head");
   // A null handler must not kill the header: blocks without a toggle still have
   // to render (and the caret must not vanish).
   if (on_toggle) {
     head.on(EventKind::kClick, [on_toggle](const std::string&) { on_toggle("toggle"); });
   }
-  head.add(el("span", b.ok ? "tb-ico ok" : "tb-ico err").text(b.ok ? "\u2713" : "\u2717"));
+  if (b.running) {
+    // No verdict yet: a spinner says "working", a check/cross would lie.
+    head.add(el("span", "tb-ico run").add(spinner()));
+  } else {
+    head.add(el("span", b.ok ? "tb-ico ok" : "tb-ico err").text(b.ok ? "\u2713" : "\u2717"));
+  }
   head.add(el("span", "tb-name").text(b.name));
   head.add(el("span", "tb-sum").text(b.summary));
   head.add(el("span", "tb-caret").text(b.expanded ? "\u25be" : "\u25b8"));

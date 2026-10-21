@@ -3113,6 +3113,63 @@ FS_TEST(uiapp_thinking_block_folds) {
   EXPECT_TRUE(dom.dump().find("let me reason about it") != std::string::npos);
 }
 
+// A tool call must appear when it STARTS and be completed in place when it
+// finishes. The old handler only listened to tool.update, so a slow tool left
+// the transcript blank, and a second event created a duplicate row.
+FS_TEST(uiapp_tool_call_start_and_complete) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.streaming = true;
+    // Tool rows live inside the folded 工作过程 group; a user reading the
+    // process has it open.
+    m.work_open = true;
+    s.messages.push_back(m);
+  });
+
+  app.on_backend_event_for_test(
+      "tool.start",
+      Json{{"name", "file.read"}, {"args", Json{{"path", "main.cpp"}}}});
+  // The row exists while it runs, with the arguments already captured (they are
+  // shown in the expandable body, so assert on the stored detail).
+  EXPECT_EQ(app.state().messages.back().tools.size(), 1u);
+  EXPECT_TRUE(app.state().messages.back().tools[0].running);
+  EXPECT_TRUE(app.state().messages.back().tools[0].detail.find("main.cpp") !=
+              std::string::npos);
+  std::string running = dom.dump();
+  EXPECT_TRUE(running.find("file.read") != std::string::npos);
+  EXPECT_TRUE(running.find("tool-block running") != std::string::npos);
+
+  app.on_backend_event_for_test(
+      "tool.update",
+      Json{{"name", "file.read"}, {"ok", true},
+           {"summary", "42 lines"}, {"detail", "line1\nline2"}});
+  // Completed IN PLACE: still one row, no longer running, verdict visible.
+  EXPECT_EQ(app.state().messages.back().tools.size(), 1u);
+  EXPECT_FALSE(app.state().messages.back().tools[0].running);
+  EXPECT_TRUE(app.state().messages.back().tools[0].ok);
+  std::string done = dom.dump();
+  EXPECT_TRUE(done.find("42 lines") != std::string::npos);
+  EXPECT_TRUE(done.find("tool-block running") == std::string::npos);
+
+  // A failure marks the row, and the detail is kept for the expandable body.
+  app.on_backend_event_for_test(
+      "tool.start", Json{{"name", "file.write"}, {"args", Json::object()}});
+  app.on_backend_event_for_test(
+      "tool.update",
+      Json{{"name", "file.write"}, {"ok", false},
+           {"summary", "permission denied"}, {"detail", "denied"}});
+  const std::vector<comp::ToolBlock>& tools = app.state().messages.back().tools;
+  EXPECT_EQ(tools.size(), 2u);
+  EXPECT_FALSE(tools[1].ok);
+  EXPECT_EQ(tools[1].detail, std::string("denied"));
+}
+
 // A tool block's body only appears when THAT block is expanded.
 FS_TEST(uiapp_tool_blocks_toggle_independently) {
   NullDom dom;

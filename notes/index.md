@@ -404,3 +404,20 @@ The process of project: P0 环境搭建
     配置里的旧端口把服务器悄悄搬走——这正是"本地也变了"。
   - 详见 current.md <69>。
 
+<70>(SOLVED): 变体构建全在 xmake 里 + webview 资源没嵌入 + tool call 全链路。
+  - 删掉 `build.bat`：三个变体改为 xmake 单值选项 `--variant=web|webview|whaleui`。
+    两个布尔开关会同时留在缓存里（`--whaleui=y` 不清 `--webview`），于是"选
+    WhaleUI 出来 Web 包"。产物名带变体，同目录共存；`package.py` 只认对应名字，
+    不再 fallback 到任意 `flashsight*`。
+  - 切变体只重编 3 个文件：变体宏从项目级 `add_defines` 挪到 `fs_ui_host` 与
+    `flashsight` 两个目标；`fs_ui` 不再含变体宏。实测 7 秒。
+  - webview 资源没嵌入：资源头以前写进 `src/ui/` 且所有变体共用文件名，后编的
+    覆盖前一个。现在在 `build/gen/`（跨变体固定路径，避免 include 路径变化导致
+    全量重编），且内容不变就不写盘。
+  - 依赖边修正：`fs_ui→fs_core→mbedtls_src` 各自 `add_deps`，否则并列依赖会被
+    按名字排序，归档顺序错开导致 `fs::highlight::*` / `mbedtls_*` 未定义。
+  - tool call：`tool.start`（带 args，立即显示"运行中"）→ `tool.update`（summary
+    + detail，**原地补全**同一行）；`ToolBlock.running` 用转圈代替对勾；落库存
+    真正执行过的调用；回填补上 tool_call id。新增 2 个用例。
+  - 详见 current.md <70>。
+

@@ -1375,6 +1375,10 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .tb-ico { font-weight: 700; }
 .tb-ico.ok { color: var(--ok); }
 .tb-ico.err { color: var(--err); }
+/* still executing: no verdict yet, so no check/cross */
+.tb-ico.run { display: inline-flex; align-items: center; }
+.tool-block.running { border-style: dashed; }
+.tool-block.running .tb-sum { color: var(--text-faint); }
 .tb-name { font-family: var(--mono); }
 .tb-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tb-caret { margin-left: auto; color: var(--text-faint); }

@@ -1,27 +1,27 @@
 # WhaleUI 桌面 UI 接入（ui-whaleui）
 
-> 状态：**代码已写完并接线，但默认不编译**（`xmake f --whaleui=y` 打开）。
-> 等 WhaleUI 完工（只剩拖放）后打开开关、跑一遍本文 §4 的验收清单即可。
-> 对应笔记：notes `<35>`。
+> 状态：**代码已写完并接线**，用 `xmake f --variant=whaleui` 打开。
+> 等 WhaleUI 完工（只剩拖放）后跑一遍本文 §4 的验收清单即可。
+> 对应笔记：notes `<35>`、`<70>`。
 
 ## 1. 开关与构建
 
-```bat
-rem 默认（浏览器 wasm + 本地 HTTP，现状不变）
-xmake f -y --toolchain=mingw
-xmake -y
+```sh
+# 默认（浏览器 wasm + 本地 HTTP）
+xmake f --variant=web -y --toolchain=mingw && xmake b
 
-rem WhaleUI 原生窗口（桌面 UI）
-xmake f -y --toolchain=mingw --whaleui=y ^
+# WhaleUI 原生窗口
+xmake f --variant=whaleui -y --toolchain=mingw \
         --whaleui_libdir=C:/aaa/WhaleUI/build/mingw/x86_64/release
-xmake -y
+xmake b
 ```
 
-- `--whaleui=y` 定义 `FS_UI_WHALEUI`（仅 native，wasm target 不受影响），
-  于是 `ui_dom_whale.cpp` / `ui_main_whale.cpp` 参与编译，`src/main.cpp` 走
-  `run_whale_ui()` 分支。
-- 同一开关下：**跳过 fs_ui_wasm**（不再需要 wasm 包），fs_ui 去掉
-  `ui_server.cpp`（它 include 只有 wasm 流程才会生成的 `ui_assets_gen.hpp`）。
+- 产物是 `flashsight-whaleui[.exe]`，和另外两个变体同目录共存。
+- 变体宏 `FS_UI_WHALEUI` 只加在 `fs_ui_host`（`ui_dom_whale.cpp` +
+  `ui_main_whale.cpp`）和 `flashsight`（`main.cpp`）上，`fs_ui` 本身不含
+  变体宏——所以切变体只重编三个文件。
+- `--variant=whaleui` 时不构建 `fs_ui_wasm`（不需要 wasm 包）。`ui_server.cpp`
+  仍然编译（三个变体共用），资源头来自 `build/gen/`。
 - 头文件：`3rdparty/whaleui/include/{whaleui.h,whaleui.hpp}`（WhaleUI 的
   include/ 副本；3rdparty 不入 git，重取方式见 `scripts/fetch_3rdparty.*`）。
 - 依赖：WhaleUI 自己的 `libwhaleui-full.a` + SDL3/SDL3_ttf 预编译包 +

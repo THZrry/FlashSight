@@ -109,6 +109,10 @@ struct ToolBlock {
   std::string detail;    // body shown expanded (mono)
   bool expanded = false;
   bool ok = true;
+  // Still executing. The row shows a "running" state and is completed in place
+  // when the matching tool.update arrives (a tool that takes seconds otherwise
+  // looks like it never started).
+  bool running = false;
 };
 H tool_block(const ToolBlock& b, EventFn on_toggle);
 

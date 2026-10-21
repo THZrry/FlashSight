@@ -13,6 +13,7 @@
 #include "agent/steering_queue.hpp"
 #include "agent/wake_scheduler.hpp"
 #include "common/fs_clock.hpp"
+#include "common/fs_json.hpp"
 #include "common/fs_path.hpp"
 
 using namespace fs;
@@ -115,6 +116,71 @@ FS_TEST(loop_approve_deny) {
   // 拒绝 → 结果回填 → 续跑至本轮结束（不再停在 kToolCalling）
   EXPECT_TRUE(loop.state() == LoopState::kTurnDone);
   EXPECT_EQ(calls, 2);
+}
+
+// ---------- Loop：工具调用全链路（start → 执行 → update → 落库） ----------
+// The UI shows a tool the moment it starts and fills in its result afterwards.
+// That only works if the loop emits tool.start with the args, tool.update with
+// a summary + detail, and persists what actually RAN (not just what the model
+// asked for) - a reloaded session otherwise had rows with nothing to expand.
+FS_TEST(loop_tool_call_events_and_persist) {
+  AgentLoop::Options opts;
+  opts.sid = "s_1";
+  opts.permission = "full";   // no approval gate: execute immediately
+  std::vector<std::string> events;
+  Json start_payload, update_payload, persisted;
+  opts.event = [&](const std::string& e, const Json& p) {
+    events.push_back(e);
+    if (e == "tool.start") start_payload = p;
+    if (e == "tool.update") update_payload = p;
+  };
+  AgentLoop loop(std::move(opts));
+  loop.persist_turn = [&persisted](const Json& t) {
+    if (jsonutil::get<std::string>(t, "role", "") == "assistant") persisted = t;
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string& name, const Json&) {
+    return FsResult::success(Json{{"summary", "42 lines"}, {"content", "x"}});
+  };
+  int calls = 0;
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out,
+                             const std::function<void(const std::string&)>&) -> FsResult {
+    ++calls;
+    if (calls == 1) {
+      Json call = Json::object();
+      call["name"] = "file.read";
+      call["id"] = "call_1";
+      call["args"] = Json{{"path", "main.cpp"}};
+      out->tool_calls = Json::array({call});
+    } else {
+      out->text = "done";
+    }
+    return FsResult::success();
+  };
+  EXPECT_TRUE(loop.send("read it").ok());
+
+  bool saw_start = false, saw_update = false;
+  for (size_t i = 0; i < events.size(); ++i) {
+    if (events[i] == "tool.start") saw_start = true;
+    if (events[i] == "tool.update") saw_update = true;
+  }
+  EXPECT_TRUE(saw_start);
+  EXPECT_TRUE(saw_update);
+  // start carries the arguments (so the row can say WHAT is running)...
+  EXPECT_EQ(jsonutil::get<std::string>(start_payload, "name", ""),
+            std::string("file.read"));
+  EXPECT_TRUE(start_payload.contains("args"));
+  // ...update carries the verdict and a one-line summary.
+  EXPECT_TRUE(jsonutil::get<bool>(update_payload, "ok", false));
+  EXPECT_EQ(jsonutil::get<std::string>(update_payload, "summary", ""),
+            std::string("42 lines"));
+  EXPECT_TRUE(update_payload.contains("detail"));
+
+  // The stored assistant turn keeps what ran, so a reload shows the same rows.
+  EXPECT_TRUE(persisted.contains("toolCalls"));
+  EXPECT_EQ(persisted["toolCalls"].size(), static_cast<size_t>(1));
+  EXPECT_EQ(jsonutil::get<std::string>(persisted["toolCalls"][0], "summary", ""),
+            std::string("42 lines"));
+  EXPECT_TRUE(jsonutil::get<bool>(persisted["toolCalls"][0], "ok", false));
 }
 
 // ---------- Loop：挂起后不再发新调用 ----------

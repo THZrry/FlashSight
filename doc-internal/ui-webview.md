@@ -9,14 +9,18 @@ UI 层（`ui_app.cpp` / `ui_vdom.cpp` / `ui_components.cpp`）完全共享，只
 
 | 变体 | 命令 | DOM 后端 | 窗口 |
 |---|---|---|---|
-| **Web**（默认） | `build.bat web` | `WasmDom`（emscripten/val） | 用户浏览器标签页 |
-| **Webview** | `build.bat webview` | `WebViewDom`（webview + 注入 JS） | 原生窗口（WebView2 / WebKitGTK / WKWebView） |
-| **WhaleUI** | `build.bat whaleui` | `WhaleDom`（WhaleUI C DOM） | WhaleUI 自绘窗口 |
+| **Web**（默认） | `xmake f --variant=web` | `WasmDom`（emscripten/val） | 用户浏览器标签页 |
+| **Webview** | `xmake f --variant=webview` | `WebViewDom`（webview + 注入 JS） | 原生窗口（WebView2 / WebKitGTK / WKWebView） |
+| **WhaleUI** | `xmake f --variant=whaleui` | `WhaleDom`（WhaleUI C DOM） | WhaleUI 自绘窗口 |
 
-每个变体在 `build/` 下有自己的子树（`build/web`、`build/webview`、
-`build/whaleui`，由 `xmake f -o` 指定），可以共存，切换不会留下陈旧对象。
+三个变体共用一个输出目录，**可执行文件名带变体**
+（`flashsight-web` / `flashsight-webview` / `flashsight-whaleui`），所以先编
+一个再编另一个不会互相覆盖。`--variant` 是单值选项，不可能出现"两个开关同时
+为真"的矛盾（以前 `--whaleui=y` 不会清掉 `--webview`，于是选了 WhaleUI 却
+出来 Web 包）。
 
-`--webview=y` 与 `--whaleui=y` **互斥**（都提供 `run_*_ui` 入口）。
+变体宏只加在 `fs_ui_host`（两个后端文件）和 `flashsight`（`main.cpp`）上，
+`fs_ui` 本身没有变体宏，所以切变体只重编三个文件、再链接。
 
 **显示方式由编译期决定**：Web 版就是浏览器，Webview / WhaleUI 版就是原生窗口，
 启动时必定按这个方式显示，没有运行时开关去换一个。

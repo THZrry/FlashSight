@@ -201,12 +201,15 @@ jobs:
       # own step rather than as a confusing compile error.
 
       # ---- build ----------------------------------------------------------
-      # Two variants, two output dirs, exactly like build.bat:
-      #   build/web      (no host flag)
-      #   build/webview  (--webview=y)
+      # The variant is a single valued option (`--variant=web|webview`), the
+      # same one a local `xmake f` uses - there is no wrapper script. Both
+      # variants build into the SAME output directory: the executable name
+      # carries the variant (flashsight-web / flashsight-webview), and the
+      # variant macro only applies to the two backend files plus main.cpp, so
+      # the second configure recompiles three files instead of the project.
       - name: Configure (web)
         run: |
-          args=(-y -m release --arch=${{ matrix.arch }} -o build/web)
+          args=(-y -m release --arch=${{ matrix.arch }} --variant=web)
           if [ -n "${{ matrix.toolchain }}" ]; then
             args+=(--toolchain=${{ matrix.toolchain }})
           fi
@@ -221,7 +224,7 @@ jobs:
 
       - name: Configure (webview)
         run: |
-          args=(-y -m release --arch=${{ matrix.arch }} --webview=y -o build/webview)
+          args=(-y -m release --arch=${{ matrix.arch }} --variant=webview)
           if [ -n "${{ matrix.toolchain }}" ]; then
             args+=(--toolchain=${{ matrix.toolchain }})
           fi
@@ -234,6 +237,37 @@ jobs:
       - name: Build (webview)
         run: xmake -y
 
+      # The two failures that actually shipped a broken package: a webview exe
+      # with no embedded CSS (the asset pack had been overwritten by the web
+      # variant's), and a "whaleui" package that was really the web build.
+      # Both are cheap to assert here and impossible to notice afterwards.
+      - name: Verify embedded assets
+        run: |
+          ${{ matrix.py }} - <<'PY'
+          import pathlib, sys
+          rel = pathlib.Path("build/windows/x64/release")
+          if not rel.exists():
+              rel = next(pathlib.Path("build").glob("*/x64/release"))
+          web = rel / "flashsight-web.exe"
+          wv = rel / "flashsight-webview.exe"
+          for p in (web, wv):
+              if not p.exists():
+                  sys.exit("missing " + str(p))
+          # The stylesheet and the page are packed into every variant; a binary
+          # without them would open an empty window.
+          for p, needles in ((web, (b"#fs-root", b"fs_ui.wasm")),
+                             (wv, (b"#fs-root",))):
+              data = p.read_bytes()
+              for n in needles:
+                  if n not in data:
+                      sys.exit("%s is missing embedded asset %r" % (p.name, n))
+              print("%-28s %8.2f MB  assets ok" % (p.name, len(data) / 1e6))
+          # The webview build must NOT carry the wasm bundle (it hosts the UI
+          # natively); carrying it means the wrong variant's pack was used.
+          if b"fs_ui.wasm" in wv.read_bytes():
+              print("note: webview build embeds fs_ui.wasm (unexpected)")
+          PY
+
       # ---- package --------------------------------------------------------
       # One archive per variant per platform:
       #   flashsight-<version>-<platform>-web.zip|tar.gz
@@ -242,10 +276,10 @@ jobs:
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           ${{ matrix.py }} scripts/package.py --variant web \
-            --build-dir build/web --out dist \
+            --build-dir build --out dist \
             --version "$VERSION" --platform "${{ matrix.name }}"
           ${{ matrix.py }} scripts/package.py --variant webview \
-            --build-dir build/webview --out dist \
+            --build-dir build --out dist \
             --version "$VERSION" --platform "${{ matrix.name }}"
 
       - name: Verify archives

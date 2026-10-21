@@ -32,11 +32,12 @@ temp/
 # development, so it must never be committed.
 .flashsight/
 
-# generated wasm bundle + embedded-asset header (built by xmake; fs_ui_wasm
-# after_build packs web/ into src/ui/ui_assets_gen.hpp - see rules/addon3.md)
+# generated wasm bundle (built by xmake). The embedded-asset header now lives in
+# the build tree (build/gen/), not in src/ - see the packer in xmake.lua.
 web/fs_ui.js
 web/fs_ui.wasm
 web/fs_ui.html
+# left behind by older builds that wrote the pack into the source tree
 src/ui/ui_assets_gen.hpp
 
 # editor

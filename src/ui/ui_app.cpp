@@ -932,9 +932,12 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
     for (size_t k = 0; k < tc.size(); ++k) {
       comp::ToolBlock tb;
       tb.name = jsonutil::get<std::string>(tc[k], "name", "");
-      std::string args = tc[k].contains("args") ? tc[k]["args"].dump(2) : "";
+      // Prefer the stored, already-summarised detail: `args` alone says what was
+      // asked for, not what came back. Older turns only have args, so fall back.
+      std::string detail = jsonutil::get<std::string>(tc[k], "detail", "");
+      if (detail.empty() && tc[k].contains("args")) detail = tc[k]["args"].dump(2);
       tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
-      tb.detail = args;
+      tb.detail = detail;
       tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
       if (!tb.name.empty()) m.tools.push_back(tb);
     }
@@ -1956,17 +1959,51 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       }
       load_session_usage(usage_sid);
     }
+  } else if (event == "tool.start") {
+    // A tool was invoked. Show it IMMEDIATELY with its arguments: a slow tool
+    // (build, fetch) otherwise leaves the transcript looking frozen, and once it
+    // finishes the block already exists so `tool.update` just fills it in.
+    std::string name = jsonutil::get<std::string>(payload, "name", "");
+    std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
+    if (!name.empty() && !m.empty() && m.back().role == "assistant") {
+      comp::ToolBlock tb;
+      tb.name = name;
+      tb.summary = tr("运行中…");
+      tb.running = true;
+      if (payload.contains("args")) tb.detail = payload["args"].dump(2);
+      m.back().tools.push_back(tb);
+      m.back().rev = next_msg_rev_++;
+      render();
+    }
   } else if (event == "tool.update") {
     std::string name = jsonutil::get<std::string>(payload, "name", "");
     bool ok = jsonutil::get<bool>(payload, "ok", true);
+    std::string summary = jsonutil::get<std::string>(payload, "summary", "");
+    std::string detail = jsonutil::get<std::string>(payload, "detail", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     if (!m.empty() && m.back().role == "assistant") {
-      comp::ToolBlock tb;
-      tb.name = name;
-      tb.summary = ok ? "ok" : "failed";
-      tb.ok = ok;
-      m.back().tools.push_back(tb);
+      // Complete the block `tool.start` created for this call. Matching by name
+      // is enough: the loop runs one tool at a time, so the newest unfinished
+      // block with that name IS this call. Creating a second block here (the old
+      // behaviour) doubled every row: "running" plus "ok".
+      comp::ToolBlock* slot = nullptr;
+      for (size_t i = m.back().tools.size(); i-- > 0;) {
+        if (m.back().tools[i].running && m.back().tools[i].name == name) {
+          slot = &m.back().tools[i];
+          break;
+        }
+      }
+      if (!slot) {
+        m.back().tools.push_back(comp::ToolBlock());
+        slot = &m.back().tools.back();
+      }
+      slot->name = name;
+      slot->ok = ok;
+      slot->running = false;
+      slot->summary = !summary.empty() ? summary : (ok ? "ok" : "failed");
+      if (!detail.empty()) slot->detail = detail;
       m.back().rev = next_msg_rev_++;
+      render();
     }
   } else if (event == "subagent.done") {
     std::string id = jsonutil::get<std::string>(payload, "id", "");
@@ -2037,9 +2074,9 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     if (!coalesced) render();
     return;
   }
-  if (event == "stream.delta" || event == "turn.done" || event == "tool.update" ||
-      event == "subagent.done" || event == "terminal.exit" ||
-      event == "terminal.output") {
+  if (event == "stream.delta" || event == "turn.done" || event == "tool.start" ||
+      event == "tool.update" || event == "subagent.done" ||
+      event == "terminal.exit" || event == "terminal.output") {
     apply_session_event(sid, event, payload);
   } else if (event == "permission.prompt") {
     st_.ask_modal = true;

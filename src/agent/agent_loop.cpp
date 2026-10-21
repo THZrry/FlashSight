@@ -167,6 +167,7 @@ FsResult AgentLoop::approve(bool yes) {
   } else {
     // 批准：真调工具，结果回填
     state_ = LoopState::kToolCalling;
+    current_call_id_ = pending_call_id_;
     FsResult tr = execute_tool(pending_tool_, pending_args_);
     if (!tr.ok()) return tr;
   }
@@ -234,6 +235,7 @@ FsResult AgentLoop::handle_tool_call(const Json& call) {
     state_ = LoopState::kWaiting;
     pending_tool_ = name;
     pending_args_ = args;
+    pending_call_id_ = call_id;
     emit("permission.prompt", Json{{"tool", name}, {"args", args}});
     return FsResult::success();
   }
@@ -242,10 +244,12 @@ FsResult AgentLoop::handle_tool_call(const Json& call) {
     state_ = LoopState::kWaiting;
     pending_tool_ = name;
     pending_args_ = args;
+    pending_call_id_ = call_id;
     emit("permission.prompt", Json{{"tool", name}, {"args", args}});
     return FsResult::success();
   }
   // 非高风险：直接执行（通过 invoke_tool 真调工具）
+  current_call_id_ = call_id;
   return execute_tool(name, args);
 }
 
@@ -263,6 +267,11 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
   ctx.approved = true;
   ctx.thinking_lang = opts_.thinking_lang;
   ctx.emit = [this](const std::string& e, const Json& p) { emit(e, p); };
+  // The UI shows a tool the moment it STARTS, not when it finishes: a slow tool
+  // (a build, a fetch) otherwise leaves the transcript blank for seconds and the
+  // turn looks stuck. `tool.start` carries the args so the block can already
+  // say WHAT is running.
+  emit("tool.start", Json{{"name", name}, {"args", args}});
   // 进程（todo）/invoke_tool 由 Host 注入的 invoke_tool 转发时补齐
   Json result = Json::object();
   FsResult r = invoke_tool ? invoke_tool(ctx, name, args)
@@ -278,8 +287,42 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
     if (r.denied()) result["denial"] = r.denial.reason;
   }
   pending_tool_results_.push_back(
-      Json{{"name", name}, {"args", args}, {"result", result}});
-  emit("tool.update", Json{{"name", name}, {"ok", r.ok()}});
+      Json{{"name", name}, {"args", args}, {"id", current_call_id_},
+           {"result", result}});
+
+  // One line that describes the OUTCOME, shown on the collapsed row. The full
+  // result goes into the expandable body; dumping the whole thing on the header
+  // made every row as wide as a file.
+  std::string summary;
+  if (!r.ok()) {
+    summary = result.contains("error") && result["error"].is_string()
+                  ? result["error"].get<std::string>()
+                  : err_code_name(r.code);
+  } else if (result.contains("summary") && result["summary"].is_string()) {
+    summary = result["summary"].get<std::string>();
+  } else if (result.contains("path") && result["path"].is_string()) {
+    summary = result["path"].get<std::string>();
+  } else if (result.contains("content") && result["content"].is_string()) {
+    summary = "ok";
+  } else if (result.is_object() && result.size() == 0) {
+    summary = "ok";
+  } else {
+    summary = "ok";
+  }
+  Json call = Json::object();
+  call["name"] = name;
+  call["args"] = args;
+  call["ok"] = r.ok();
+  call["summary"] = summary;
+  // The body is the tool's own payload, trimmed: a 2 MB file read would be
+  // written into the session file and re-parsed on every reload.
+  std::string body = result.dump(2);
+  if (body.size() > 4000) body = body.substr(0, 4000) + "\n... (truncated)";
+  call["detail"] = body;
+  executed_calls_.push_back(call);
+
+  emit("tool.update", Json{{"name", name}, {"ok", r.ok()},
+                           {"summary", summary}, {"detail", body}});
   return FsResult::success();
 }
 
@@ -312,6 +355,7 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   messages.push_back(user_msg);
   last_user_text_ = user_text;
   turn_started_ms_ = WallClock().now_ms();  // this turn's clock starts here
+  executed_calls_ = Json::array();          // fresh turn, fresh tool log
   saved_valid_ = false;  // 新一轮开始：清掉旧保存点
   return run_loop(messages, opts_.model, hopts.tools);
 }
@@ -438,7 +482,9 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
   Json asst_turn = Json::object();
   asst_turn["role"] = "assistant";
   asst_turn["streamSummary"] = result.text;
-  asst_turn["toolCalls"] = result.tool_calls;
+  asst_turn["toolCalls"] = executed_calls_.size() > 0 ? executed_calls_
+                                                      : result.tool_calls;
+  executed_calls_ = Json::array();
   asst_turn["startedAt"] = turn_started_ms_ > 0 ? turn_started_ms_ : ended_ms;
   asst_turn["ts"] = ended_ms;
   if (persist_turn) {

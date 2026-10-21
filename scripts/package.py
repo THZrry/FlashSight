@@ -62,36 +62,39 @@ def log(msg):
     print("[package] " + msg, flush=True)
 
 
-def find_exe(build_dir):
-    """Locate the built executable under build_dir (xmake nests by plat/arch/mode).
+def find_exe(build_dir, variant):
+    """Locate the built executable for `variant` under build_dir.
 
-    xmake names the target after the target name, so both variants produce
-    `flashsight[.exe]`. A suffixed name (`flashsight_web.exe`) would mean the
-    target was renamed - accept it too rather than failing the release on a
-    naming change nobody remembers making.
+    The executable name carries the variant (flashsight-web, flashsight-webview,
+    flashsight-whaleui), because all variants build into the same output
+    directory. That is deliberate: without the suffix, building a second variant
+    silently replaced the first one, and the packager then shipped whichever
+    build happened to be on disk - which is how a "WhaleUI" package turned out
+    to be the Web build.
+
+    Only the exact variant name is accepted. Falling back to "any flashsight*"
+    is what allowed the wrong binary into a release, so a missing suffix is an
+    error that names what was expected.
     """
-    names = ("flashsight.exe", "flashsight")
+    wanted = ("flashsight-%s.exe" % variant, "flashsight-%s" % variant)
     hits = []
-    for name in names:
+    for name in wanted:
         for p in build_dir.rglob(name):
             # Skip xmake's internal trees: .deps/ holds dependency stubs with
             # the same basename, .objs/ holds object files.
             if any(part.startswith(".") for part in p.relative_to(build_dir).parts):
                 continue
-            if not p.is_file():
-                continue
-            hits.append(p)
-    if not hits:
-        # Fallback: any executable whose name starts with "flashsight".
-        for p in build_dir.rglob("flashsight*"):
-            if p.suffix.lower() not in (".exe", ""):
-                continue
-            if any(part.startswith(".") for part in p.relative_to(build_dir).parts):
-                continue
             if p.is_file():
                 hits.append(p)
     if not hits:
-        raise SystemExit("no flashsight executable under %s" % build_dir)
+        found = sorted(p.name for p in build_dir.rglob("flashsight*")
+                       if p.is_file() and not any(
+                           part.startswith(".") for part in
+                           p.relative_to(build_dir).parts))
+        raise SystemExit(
+            "no %s under %s (found: %s)\n"
+            "Build that variant first:  xmake f --variant=%s && xmake b"
+            % (wanted[0], build_dir, ", ".join(found) or "nothing", variant))
     # Prefer the shallowest path, and a release build over a stale debug tree.
     hits.sort(key=lambda p: (len(p.parts), "debug" in p.parts))
     return hits[0]
@@ -138,7 +141,8 @@ def write_readme(dest, variant, version, platform):
         "Platform: %s" % platform,
         "",
         "Run:",
-        "  flashsight%s" % (".exe" if platform.startswith("windows") else ""),
+        "  flashsight-%s%s" % (variant,
+                              ".exe" if platform.startswith("windows") else ""),
         "",
         "Options:",
         "  --port N       serve the UI on a fixed port (default: a free one)",
@@ -183,7 +187,7 @@ def main():
     args = ap.parse_args()
 
     build_dir = (ROOT / args.build_dir).resolve()
-    exe = find_exe(build_dir)
+    exe = find_exe(build_dir, args.variant)
     log("exe: %s" % exe)
 
     platform = args.platform or sys.platform
@@ -198,6 +202,20 @@ def main():
     stage.mkdir(parents=True)
 
     shutil.copy2(exe, stage / exe.name)
+
+    # WhaleUI reads its stylesheet and icon sheets from disk (through the
+    # engine's VFS) instead of embedding them, so the `web/` directory xmake
+    # copies next to the exe has to travel with the package. Shipping only the
+    # executable produced an unstyled window.
+    if args.variant == "whaleui":
+        src_web = exe.parent / "web"
+        if not src_web.is_dir():
+            raise SystemExit(
+                "%s has no web/ directory next to it; the WhaleUI build must "
+                "copy the UI assets (see whaleui_copy_dlls in xmake.lua)"
+                % exe.name)
+        shutil.copytree(src_web, stage / "web")
+        log("assets: web/ (%d files)" % len(list((stage / "web").rglob("*"))))
 
     # Windows: bundle the C++ runtime the exe was linked against. The import
     # table decides which DLLs that is - a statically linked toolchain must not
