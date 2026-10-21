@@ -392,3 +392,15 @@ The process of project: P0 环境搭建
     静默钳到 65535。设置页显示真实局域网 IP（UDP connect 8.8.8.8 读 getsockname）。
   - 详见 current.md <68>。
 
+<69>(SOLVED): 改端口/切地址闪退 + 页面失联 + 端口"自己变了"。
+  - 闪退根因：`restart()` 每次新开 detached 线程；连续两次设置 → 两个线程同时
+    `stop()`，第二次 `join()` 已 join 的 `std::thread` 抛异常，detached 线程里没人
+    接 → `std::terminate`（无输出退出）。改成单个常驻 worker 串行合并重绑。
+  - 页面失联：原来先关旧监听再起新监听，中间空窗导致旧页面探测失败死在原地址。
+    改成新监听先 accept，再退役旧监听；端口变化时旧 socket 多留 1.2s。
+  - 停止标志按"代"隔离（每次重绑新建 `shared_ptr<atomic<bool>>`），否则退役旧监听
+    会把新监听的 SSE 一起杀掉。listen 线程改为按值捕获 Server*，不再读 impl_->svr。
+  - `--port` 现在写回 `server.port`：此前命令行端口只用于本次启动，之后改地址会用
+    配置里的旧端口把服务器悄悄搬走——这正是"本地也变了"。
+  - 详见 current.md <69>。
+

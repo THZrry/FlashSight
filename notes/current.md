@@ -1656,3 +1656,36 @@ The process of project: P0 环境搭建 + P1 AppCore
     （0.0.0.0:8850）；SSE 在重绑时被服务端正常关闭（EventSource 会自动重连）。
     270 用例 2710 断言全过；web / webview 两个变体都编译通过。
 
+<69>(SOLVED): 改端口/切地址时闪退 + 页面失联 + 端口"自己变了"。
+  - 用户报告：改端口后本地也变了，后面什么操作都做不了；从"Web 服务"切到本地、
+    再改端口，程序直接闪退且没有报错。用户猜是 join 监听的处理有问题——判断对了。
+  - **闪退根因**：`restart()` 每次调用都 `std::thread(...).detach()` 一个新线程。
+    连续两次设置（切地址、再改端口）就有两个线程同时进 `stop()`；第二个线程对
+    已经 join 过的 `std::thread` 再次 `join()` 会抛 `std::system_error`，而它在
+    detached 线程里没人捕获 → `std::terminate`，进程无声消失。**改成单个常驻
+    worker 线程**：`restart()` 只把最新的目标设置放进槽位并唤醒，合并突发的多次
+    设置（表单场景就是"最后一次生效"）。worker 在 `~UiServer` 里置 quit 并 join。
+  - **页面失联根因**：`server.moved` 在 `restart()` 里就进了事件环，但 `do_rebind`
+    随后是「先 stop 旧监听、再起新监听」。中间那段时间旧页面已经连不上、新端口
+    还没起来，页面探测失败就停在死页面上——用户看到的"什么操作都做不了"。
+    改成**新监听先 accept，再退役旧监听**：换入新实例、起 listen、等 `is_running`，
+    然后才给旧实例置 stop 标志并 join。端口变化时旧 socket 再多活 1.2s，给页面
+    完成探测 + `location.replace` 的时间。
+  - **停止标志必须按"代"区分**：原来 `Impl::stopping` 是一个共享的 atomic。新旧
+    监听短暂并存时，旧监听退役会把标志置位，新监听的 SSE 也跟着被杀。改成每次
+    `start()`/重绑都新建一个 `shared_ptr<atomic<bool>>`，SSE 处理器捕获自己那一代
+    的 flag。
+  - **listen 线程不能捕获 `this`**：`std::thread([this]{ impl_->svr->listen... })`
+    在线程真正跑起来时读的是**当前**的 `impl_->svr`，重绑换过实例后就会去 listen
+    新实例（而它已经有自己的 listen 线程）。改成按值捕获 `httplib::Server*`。
+  - **`--port` 与配置不同步导致"端口自己变了"**：启动时 `--port 8930` 只用于本次
+    `server.start()`，配置里仍写着旧端口；之后任意一次改地址都会
+    `apply_server_settings()` 重新读配置，把端口悄悄改回旧值。现在 `--port` 会写回
+    `server.port`（`apply_server_settings` 在服务未运行时直接返回，避免启动前误重绑）。
+  - **`/api/conn-lost` 页面兜底**：连接彻底断开时不再只给一个"重新加载"，而是提供
+    端口输入框（预填当前端口）+ "打开新端口" + "重试当前地址"。
+  - 实测：`--port 8930` 启动后依次 切局域网 → 切本地 → 改端口 8931，进程存活、
+    端口正确；10 次快速 host 切换全部 200 无崩溃；页面内改端口 8931→8932 后标签页
+    自动跳到新地址、SSE readyState=1、界面正常渲染。270 用例 2710 断言全过，
+    web / webview 两个变体都编译通过。
+

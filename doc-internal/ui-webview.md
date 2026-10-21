@@ -52,15 +52,30 @@ WhaleUI 版:  UI: WhaleUI (native window)               (无服务)
   就保留原监听并把错误显示在设置页。
 - **重启不能在被服务的那条请求线程上做**：`stop()` 要 join 监听线程，而监听线程
   退出时又会 join 线程池，当前请求本身就在池里 → 死锁（浏览器看到的是请求挂住）。
-  所以 `restart()` 起一个 detached 线程。
+- **但也不能每次调用都起一个 detached 线程**（这是曾经的闪退根因）：连续两次设置
+  （先切地址、再改端口）会让两个 helper 同时进 `stop()`；第二次 `join()` 一个已经
+  join 过的 `std::thread` 会抛 `std::system_error`，detached 线程里无人捕获 →
+  `std::terminate`，进程无任何输出直接消失。现在只有**一个常驻 rebind worker**：
+  `restart()` 把最新目标写进槽位并 `notify`，worker 串行执行并合并突发请求（表单
+  语义：最后一次生效）。worker 在 `~UiServer` 里置 quit 并 join。
 - **`stop()` 必须先关掉正在进行的 SSE**：页面常挂一条 `/api/stream`，它的 chunked
   处理器要一直跑（等下一个事件）才不会结束；它占着池里一个 worker，`stop()` 的
-  join 就永远等不到它 → 重绑卡死、旧监听不释放。所以 `Impl` 有个 `stopping` 标志：
-  `stop()` 先置位并 `cv.notify_all()`，SSE 处理器每次醒来先查它，置位就 `return
-  false`（chunked provider 返回 false 会让 httplib 以 Canceled 退出该请求）。重绑
-  里换上**新实例**后要手动清掉标志（那条路径不走 `start()`）。keep-alive 等待设成
+  join 就永远等不到它 → 重绑卡死、旧监听不释放。**停止标志必须按"代"隔离**：每次
+  `start()` / 重绑都新建一个 `shared_ptr<atomic<bool>>`，SSE 处理器捕获自己那一代
+  的 flag。用一个共享标志时，退役旧监听会顺带杀掉新监听的 SSE。keep-alive 等待
   0.5s，保证 `stop()` 最坏只等半秒。**这是"改端口没反应 / 0.0.0.0 没有服务"的最后
   一层根因**——HTTP 层不挂 SSE 单独测时重绑全都正常。
+- **新监听先 accept，再退役旧监听**：换入新实例 → 起 `listen_after_bind` → 等
+  `is_running()` → 才给旧实例置 stop 并 join。反过来的顺序会留下空窗，旧页面探测
+  新端口失败就停在死地址上（"后面什么操作都做不了"）。端口变化时旧 socket 再多活
+  1.2s，给页面完成探测 + `location.replace`。
+- **listen 线程要按值捕获 `httplib::Server*`**，不能 `[this]{ impl_->svr->... }`：
+  线程真正运行时读的是**当前**的 `impl_->svr`，重绑换过实例后就会去 listen 新实例，
+  而它已经有自己的 listen 线程了。
+- **`--port` 要写回 `server.port`**：命令行端口原来只影响本次 `server.start()`，
+  配置里还是旧值；之后任意一次改地址都会 `apply_server_settings()` 读配置，把端口
+  悄悄搬回旧值——这就是"本地的也变了"。`apply_server_settings()` 在服务未运行时
+  直接返回，避免启动前误触发重绑。
 - `stop()` 会摘掉 FsApi 的事件监听器，重启前要重新注册，否则 UI 再也收不到事件。
 - 所有路由 + 鉴权门的注册抽到 `configure(httplib::Server&)`，重绑时对新实例重放一遍。
 - **端口/密码输入框在 Enter 或失焦时提交**，不是每敲一个字符。按字符提交会逐位重绑

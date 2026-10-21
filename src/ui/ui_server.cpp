@@ -40,14 +40,39 @@ struct UiServer::Impl {
   // setting simply had no effect.
   std::mutex err_mu;
   std::string last_error;
-  // Set while tearing the listener down. An SSE stream never ends on its own -
-  // it waits for the next event - and httplib's listen loop joins its thread
-  // pool on shutdown, so a connected page kept one worker busy forever and
-  // stop() blocked indefinitely. Every rebind (port/host/password change) hung
-  // on that join, the old listener stayed bound, and the settings page showed
-  // the address the user thought they had just changed. The SSE handler checks
-  // this flag on each wake and returns, ending its request.
-  std::atomic<bool> stopping{false};
+  // Per-LISTENER stop flag. An SSE stream never ends on its own - it waits for
+  // the next event - and httplib's listen loop joins its thread pool on
+  // shutdown, so a connected page keeps one worker busy and stop() would block
+  // forever. The SSE handler checks its own generation's flag and returns.
+  //
+  // It MUST be per generation, not one flag on Impl: during a rebind the old and
+  // the new listener overlap briefly (that overlap is what gives the page time to
+  // follow "server.moved"), and a shared flag would kill the new listener's
+  // streams the moment the old one was retired.
+  std::shared_ptr<std::atomic<bool> > stop_flag =
+      std::make_shared<std::atomic<bool> >(false);
+  // ---- rebind serialization ----
+  //
+  // restart() used to spawn a NEW detached thread per call. Changing the host and
+  // then the port (or typing a port twice) gave two helpers that both entered
+  // stop(); the second join() on an already-joined std::thread throws
+  // std::system_error, and because it happened inside a detached thread nobody
+  // caught it -> std::terminate, i.e. the app vanished with no message.
+  //
+  // One persistent worker now owns the rebind. Callers only publish the latest
+  // desired settings (coalescing: the last write wins, which is exactly right for
+  // a form field) and signal the worker.
+  std::thread rebind_worker;
+  std::mutex rebind_mu;
+  std::condition_variable rebind_cv;
+  bool rebind_has_request = false;
+  bool rebind_quit = false;
+  int rebind_port = 0;
+  std::string rebind_host;
+  std::string rebind_password;
+  // Back-pointer for the worker lambda (it cannot capture `this` from restart()
+  // because the worker outlives that call).
+  UiServer* owner = nullptr;
   // The pre-routing handler runs on httplib's worker threads, so token lookups
   // need the lock (token_mu). Declared as a member function so the lambda above
   // can call it while the struct is complete.
@@ -74,9 +99,19 @@ namespace {
 constexpr size_t kEventRingMax = 8192;
 }
 
-UiServer::UiServer() : impl_(new Impl()) {}
+UiServer::UiServer() : impl_(new Impl()) { impl_->owner = this; }
 
-UiServer::~UiServer() { stop(); }
+UiServer::~UiServer() {
+  // Stop the rebind worker first: it calls back into this object.
+  {
+    std::lock_guard<std::mutex> lk(impl_->rebind_mu);
+    impl_->rebind_quit = true;
+    impl_->rebind_has_request = false;
+  }
+  impl_->rebind_cv.notify_all();
+  if (impl_->rebind_worker.joinable()) impl_->rebind_worker.join();
+  stop();
+}
 
 void UiServer::bind_api(FsApi* api) {
   impl_->bound_api = api;
@@ -127,7 +162,7 @@ Json UiServer::drain_events(int64_t since, int64_t* next) {
 FsResult UiServer::start(int port, const std::string& host,
                          const std::string& password) {
   if (impl_->running.load()) return FsResult::success();
-  impl_->stopping.store(false);
+  impl_->stop_flag = std::make_shared<std::atomic<bool> >(false);
   impl_->host = host.empty() ? "127.0.0.1" : host;
   impl_->password = password;
   impl_->svr.reset(new httplib::Server());
@@ -138,7 +173,12 @@ FsResult UiServer::start(int port, const std::string& host,
   if (!br.ok()) return br;
   impl_->port = actual;
   impl_->running.store(true);
-  impl_->th = std::thread([this]() { impl_->svr->listen_after_bind(); });
+  // Capture the SERVER by value. Capturing `this` and reading impl_->svr inside
+  // the thread is a race: a rebind swaps impl_->svr, and the thread could then
+  // call listen_after_bind() on the NEW instance (which already has its own
+  // listen thread).
+  httplib::Server* srv = impl_->svr.get();
+  impl_->th = std::thread([srv]() { srv->listen_after_bind(); });
   // 等 listen 就绪（简单轮询）
   for (int i = 0; i < 100 && !impl_->svr->is_running(); ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -260,28 +300,30 @@ void UiServer::configure(httplib::Server& svr) {
       }
     }
     Impl* im = impl_.get();
+    std::shared_ptr<std::atomic<bool> > gen_stop = impl_->stop_flag;
     res.set_header("Cache-Control", "no-store");
     res.set_header("X-Accel-Buffering", "no");
     res.set_chunked_content_provider(
         "text/event-stream",
-        [im, since](size_t, httplib::DataSink& sink) mutable {
+        [im, gen_stop, since](size_t, httplib::DataSink& sink) mutable {
           // One wait per chunk. The timeout doubles as a keep-alive: a comment
           // line every second keeps idle proxies/browsers from deciding the
           // stream is dead; it also bounds how long stop() waits for this
-          // handler to notice `stopping`.
+          // handler to notice its generation is being retired.
           std::unique_lock<std::mutex> lk(im->mu);
           im->cv.wait_for(lk, std::chrono::milliseconds(500), [&] {
-            if (im->stopping.load()) return true;
+            if (gen_stop->load()) return true;
             for (size_t i = 0; i < im->events.size(); ++i) {
               if (im->events[i].first > since) return true;
             }
             return false;
           });
-          // The listener is going away (a rebind is swapping it): end this
+          // This listener is going away (a rebind is swapping it): end the
           // request now so stop() can join the worker thread. Returning false
           // stops the chunked stream, which the browser sees as a closed
           // connection - EventSource reconnects to the NEW listener on its own.
-          if (im->stopping.load()) return false;
+          // The new listener has a DIFFERENT flag, so it keeps serving.
+          if (gen_stop->load()) return false;
           std::string out;
           size_t sent = 0;
           for (size_t i = 0; i < im->events.size() && sent < 256; ++i) {
@@ -447,16 +489,19 @@ void UiServer::configure(httplib::Server& svr) {
 }
 
 void UiServer::stop() {
-  if (impl_ && impl_->running.load()) {
-    // Make every open SSE stream return before we wait on the join. Without
-    // this the connected page keeps a pool thread parked in its stream handler
-    // and stop() blocks until the browser gives up - which it does not, so a
-    // rebind never completed.
-    impl_->stopping.store(true);
-    impl_->cv.notify_all();
+  // Retire the CURRENT generation: make every open SSE stream end so the join
+  // below cannot block (the connected page keeps a pool thread parked in its
+  // stream handler otherwise). The flag is per generation, so a listener swapped
+  // in by a rebind is unaffected.
+  if (impl_ && impl_->stop_flag) impl_->stop_flag->store(true);
+  if (impl_) impl_->cv.notify_all();
+  if (impl_ && impl_->svr && impl_->running.load()) {
     impl_->svr->stop();
     if (impl_->th.joinable()) impl_->th.join();
     impl_->running.store(false);
+  } else if (impl_ && impl_->th.joinable()) {
+    // Defensive: a listen thread exists even if `running` was already cleared.
+    impl_->th.join();
   }
   if (impl_ && impl_->bound_api && impl_->listener_id >= 0) {
     impl_->bound_api->remove_event_listener(impl_->listener_id);
@@ -553,36 +598,30 @@ bool UiServer::is_loopback(const std::string& addr) {
 
 FsResult UiServer::restart(int port, const std::string& host,
                            const std::string& password) {
-  // REBIND MUST NOT BLOCK THE CALLING REQUEST.
+  // REBIND MUST NOT BLOCK THE CALLING REQUEST, and only ONE rebind may run.
   //
-  // restart() is reached from a settings.set handled by this very server, on one
-  // of its worker threads. stop() joins the listen thread - that part is fine -
-  // but httplib's listen loop joins its thread pool when it exits, and THIS
-  // request's thread is part of that pool. Doing the rebind inline therefore
-  // deadlocks the request that asked for it (the browser sees it hang).
+  // Two separate constraints, both learned the hard way:
+  //   * Inline is impossible: restart() is reached from a settings.set handled by
+  //     this very server, on one of its worker threads. stop() joins the listen
+  //     thread, which joins the thread pool this request lives in -> deadlock.
+  //   * One detached thread PER CALL is also wrong. Changing the host and then
+  //     the port (or committing the port twice) gave two helpers that both called
+  //     stop(); the second join() on an already-joined std::thread throws
+  //     std::system_error, which is uncaught inside a detached thread ->
+  //     std::terminate. The process vanished with no message.
   //
-  // So the swap runs on a detached helper and the settings call returns at once.
-  UiServer* self = this;
-
-  // KEEP THE PORT unless the user actually asked for a different one.
-  //
-  // `port == 0` means "auto", and auto used to mean "ask the OS again" - so
-  // changing only the password or the listen address silently moved the app to a
-  // brand new port. The socket was released a moment ago; the same port is
-  // available again, and staying put is what the user expects.
+  // So there is ONE persistent worker. restart() only publishes the latest
+  // desired settings and wakes it; if a rebind is already in flight the new
+  // request replaces the pending one (last write wins - correct for a form).
   int old_port = impl_->port;
   int target_port = port > 0 ? port : old_port;
   bool port_changed = target_port > 0 && target_port != old_port;
 
-  impl_->rebinding.store(true);
-  // Tell the page where we are going BEFORE dropping the socket it is using.
-  // The Web build's UI is served by this very server, so a page loaded from the
-  // old origin cannot follow a port change on its own.
-  //
-  // Only the PORT is sent: each client builds the URL from its OWN hostname.
-  // Sending an absolute URL would be wrong for remote clients (127.0.0.1 is the
-  // browser's own machine) - and it used to be built from the CONFIGURED port,
-  // which is 0 for "auto", producing "…:0/".
+  // Tell the page where we are going BEFORE dropping the socket it uses. Do this
+  // here (not in the worker) because the worker may sleep and coalesce; the frame
+  // has to leave the old listener while it is still serving. The page probes the
+  // new port before navigating, so a later bind failure results in "still on the
+  // old address", not a dead tab.
   if (port_changed) {
     Json payload = Json::object();
     payload["port"] = target_port;
@@ -591,84 +630,137 @@ FsResult UiServer::restart(int port, const std::string& host,
     impl_->events.push_back(std::make_pair(impl_->next_event_id++,
                                            std::make_pair("server.moved", payload)));
     while (impl_->events.size() > kEventRingMax) impl_->events.pop_front();
+    impl_->cv.notify_all();
   }
-  impl_->cv.notify_all();
-  std::thread([self, target_port, host, password, port_changed]() {
-    // Let the "server.moved" frame reach the browser (and this response finish)
-    // before anything is torn down.
-    std::this_thread::sleep_for(std::chrono::milliseconds(port_changed ? 500 : 120));
 
-    // BIND THE NEW LISTENER FIRST, then drop the old one. This is what keeps the
-    // service continuous: a stop-then-start leaves a window with nothing
-    // listening, and any request in that window (including the page's own poll)
-    // fails. Binding first also proves the new port is actually free before the
-    // old one is given up.
-    std::unique_ptr<httplib::Server> next(new httplib::Server());
-    std::string prev_host = self->impl_->host;
-    std::string prev_pw = self->impl_->password;
-    int actual = 0;
-    // `configure` reads impl_->password, so set the new one before configuring.
-    self->impl_->host = host;
-    self->impl_->password = password;
-    self->configure(*next);
-    FsResult br = self->bind_server(*next, target_port, &actual);
-    if (!br.ok()) {
-      // Could not take the new address: put the old settings back and keep the
-      // CURRENT listener running. Nothing is interrupted, and the settings page
-      // reports the error.
-      self->impl_->host = prev_host;
-      self->impl_->password = prev_pw;
-      self->impl_->rebinding.store(false);
-      {
-        std::lock_guard<std::mutex> lk(self->impl_->err_mu);
-        self->impl_->last_error = br.message;
-      }
-      std::fprintf(stderr, "[ui] rebind to %s:%d failed: %s (kept %s:%d)\n",
-                   host.c_str(), target_port, br.message.c_str(),
-                   prev_host.c_str(), self->impl_->port);
-      return;
-    }
-
-    // New socket is bound: swap it in. `stop()` closes the OLD server (its own
-    // instance), so the new one is untouched.
-    self->stop();
-    if (self->impl_->bound_api) {
-      // stop() removed the sink; re-attach for the new instance.
-      Impl* im = self->impl_.get();
-      self->impl_->listener_id = self->impl_->bound_api->add_event_listener(
-          [im](const std::string& e, const Json& p) {
-        {
-          std::lock_guard<std::mutex> lk(im->mu);
-          im->events.push_back(std::make_pair(im->next_event_id++,
-                                              std::make_pair(e, p)));
-          while (im->events.size() > kEventRingMax) im->events.pop_front();
+  impl_->rebinding.store(true);
+  {
+    std::lock_guard<std::mutex> lk(impl_->rebind_mu);
+    impl_->rebind_port = target_port;
+    impl_->rebind_host = host;
+    impl_->rebind_password = password;
+    impl_->rebind_has_request = true;
+    // Start (or restart) the single worker. It serializes every rebind.
+    if (!impl_->rebind_worker.joinable()) {
+      Impl* im = impl_.get();
+      impl_->rebind_worker = std::thread([im]() {
+        for (;;) {
+          int p = 0;
+          std::string h, pw;
+          {
+            std::unique_lock<std::mutex> lk(im->rebind_mu);
+            im->rebind_cv.wait(lk, [&] {
+              return im->rebind_quit || im->rebind_has_request;
+            });
+            if (im->rebind_quit && !im->rebind_has_request) return;
+            p = im->rebind_port;
+            h = im->rebind_host;
+            pw = im->rebind_password;
+            im->rebind_has_request = false;
+          }
+          // Let the "server.moved" frame reach the browser (and the settings
+          // response finish) before anything is torn down.
+          std::this_thread::sleep_for(std::chrono::milliseconds(300));
+          // The owner is UiServer; it outlives the worker because ~UiServer stops
+          // and joins it (see ~UiServer).
+          UiServer* owner = im->owner;
+          owner->do_rebind(p, h, pw, p != 0 && p != im->port);
         }
-        im->cv.notify_all();
       });
     }
-    self->impl_->svr = std::move(next);
-    self->impl_->port = actual;
-    self->impl_->running.store(true);
-    // stop() set this to end the OLD listener's streams; the new one must serve
-    // normally, so clear it before the accept loop starts.
-    self->impl_->stopping.store(false);
-    self->impl_->th = std::thread([self]() { self->impl_->svr->listen_after_bind(); });
-    for (int i = 0; i < 100 && !self->impl_->svr->is_running(); ++i) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    self->impl_->rebinding.store(false);
-    {
-      std::lock_guard<std::mutex> lk(self->impl_->err_mu);
-      self->impl_->last_error.clear();
-    }
-    std::fprintf(stderr, "[ui] server listening on %s:%d%s\n", host.c_str(),
-                 self->impl_->port,
-                 password.empty() ? "" : " (password required)");
-  }).detach();
+  }
+  impl_->rebind_cv.notify_all();
   return FsResult::success(Json{{"rebinding", true},
                                 {"port", target_port},
                                 {"moved", port_changed}});
 }
+
+// The swap itself. Runs on the single rebind worker (see restart), so it may
+// block: stop() joins the listen thread and its pool.
+void UiServer::do_rebind(int target_port, const std::string& host,
+                         const std::string& password, bool /*port_changed*/) {
+  // BIND THE NEW LISTENER FIRST, then drop the old one. This keeps the service
+  // continuous (a stop-then-start leaves a window with nothing listening, and
+  // the page's own requests fail in it) and proves the new address is free
+  // before the old one is given up.
+  std::unique_ptr<httplib::Server> next(new httplib::Server());
+  std::string prev_host = impl_->host;
+  std::string prev_pw = impl_->password;
+  const int old_port = impl_->port;
+  int actual = 0;
+  // `configure` reads impl_->password, so set the new one before configuring.
+  impl_->host = host;
+  impl_->password = password;
+  configure(*next);
+  FsResult br = bind_server(*next, target_port, &actual);
+  if (!br.ok()) {
+    // Could not take the new address: put the old settings back and keep the
+    // CURRENT listener running. Nothing is interrupted, and the settings page
+    // reports the error.
+    impl_->host = prev_host;
+    impl_->password = prev_pw;
+    {
+      std::lock_guard<std::mutex> lk(impl_->err_mu);
+      impl_->last_error = br.message;
+    }
+    impl_->rebinding.store(false);
+    std::fprintf(stderr, "[ui] rebind to %s:%d failed: %s (kept %s:%d)\n",
+                 host.c_str(), target_port, br.message.c_str(),
+                 prev_host.c_str(), impl_->port);
+    return;
+  }
+
+  // New socket is bound. Start accepting on the NEW listener BEFORE retiring the
+  // old one: the page is told "server.moved" and needs the new port to answer
+  // before it drops the old origin. A brief overlap is harmless (they are
+  // different sockets) and it is what makes the navigation reliable.
+  //
+  // Capture the old generation's resources locally, put the new ones in place,
+  // THEN close the old listener. Doing it in the other order (stop() first) left
+  // a window with nothing listening, which is what made the page unable to do
+  // anything after a port change.
+  httplib::Server* old_svr = impl_->svr.release();
+  std::unique_ptr<httplib::Server> old_owner(old_svr);
+  std::thread old_th = std::move(impl_->th);
+  std::shared_ptr<std::atomic<bool> > old_stop = impl_->stop_flag;
+  bool port_moved = (actual != 0 && actual != old_port);
+
+  impl_->svr = std::move(next);
+  impl_->stop_flag = std::make_shared<std::atomic<bool> >(false);
+  impl_->port = actual;
+  impl_->running.store(true);
+  // Capture the SERVER by value (see start()).
+  httplib::Server* srv = impl_->svr.get();
+  impl_->th = std::thread([srv]() { srv->listen_after_bind(); });
+  for (int i = 0; i < 100 && !impl_->svr->is_running(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  // Retire the previous listener now that the new one is serving. Its SSE
+  // streams get its own flag and return; the new listener's streams are
+  // untouched. Keep the API sink registered (it lives on Impl, not per server).
+  //
+  // When the PORT changed, keep the old socket alive a moment longer: the page
+  // is in the middle of probing the new port and replacing its location, and
+  // killing the old origin first is exactly what made a dead tab with nothing
+  // left to click. The overlap only delays shutdown, never blocks a request.
+  if (old_stop) old_stop->store(true);
+  impl_->cv.notify_all();
+  if (port_moved && old_owner) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+  }
+  if (old_owner) old_owner->stop();
+  if (old_th.joinable()) old_th.join();
+
+  {
+    std::lock_guard<std::mutex> lk(impl_->err_mu);
+    impl_->last_error.clear();
+  }
+  impl_->rebinding.store(false);
+  std::fprintf(stderr, "[ui] server listening on %s:%d%s\n", host.c_str(),
+               impl_->port, password.empty() ? "" : " (password required)");
+}
+
 
 }  // namespace ui
 }  // namespace fs

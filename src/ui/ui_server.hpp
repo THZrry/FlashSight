@@ -85,6 +85,9 @@ class UiServer {
   void configure(httplib::Server& svr);
   // 绑定监听 socket（不开始 accept）。port 0 = 系统分配；actual 回填实际端口。
   FsResult bind_server(httplib::Server& svr, int port, int* actual);
+  // 真正执行一次重绑。只允许一个线程调用（restart 的 worker 串行驱动）。
+  void do_rebind(int target_port, const std::string& host,
+                 const std::string& password, bool port_changed);
 };
 
 }  // namespace ui

@@ -139,6 +139,12 @@
   // the browser's error page (the port was not open yet). Probe it first with a
   // no-cors request - that resolves for any HTTP answer, including 401, and
   // rejects only when nothing is listening.
+  //
+  // Keep location.hostname as-is: for an IPv6 literal the browser already
+  // returns it bracketed ("[::1]"), and re-bracketing it would produce
+  // "[[::1]]". For the same reason a literal "::" (hostname stripped of its
+  // brackets by an older build) cannot be repaired here - the server sends the
+  // port only, never a host.
   window.__fsServerMoved = function (newPort) {
     if (!newPort) return;
     var url = location.protocol + '//' + location.hostname + ':' + newPort + '/';
@@ -146,6 +152,7 @@
     var tries = 0;
     function probe() {
       tries++;
+      // cache:'no-store' + no-cors: any HTTP answer counts as "listening".
       fetch(url, { mode: 'no-cors', cache: 'no-store' })
         .then(function () { location.replace(url); })
         .catch(function () {
@@ -160,9 +167,9 @@
   };
 
   // If the stream dies and cannot reconnect, the server may have moved without
-  // us hearing about it (the "moved" frame travels on the very socket that is
-  // about to close). Rather than sitting on a dead page, say so and offer a
-  // reload - the app itself is still running.
+  // us hearing the "moved" frame (it travels on the very socket being closed).
+  // Say so and give a way out instead of leaving a dead page: reload the same
+  // address, or type the port that was just applied.
   window.__fsConnLost = function () {
     if (document.getElementById('fs-conn-lost')) return;
     var box = document.createElement('div');
@@ -170,19 +177,41 @@
     box.id = 'fs-conn-lost';
     box.innerHTML =
       '<div class="auth-box"><div class="auth-title">与服务的连接已断开</div>' +
-      '<div class="auth-sub">如果刚改过端口，请用新端口的地址重新打开。</div>' +
-      '<button class="auth-btn" onclick="location.reload()">重新加载</button></div>';
+      '<div class="auth-sub">如果刚改过端口，请输入新端口；否则先重试当前地址。</div>' +
+      '<input class="auth-input" id="fs-conn-port" type="text" inputmode="numeric" placeholder="新端口">' +
+      '<button class="auth-btn" id="fs-conn-go">打开新端口</button>' +
+      '<button class="auth-btn" id="fs-conn-retry" style="margin-top:8px">重试当前地址</button>' +
+      '</div>';
     document.body.appendChild(box);
+    var inp = document.getElementById('fs-conn-port');
+    inp.value = String(location.port || '');
+    function go() {
+      var p = (inp.value || '').trim();
+      if (!p) return;
+      window.__fsServerMoved(p);
+    }
+    document.getElementById('fs-conn-go').onclick = go;
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') go();
+    });
+    document.getElementById('fs-conn-retry').onclick = function () {
+      location.reload();
+    };
+    inp.focus();
+    inp.select();
   };
+
 
   function showMovedCard(url) {
     var box = document.createElement('div');
     box.className = 'auth-gate';
     box.innerHTML =
       '<div class="auth-box"><div class="auth-title">服务已更换端口</div>' +
-      '<div class="auth-sub">新地址没有响应，可能端口被占用。设置已保存，' +
-      '重启后会用新端口。</div>' +
-      '<a class="auth-btn" href="' + url + '">重试</a></div>';
+      '<div class="auth-sub">新地址暂时没有响应（端口可能被占用）。' +
+      '设置已保存，重启后会用新端口。</div>' +
+      '<a class="auth-btn" href="' + url + '">重试</a>' +
+      '<button class="auth-btn" style="margin-top:8px" ' +
+      'onclick="this.closest(\'.auth-gate\').remove()">留在当前页</button></div>';
     document.body.appendChild(box);
   }
 })();

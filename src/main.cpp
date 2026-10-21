@@ -143,7 +143,24 @@ int main(int argc, char** argv) {
     };
     srv_host = get_str(fs::kKeyServerHost, "127.0.0.1");
     srv_pw = get_str(fs::kKeyServerPassword, "");
-    if (port <= 0) port = get_int(fs::kKeyServerPort, 0);
+    int cfg_port = get_int(fs::kKeyServerPort, 0);
+    if (port <= 0) {
+      port = cfg_port;
+    } else if (port != cfg_port) {
+      // A --port on the command line overrides the saved setting, but the saved
+      // setting is what every later rebind reads (apply_server_settings). Leaving
+      // them out of sync meant: start with --port 8920, touch the listen address,
+      // and the server silently jumped to the OLD saved port - the port "changed
+      // by itself". Persist the override so the config tells the truth.
+      // A --port on the command line overrides the saved setting, but the saved
+      // setting is what every later rebind reads (apply_server_settings). Leaving
+      // them out of sync meant: start with --port 8920, touch the listen address,
+      // and the server silently jumped to the OLD saved port - the port "changed
+      // by itself". Persist the override so the config tells the truth.
+      // (apply_server_settings is a no-op while the server is not running, so this
+      // does not try to rebind.)
+      api.settings_set(fs::kKeyServerPort, fs::Json(port), "");
+    }
   }
   fs::FsResult r = server.start(port, srv_host, srv_pw);
   if (!r.ok()) {

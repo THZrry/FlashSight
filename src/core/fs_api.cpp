@@ -232,6 +232,14 @@ void FsApi::apply_proxy_settings() {
 
 void FsApi::apply_server_settings() {
   if (!ui_server_restart_) return;   // no server in this process (tests)
+  // Before the server has started (i.e. this is being called from main() while
+  // applying command-line overrides), there is no listener to rebind: the start
+  // path will use these values directly. Triggering restart() here created a
+  // worker that bound the port, and then start() bound it again.
+  if (ui_server_status_) {
+    Json st = ui_server_status_();
+    if (!jsonutil::get<bool>(st, "running", false)) return;
+  }
   std::string host = settings_->get_value(kKeyServerHost, Json("127.0.0.1")).is_string()
                          ? settings_->get_value(kKeyServerHost, Json("127.0.0.1"))
                                .get<std::string>()
