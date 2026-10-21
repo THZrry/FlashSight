@@ -54,6 +54,69 @@ std::string subst_session(const std::string& v, const std::string& sid) {
   }
   return out;
 }
+
+// ---- SSE (text/event-stream) line splitter -------------------------------
+// The body arrives in arbitrary read-sized chunks, so a `data:` line can be cut
+// in half. Buffer until a newline, and keep the remainder for the next chunk.
+class SseReader {
+ public:
+  // Returns each complete `data:` payload (the JSON after "data: ").
+  void feed(const char* data, size_t len, std::vector<std::string>* out) {
+    buf_.append(data, len);
+    size_t start = 0;
+    for (;;) {
+      size_t nl = buf_.find('\n', start);
+      if (nl == std::string::npos) break;
+      std::string line = buf_.substr(start, nl - start);
+      start = nl + 1;
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (line.compare(0, 5, "data:") != 0) continue;   // event:/id:/comments
+      std::string payload = line.substr(5);
+      if (!payload.empty() && payload[0] == ' ') payload.erase(0, 1);
+      out->push_back(payload);
+    }
+    buf_.erase(0, start);
+  }
+
+ private:
+  std::string buf_;
+};
+
+// Streaming tool calls arrive as fragments: {index, id?, function{name?,
+// arguments?}} where only the FIRST fragment carries id/name and the arguments
+// are concatenated across fragments. Merge them into the same shape as a
+// non-streaming response so the rest of the loop cannot tell the difference.
+void merge_tool_call_deltas(const Json& deltas, Json* acc) {
+  if (!acc) return;
+  if (!acc->is_array()) *acc = Json::array();
+  for (size_t i = 0; i < deltas.size(); ++i) {
+    const Json& d = deltas[i];
+    if (!d.is_object()) continue;
+    int64_t idx = jsonutil::get_int(d, "index", -1);
+    if (idx < 0) idx = static_cast<int64_t>(acc->size());
+    while (static_cast<int64_t>(acc->size()) <= idx) acc->push_back(Json::object());
+    Json& slot = (*acc)[static_cast<size_t>(idx)];
+    if (!slot.is_object()) slot = Json::object();
+    std::string id = jsonutil::get<std::string>(d, "id", "");
+    if (!id.empty()) slot["id"] = id;
+    std::string type = jsonutil::get<std::string>(d, "type", "");
+    if (!type.empty()) slot["type"] = type;
+    if (d.contains("function") && d["function"].is_object()) {
+      const Json& f = d["function"];
+      if (!slot.contains("function") || !slot["function"].is_object()) {
+        slot["function"] = Json::object();
+      }
+      std::string name = jsonutil::get<std::string>(f, "name", "");
+      if (!name.empty()) slot["function"]["name"] = name;
+      std::string args = jsonutil::get<std::string>(f, "arguments", "");
+      if (!args.empty()) {
+        std::string prev = jsonutil::get<std::string>(slot["function"],
+                                                      "arguments", "");
+        slot["function"]["arguments"] = prev + args;
+      }
+    }
+  }
+}
 }  // namespace
 
 FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* out,
@@ -65,6 +128,13 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
   body["temperature"] = req.temperature;
   body["max_tokens"] = req.max_tokens;
   body["stream"] = req.stream;
+  if (req.stream) {
+    // Without this a streamed reply carries no usage block, so every streamed
+    // call recorded 0 prompt tokens - which is what made the context water
+    // level disappear (-1%) after the first streamed turn. Supported by
+    // [OI]-compatible endpoints (DeepSeek included).
+    body["stream_options"] = Json{{"include_usage", true}};
+  }
   // 供应商特有的请求体字段（浅合并；不覆盖上面构造好的标准字段，除非用户
   // 明确写了同名字段——那正是"自定义 body"的意义）
   if (conn_.body_override.is_object()) {
@@ -93,7 +163,73 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
   http.timeout_ms = 120000;
 
   HttpResponse resp;
-  FsResult nr = net_->request(http, &resp);
+  FsResult nr;
+  // Some servers ignore "stream": true and answer with one complete JSON body.
+  // The SSE reader sees no "data:" lines at all in that case, so fall back to
+  // parsing the body as a normal response - otherwise the reply silently
+  // vanished (the tests caught exactly this).
+  bool saw_sse = false;
+  if (req.stream) {
+    // Real streaming: each SSE delta is parsed as it arrives and handed to
+    // on_delta immediately, so the UI renders while the model is still talking.
+    SseReader reader;
+    nr = net_->request_stream(http, [&](const char* data, size_t len) {
+      std::vector<std::string> payloads;
+      reader.feed(data, len, &payloads);
+      if (!payloads.empty()) saw_sse = true;
+      for (size_t i = 0; i < payloads.size(); ++i) {
+        if (payloads[i] == "[DONE]") continue;
+        try {
+          Json d = Json::parse(payloads[i]);
+          Json choices = d.contains("choices") && d["choices"].is_array()
+                             ? d["choices"] : Json::array();
+          if (choices.empty()) {
+            // A usage-only tail chunk (stream_options.include_usage, or a
+            // provider that appends it after [DONE]). This is the ONLY place a
+            // streamed reply reports prompt tokens, so it feeds the context
+            // water level.
+            if (d.contains("usage") && d["usage"].is_object()) {
+              const Json& u = d["usage"];
+              int64_t pin = jsonutil::get_int(u, "prompt_tokens", 0);
+              int64_t pout = jsonutil::get_int(u, "completion_tokens", 0);
+              if (pin > 0) out->in_tokens = pin;
+              if (pout > 0) out->out_tokens = pout;
+              int64_t pcache = jsonutil::get_int(u, "prompt_tokens_cached", 0);
+              if (pcache > 0) out->cache_tokens = pcache;
+            }
+            continue;
+          }
+          const Json& ch = choices[0];
+          // Some endpoints attach usage to the final content chunk instead.
+          if (d.contains("usage") && d["usage"].is_object()) {
+            const Json& u = d["usage"];
+            int64_t pin = jsonutil::get_int(u, "prompt_tokens", 0);
+            int64_t pout = jsonutil::get_int(u, "completion_tokens", 0);
+            if (pin > 0) out->in_tokens = pin;
+            if (pout > 0) out->out_tokens = pout;
+          }
+          Json delta = ch.contains("delta") && ch["delta"].is_object()
+                           ? ch["delta"] : Json::object();
+          std::string piece = jsonutil::get<std::string>(delta, "content", "");
+          if (!piece.empty()) {
+            out->text += piece;
+            if (on_delta) on_delta(piece);
+          }
+          // Tool calls also arrive incrementally (index + partial arguments).
+          // They are accumulated but NOT forwarded: the UI shows them once the
+          // turn ends, and a half-built JSON argument is not renderable.
+          if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+            merge_tool_call_deltas(delta["tool_calls"], &out->tool_calls);
+          }
+        } catch (...) {
+          // A malformed delta must not kill the stream.
+        }
+      }
+      return true;
+    }, &resp);
+  } else {
+    nr = net_->request(http, &resp);
+  }
   if (!nr.ok()) return nr;
   out->http_status = resp.status;
   if (resp.status == 402) {
@@ -108,6 +244,10 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
     out->error = "http " + std::to_string(resp.status);
     return FsResult::error(ErrCode::kRemote, out->error);
   }
+  // Streaming already accumulated the text - unless the server ignored
+  // "stream": true and sent one plain JSON body, in which case saw_sse is false
+  // and the normal parse below is the only way to get the reply.
+  if (req.stream && saw_sse) return FsResult::success();
   try {
     Json j = Json::parse(resp.body);
     // text 累积
@@ -146,7 +286,8 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
       out->cost_kind = conn_.has_quota ? conn_.quota_kind : "unknown";
       out->cost = conn_.has_quota ? conn_.quota_value : 0.0;
     }
-    // 流式：body 已是完整 JSON（NetClient v1 不支持分块流；P2 验收走完整响应 + on_delta 全量推）
+    // The server ignored "stream": true and sent one complete body. Push it as
+    // a single delta so a streaming consumer still renders it.
     if (req.stream && on_delta && !out->text.empty()) on_delta(out->text);
     return FsResult::success();
   } catch (...) {
@@ -239,13 +380,65 @@ FsResult ProviderClient::chat_anthropic(const ChatRequest& req, ChatResponse* ou
   http.timeout_ms = 120000;
 
   HttpResponse resp;
-  FsResult nr = net_->request(http, &resp);
+  FsResult nr;
+  bool saw_sse = false;
+  if (req.stream) {
+    // Anthropic's SSE events: content_block_delta carries {delta:{type:
+    // text_delta, text}}; message_delta carries the final usage numbers.
+    SseReader reader;
+    nr = net_->request_stream(http, [&](const char* data, size_t len) {
+      std::vector<std::string> payloads;
+      reader.feed(data, len, &payloads);
+      if (!payloads.empty()) saw_sse = true;
+      for (size_t i = 0; i < payloads.size(); ++i) {
+        if (payloads[i] == "[DONE]") continue;
+        try {
+          Json d = Json::parse(payloads[i]);
+          std::string type = jsonutil::get<std::string>(d, "type", "");
+          if (type == "content_block_delta" && d.contains("delta") &&
+              d["delta"].is_object()) {
+            const Json& dl = d["delta"];
+            if (jsonutil::get<std::string>(dl, "type", "") == "text_delta") {
+              std::string piece = jsonutil::get<std::string>(dl, "text", "");
+              if (!piece.empty()) {
+                out->text += piece;
+                if (on_delta) on_delta(piece);
+              }
+            }
+          } else if (type == "message_start" && d.contains("message") &&
+                     d["message"].is_object()) {
+            const Json& m = d["message"];
+            if (m.contains("usage") && m["usage"].is_object()) {
+              out->in_tokens = jsonutil::get_int(m["usage"], "input_tokens", 0);
+            }
+          } else if (type == "message_delta" && d.contains("usage") &&
+                     d["usage"].is_object()) {
+            out->out_tokens = jsonutil::get_int(d["usage"], "output_tokens",
+                                                out->out_tokens);
+          } else if (type == "error" && d.contains("error") &&
+                     d["error"].is_object()) {
+            out->error = jsonutil::get<std::string>(d["error"], "message",
+                                                    "stream error");
+          }
+        } catch (...) {
+          // A malformed event must not kill the stream.
+        }
+      }
+      return true;
+    }, &resp);
+  } else {
+    nr = net_->request(http, &resp);
+  }
   if (!nr.ok()) return nr;
   out->http_status = resp.status;
   if (resp.status != 200) {
     out->error = "http " + std::to_string(resp.status);
     return FsResult::error(ErrCode::kRemote, out->error);
   }
+  if (!out->error.empty()) return FsResult::error(ErrCode::kRemote, out->error);
+  // Same fallback as the OpenAI path: a server that ignores "stream": true sends
+  // one plain JSON body, and the SSE parser saw nothing.
+  if (req.stream && saw_sse) return FsResult::success();
   try {
     Json j = Json::parse(resp.body);
     Json content = j.contains("content") && j["content"].is_array()

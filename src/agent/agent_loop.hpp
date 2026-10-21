@@ -68,6 +68,9 @@ class AgentLoop {
   // 会话级属性更新（FsApi 读 sessionSettings 后传入）
   void set_permission(const std::string& perm) { opts_.permission = perm; }
   void set_thinking_lang(const std::string& lang) { opts_.thinking_lang = lang; }
+  // 会话当前模型。必须能在两轮之间改：用户在会话里换模型后立刻发送时，
+  // 若 loop 只在创建时读一次模型，请求就会一直带着旧模型（或空模型）。
+  void set_model(const std::string& m) { opts_.model = m; }
 
   // send：用户输入（含引导队列合并），进入 planning
   FsResult send(const std::string& text);
@@ -101,8 +104,19 @@ class AgentLoop {
   // 定时器到点回调
   FsResult on_timer();
 
-  // 模型调用抽象（测试可注入）
-  std::function<FsResult(const ModelCallRequest&, ModelCallResult*)> call_model;
+  // 模型调用抽象（测试可注入）。第三个参数是流式回调：每收到一段文本就调一次，
+  // 由 loop 转发成 stream.delta 事件。为 nullptr 时按非流式处理。
+  std::function<FsResult(const ModelCallRequest&, ModelCallResult*,
+                         const std::function<void(const std::string&)>&)>
+      call_model;
+
+  // 会话历史（Host 注入：返回 full.json）。run_turn 用它装配真正的多轮
+  // messages；没有它时只能发单条 user 消息，模型永远看不到上一轮说过什么。
+  std::function<FsResult(Json*)> load_history;
+
+  // 落库一轮（Host 注入：写 user / assistant 两条 turn）。不接的话会话文件
+  // 永远没有内容，下一轮的历史自然也是空的。
+  std::function<void(const Json&)> persist_turn;
 
   // 工具执行抽象（Host 注入；批准后真调工具）
   std::function<FsResult(const ToolContext&, const std::string&, const Json&)> invoke_tool;
@@ -131,6 +145,13 @@ class AgentLoop {
   // 中断-继续保存点（addon2）：中断/失败时的 messages 上下文
   Json saved_messages_ = Json::array();
   bool saved_valid_ = false;
+
+  // 本轮用户输入（落库 user turn 用）。run_loop 只拿到 messages，拿不到原始
+  // 输入，所以由 run_turn / continue_task 在进入循环前记下来。
+  std::string last_user_text_;
+  // Wall-clock start of this turn, stamped when the request goes out. The stored
+  // turn needs it: without it the duration shown on a reloaded message is 0.0s.
+  int64_t turn_started_ms_ = 0;
 
   FsResult run_turn(const std::string& user_text);
   // 从给定 messages 继续跑（工具循环 + 回填），供 continue_task 复用

@@ -1,6 +1,8 @@
 // fs_net_http.cpp - httplib + mbedTLS based NetClient
 #include "fs_net_http.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "httplib.h"
@@ -10,22 +12,27 @@ namespace fs {
 namespace {
 
 FsResult map_httplib_error(httplib::Error e) {
+  // The mapped message says what the APP should do; the detail says what
+  // actually happened. Without the detail every transport failure surfaced as
+  // the same "network io error", which made a TLS handshake failure
+  // indistinguishable from a DNS failure or a dropped connection.
+  const std::string detail = httplib::to_string(e);
   switch (e) {
     case httplib::Error::Connection:
     case httplib::Error::Read:
     case httplib::Error::Write:
     case httplib::Error::ConnectionClosed:
-      return FsResult::error(ErrCode::kNetwork, "network io error");
+      return FsResult::error(ErrCode::kNetwork, "network io error (" + detail + ")");
     case httplib::Error::ConnectionTimeout:
     case httplib::Error::Timeout:
-      return FsResult::error(ErrCode::kTimeout, "network timeout");
+      return FsResult::error(ErrCode::kTimeout, "network timeout (" + detail + ")");
     case httplib::Error::SSLConnection:
     case httplib::Error::SSLLoadingCerts:
     case httplib::Error::SSLServerVerification:
     case httplib::Error::SSLServerHostnameVerification:
-      return FsResult::error(ErrCode::kNetwork, "tls/ssl error");
+      return FsResult::error(ErrCode::kNetwork, "tls/ssl error (" + detail + ")");
     default:
-      return FsResult::error(ErrCode::kNetwork, "http client error");
+      return FsResult::error(ErrCode::kNetwork, "http client error (" + detail + ")");
   }
 }
 
@@ -54,6 +61,37 @@ FsResult execute(Cli& cli, const HttpRequest& req, const std::string& path,
   return FsResult::success();
 }
 
+// Same request, but the body is handed over as it arrives. httplib's
+// ContentReceiver runs per read() chunk, so an SSE stream reaches on_chunk while
+// the model is still generating.
+template <typename Cli>
+FsResult execute_stream(Cli& cli, const HttpRequest& req, const std::string& path,
+                        const std::function<bool(const char*, size_t)>& on_chunk,
+                        HttpResponse* out) {
+  httplib::Headers h;
+  for (auto& kv : req.headers) h.emplace(kv.first, kv.second);
+  httplib::ContentReceiver recv = [&on_chunk, out](const char* data, size_t len) {
+    // Keep a copy so a non-streaming consumer still sees the whole body, and
+    // forward it so a streaming one can render incrementally.
+    out->body.append(data, len);
+    return on_chunk ? on_chunk(data, len) : true;
+  };
+  httplib::Result res;
+  if (req.method == "POST") {
+    res = cli.Post(path.c_str(), h, req.body, "application/json", recv);
+  } else if (req.method == "GET") {
+    res = cli.Get(path.c_str(), h, recv);
+  } else {
+    // The streaming overloads only exist for GET/POST; the rest are small
+    // (DELETE/PUT) and do not stream.
+    return execute(cli, req, path, out);
+  }
+  httplib::Error err = res.error();
+  if (err != httplib::Error::Success) return map_httplib_error(err);
+  out->status = res->status;
+  return FsResult::success();
+}
+
 }  // namespace
 
 HttplibNetClient::HttplibNetClient(const HttpRequest&) {}
@@ -70,6 +108,7 @@ FsResult HttplibNetClient::request(const HttpRequest& req, HttpResponse* out) co
   std::string ph = req.proxy_host.empty() ? proxy_host_ : req.proxy_host;
   int pp = req.proxy_host.empty() ? proxy_port_ : req.proxy_port;
   bool tls = (scheme == "https");
+  FsResult r;
   if (tls) {
     httplib::SSLClient cli(host, port);
     cli.enable_server_certificate_verification(req.verify_cert);
@@ -77,15 +116,63 @@ FsResult HttplibNetClient::request(const HttpRequest& req, HttpResponse* out) co
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
-    return execute(cli, req, path, out);
+    r = execute(cli, req, path, out);
   } else {
     httplib::Client cli(host, port);
     cli.set_connection_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
-    return execute(cli, req, path, out);
+    r = execute(cli, req, path, out);
   }
+  // FS_NET_DEBUG=1 traces every request. A network failure reported by the UI
+  // is otherwise impossible to attribute: the error code alone does not say
+  // which host, proxy or scheme was attempted.
+  if (std::getenv("FS_NET_DEBUG")) {
+    std::fprintf(stderr, "[net] %s %s%s proxy=%s:%d tls=%d -> ok=%d code=%d status=%d %s\n",
+                 req.method.c_str(), host.c_str(), path.c_str(),
+                 ph.empty() ? "-" : ph.c_str(), pp, (int)tls, (int)r.ok(),
+                 (int)r.code, out->status, r.message.c_str());
+  }
+  return r;
+}
+
+FsResult HttplibNetClient::request_stream(
+    const HttpRequest& req,
+    const std::function<bool(const char*, size_t)>& on_chunk,
+    HttpResponse* out) const {
+  if (!out) return FsResult::error(ErrCode::kInvalidArg, "null response ptr");
+  std::string host, scheme, path;
+  int port = 0;
+  if (!parse_url(req.url, &scheme, &host, &port, &path)) {
+    return FsResult::error(ErrCode::kInvalidArg, "bad url: " + req.url);
+  }
+  std::string ph = req.proxy_host.empty() ? proxy_host_ : req.proxy_host;
+  int pp = req.proxy_host.empty() ? proxy_port_ : req.proxy_port;
+  bool tls = (scheme == "https");
+  FsResult r;
+  if (tls) {
+    httplib::SSLClient cli(host, port);
+    cli.enable_server_certificate_verification(req.verify_cert);
+    cli.set_connection_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
+    cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
+    cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
+    if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
+    r = execute_stream(cli, req, path, on_chunk, out);
+  } else {
+    httplib::Client cli(host, port);
+    cli.set_connection_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
+    cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
+    cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
+    if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
+    r = execute_stream(cli, req, path, on_chunk, out);
+  }
+  if (std::getenv("FS_NET_DEBUG")) {
+    std::fprintf(stderr, "[net] (stream) %s %s%s -> ok=%d code=%d status=%d %s\n",
+                 req.method.c_str(), host.c_str(), path.c_str(), (int)r.ok(),
+                 (int)r.code, out->status, r.message.c_str());
+  }
+  return r;
 }
 
 bool HttplibNetClient::parse_url(const std::string& url, std::string* scheme,
@@ -111,7 +198,7 @@ bool HttplibNetClient::parse_url(const std::string& url, std::string* scheme,
       return false;
     }
   }
-  return !host->empty();
+  return !host->empty() && *port > 0;
 }
 
 }  // namespace fs

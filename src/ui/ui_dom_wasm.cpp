@@ -31,6 +31,17 @@ using emscripten::val;
 EM_JS(void, fs_dom_boot, (), {
   if (!globalThis.__fsNodes) globalThis.__fsNodes = [null];
   if (!globalThis.__fsHandlers) globalThis.__fsHandlers = [];
+  // The browser's context menu is a document-level default: a per-node
+  // contextmenu listener never fires on nodes without one, so right-clicking
+  // anywhere popped "Back / Reload / Save as / Inspect". Swallow it globally and
+  // let the app draw its own menu everywhere - text fields included, so the menu
+  // is identical wherever you click.
+  if (!globalThis.__fsCtxMenuPatched) {
+    globalThis.__fsCtxMenuPatched = true;
+    document.addEventListener('contextmenu', function (ev) {
+      ev.preventDefault();
+    }, true);
+  }
 });
 
 EM_JS(void, fs_dom_off, (int node_id, int kind), {
@@ -83,6 +94,10 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
         // keydown carries the key name (not the element value) so handlers can
         // react to Escape / arrow keys; kKeyEnter handles Enter separately.
         v = evt.key === undefined ? "" : String(evt.key);
+      } else if (name === 'contextmenu') {
+        // The menu opens AT the pointer, so the value is "x\ty" in viewport
+        // coordinates (every other event sends the element's text).
+        v = String(evt.clientX | 0) + "\t" + String(evt.clientY | 0);
       } else if (t === 'INPUT' && el.type === 'checkbox') {
         v = el.checked ? '1' : '0';
       } else if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') {
@@ -796,6 +811,35 @@ EM_JS(void, fs_dom_copy_text, (const char* text), {
   }
 });
 
+// Run a browser edit command against the focused field. The app draws its own
+// context menu over text fields (the native one is suppressed), so cut / copy /
+// paste / select-all have to be reachable from a menu item.
+EM_JS(void, fs_dom_exec_edit, (const char* command), {
+  var c = UTF8ToString(command);
+  if (!c) return;
+  if (c === 'paste') {
+    // execCommand('paste') is refused by every modern engine; the async
+    // clipboard API is the only path, and a menu click is a valid user gesture.
+    var el = document.activeElement;
+    if (!el || !navigator.clipboard || !navigator.clipboard.readText) return;
+    navigator.clipboard.readText().then(function (t) {
+      if (!t) return;
+      try {
+        var s = el.selectionStart, e = el.selectionEnd;
+        if (typeof s === 'number' && typeof e === 'number') {
+          el.value = el.value.slice(0, s) + t + el.value.slice(e);
+          el.selectionStart = el.selectionEnd = s + t.length;
+        } else {
+          el.value += t;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch (err) {}
+    }).catch(function () {});
+    return;
+  }
+  try { document.execCommand(c, false, null); } catch (e) {}
+});
+
 // Restart a mount-only animation on a node that already exists. The CSS class is
 // already on it (the app declares it every render), so simply leaving it there
 // does nothing: the animation ran once when the node was created. Removing the
@@ -1301,6 +1345,11 @@ class WasmDom : public IDom {
 
   void copy_text(const std::string& text) override {
     fs_dom_copy_text(text.c_str());
+  }
+
+  bool exec_edit(const std::string& command) override {
+    fs_dom_exec_edit(command.c_str());
+    return true;
   }
 
   void play_animation(Node node, const std::string& cls) override {

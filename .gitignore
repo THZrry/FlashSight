@@ -1,16 +1,25 @@
 # build artifacts
+#
+# xmake is configured with -o build/<variant>, so every variant has its own
+# output tree under build/ (see build.bat). build/ itself is the only build
+# directory; there are no build_* siblings any more.
 build/
-# scratch build dirs (`xmake f -o build_check` / `-o build_whale`): a second
-# config used to cross-check a toolchain or the WhaleUI switch. Build output, so
-# never committed - one of them once slipped in and added ~40k cache files.
-build_*/
 .xmake/
 *.o
 *.obj
 *.exe
 *.a
 *.lib
+*.dll
+*.pdb
 *.log
+*.tmp
+
+# xmake / build logs that used to be dropped in the repo root
+/build*.txt
+/run*.txt
+/git_status.txt
+/probe_*.txt
 
 # vendored third-party (per rules: not committed; see scripts/fetch_3rdparty)
 3rdparty/

@@ -12,6 +12,14 @@ set_project("FlashSight")
 set_version("0.1.0")
 set_xmakever("2.8.0")
 
+-- CI stamps the release tag into the binary. Local builds keep the header's
+-- default, so a dev build prints `FlashSight 0.1.0`.
+local build_version = os.getenv("FLASHSIGHT_VERSION")
+if build_version and build_version ~= "" then
+    set_version(build_version)
+    add_defines('FS_VERSION_STRING="' .. build_version .. '"')
+end
+
 add_rules("mode.debug", "mode.release")
 set_languages("c++14")
 -- Build targets sequentially in dependency order. The wasm bundle is a build
@@ -19,7 +27,30 @@ set_languages("c++14")
 -- xmake's default parallel-across-targets scheduling starts fs_ui's compile
 -- before fs_ui_wasm has produced web/fs_ui.js. Serializing makes add_deps a
 -- real ordering edge for compilation, not just linking.
-set_policy("build.across_targets_in_parallel", false)
+--
+-- "build.fence" is the modern spelling (xmake >= 3.0); the older
+-- build.across_targets_in_parallel is deprecated and warns on every build.
+if xmake.version() and xmake.version():ge("3.0.0") then
+    set_policy("build.fence", true)
+else
+    set_policy("build.across_targets_in_parallel", false)
+end
+
+-- mbedtls is always built from source by the `mbedtls_src` target below, with
+-- whatever toolchain the project uses.
+--
+-- The vendored cmake build under 3rdparty/mbedtls-3.6.4/build is NOT used, even
+-- when it exists: on this machine it was produced by MSVC, so its archives
+-- contain .obj files linked against the MSVC CRT. Linking those into a MinGW
+-- executable mixes two heaps - allocations made by mbedtls/httplib went to one
+-- CRT and were freed by the other, and every HTTPS request crashed with
+-- SIGSEGV inside RtlFreeHeap when the httplib client was destroyed. Building
+-- the same sources with the project toolchain makes allocation and release
+-- symmetrical.
+--
+-- (xmake's mbedtls package was the other candidate; it installs via cmake and
+-- therefore needs Visual Studio on Windows, which a MinGW-only box does not
+-- have. Compiling the .c files directly has no such dependency.)
 
 -- include dirs (native)
 includedirs = {
@@ -35,11 +66,19 @@ includedirs = {
     "3rdparty/dtl-1.20",
     "3rdparty/md4c-master/src",
     "3rdparty/httplib",
-    "3rdparty/mbedtls-3.6.4/include",
     "3rdparty/qjs-regex",
     "3rdparty/reproc/include",
     "3rdparty/whaleui/include",
+    "3rdparty/webview/include",
+    "3rdparty/mbedtls-3.6.4/include",
 }
+-- Windows-only vendored headers: the MinGW compatibility header and the
+-- WebView2 SDK are not fetched on other hosts (see scripts/fetch_3rdparty.py),
+-- so pointing -I at them would only add noise.
+if is_plat("windows") then
+    table.insert(includedirs, "3rdparty/webview/compat-mingw")
+    table.insert(includedirs, "3rdparty/mswebview2/include")
+end
 
 -- WhaleUI integration switch. OFF by default: the desktop UI is written and
 -- wired (ui_dom_whale.cpp / ui_main_whale.cpp, guarded by FS_UI_WHALEUI) but not
@@ -47,7 +86,7 @@ includedirs = {
 option("whaleui")
     set_default(false)
     set_showmenu(true)
-    set_description("Build the WhaleUI desktop UI (native window) instead of the wasm/HTTP one")
+    set_description("WhaleUI variant: native window rendered by WhaleUI's own engine")
 option_end()
 
 -- path to a WhaleUI build (the directory holding libwhaleui-*.a); only used with
@@ -59,6 +98,34 @@ option("whaleui_libdir")
 option_end()
 
 local whaleui_on = has_config("whaleui")
+
+-- webview: the shipping desktop host (native window + OS web engine). Declared
+-- here, next to --whaleui, because fs_ui's asset packing and the flashsight
+-- target both read it; the webview_host target itself is defined further down.
+option("webview")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Webview variant: native window hosting the UI in the OS web engine")
+option_end()
+local webview_on = has_config("webview")
+
+-- The three UI variants. They differ ONLY in the DOM backend under IDom:
+--
+--   web     (default) : WasmDom   - the UI compiled to wasm, run in a browser
+--   webview           : WebViewDom - the UI in C++, DOM driven through webview
+--   whaleui           : WhaleDom   - the UI in C++, DOM driven by WhaleUI
+--
+-- ALL THREE embed the local HTTP server (ui_server.cpp) so the app can also be
+-- reached remotely (the remote-access entry point is still TODO - the server
+-- currently only serves the embedded assets + the local API).
+--
+-- Each variant is built into its OWN subtree of build/ so they can coexist:
+--   build/web/...  build/webview/...  build/whaleui/...
+-- build.bat configures the output directory; the names here only gate features.
+if whaleui_on and webview_on then
+    raise("--whaleui=y and --webview=y are mutually exclusive (pick one desktop host)")
+end
+local variant = whaleui_on and "whaleui" or (webview_on and "webview" or "web")
 
 -- Where WhaleUI's already-installed xrepo dependencies live (lexbor, utf8proc,
 -- SDL3_image, SDL3). WhaleUI built them from source; we link the same copies
@@ -81,16 +148,44 @@ wasm_includedirs = {
 
 if is_plat("windows") then
     add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN")
+elseif is_plat("macosx", "iphoneos") then
+    -- set_languages("c++14") passes -std=c++14, which makes clang define
+    -- __STRICT_ANSI__ and hides part of the BSD extension surface (nanosleep,
+    -- mkstemp). _DARWIN_C_SOURCE restores the default Darwin feature level.
+    add_defines("_DARWIN_C_SOURCE")
+else
+    -- Same for glibc: -std=c++14 defines __STRICT_ANSI__, so popen/pclose,
+    -- mkstemp and nanosleep (used by fs_git, shell_detect and main) are not
+    -- declared without an explicit feature macro.
+    add_defines("_DEFAULT_SOURCE")
 end
 
--- Shared config: the WhaleUI desktop UI. Only the native build can use it (the
--- wasm target is the browser backend), and ui_dom_whale/ui_main_whale are
--- #ifdef'd so defining the macro is what turns the code on.
+-- Shared config: which desktop host is compiled in. Only the native build can
+-- use these (the wasm target is the browser backend). ui_dom_whale /
+-- ui_main_whale / ui_dom_webview / ui_main_webview are all #ifdef'd, so
+-- defining the macro is what turns the code on - and it must be defined
+-- PROJECT-wide (not only on the exe), because those .cpp files live in fs_ui.
 if whaleui_on and not is_plat("wasm") then
     add_defines("FS_UI_WHALEUI")
     local libdir = get_config("whaleui_libdir")
     add_linkdirs(libdir)
+elseif webview_on and not is_plat("wasm") then
+    add_defines("FS_UI_WEBVIEW")
 end
+
+-- The embedded web server is part of EVERY variant (local API + remote-access
+-- groundwork). ui_server.cpp needs the packed asset header, so the packer below
+-- always emits it; only the wasm bundle is conditional.
+add_defines("FS_UI_EMBED_SERVER")
+
+-- httplib's TLS backend must be selected in EVERY translation unit that
+-- includes the header, not just fs_core's. ui_server.cpp (in fs_ui) also
+-- includes httplib.h for the local HTTP server; compiled without this macro it
+-- produced a second, non-TLS copy of the header's inline definitions, and the
+-- linker picked those - so SSLClient silently behaved like a plain client and
+-- every HTTPS request failed with "Could not establish connection" while a
+-- standalone request in the same process succeeded.
+add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
 
 -- collect cpp files of dirs that exist (empty dirs are not errors)
 function dir_files(...)
@@ -161,15 +256,23 @@ end
 -- ==========================================================================
 -- wasm UI target: built as a dependency of fs_ui (per-target platform).
 -- ==========================================================================
--- emcc on PATH? (search PATH entries for emcc / emcc.exe)
+-- emcc on PATH? (search PATH entries for emcc)
+--
+-- Two things are host-specific here:
+--   * the separator: ';' on Windows, ':' elsewhere. Splitting on ';'
+--     unconditionally made this always false on Linux/macOS, which silently
+--     skipped the wasm target and produced a Web build with no fs_ui.js.
+--   * the filename: an emsdk install on Windows ships emcc.bat / emcc.py, not
+--     emcc.exe, so the extensionless name must be resolved like a shell would.
 local function has_emcc()
-    local path = os.getenv("PATH") or ""
-    for entry in path:gmatch("[^;]+") do
-        if entry ~= "" then
-            local base = entry
-            local last = base:sub(-1)
-            if last ~= "\\" and last ~= "/" then base = base .. "\\" end
-            if os.isfile(base .. "emcc") or os.isfile(base .. "emcc.exe") then
+    local env = os.getenv("PATH") or ""
+    local sep = is_host("windows") and ";" or ":"
+    local names = is_host("windows")
+        and {"emcc", "emcc.exe", "emcc.bat", "emcc.cmd", "emcc.py"}
+        or {"emcc"}
+    for entry in env:gmatch("[^" .. sep .. "]+") do
+        for _, name in ipairs(names) do
+            if os.isfile(entry .. "/" .. name) then
                 return true
             end
         end
@@ -178,10 +281,25 @@ local function has_emcc()
 end
 local emcc_ok = has_emcc()
 
+-- The Web variant IS the wasm bundle: without emcc the build would succeed but
+-- embed no fs_ui.js/fs_ui.wasm, and the browser would show a stale or blank
+-- app (the asset packer only lists files that exist). Fail here instead.
+if variant == "web" and not emcc_ok then
+    raise("emcc not found on PATH - the Web variant needs Emscripten to build " ..
+          "the wasm UI.\n" ..
+          "  * install emsdk and run `emsdk activate latest`, or\n" ..
+          "  * build a desktop variant instead: --webview=y")
+end
+
 if emcc_ok and not whaleui_on then
 target("fs_ui_wasm")
     set_kind("binary")
     set_plat("wasm")
+    -- The arch must be overridden too: --arch=arm64 (or any other host arch)
+    -- would otherwise be carried into the wasm target, which only knows
+    -- wasm32/wasm64 - so every arm64 CI job would fail to configure it. The
+    -- wasm bundle is architecture-independent anyway.
+    set_arch("wasm32")
     set_toolchains("emcc")
     -- emscripten/val.h (the DOM adapter) requires C++17; the native build stays C++14.
     set_languages("c++17")
@@ -201,7 +319,7 @@ target("fs_ui_wasm")
     set_extension(".js")
     add_ldflags("-lembind", "-sALLOW_MEMORY_GROWTH=1", "-sDISABLE_EXCEPTION_CATCHING=0",
                 "--no-entry", {force = true})
-    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_vsplit,_fs_ui_key,_fs_ui_key_input,_fs_ui_cell_size,_fs_ui_file_pick,_fs_ui_scroll_pin,_fs_ui_scroll_edges,_fs_ui_timeout,_fs_api_done,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
+    add_ldflags("-sEXPORTED_FUNCTIONS=_fs_ui_start,_fs_ui_show,_fs_ui_fire_event,_fs_ui_fire,_fs_ui_drop,_fs_ui_split,_fs_ui_vsplit,_fs_ui_key,_fs_ui_key_input,_fs_ui_cell_size,_fs_ui_file_pick,_fs_ui_scroll_pin,_fs_ui_scroll_edges,_fs_ui_timeout,_fs_api_done,_fs_api_sse_event,_fs_ui_backend_debug,_fs_ui_debug,_malloc,_free",
                 {force = true})
     add_ldflags("-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,stringToUTF8,lengthBytesUTF8",
                 {force = true})
@@ -212,16 +330,33 @@ end  -- fs_ui_wasm
 -- ============================ native ============================
 if not is_plat("wasm") then
 
--- mbedtls static libs (fs_net_http.cpp references their symbols)
+-- mbedtls (fs_net_http.cpp references its symbols).
+--
+-- Always the source build below - see the note at the top of the file for why
+-- the vendored MSVC archives must not be linked into a MinGW executable.
 function mbedtls_link()
-    local libdir = os.projectdir() .. "/3rdparty/mbedtls-3.6.4/build"
-    add_ldflags(libdir .. "/library/libmbedtls.a")
-    add_ldflags(libdir .. "/library/libmbedx509.a")
-    add_ldflags(libdir .. "/library/libmbedcrypto.a")
-    add_ldflags(libdir .. "/3rdparty/everest/libeverest.a")
-    add_ldflags(libdir .. "/3rdparty/p256-m/libp256m.a")
-    add_ldflags("-lbcrypt", "-lcrypt32")
+    if is_plat("windows") then
+        add_syslinks("bcrypt", "crypt32")
+    end
 end
+
+-- mbedtls from source, compiled by the project's own toolchain.
+--
+-- Only library/*.c: with the default mbedtls_config.h neither the everest nor
+-- the p256-m driver is enabled, so their sources are not needed (cmake builds
+-- them unconditionally but only links them in when the config asks).
+--
+-- Link order matters as usual: callers must depend on this AFTER fs_core, or
+-- every mbedtls_* symbol fs_core references stays undefined.
+target("mbedtls_src")
+    set_kind("static")
+    set_languages("c99")
+    add_includedirs("3rdparty/mbedtls-3.6.4/include",
+                    "3rdparty/mbedtls-3.6.4/library")
+    add_files("3rdparty/mbedtls-3.6.4/library/*.c")
+    -- mbedtls is third-party C: warnings here are not ours to fix.
+    set_warnings("none")
+target_end()
 
 -- WhaleUI static library + its own dependencies (only with --whaleui=y).
 --
@@ -340,13 +475,20 @@ target("fs_core")
     set_kind("static")
     set_languages("c++14")
     add_includedirs(includedirs)
-    add_defines("CPPHTTPLIB_MBEDTLS_SUPPORT")
     add_files(dir_files("src/core", "src/agent", "src/tools",
                         "src/provider", "src/storage", "src/common", "src/term"))
     add_files("3rdparty/md4c-master/src/md4c.c",
               "3rdparty/md4c-master/src/md4c-html.c",
               "3rdparty/md4c-master/src/entity.c")
-    add_files("3rdparty/qjs-regex/libregexp.c", "3rdparty/qjs-regex/libunicode.c")
+    -- QuickJS regex engine. cutils.c carries the DynBuf helpers that
+    -- libregexp/libunicode call into (dbuf_put_*, dbuf_free); quickjs-ng
+    -- inlines them in cutils.h and ships no .c, so the file is optional.
+    local qjs_files = {"3rdparty/qjs-regex/libregexp.c",
+                       "3rdparty/qjs-regex/libunicode.c"}
+    if os.isfile("3rdparty/qjs-regex/cutils.c") then
+        table.insert(qjs_files, "3rdparty/qjs-regex/cutils.c")
+    end
+    add_files(qjs_files)
     -- reproc: platform files are selected per OS (posix files don't compile on Windows)
     local reproc_common = {
         "3rdparty/reproc/src/drain.c",
@@ -386,39 +528,63 @@ target("fs_core")
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
+    else
+        -- std::thread (the UI server's listen thread, the terminal pollers,
+        -- reproc's drain threads) needs -pthread; dl is what the webview Linux
+        -- backend expects to be present.
+        add_syslinks("pthread", "dl")
     end
+
 
 target("fs_ui")
     set_kind("static")
     set_languages("c++14")
     add_includedirs(includedirs)
     add_files(dir_files("src/ui"))
+    -- The packed assets are INPUTS of this target: the packer runs in its
+    -- before_build and writes ui_assets_gen.hpp, so editing index.html or a CSS
+    -- file has to invalidate fs_ui or the new bytes never reach the library
+    -- (which is how a change to index.html silently did nothing).
+    add_headerfiles(web_assets)
+    -- ui_server.cpp stays in EVERY variant: all three embed the local HTTP
+    -- server (it is the groundwork for remote access, see the note at the top).
     if whaleui_on then
-        -- The WhaleUI desktop UI needs no HTTP server, and ui_server.cpp pulls in
-        -- ui_assets_gen.hpp (which only the wasm bundle produces) - so drop it
-        -- from this build. The browser path is unaffected (default config).
-        remove_files("src/ui/ui_server.cpp")
         whaleui_link()
     end
     add_cxxflags("-Wall")
-    if emcc_ok and not whaleui_on then
+    if emcc_ok and not whaleui_on and not webview_on then
         -- fs_ui_wasm produces web/fs_ui.js + fs_ui.wasm, which the packer embeds.
+        -- Only the Web variant ships the wasm bundle; the desktop variants host
+        -- the UI natively and have no use for it.
         add_deps("fs_ui_wasm", {link = false})
-        -- Pack the assets BEFORE fs_ui's own sources are checked for staleness:
-        -- a header regenerated in fs_ui_wasm's after_build is already "not newer"
-        -- by then, so a style.css edit never reached this target.
+    end
+    -- Pack the assets BEFORE fs_ui's own sources are checked for staleness:
+    -- a header regenerated inside a dependency's after_build is already "not
+    -- newer" by then, so a style.css edit never reached this target.
+    --
+    -- Every variant embeds the stylesheet + icons (the Web variant serves them
+    -- over HTTP, the webview variant inlines them into the document, the
+    -- WhaleUI variant reads them through its VFS). Only the Web variant also
+    -- embeds the compiled wasm bundle.
+    --
+    -- NOTE: the body is INLINED here on purpose. xmake only exposes io/os/path
+    -- inside a target hook's own body; a script-level function cannot see them
+    -- ("attempt to index a nil value (local 'io_lib')" / "call a nil value").
+    if true then
+        local with_wasm = (variant == "web") and emcc_ok
         before_build(function (target)
             local root = os.projectdir()
             local items = {
                 {name = "index.html", mime = "text/html; charset=utf-8"},
                 {name = "style.css",  mime = "text/css; charset=utf-8"},
-                {name = "fs_ui.js",   mime = "application/javascript; charset=utf-8"},
-                {name = "fs_ui.wasm", mime = "application/wasm"},
                 {name = "icons/fa-subset.css", mime = "text/css; charset=utf-8"},
                 {name = "icons/fa-solid-900.woff2", mime = "font/woff2"},
                 {name = "icons/icons.css", mime = "text/css; charset=utf-8"},
             }
-            -- icon sets: enumerate instead of listing ~140 files by hand
+            if with_wasm then
+                items[#items + 1] = {name = "fs_ui.js",   mime = "application/javascript; charset=utf-8"}
+                items[#items + 1] = {name = "fs_ui.wasm", mime = "application/wasm"}
+            end
             for _, d in ipairs({"icons/lobe", "icons/file"}) do
                 local dir = path.join(root, "web", d)
                 for _, f in ipairs(os.files(path.join(dir, "*.svg")) or {}) do
@@ -432,8 +598,9 @@ target("fs_ui")
             end
             local out_path = path.join(root, "src/ui/ui_assets_gen.hpp")
             local lines = {}
-            lines[#lines + 1] = "// AUTO-GENERATED by xmake (fs_ui_wasm after_build) - do not edit."
-            lines[#lines + 1] = "// Embedded web assets served by ui_server at runtime."
+            lines[#lines + 1] = "// AUTO-GENERATED by xmake (pack_web_assets) - do not edit."
+            lines[#lines + 1] = "// Embedded web assets: served over HTTP (Web build) or inlined"
+            lines[#lines + 1] = "// into the webview document (Desktop build)."
             lines[#lines + 1] = "#pragma once"
             lines[#lines + 1] = ""
             lines[#lines + 1] = "#include <cstddef>"
@@ -459,7 +626,7 @@ target("fs_ui")
                 -- corrupts binary (UTF-8 replacement bytes), which breaks .wasm.
                 local f = io.open(p, "rb")
                 if not f then
-                    raise("[assets] missing " .. p .. " (build fs_ui_wasm first)")
+                    raise("[assets] missing " .. p)
                 end
                 local data = f:read("*a")
                 f:close()
@@ -505,6 +672,17 @@ target("fs_ui")
         end)
     end
 
+
+-- ==========================================================================
+-- The three UI variants (see the `variant` note at the top)
+--
+--   web     : WasmDom     - UI compiled to wasm, run in a browser tab
+--   webview : WebViewDom  - native window, DOM driven through webview
+--   whaleui : WhaleDom    - native window, DOM driven by WhaleUI
+--
+-- All three link the embedded HTTP server (ui_server.cpp) and the same
+-- `flashsight` target; only the DOM backend and the window differ.
+-- ==========================================================================
 target("flashsight")
     set_kind("binary")
     set_languages("c++14")
@@ -517,20 +695,92 @@ target("flashsight")
     -- "undefined reference to fs::highlight::lang_for_path" - the browser
     -- build never noticed because nothing there pulls ui_app.cpp.obj in.
     add_deps("fs_ui", "fs_core")
+    add_deps("mbedtls_src")
     if whaleui_on then
         -- The desktop UI reads web/style.css through the VFS at run time, so the
         -- assets must exist next to the exe; they are tracked as inputs so a CSS
         -- edit re-links.
         add_headerfiles(web_assets)
     end
+    if webview_on then
+        add_deps("webview_host")
+        add_defines("FS_UI_WEBVIEW")
+        if is_plat("windows") then
+            add_syslinks("advapi32", "version")
+        end
+    end
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
+    else
+        -- see fs_core: -pthread for std::thread, dl for the webview backend
+        add_syslinks("pthread", "dl")
     end
     mbedtls_link()
     if whaleui_on then
         whaleui_copy_dlls()
     end
+
+-- ==========================================================================
+-- webview host library (only with --webview=y).
+--
+-- `webview` (github.com/webview/webview, MIT) is a header + one .cc that opens
+-- a native window with the OS web engine:
+--
+--   Windows : WebView2 (needs the SDK headers in 3rdparty/mswebview2; the
+--             runtime ships with Windows 11 and current Windows 10)
+--   macOS   : WKWebView (header-only against the system frameworks, so just
+--             -framework WebKit)
+--   Linux   : WebKitGTK via GTK3/GTK4 - the headers/flags come from pkg-config,
+--             so the runner needs libgtk-3-dev + libwebkit2gtk-4.1-dev
+--
+-- See doc-internal/thirdparty.md.
+-- ==========================================================================
+if webview_on and not is_plat("wasm") then
+    target("webview_host")
+        set_kind("static")
+        set_languages("c++14")
+        add_includedirs("3rdparty/webview/include")
+        add_files("3rdparty/webview/src/webview.cc")
+        add_defines("WEBVIEW_STATIC")
+        add_cxxflags("-Wall")
+        if is_plat("windows") then
+            -- The built-in WebView2 loader reads the SDK headers and resolves
+            -- WebView2Loader.dll's exports at run time, so no import lib is
+            -- linked. shlwapi: the loader uses PathFindFileNameW.
+            add_includedirs("3rdparty/webview/compat-mingw",
+                            "3rdparty/mswebview2/include")
+            add_syslinks("ole32", "uuid", "advapi32", "shell32", "user32", "shlwapi")
+        elseif is_plat("macosx", "iphoneos") then
+            -- webview.cc is plain C++ that talks to the ObjC runtime through
+            -- objc_msgSend (no @-syntax, no .mm), so no ObjC++ is involved.
+            -- This mirrors webview's own cmake: WebKit (which brings AppKit
+            -- and CoreGraphics with it) plus libdl.
+            add_frameworks("WebKit")
+            add_syslinks("dl")
+        elseif is_plat("linux", "bsd") then
+            -- GTK3 + WebKitGTK 4.1 is the oldest pairing webview supports that
+            -- current distros still package. webview.h picks the GTK3/GTK4 code
+            -- path from GTK_MAJOR_VERSION, so both flag sets must come from the
+            -- same pair. find_package returns structured links/linkdirs/
+            -- includedirs; splitting pkg-config's output by hand would lose the
+            -- ordering xmake applies to links (and break on paths with spaces).
+            local gtk = find_package("pkgconfig::gtk+-3.0")
+            local wk = find_package("pkgconfig::webkit2gtk-4.1")
+            if not gtk or not wk then
+                raise("--webview=y on Linux needs libgtk-3-dev and libwebkit2gtk-4.1-dev " ..
+                      "(pkg-config must find gtk+-3.0 and webkit2gtk-4.1)")
+            end
+            for _, pkg in ipairs({gtk, wk}) do
+                add_includedirs(pkg.includedirs or {})
+                add_defines(pkg.defines or {})
+                add_linkdirs(pkg.linkdirs or {})
+                add_links(pkg.links or {})
+            end
+            add_syslinks("dl")
+        end
+    target_end()
+end
 
 target("fs_tests")
     set_kind("binary")
@@ -540,9 +790,15 @@ target("fs_tests")
     -- same link order as `flashsight`: the tests link UiApp, which calls into
     -- fs_core (see the note there)
     add_deps("fs_ui", "fs_core")
+    add_deps("mbedtls_src")
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
+    else
+        -- std::thread (the UI server's listen thread, the terminal pollers) needs
+        -- -pthread; dlopen is used by nothing yet but the webview Linux backend
+        -- expects libdl to be present.
+        add_syslinks("pthread", "dl")
     end
     mbedtls_link()
 

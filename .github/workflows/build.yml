@@ -1,0 +1,299 @@
+name: build
+
+# Releases are cut from tags: `v0.1.0` (and pre-releases like `v0.2.0-rc1`).
+# Publishing a GitHub Release also triggers a build, so assets can be attached
+# to it after the fact. workflow_dispatch builds without publishing.
+#
+#   Web      : one self-contained executable per platform (wasm UI embedded,
+#              served over the embedded HTTP server)
+#   Webview  : one executable per platform (native window via the OS web engine)
+#
+# WhaleUI is deliberately NOT built here: it needs a WhaleUI checkout and a
+# build of its engine, which this repo does not vendor. It stays a local
+# variant (build.bat whaleui) - see doc-internal/ui-whaleui.md.
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # xmake is a single binary; pinning the version keeps the build reproducible.
+  XMAKE_VERSION: v3.0.6
+  # Emscripten compiles the UI to wasm. The bundle is architecture-independent,
+  # so every runner uses the same SDK.
+  EMSDK_VERSION: 3.1.61
+
+jobs:
+  # ------------------------------------------------------------------------
+  # Resolve the version and the matrix once, so every job agrees on the names
+  # that end up in the release.
+  # ------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: v
+        name: Resolve version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            ref="${{ github.event.release.tag_name }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            ref="${{ github.ref_name }}"
+          else
+            ref="0.0.0-dev"
+          fi
+          # Strip a leading v so the archive names stay uniform.
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          echo "resolved version: ${ref#v}"
+      - id: m
+        name: Build matrix
+        run: |
+          # One entry per (runner, target arch). Supported today:
+          #   windows-x86_64   native MSYS2 mingw64
+          #   windows-arm64    llvm-mingw aarch64 (cross from the x64 runner)
+          #   macos-arm64      Xcode clang, WKWebView
+          #   linux-x86_64     gcc, WebKitGTK 4.1
+          #   linux-aarch64    gcc on an arm64 runner, WebKitGTK 4.1
+          #
+          # Nothing else is attempted: webview has no backend for the remaining
+          # platforms, so a package would not run there.
+          #
+          # `toolchain` empty means "the platform default" (clang on macOS).
+          # `mingw` selects how the Windows toolchain is installed; the actual
+          # directory is resolved in the build job.
+          matrix=$(cat <<'JSON'
+          {
+            "include": [
+              {
+                "name": "windows-x86_64",
+                "os": "windows-latest",
+                "arch": "x86_64",
+                "toolchain": "mingw",
+                "mingw": "msys2",
+                "py": "python"
+              },
+              {
+                "name": "windows-arm64",
+                "os": "windows-latest",
+                "arch": "arm64",
+                "toolchain": "mingw",
+                "mingw": "llvm",
+                "py": "python"
+              },
+              {
+                "name": "macos-arm64",
+                "os": "macos-14",
+                "arch": "arm64",
+                "toolchain": "",
+                "mingw": "",
+                "py": "python3"
+              },
+              {
+                "name": "linux-x86_64",
+                "os": "ubuntu-24.04",
+                "arch": "x86_64",
+                "toolchain": "gcc",
+                "mingw": "",
+                "py": "python3"
+              },
+              {
+                "name": "linux-aarch64",
+                "os": "ubuntu-24.04-arm",
+                "arch": "arm64",
+                "toolchain": "gcc",
+                "mingw": "",
+                "py": "python3"
+              }
+            ]
+          }
+          JSON
+          )
+          echo "matrix=$(echo "$matrix" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The version stamp falls back to `git describe`, which needs tags.
+          fetch-depth: 0
+
+      # ---- toolchains -----------------------------------------------------
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+          actions-cache-folder: .xmake-cache
+
+      - name: Install MSYS2 mingw64 (Windows x86_64)
+        if: matrix.mingw == 'msys2'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: false
+          install: mingw-w64-x86_64-gcc
+
+      - name: Install llvm-mingw (Windows arm64)
+        if: matrix.mingw == 'llvm'
+        shell: pwsh
+        run: |
+          # llvm-mingw provides target-prefixed gcc-named driver wrappers, which
+          # is exactly what xmake's mingw toolchain looks for with
+          # --arch=arm64 (aarch64-w64-mingw32-gcc). Its own find_mingw.lua has a
+          # dedicated branch for this prefix.
+          $ver = "20240417"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/llvm-mingw-$ver-ucrt-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath C:\llvm-mingw -Force
+          $dir = (Get-ChildItem C:\llvm-mingw -Directory | Select-Object -First 1).FullName
+          $gcc = Join-Path $dir "bin\aarch64-w64-mingw32-gcc.exe"
+          if (-not (Test-Path $gcc)) {
+            Write-Error "llvm-mingw has no aarch64-w64-mingw32-gcc wrapper at $gcc"
+            exit 1
+          }
+          "MINGW_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "llvm-mingw at $dir"
+          & $gcc --version | Select-Object -First 1
+
+      - name: Set MSYS2 mingw dir
+        if: matrix.mingw == 'msys2'
+        run: echo "MINGW_DIR=C:/msys64/mingw64" >> "$GITHUB_ENV"
+
+      - name: Install Linux dependencies
+        if: matrix.os != 'windows-latest' && matrix.os != 'macos-14'
+        run: |
+          sudo apt-get update
+          # WebKitGTK 4.1 + GTK3 are what the webview Linux backend compiles
+          # against (see the webview_host target in xmake.lua).
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: .emsdk-cache
+
+      # ---- dependencies ---------------------------------------------------
+      - name: Fetch 3rdparty
+        run: ${{ matrix.py }} scripts/fetch_3rdparty.py
+
+      # mbedtls is the one dependency not vendored in the repo: xmake's
+      # add_requires() installs it during configure (see mbedtls_link()).
+      # Fetching it here instead makes a package-repo failure show up as its
+      # own step rather than as a confusing compile error.
+
+      # ---- build ----------------------------------------------------------
+      # Two variants, two output dirs, exactly like build.bat:
+      #   build/web      (no host flag)
+      #   build/webview  (--webview=y)
+      - name: Configure (web)
+        run: |
+          args=(-y -m release --arch=${{ matrix.arch }} -o build/web)
+          if [ -n "${{ matrix.toolchain }}" ]; then
+            args+=(--toolchain=${{ matrix.toolchain }})
+          fi
+          if [ -n "${MINGW_DIR:-}" ]; then
+            args+=(--mingw="$MINGW_DIR")
+          fi
+          echo "xmake f ${args[*]}"
+          xmake f "${args[@]}"
+
+      - name: Build (web)
+        run: xmake -y
+
+      - name: Configure (webview)
+        run: |
+          args=(-y -m release --arch=${{ matrix.arch }} --webview=y -o build/webview)
+          if [ -n "${{ matrix.toolchain }}" ]; then
+            args+=(--toolchain=${{ matrix.toolchain }})
+          fi
+          if [ -n "${MINGW_DIR:-}" ]; then
+            args+=(--mingw="$MINGW_DIR")
+          fi
+          echo "xmake f ${args[*]}"
+          xmake f "${args[@]}"
+
+      - name: Build (webview)
+        run: xmake -y
+
+      # ---- package --------------------------------------------------------
+      # One archive per variant per platform:
+      #   flashsight-<version>-<platform>-web.zip|tar.gz
+      #   flashsight-<version>-<platform>-webview.zip|tar.gz
+      - name: Package
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          ${{ matrix.py }} scripts/package.py --variant web \
+            --build-dir build/web --out dist \
+            --version "$VERSION" --platform "${{ matrix.name }}"
+          ${{ matrix.py }} scripts/package.py --variant webview \
+            --build-dir build/webview --out dist \
+            --version "$VERSION" --platform "${{ matrix.name }}"
+
+      - name: Verify archives
+        run: |
+          # A package that is suspiciously small means the executable or the
+          # embedded assets are missing - catch that here, not after publishing.
+          ${{ matrix.py }} - <<'PY'
+          import pathlib, sys
+          dist = pathlib.Path("dist")
+          archives = sorted(p for p in dist.iterdir() if p.is_file())
+          if len(archives) != 2:
+              sys.exit("expected 2 archives, got %d: %s" %
+                       (len(archives), [a.name for a in archives]))
+          for a in archives:
+              size = a.stat().st_size
+              print("%-60s %8.2f MB" % (a.name, size / 1e6))
+              if size < 1_000_000:
+                  sys.exit("%s is suspiciously small" % a.name)
+          PY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashsight-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ------------------------------------------------------------------------
+  # Attach every artifact to the release that triggered the run.
+  # ------------------------------------------------------------------------
+  release:
+    needs: [prepare, build]
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List assets
+        run: ls -lh dist
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          # A tag push has no release object yet; create one as a draft so the
+          # notes can be written before it goes public.
+          draft: ${{ github.event_name != 'release' }}
+          generate_release_notes: true

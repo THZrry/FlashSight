@@ -38,7 +38,8 @@ struct TabSpec {
 
 // Full tab strip: tabs + "+" button. Active tab gets the raised look.
 H tab_strip(const std::vector<TabSpec>& tabs, const std::string& active_key,
-            EventFn on_select, EventFn on_close, EventFn on_add);
+            EventFn on_select, EventFn on_close, EventFn on_add,
+            EventFn on_context = nullptr);
 
 // Centered row of title buttons (home sub-navigation).
 H title_tabs(const std::vector<std::string>& items, int active, EventFn on_select);
@@ -50,8 +51,11 @@ H panel_tabs(const std::vector<TabSpec>& tabs, const std::string& active_key,
 // ---------- forms ----------
 H field(const std::string& label, const H& control, const std::string& hint = "");
 // `on_enter` (optional) fires on Enter; used by single-line prompt inputs.
+// `on_blur` (optional) fires with the field's value when focus leaves it, so a
+// typed value also commits when the user clicks away instead of pressing Enter.
 H text_input(const std::string& value, const std::string& placeholder,
-             EventFn on_input, EventFn on_enter = nullptr);
+             EventFn on_input, EventFn on_enter = nullptr,
+             EventFn on_blur = nullptr);
 H textarea(const std::string& value, const std::string& placeholder,
            EventFn on_input, EventFn on_enter);
 H select(const std::vector<std::string>& options, int selected, EventFn on_change);
@@ -126,6 +130,9 @@ struct ChatMsg {
   // When the turn ended and how long it took (ms since epoch; 0 = unknown).
   int64_t started_at = 0;
   int64_t ended_at = 0;
+  // "Now" for the live elapsed counter of a streaming turn. The shell stamps it
+  // on every render while anything streams; 0 means "do not show a live timer".
+  int64_t now_ms = 0;
   std::string summary;           // turn summary (not folded, no border)
   // Bumped by whoever mutates this message. The chat view memoises one rendered
   // VNode per message and reuses it while this number is unchanged: a session
@@ -148,8 +155,11 @@ struct ChatMsg {
 // system -> centered dim line. Actions appear on hover (CSS).
 // `on_turn_action` receives "fork" | "rollback" | "forget" for THIS turn; it is
 // how a message becomes a navigation point ("branch from here").
+// `on_context` receives "<x>\t<y>" on right-click; the shell uses it to open its
+// own context menu (the browser's is suppressed by the DOM adapters).
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
-               EventFn on_think_toggle = nullptr, EventFn on_turn_action = nullptr);
+               EventFn on_think_toggle = nullptr, EventFn on_turn_action = nullptr,
+               EventFn on_context = nullptr);
 
 // Stable identity for one rendered message: a keyed VNode is what lets the
 // framework match (and therefore skip) a subtree across renders. `uid` must be

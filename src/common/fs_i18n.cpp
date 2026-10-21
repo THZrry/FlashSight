@@ -84,6 +84,8 @@ const Entry kEnTable[] = {
     // ---- 会话 / 输入框 ----
     {"输入消息…（Enter 发送，Shift+Enter 换行）",
      "Type a message… (Enter sends, Shift+Enter adds a line)"},
+    {"输入消息…（Ctrl+Enter 发送，Enter 换行）",
+     "Type a message… (Ctrl+Enter sends, Enter adds a line)"},
     {"发送", "Send"},
     {"挂起", "Suspend"},
     {"恢复", "Resume"},

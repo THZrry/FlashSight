@@ -11,7 +11,30 @@
 ## 2. targets（见 arch.md §3）
 
 `fs_core`（静态库） / `fs_ui`（静态库，独立目录） /
-`flashsight`（主程序） / `fs_tests`（单测）。
+`flashsight`（主程序） / `fs_tests`（单测）。Web 变体另有 `fs_ui_wasm`
+（emcc，产物被 `fs_ui` 的 `before_build` 打包进 `ui_assets_gen.hpp`）；
+Webview 变体另有 `webview_host`。
+
+## 2.1 三个 UI 变体与输出目录
+
+| 变体 | 配置 | 输出 |
+|---|---|---|
+| Web | `xmake f -o build/web` | `build/web/<plat>/<arch>/<mode>/flashsight` |
+| Webview | `xmake f --webview=y -o build/webview` | `build/webview/...` |
+| WhaleUI | `xmake f --whaleui=y --whaleui_libdir=... -o build/whaleui` | `build/whaleui/...` |
+
+`build.bat web|webview|whaleui|test` 是 Windows 上的入口；其他平台等价命令：
+`xmake f -m release -o build/web && xmake`。
+
+## 2.2 CI 与发布包
+
+`.github/workflows/build.yml` 按 tag（`v*`）与 `release: published` 触发，
+矩阵覆盖 Windows x86_64/arm64、macOS arm64、Linux x86_64/aarch64；每个 job
+编 Web + Webview 两版，`scripts/package.py` 出两个包并挂到 release。
+WhaleUI 不在 CI 里（需要 WhaleUI 仓库与其引擎构建产物）。
+
+依赖：`scripts/fetch_3rdparty.py`（幂等，Windows/macOS/Linux 通用），
+mbedtls 走 xmake 包（没有本地预编译树时自动 `add_requires`）。
 
 ## 3. 第三方（定稿 + 待验证）
 

@@ -51,6 +51,54 @@
 - openWith（文件管理器/vscode/vs/sublime/kate/jetbrains/系统默认）是右键下拉组合按钮，
   纯 GUI 功能，路径模板在设置-环境管理。
 
+## 3.1 右键菜单
+
+浏览器自带的右键菜单是**文档级默认行为**：只在某个节点上绑 `contextmenu` 是拦不住的，
+没绑定的区域（空白、卡片、侧栏）照样弹出「后退 / 重新加载 / 另存为 / 检查」。
+所以两个 DOM 适配器都在启动时装一个 `document` 级 `contextmenu` 监听，**一律
+`preventDefault()`** —— 包括文本输入框：菜单要在所有地方长得一样，剪切/复制/粘贴
+由应用自己的菜单项提供（`IDom::exec_edit`，粘贴走异步剪贴板 API，菜单点击本身就是
+合法手势）。
+
+应用菜单的状态在 `AppState::ctx_*`（`ctx_open / ctx_x / ctx_y / ctx_kind / ctx_id / ctx_label`），
+渲染在 overlay 层，`position: fixed` + 内联 `left/top`。**位置来自指针**——适配器把
+`contextmenu` 事件的值改成 `"x\ty"`（视口坐标），而不是锚定某个控件：右键菜单属于
+"这一次点击"，不属于某个按钮。
+
+按被点对象给不同的项，只保留真正能用的：
+
+| 对象 | 菜单项 |
+|---|---|
+| 消息 | 复制 / 从这里分叉 / 回滚到这里 / 忘记这一轮 |
+| 标签页（顶部模式） | 重命名 / 关闭 |
+| 会话行（左栏导航 + 项目卡片） | 打开 / 重命名 / 删除会话 |
+| 输入区 | 剪切 / 复制 / 粘贴 / 全选 / 清空输入 |
+
+关闭方式：Esc，或按到菜单外的任何地方（`IDom::bind_outside_click`）。**不能用全屏
+遮罩层**——那会把下一次右键吃掉，表现为"右键别处什么都不出现"；`bind_outside_click`
+只关菜单、不吞事件，所以右键另一行会直接换成那一行的菜单。
+
+## 3.2 流式渲染
+
+后端走真正的 SSE：`NetClient::request_stream` 把字节按到达顺序交给回调，
+`ProviderClient` 用 `SseReader` 拼行（`data:` 行可能被 read 边界切断），每段文本立刻
+回调 → `AgentLoop` 发 `stream.delta` 事件。
+
+**前端不能用轮询**。浏览器的定时器在"被遮挡/后台"的页面里会被压到 ~1Hz（实测
+`setInterval(120ms)` 的真实间隔是 1031ms），于是 UI 每秒只能取一批事件，模型每秒
+产生上百条 delta，前端永远追不上——表现就是"生成完了才一点点喂过来"。所以：
+
+- `GET /api/stream` 是 SSE 长连接（`text/event-stream` + chunked），事件产生时由
+  `condition_variable` 唤醒写入，不经过任何定时器。`/api/events?since=N` 仍保留给
+  测试和简单客户端。
+- 前端 `EventSource` 在 `poll()` 里**只负责确保连接已打开**，不再拉取事件。
+- **重绘也由数据驱动**：delta 到达时直接 render（SSE 帧是普通任务，不受定时器节流），
+  只加 25ms 下限防止一次连发过多；不靠 `setInterval` 刷。
+- 非流式仍然支持：服务端忽略 `stream:true` 只回整段 JSON 时，`saw_sse == false`，
+  走正常解析再补发一次 delta（否则回复会凭空消失——测试就是这么抓到的）。
+- 计时：`turn.done` 带 `startedAt/endedAt`（后端时钟，比 UI 看到第一个 delta 更准）；
+  流式期间显示已用时长，结束后常显"时长 · 结束时刻"，只有操作按钮 hover 才出现。
+
 ## 4. 性能与空态（验收条目）
 
 - 历史虚拟化（一次 10 条）、diff div 限高滚动超长截断、流式渲染 diff 更新（md4c diff AST）。

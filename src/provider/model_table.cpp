@@ -96,6 +96,35 @@ void ModelTable::load_user_models(const Json& j) {
   }
 }
 
+Json ModelTable::api_models_json() const {
+  Json out = Json::object();
+  for (auto& kv : api_) {
+    if (kv.second.empty()) continue;
+    Json arr = Json::array();
+    for (auto& m : kv.second) arr.push_back(m.to_json());
+    out[kv.first] = arr;
+  }
+  return out;
+}
+
+void ModelTable::load_api_models(const Json& j) {
+  api_.clear();
+  if (!j.is_object()) return;
+  for (auto it = j.begin(); it != j.end(); ++it) {
+    if (!it.value().is_array()) continue;
+    std::vector<ModelEntry> v;
+    for (auto& e : it.value()) {
+      if (!e.is_object()) continue;
+      ModelEntry m = ModelEntry::from_json(e);
+      if (m.id.empty()) continue;
+      m.from_api = true;
+      fill_model_defaults(&m);
+      v.push_back(m);
+    }
+    if (!v.empty()) api_.push_back({it.key(), v});
+  }
+}
+
 std::vector<ModelEntry> ModelTable::list_models(const std::string& provider_id) const {
   std::vector<ModelEntry> out;
   // 用户自定义优先，并记住哪些 id 已经占位
@@ -121,11 +150,49 @@ std::vector<ModelEntry> ModelTable::list_models(const std::string& provider_id) 
 
 ModelEntry ModelTable::resolve(const std::string& provider_id,
                                const std::string& model_id) const {
+  // A user entry records what the USER changed (enable/disable, a level list).
+  // It must not erase facts that only the API knows - the context window above
+  // all: the side panel's water level is computed from it, and a user row that
+  // only flipped `enabled` used to freeze context_len at 0, which made the level
+  // disappear for every model the user had ever touched.
+  auto merge_missing = [this, &provider_id](ModelEntry* dst) {
+    if (auto* a = find_in(api_, provider_id)) {
+      for (auto& m : *a) {
+        if (m.id != dst->id) continue;
+        if (dst->caps.context_len <= 0) dst->caps.context_len = m.caps.context_len;
+        if (dst->caps.max_output <= 0) dst->caps.max_output = m.caps.max_output;
+        if (!dst->caps.vision && m.caps.vision) dst->caps.vision = true;
+        if (!dst->caps.audio && m.caps.audio) dst->caps.audio = true;
+        if (!dst->caps.pdf && m.caps.pdf) dst->caps.pdf = true;
+        if (!dst->caps.video && m.caps.video) dst->caps.video = true;
+        if (!dst->caps.structured_output && m.caps.structured_output) {
+          dst->caps.structured_output = true;
+        }
+        if (dst->thinking.levels.empty() && !m.thinking.levels.empty()) {
+          dst->thinking = m.thinking;
+          dst->caps.thinking = true;
+        }
+        if (dst->display.empty() || dst->display == dst->id) {
+          if (!m.display.empty()) dst->display = m.display;
+        }
+        if (dst->icon.empty()) dst->icon = m.icon;
+        return;
+      }
+    }
+    for (auto& m : preset_) {
+      if (m.id != dst->id) continue;
+      if (dst->caps.context_len <= 0) dst->caps.context_len = m.caps.context_len;
+      if (dst->caps.max_output <= 0) dst->caps.max_output = m.caps.max_output;
+      return;
+    }
+  };
+
   // 1) 用户自定义
   if (auto* u = find_in(user_, provider_id)) {
     for (auto& m : *u) {
       if (m.id == model_id) {
         ModelEntry r = m;
+        merge_missing(&r);
         fill_model_defaults(&r);
         return r;
       }
@@ -223,6 +290,75 @@ ModelTable::FetchResult ModelTable::fetch_models(const std::string& provider_id,
       // API 不一定给能力标签：保守置 tool_use=true（[OI] chat 形态默认支持工具）；
       // 用户可在设置里手动改（provider.md §4 允许覆盖）
       m.caps.tool_use = true;
+
+      // ---- fill every fact the endpoint DOES report -------------------------
+      // One fetch should be enough to configure a model. Anything the endpoint
+      // states here is authoritative; the UI then needs no manual entry and no
+      // guess from the model name.
+      std::string display = jsonutil::get<std::string>(e, "name", "");
+      if (!display.empty()) m.display = display;
+      int64_t max_out = jsonutil::get_int(e, "max_output_tokens", 0);
+      if (max_out <= 0) max_out = jsonutil::get_int(e, "max_completion_tokens", 0);
+      if (max_out > 0) m.caps.max_output = max_out;
+      // Modalities: "input_modalities": ["text","image"] (OpenRouter-style) or
+      // the older "architecture":{"input_modalities":[...]} nesting.
+      auto has_modality = [&e](const char* what) {
+        const Json* arr = nullptr;
+        if (e.contains("input_modalities") && e["input_modalities"].is_array()) {
+          arr = &e["input_modalities"];
+        } else if (e.contains("architecture") && e["architecture"].is_object() &&
+                   e["architecture"].contains("input_modalities") &&
+                   e["architecture"]["input_modalities"].is_array()) {
+          arr = &e["architecture"]["input_modalities"];
+        }
+        if (!arr) return false;
+        for (size_t i = 0; i < arr->size(); ++i) {
+          if ((*arr)[i].is_string() && (*arr)[i].get<std::string>() == what) {
+            return true;
+          }
+        }
+        return false;
+      };
+      if (has_modality("image")) m.caps.vision = true;
+      if (has_modality("audio")) m.caps.audio = true;
+      if (has_modality("video")) m.caps.video = true;
+      if (has_modality("pdf") || has_modality("file")) m.caps.pdf = true;
+      // Reasoning levels: {"effort":{"supported_levels":[...],
+      // "default_level":"high"}} (DeepSeek/opencode-style). This is the model's
+      // OWN ladder, so it beats the name-based guess in fill_model_defaults.
+      if (e.contains("effort") && e["effort"].is_object()) {
+        const Json& ef = e["effort"];
+        if (ef.contains("supported_levels") && ef["supported_levels"].is_array()) {
+          for (size_t i = 0; i < ef["supported_levels"].size(); ++i) {
+            if (ef["supported_levels"][i].is_string()) {
+              m.thinking.levels.push_back(
+                  ef["supported_levels"][i].get<std::string>());
+            }
+          }
+        }
+        m.thinking.default_level = jsonutil::get<std::string>(ef, "default_level", "");
+        if (!m.thinking.levels.empty()) {
+          m.caps.thinking = true;
+          if (m.thinking.default_level.empty()) {
+            m.thinking.default_level = m.thinking.levels[0];
+          }
+        }
+      }
+      // Structured output / tool use flags, when the endpoint spells them out.
+      if (e.contains("capabilities") && e["capabilities"].is_object()) {
+        const Json& c = e["capabilities"];
+        if (c.contains("tools") || c.contains("tool_use")) {
+          m.caps.tool_use = jsonutil::get<bool>(
+              c, c.contains("tools") ? "tools" : "tool_use", true);
+        }
+        if (c.contains("structured_output")) {
+          m.caps.structured_output =
+              jsonutil::get<bool>(c, "structured_output", false);
+        }
+        if (c.contains("vision")) {
+          m.caps.vision = jsonutil::get<bool>(c, "vision", m.caps.vision);
+        }
+      }
       models.push_back(m);
     }
     if (models.empty()) {

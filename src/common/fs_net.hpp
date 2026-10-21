@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 
@@ -36,6 +37,24 @@ class NetClient {
  public:
   virtual ~NetClient() = default;
   virtual FsResult request(const HttpRequest& req, HttpResponse* out) const = 0;
+
+  // Streaming variant: `on_chunk` is called as bytes arrive, so an SSE response
+  // can be rendered while the model is still talking. Returning false from the
+  // callback aborts the transfer (used when the UI cancels).
+  //
+  // The default implementation issues a normal request and delivers the body in
+  // one chunk, so a stub NetClient keeps working without implementing this -
+  // only "is the text incremental?" changes, never the result.
+  virtual FsResult request_stream(
+      const HttpRequest& req,
+      const std::function<bool(const char*, size_t)>& on_chunk,
+      HttpResponse* out) const {
+    FsResult r = request(req, out);
+    if (r.ok() && on_chunk && !out->body.empty()) {
+      on_chunk(out->body.data(), out->body.size());
+    }
+    return r;
+  }
 };
 
 }  // namespace fs

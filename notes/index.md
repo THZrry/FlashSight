@@ -286,3 +286,109 @@ The process of project: P0 环境搭建
   - 实测：探索两个区块 delay 0s/0.06s、条目 transform translateY(6px)；
     搜索三条 0/0.03/0.06s。268 用例 2672 断言。
 
+<59>(SOLVED): Web / Desktop 双版本 + WebViewDom 适配器（webview 作为 WhaleUI 后备）。
+  - 三变体共用同一套 UI，只换 IDom：Web(默认, WasmDom) / Desktop-webview
+    (WebViewDom) / Desktop-WhaleUI(WhaleDom)；各自独立构建目录，build.bat 切换。
+  - 新增 ui_dom_webview.cpp + ui_main_webview.cpp；webview 0.12.0 + WebView2 SDK
+    入 3rdparty。三变体都内嵌 web/（Desktop 把 CSS 内联、woff2 转 data: URI，
+    因为 NavigateToString 没有 base URL）。
+  - 适配器要点：节点 id 由 C++ 分配；读操作走 C++ 镜像（fs_ui_push 回传）。
+  - 坑：webview_init 必须在 set_html 之前；绑定是位置参数（C 侧收 JSON 数组）；
+    insert_before 漏传 ref 会让重排全部追加到末尾（点击后整页变空）；
+    链接需 shlwapi；xmake 的 io 只在 target hook 函数体内可见（打包逻辑必须内联）。
+  - 详见 current.md <59> 与 doc-internal/ui-webview.md。
+
+<60>(SOLVED): 构建目录归拢到 build/{web,webview,whaleui} + GitHub Actions 多平台打包。
+  - 三变体命名统一（Web/Webview/WhaleUI），输出目录改为 build 下的分支；
+    .gitignore 补齐，仓库根目录清掉 24 个历史日志。
+  - 三变体都内嵌 HTTP 服务（远程入口仍 TODO）。
+  - 跨平台坑：emcc 检测按 host 切 PATH 分隔符（否则 Linux/macOS 上 wasm 被静默跳过）；
+    wasm target 补 set_arch("wasm32")（否则 arm64 交叉构建配置失败）；mbedtls 无预编译
+    树时改走 add_requires（且此时不能带 3.6.4 头）；非 Windows 加
+    _DEFAULT_SOURCE/_DARWIN_C_SOURCE + pthread/dl；webview Linux 走
+    pkgconfig::gtk+-3.0 + webkit2gtk-4.1，macOS 走 -framework WebKit + dl。
+  - scripts/fetch_3rdparty.py 统一依赖拉取（幂等），scripts/package.py 出包，
+    .github/workflows/build.yml 矩阵（win x86_64/arm64、macos arm64、linux x86_64/aarch64）
+    按 tag/release 触发，每平台每变体一个包。详见 current.md <60>。
+
+<61>(SOLVED): 网络"连不通"的三个真 bug + 多轮对话 + 定时任务。
+  - httplib 的 TLS 宏只在 fs_core 上定义，ui_server.cpp（fs_ui）编出另一份非 TLS
+    实现且被链接器选中 → 所有 HTTPS 请求 "Could not establish connection"。
+    宏提到项目级。
+  - mbedtls 链了 MSVC 编的 .a，两套 CRT 混用 → 请求完成时 RtlFreeHeap SIGSEGV。
+    改为 mbedtls_src 从源码编。
+  - provider 路由只取第一个启用的连接，deepseek 的模型被发到 anthropic → 403。
+    改为按模型归属匹配 provider。
+  - 多轮对话是假的：HistoryBuilder 没被调用、persist_turn 从未调用。已接上。
+  - 失败后 state 停在 kTurnDone，被当成"忙"→ 后续消息全进引导队列。已修。
+  - 换模型不生效（loop 只读一次模型）；定时任务无创建接口且 on_timer_tick
+    从未被调用。补 session.schedule/pendingWakes + UI 倒计时条 + 定时按钮。
+  - 输入框 placeholder 跟随 Enter 设置。详见 current.md <61>。
+
+<62>(SOLVED): 重开会话看不到用户输入 + 全局右键菜单。
+  - user turn 把输入存在 `promptRaw`，UI 只读 `text`/`streamSummary`，所以用户
+    消息全渲染成空白（答案在、问题没了）。改为三级回退。
+  - 浏览器原生右键菜单是文档级默认行为，只绑节点拦不住；两个适配器改在
+    document 上监听，文本输入区放行（保留原生剪切复制粘贴），其余拦截。
+  - 应用菜单：消息=复制/分叉/回滚/忘记，标签页=重命名/关闭，会话行=打开/重命名/
+    删除，输入区=清空/复制。坐标来自指针（适配器把事件值改成 "x\ty"）。
+  - 详见 current.md <62> 与 doc-internal/ui-events.md §3.1。
+
+<63>(SOLVED): 真流式（SSE）+ 计时 + 右键补齐 + 上下文水位 + 模型属性自动填充。
+  - 流式原本是假的（`stream=false`）。现在 NetClient 有 request_stream、ProviderClient
+    用 SseReader 解 SSE、AgentLoop 边收边发 stream.delta；非流式仍兼容。
+  - UI：delta 判断漏了 `!streaming`（新答案粘在旧消息上）；每条 delta 都 render 会
+    饿死事件循环（看着像卡住）→ 改 50ms 节流；poll 加在途保护、每批 128 条、事件环 8192。
+  - 计时：流式显示已用时长，结束后常显"时长 · 结束时刻"（后端给 startedAt/endedAt）。
+  - 右键：左栏会话行、输入框都接上；菜单外任意按下关菜单且不吞事件（第二次右键切换菜单）。
+  - 水位：流式要 stream_options.include_usage、resolve 合并而非覆盖 API 的 context_len、
+    取回的模型列表落盘、最低显示 1% 并常显数字。
+  - 模型属性：一次获取列表就填好 name/context/max_output/多模态/档位/能力。
+  - 详见 current.md <63>、doc-internal/ui-events.md §3.2、doc-internal/provider.md §4。
+
+<64>(SOLVED): 流式"像一次性生成完再喂" —— 浏览器定时器节流。
+  - 页面里 `setInterval(120ms)` 实测间隔 1031ms（被遮挡/后台页面被压到 ~1Hz），
+    而模型每秒产出约 150 条 delta，轮询每次最多 128 条 → 永远追不上，生成结束才补完。
+  - 改为服务端 SSE 推送（`GET /api/stream`，chunked + cv 唤醒）+ 前端 EventSource；
+    重绘也改成 delta 到达即 render（SSE 帧不受定时器节流），25ms 下限防连发。
+  - 实测 47 次重绘、字符数平滑增长、计时 0.0→1.6s；结束后常显"2.7s · 09:19"。
+  - 教训：UI 刷新节奏若由定时器驱动，先确认它没被浏览器节流。详见 current.md <64>。
+
+<65>(SOLVED): 模型可用性校验 + Web 服务设置（远程 + 密码）+ 密码遮罩/鉴权。
+  - 会话记住的模型失效（被禁用/供应商被删）→ 清空模型框、标警告、禁用发送；
+    send_message 同一道闸；无后端时跳过（测试/预览）。
+  - 设置-权限-Web 服务：监听地址/端口/密码，改动实时生效（stop+start 重绑）。
+    重启必须放 detached 线程：在请求线程上 stop() 会 join 到线程池里的自己 → 死锁。
+  - 鉴权只约束远程，回环免密；/api/auth 探测、/api/login 换 token、/api/* 带 Bearer；
+    页面外壳（/、css、js、wasm）必须公开，否则连密码框都加载不出来。
+  - 密码遮罩是 index.html 的纯 HTML/JS；登录成功后要显式 startApp()，否则界面空白。
+  - 顺带修：fs_ui 未声明 web_assets 为输入，改 HTML/CSS 不重新打包（内嵌资源是旧的）。
+  - 详见 current.md <65>、doc-internal/ui-webview.md §1.1、provider.md §3.1。
+
+<66>(SOLVED): 三种访问方式并列（只有 Web 版跑服务）+ 端口修改真正生效。
+  - Webview / WhaleUI 有原生窗口，不再启动内嵌服务；只有 Web 版需要（服务就是 UI）。
+  - 端口"没生效"是因为 on_input 逐字符提交，逐位重绑、互相踩掉；改成只在 Enter 提交，
+    输入中只更新本地 draft。
+  - 换端口后旧页面必然失联：重绑前推 `server.moved`，页面显示"服务已更换地址"+
+    新地址链接。
+  - restart 是异步的，加 `rebinding` 标志让设置页延迟重读状态，避免读到旧端口。
+  - 详见 current.md <66>。
+
+<67>(SOLVED): 重绑不换端口 + 换端口时页面自动跳转。
+  - 重绑沿用了 `port = 0` 那条路，导致只改密码/地址也会换端口。改为只有明确写不同
+    端口才换。
+  - 重绑改成先绑新端口再关旧监听（中间无监听窗口会让页面轮询失败）；绑不上就保留原
+    监听并在设置页显示错误。路由注册抽成 configure()，重绑对新实例重放。
+  - `server.moved` 只带端口，URL 由页面用自己的 hostname 拼；收到后先探测新端口，
+    通了才 replace（立即跳会落到浏览器错误页）；探测失败才出提示卡片。
+  - "Web 服务"设置页只在 Web 版显示。详见 current.md <67>。
+
+<68>(SOLVED): Web 服务改端口/改地址真正生效（根因：SSE 把 stop() 卡死）。
+  - 页面常挂的 `/api/stream` 一条 SSE 会一直占着线程池里一个 worker；httplib 的
+    stop() 要 join 线程池，于是重绑永远卡住、旧监听不释放——这就是"改端口没反应
+    / 0.0.0.0 没有服务"。加 `stopping` 标志：stop() 置位并唤醒，SSE 处理器见信号
+    立即 return false 结束请求；keep-alive 等待 15s→0.5s。
+  - 端口框 Enter 或失焦都提交；输入非法值（非数字 / 超 0-65535）拒绝并提示，不再
+    静默钳到 65535。设置页显示真实局域网 IP（UDP connect 8.8.8.8 读 getsockname）。
+  - 详见 current.md <68>。
+

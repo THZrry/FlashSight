@@ -28,7 +28,12 @@ void AgentLoop::emit(const std::string& event, const Json& payload) {
 
 // send：用户输入进入 planning（手动模式；自动模式 plan 未闭合时由 finish_turn 触发 autoNext）
 FsResult AgentLoop::send(const std::string& text) {
-  if (state_ != LoopState::kIdle) {
+  // kTurnDone is a PARKED state, not a running one: the previous turn finished,
+  // whether it succeeded or was interrupted. Treating it as busy (the old
+  // `state_ != kIdle` test) meant that after one failed turn every later message
+  // went into the steering queue and was never sent - the session looked
+  // permanently interrupted and could not be typed into again.
+  if (state_ != LoopState::kIdle && state_ != LoopState::kTurnDone) {
     // 正在运行：进入引导队列（addon1.md 当前传递）
     steering_queue_.push_back(text);
     emit("steering.queued", Json{{"len", (int)steering_queue_.size()}});
@@ -281,18 +286,32 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
 // 执行一轮（planning -> toolCalling -> ... -> turnDone）
 // addon2：工具结果回填后再喂模型，循环直到模型不再要工具（完整 agent 循环）
 FsResult AgentLoop::run_turn(const std::string& user_text) {
-  // 构造 history（HistoryBuilder）
   HistoryBuilder::Options hopts = opts_.history;
-  // 注意：需要 full.json；v1 简化：直接调用 call_model
-  Json system_msg = Json::object();
-  system_msg["role"] = "system";
-  system_msg["content"] = hopts.system_prefix;
+  // The conversation so far, then the new user message. Building only
+  // [system, user] (the old behaviour) made every turn stateless: the model
+  // could not see anything said before, so follow-ups like "what did I just
+  // ask?" were answered as if the session had just started.
+  Json messages = Json::array();
+  Json full = Json::object();
+  bool have_history = false;
+  if (load_history && load_history(&full).ok()) have_history = true;
+  if (have_history) {
+    HistoryResult hist = HistoryBuilder(hopts).build(full);
+    messages = hist.messages;
+    if (!messages.is_array()) messages = Json::array();
+  }
+  if (messages.empty()) {
+    Json system_msg = Json::object();
+    system_msg["role"] = "system";
+    system_msg["content"] = hopts.system_prefix;
+    messages.push_back(system_msg);
+  }
   Json user_msg = Json::object();
   user_msg["role"] = "user";
   user_msg["content"] = user_text;
-  Json messages = Json::array();
-  messages.push_back(system_msg);
   messages.push_back(user_msg);
+  last_user_text_ = user_text;
+  turn_started_ms_ = WallClock().now_ms();  // this turn's clock starts here
   saved_valid_ = false;  // 新一轮开始：清掉旧保存点
   return run_loop(messages, opts_.model, hopts.tools);
 }
@@ -307,8 +326,21 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
   req.session_id = opts_.sid;  // x-opencode-session 透传（套餐连接）
 
   // 挂起中：发完当前调用后不再发新调用（v1：run_loop 结束后检查）
+  //
+  // Deltas are emitted AS THEY ARRIVE, not after the call returns: the whole
+  // point of streaming is that the transcript fills in while the model is still
+  // talking. `streamed` tracks whether anything was pushed, so a provider that
+  // answers in one piece (no SSE) still gets its text emitted exactly once.
+  if (turn_started_ms_ <= 0) turn_started_ms_ = WallClock().now_ms();
+  bool streamed = false;
+  auto on_delta = [this, &streamed](const std::string& piece) {
+    if (piece.empty()) return;
+    streamed = true;
+    emit("stream.delta", Json{{"text", piece}});
+  };
   ModelCallResult result;
-  FsResult r = call_model ? call_model(req, &result) : FsResult::error(ErrCode::kInternal, "no model");
+  FsResult r = call_model ? call_model(req, &result, on_delta)
+                          : FsResult::error(ErrCode::kInternal, "no model");
   if (!r.ok() || !result.error.empty()) {
     // 失败：保存断点，允许"打断后续接"（addon2）
     saved_messages_ = req.messages;
@@ -321,8 +353,8 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
     state_ = LoopState::kTurnDone;
     return r;
   }
-  // 成功：发 stream.delta
-  if (!result.text.empty()) {
+  // 非流式（或流式没吐任何东西）：整段补发一次，UI 才不会一片空白
+  if (!streamed && !result.text.empty()) {
     emit("stream.delta", Json{{"text", result.text}});
   }
   // 工具调用：执行 + 回填结果 + 再喂模型，直到无 tool_calls
@@ -367,7 +399,14 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
     req.messages.push_back(tool_msg);
     pending_tool_results_.clear();
     ModelCallResult r2;
-    FsResult r2r = call_model ? call_model(req, &r2) : FsResult::error(ErrCode::kInternal, "no model");
+    bool streamed2 = false;
+    auto on_delta2 = [this, &streamed2](const std::string& piece) {
+      if (piece.empty()) return;
+      streamed2 = true;
+      emit("stream.delta", Json{{"text", piece}});
+    };
+    FsResult r2r = call_model ? call_model(req, &r2, on_delta2)
+                              : FsResult::error(ErrCode::kInternal, "no model");
     if (!r2r.ok() || !r2.error.empty()) {
       saved_messages_ = req.messages;
       saved_valid_ = true;
@@ -380,16 +419,35 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
       return r2r;
     }
     result = r2;
-    if (!result.text.empty()) {
+    if (!streamed2 && !result.text.empty()) {
       emit("stream.delta", Json{{"text", result.text}});
     }
   }
-  // 落库（v1：由 FsApi 层负责持久化；这里发 turn.done）
-  Json turn = Json::object();
-  turn["role"] = "assistant";
-  turn["streamSummary"] = result.text;
-  turn["toolCalls"] = result.tool_calls;
-  emit("turn.done", Json{{"summary", result.text}});
+  // 落库：user 轮 + assistant 轮都要写。此前只发 turn.done 事件、从不落盘，
+  // 于是下一轮 load_history 读到的 turns 永远是空的 —— 多轮对话看起来像每句
+  // 都是新会话的第一句。
+  //
+  // Timestamps are written HERE, from the loop's own clock: append_turn used to
+  // stamp both turns at write time, which is after the model already answered -
+  // so a reloaded turn showed a duration of 0.0s no matter how long it took.
+  int64_t ended_ms = WallClock().now_ms();
+  Json user_turn = Json::object();
+  user_turn["role"] = "user";
+  user_turn["promptRaw"] = last_user_text_;
+  user_turn["ts"] = turn_started_ms_ > 0 ? turn_started_ms_ : ended_ms;
+  Json asst_turn = Json::object();
+  asst_turn["role"] = "assistant";
+  asst_turn["streamSummary"] = result.text;
+  asst_turn["toolCalls"] = result.tool_calls;
+  asst_turn["startedAt"] = turn_started_ms_ > 0 ? turn_started_ms_ : ended_ms;
+  asst_turn["ts"] = ended_ms;
+  if (persist_turn) {
+    persist_turn(user_turn);
+    persist_turn(asst_turn);
+  }
+  emit("turn.done", Json{{"summary", result.text},
+                         {"startedAt", turn_started_ms_},
+                         {"endedAt", ended_ms}});
   state_ = LoopState::kTurnDone;
   return FsResult::success();
 }
@@ -409,6 +467,8 @@ FsResult AgentLoop::continue_task(const std::string& guidance) {
   g["role"] = "user";
   g["content"] = guidance;
   msgs.push_back(g);
+  last_user_text_ = guidance;
+  turn_started_ms_ = WallClock().now_ms();
   saved_valid_ = false;
   state_ = LoopState::kPlanning;
   emit("loop.resumed", Json{{"guidance", guidance}});

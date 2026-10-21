@@ -32,6 +32,12 @@ class ModelTable {
   // 持久化：用户模型设置整份进出（存 settings 的 provider.models 键）
   Json user_models_json() const;
   void load_user_models(const Json& j);
+  // The fetched model list also has to survive a restart: it is the only source
+  // of the facts the endpoint reported (context window, output cap, thinking
+  // levels). Kept in memory only, a restart lost them and the context water
+  // level silently disappeared until the user fetched again.
+  Json api_models_json() const;
+  void load_api_models(const Json& j);
 
   // 某 provider 的完整模型列表（用户 + API，按 id 去重、用户优先），
   // 每一项都补齐默认档位/图标。两者都空时回退预置表（保持旧行为）。

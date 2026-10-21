@@ -115,6 +115,11 @@ class FsApi {
   FsResult session_suspend(const std::string& sid);
   FsResult session_resume(const std::string& sid);
   FsResult session_cancel_wake(const std::string& sid);
+  // 定时任务（用户可设的"稍后自动再跑一轮"）：delay_ms 后触发一次唤醒。
+  FsResult session_schedule(const std::string& sid, int64_t delay_ms,
+                            const std::string& note);
+  // 该会话当前挂着的唤醒（定时 + 事件），UI 用来显示倒计时/取消。
+  FsResult session_pending_wakes(const std::string& sid);
   // Live loop state for one session ("idle" | "suspended" | "planning" |
   // "toolCalling" | "waiting" | "turnDone"). The composer's suspend button and
   // the session status dots read this instead of guessing from local clicks.
@@ -347,6 +352,31 @@ class FsApi {
   // 终端后台轮询线程（桌面端；~FsApi 时停止）
   std::atomic<bool> poller_stop_{false};
   std::unique_ptr<std::thread> poller_;
+
+  // 内嵌 Web 服务（可选）。设置页改监听地址/端口/密码要立即生效，所以 FsApi
+  // 持有一对回调（不是 UiServer*）：fs_core 不能依赖 fs_ui，静态库链接顺序
+  // 会反过来。空 = 这个进程没有起服务器（单测）。
+  //
+  //   restart(port, host, password) -> 是否绑定成功
+  //   status() -> {running, host, port, password, url}
+  std::function<bool(int, const std::string&, const std::string&)> ui_server_restart_;
+  std::function<Json()> ui_server_status_;
+
+ public:
+  void attach_ui_server(std::function<bool(int, const std::string&,
+                                           const std::string&)> restart,
+                        std::function<Json()> status) {
+    ui_server_restart_ = std::move(restart);
+    ui_server_status_ = std::move(status);
+  }
+  // 把 server.* 设置应用到服务器（改绑定/密码时重启）
+  void apply_server_settings();
+  // 当前生效的监听配置（设置页回显）
+  FsResult server_status();
+  // 这个连接是否需要密码（页面在挂载前问一次；回环始终 false）
+  FsResult server_auth_required();
+  // 校验密码，成功则发放会话令牌（前端存起来，后续请求带上）
+  FsResult server_login(const std::string& password);
 };
 
 }  // namespace fs

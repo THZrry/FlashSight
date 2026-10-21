@@ -264,6 +264,17 @@ class IDom {
   // picker: the UI only says "copy this".
   virtual void copy_text(const std::string& text) { (void)text; }
 
+  // Editing commands on the FOCUSED element: "cut" | "copy" | "paste" |
+  // "selectAll". The app draws its own menu over text fields instead of the
+  // browser's, so these have to be reachable from a menu item. Returns false
+  // when the platform refuses (a browser will not let script read the clipboard
+  // for "paste" without permission) - the caller then tells the user to use the
+  // keyboard shortcut.
+  virtual bool exec_edit(const std::string& command) {
+    (void)command;
+    return false;
+  }
+
   // --- file picker (upload) ---
   // Clicking `node` opens the OS file chooser. The picked files are sent to the
   // backend (which stores them inside the project, where the model's file tools

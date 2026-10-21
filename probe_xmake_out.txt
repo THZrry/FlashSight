@@ -1,6 +1,0 @@
-has add_linkgroups: false
-has add_links: false
-has add_linkdirs: false
-has os.absolute: false
-has os.absfile: false
-[0m[1m{[0m [1m}[0m

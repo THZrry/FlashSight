@@ -1407,3 +1407,252 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 实测：探索两个区块 delay 0s/0.06s、条目 transform translateY(6px)；
     搜索三条 0/0.03/0.06s。268 用例 2672 断言。
 
+<59>(SOLVED): Web / Desktop 双版本 + WebViewDom 适配器（webview 作为 WhaleUI 的后备）。
+  - 三变体共用同一套 UI（ui_app/vdom/components 未改），只换 IDom：
+    Web(默认, WasmDom) / Desktop-webview(WebViewDom) / Desktop-WhaleUI(WhaleDom)。
+    各自独立构建目录（build_web / build_desktop / build_whale），build.bat 一键切换。
+    --webview=y 与 --whaleui=y 互斥（都会替换 ui_server.cpp 并各自提供入口）。
+  - 新增 src/ui/ui_dom_webview.cpp（WebViewDom）+ src/ui/ui_main_webview.cpp
+    （原生窗口 + 内嵌资源 + NativeBackend）。webview 0.12.0 + WebView2 SDK 放
+    3rdparty/webview、3rdparty/mswebview2（脚本已补拉取，见 doc-internal/thirdparty.md）。
+  - 三变体都内嵌 web/（xmake 的 pack_web_assets 生成 ui_assets_gen.hpp）。Desktop
+    把 CSS 内联进 `<style>`、woff2 转 data: URI —— webview_set_html 用
+    NavigateToString，文档没有 base URL，相对路径无法解析。
+  - 适配器关键设计：webview_eval 无返回值、绑定是异步 Promise，所以
+    (a) 节点 id 由 C++ 分配（JS 按 id 存表，无需回传）；
+    (b) get_value/is_focused/scroll_* 走 C++ 镜像，用户改动经 fs_ui_push 回传
+    （在事件处理器之前送达，所以处理器里读到的是新值）。
+  - 坑：
+    * webview_init() 必须在第一次 set_html 之前调用，否则 glue 不进当前文档 → 全黑。
+    * webview 绑定是**位置参数**的 JS 函数，C 侧收到 JSON 数组 [a,b,...]，
+      不能把数组当单个参数传。
+    * insert_before 忘了把 ref 传给 JS → diff 重排全部追加到末尾，点击后整页变空。
+    * 链接需要 shlwapi（内置 WebView2 loader 用 PathFindFileNameW）。
+    * xmake 只在 target hook 的**函数体内**暴露 io/os/path；打包逻辑若抽成脚本级
+      函数会报 nil（"attempt to call a nil value" / "index a nil value"），必须内联。
+  - 实测：Web 版编译通过（139 个内嵌资源）；Desktop 版编译通过，窗口渲染正常，
+    设置页双栏/表单/开关、主页子标签切换均可用。
+  - 文档：doc-internal/ui-webview.md（三变体、适配器设计、踩坑、已知限制）。
+
+<60>(SOLVED): 构建目录归拢到 build/ + 三变体重命名 + GitHub Actions 多平台打包。
+  - 变体命名统一为 Web / Webview / WhaleUI（xmake 的 --webview / --whaleui），
+    输出目录不再是 build_web/build_desktop/build_whale 三个兄弟目录，而是
+    build/web、build/webview、build/whaleui（build.bat 用 -o 指定）。
+    .gitignore 补上 build/ 与所有日志/临时文件（*.log、build*.txt、run*.txt、
+    probe_*.txt）；仓库根目录清掉 24 个历史日志。
+  - 三个变体**都**编译内嵌 HTTP 服务（此前只有 Web 版有）。远程接入入口仍是
+    TODO（main.cpp 注释已写明将来 --no-window 只跑服务），但 server 已经先起来，
+    桌面版启动时也会打印 "UI server: http://127.0.0.1:PORT/"。
+  - 跨平台化的坑（都是 CI 才暴露的）：
+    * emcc 检测按 ';' 切 PATH → Linux/macOS 上永远 false，wasm 被静默跳过，
+      构建出的 Web 包没有 fs_ui.js。改成按 host 选 ';' / ':'。
+    * wasm target 只 set_plat 不 set_arch，--arrm64 会漏进 wasm 平台
+      （wasm 只有 wasm32/wasm64）→ arm64 的 CI job 直接配置失败。补 set_arch("wasm32")。
+    * mbedtls 此前硬编码 3rdparty/mbedtls-3.6.4/build/*.a（本地 cmake 产物），
+      CI 没有。改为：有这个树就按路径链；没有就 add_requires("mbedtls 3.6.7")，
+      且此时**不能**把 3.6.4 的头文件放进 include path（否则头是 3.6.4、库是 3.6.7）。
+    * -std=c++14 会定义 __STRICT_ANSI__，glibc 下 popen/mkstemp/nanosleep 不声明。
+      非 Windows 加 _DEFAULT_SOURCE / _DARWIN_C_SOURCE；并补 -pthread、-ldl。
+    * webview 的 Linux 后端要 gtk+-3.0 + webkit2gtk-4.1，用 find_package("pkgconfig::…")
+      取结构化 links/linkdirs，别手工 split pkg-config 输出；macOS 只需
+      add_frameworks("WebKit") + dl（webview.cc 是纯 C++ 走 objc_msgSend，不用 .mm）。
+    * Windows 的 compat-mingw / mswebview2 头文件目录只在 is_plat("windows") 时加。
+    * set_policy("build.across_targets_in_parallel", false) 在 xmake 3.x 已废弃，
+      改 build.fence（否则每次构建都刷警告）。
+  - 依赖脚本统一成一份 Python（scripts/fetch_3rdparty.py），.sh/.bat 只是壳：
+    curl+unzip+tar 在干净的 Windows runner 上不齐，urllib+zipfile+tarfile 到处都有。
+    幂等（已解压就跳过），支持 PROXY / SKIP_WEBVIEW / WHALEUI_DIR。
+  - 打包脚本 scripts/package.py：每个平台每个变体一个包
+    flashsight-<version>-<platform>-<variant>.zip|tar.gz。Windows 上按 PE 导入表
+    决定要带哪些运行时 DLL（不写死 MinGW 列表，llvm-mingw 的 libc++.dll 也能带上）；
+    Windows 出 zip，其他出 tar.gz（保留可执行位）。
+  - .github/workflows/build.yml：tag（v*）与 release published 触发，矩阵
+    windows-x86_64(MSYS2 mingw64) / windows-arm64(llvm-mingw 交叉) / macos-arm64 /
+    linux-x86_64 / linux-aarch64，每个 job 编 Web + Webview 两版并出两个包，
+    最后 softprops 挂到 release（tag 推送时建 draft）。WhaleUI 不在 CI 里——
+    它需要 WhaleUI 仓库与其引擎构建产物，本地用 build.bat whaleui。
+  - 实测：本机 web/webview 两版重新编译通过；打出的两个 zip 解压后直接运行，
+    Web 版 200 提供 index/wasm（1,592,654 字节）与 /api/call，Webview 版窗口正常。
+
+<61>(SOLVED): 网络"连不通"的三个真 bug（不是网络问题）+ 多轮对话 + 定时任务。
+  - 起因：界面里发消息报 "network io error"，但 curl 与同一进程里的临时请求都正常。
+  - 根因 1（最致命）：httplib 的 TLS 宏只定义在 fs_core 上。ui_server.cpp 属于
+    fs_ui，也 include 了 httplib.h；没带 CPPHTTPLIB_MBEDTLS_SUPPORT 编出来的那份
+    头文件里 SSLClient 的实现退化成普通连接，链接器选中了它，于是所有 HTTPS 请求
+    都报 "Could not establish connection"，而单独编译一段同样的请求却能成功。
+    修法：把 CPPHTTPLIB_MBEDTLS_SUPPORT 提到项目级（xmake 顶层 add_defines）。
+  - 根因 2：mbedtls 链了 MSVC 编的 .a。3rdparty/mbedtls-3.6.4/build 里的归档成员
+    是 *.obj（MSVC），链进 MinGW 程序后两套 CRT 混用，请求完成、ClientImpl 析构
+    时在 RtlFreeHeap 里 SIGSEGV（gdb 抓到）。修法：mbedtls 一律用 mbedtls_src
+    target 从源码编（同一工具链），不再用预编译树。
+  - 根因 3：provider 路由只取第一个启用的连接。配了 Anthropic + DeepSeek 时，
+    "deepseek-chat" 被发到 api.anthropic.com，回 403。修法：先按"哪个 provider
+    的模型表里有这个 model"匹配，认不出再回退第一个启用的。
+  - 多轮对话其实是假的：run_turn 只发 [system, 当前 user]，HistoryBuilder 根本没
+    被调用；而且 persist_turn 从未被调用，会话文件里从来没有 turn。两者都接上
+    （AgentLoop::load_history / persist_turn，Host 注入），现在"我叫 Ada"下一轮能记住。
+  - 中断后无法再发消息：AgentLoop::send 用 state_ != kIdle 判断忙，而失败后状态
+    停在 kTurnDone（其实是空闲），于是后续每条消息都进引导队列永不发送。
+    改为 kIdle 与 kTurnDone 都算空闲。
+  - 换模型不生效：loop 只在创建时读一次模型。新增 set_model，并把会话模型从
+    sessionSettings 传进 AgentHost::send。
+  - 定时任务：WakeScheduler 早就写好，但 (a) 没有任何接口能创建定时唤醒，
+    (b) on_timer_tick 从未被调用。补 session.schedule / session.pendingWakes，
+    并让终端轮询线程每 60ms 调一次 on_timer_tick。UI 在输入框上方（与中断条
+    同一位置）显示倒计时与取消，自动模式下工具条多一个"定时"按钮。
+  - 输入框 placeholder 跟着 Enter 设置走（Ctrl+Enter 模式下不再说"Enter 发送"）。
+  - 调试开关：FS_NET_DEBUG=1 打印每条请求的 host/path/代理/TLS/结果；
+    map_httplib_error 现在带上 httplib 的原始错误文本，不再一律 "network io error"。
+  - 验证：web 变体重编通过；268 用例 2672 断言全过；打包后的 exe 直接运行能提供
+    index/wasm/API；对话连续两轮且第二轮记得第一轮内容；定时唤醒 2 秒后触发
+    wake.fired。
+
+<62>(SOLVED): 重新打开会话看不到自己的输入 + 全局右键菜单。
+  - 用户历史不显示：后端返回正常（8 轮都在），是 UI 的 turn_to_message 只读
+    `text` / `streamSummary`。user turn 把输入存在 `promptRaw` 里，于是每条用户
+    消息都渲染成空白——答案都在、问题全没了。改为依次回退
+    text → promptRaw → streamSummary。
+  - 右键：浏览器原生菜单是**文档级默认行为**，只在节点上绑 contextmenu 拦不住，
+    没绑定的地方照样弹「后退/重新加载/检查」。两个 DOM 适配器启动时装一个
+    document 级监听：INPUT/TEXTAREA/contentEditable 放行（剪切复制粘贴是浏览器
+    能力，应用做不了），其余 preventDefault。
+  - 应用菜单：AppState::ctx_* + overlay 层 fixed 定位，坐标来自指针。适配器把
+    contextmenu 的事件值从"元素文本"改成 "x\ty" 视口坐标（三个后端都改了），
+    否则菜单没有位置可开。
+  - 菜单项按对象给，只留能用的：消息=复制/分叉/回滚/忘记；标签页=重命名/关闭；
+    会话行=打开/重命名/删除；输入区=清空/复制输入内容。Esc 与点空白处关闭。
+  - 顺手把 placeholder 跟着 Enter 设置走（上一批遗留）：Ctrl+Enter 模式下显示
+    "Ctrl+Enter 发送，Enter 换行"，不再硬编码"Enter 发送"。
+  - 浏览器实测：会话 s_dec6176ec0d4 的 4 条用户消息全部显示；右键消息出
+    "复制/从这里分叉/回滚到这里/忘记这一轮"；右键会话行出"打开/重命名/删除会话"；
+    空白处 contextmenu 被 preventDefault，textarea 未被拦截（保留原生菜单）。
+
+<63>(SOLVED): 真流式 + 计时 + 右键补齐 + 上下文水位 + 模型属性自动填充。
+  - 流式原来是假的：fs_api 写死 `stream = false`，所以内容整段刷出。现在是真的
+    SSE——NetClient 加 request_stream（httplib 的 ContentReceiver，按 read 边界
+    回调），ProviderClient 用 SseReader 拼 `data:` 行，每段文本立刻 on_delta →
+    AgentLoop 发 stream.delta。非流式仍支持：服务端忽略 stream 只回整段 JSON 时
+    saw_sse=false，走正常解析再补发（否则回复直接消失，5 个用例抓到）。
+  - UI 端两个真 bug：① delta 判断只 `role != assistant`，上一轮的答案也是
+    assistant，于是新一轮文本被追加到旧消息上（两个答案粘一起）；改判
+    `!streaming`。② 每条 delta 都 render 会把浏览器事件循环饿死（下一次 poll 发不
+    出去，看着像"卡住"）；改为标脏 + pump 每 50ms 重绘一次。另外 poll 加在途保护、
+    drain_events 每批上限 128、事件环 512→8192（流式一轮就有几百条）。
+  - 计时：后端在 turn.done 里带 startedAt/endedAt（它知道请求何时发出），流式期间
+    每秒刷新已用时长；结束后在 hover 那排按钮旁边常显"时长 · 结束时刻"。
+  - 右键：左栏会话行没绑（只有项目卡片有）；输入框之前放行原生菜单，现在统一由应用
+    菜单接管（剪切/复制/粘贴/全选，粘贴走异步剪贴板 API）。菜单外的**任何**按下都
+    关菜单且不吞事件（bind_outside_click），所以右键另一处会直接换成那处的菜单——
+    之前用全屏遮罩，第二次右键被吃掉，表现为"什么都没有"。
+  - 上下文水位：① 流式响应默认不带 usage，加上 stream_options.include_usage，
+    否则每次流式调用的 prompt tokens 都是 0（水位恒 -1）；② 用户只改过 enabled 的
+    模型覆盖了 API 的 context_len，resolve() 改为合并而非覆盖；③ 取回的模型列表落盘
+    （provider.apiModels），重启后 ctx 不再丢；④ 百分比最低显示 1%，旁边常显数字
+    （1M 窗口下几千 token 整除成 0，看起来像没算）。
+  - 模型属性自动填充：一次"获取模型列表"就补齐 name / context_len / max_output /
+    多模态（input_modalities）/ 思考档位（effort.supported_levels）/ 工具与结构化
+    输出能力，用户不必手填。
+  - 浏览器实测：流式期间采样到字符数递增（337→959→1587→2299）、实时计时
+    1.0s→2.0s→4.0s、贴底跟随正常；右键消息/标签页/左栏会话行/输入框各自的菜单
+    都对，且第二次右键会切换菜单；输入框菜单出"剪切/复制/粘贴/全选/清空输入"；
+    水位显示 1%。268 用例 2701 断言全过。
+
+<64>(SOLVED): 流式"像是一次性生成完再喂"——根因是浏览器定时器节流。
+  - 上一轮虽然做了真 SSE 后端（ProviderClient 解 SSE、AgentLoop 边收边发），但前端
+    还是**轮询**取事件。实测：页面里 `setInterval(120ms)` 的真实间隔是 1031ms——
+    浏览器把被遮挡/后台页面的定时器压到 ~1Hz。而模型每秒产生约 150 条 delta，
+    每次 poll 最多取 128 条，于是前端永远追不上，等生成结束才开始补完。
+    这也解释了为什么"后端事件时间戳看着是流式的、界面却像一次性刷出"。
+  - 修法：服务端加 `GET /api/stream`（SSE，chunked + condition_variable 唤醒），
+    前端改用 `EventSource`；`poll()` 只确保连接打开，不再拉取。
+  - 重绘也改成数据驱动：delta 到达时直接 render（SSE 帧是普通任务，不受定时器
+    节流），25ms 下限防连发；不再依赖 setInterval 刷帧。计时同样在 delta 里盖章。
+  - 验证（浏览器 MutationObserver 采样）：一次 250 词回复产生 47 次重绘，字符数
+    4→46→93→142→206→…→1125 平滑增长，实时计时 0.0s→1.6s；结束后常显
+    "2.7s · 09:19"，操作按钮仍 hover 才出现。
+  - 教训：只要 UI 的刷新节奏由定时器驱动，就必须先确认这个定时器没被浏览器节流。
+
+<65>(SOLVED): 模型可用性校验 + Web 服务设置（远程+密码）+ 密码遮罩/鉴权。
+  - 会话记住的模型可能失效（被禁用/供应商被删）：打开会话时核对 model.allEnabled，
+    不在列表就清空模型框、按钮标警告、**禁用发送**并提示；send_message 里有同一道
+    闸。无后端时跳过（UI 测试/纯预览的演示路径）。真发出去只会失败在 provider 层，
+    错误信息里根本不含"模型不存在"。
+  - 设置-权限-Web 服务：监听地址（仅本机 / 局域网远程）、端口、访问密码，改动实时
+    生效。httplib 不能在 listen 后换绑定地址，只能 stop+start。
+  - **重启不能在被服务的那条请求线程上做**：stop() join 监听线程，监听线程退出又
+    join 线程池，而当前请求就在池里 → 死锁（浏览器看到请求挂住）。改成 detached
+    线程 + 延迟 150ms 让响应先写回。stop() 还会摘掉事件监听器，重启前要重新注册。
+  - 鉴权只约束远程：回环始终免密（桌面版自己就通过这个服务器说话）。/api/auth 探测、
+    /api/login 换 token、之后 /api/* 带 Bearer。**页面外壳必须公开**——它不含数据，
+    且必须先加载出来才能显示密码框；一开始把 `/` 也拦了，远程拿到的是 401 JSON。
+  - 密码遮罩是 index.html 里的纯 HTML/JS（wasm 挂载前就要能拦住）。模块可能在遮罩
+    期间就加载完，那时 onRuntimeInitialized 会跳过启动 → 登录成功后必须由 startApp()
+    补启动，否则登录成功但界面空白。
+  - 顺带修：`fs_ui` 没把 web_assets 声明为输入，改 index.html/style.css 不会触发
+    重新打包，内嵌资源一直是旧的（这次改 index.html 完全没生效才发现）。
+  - 实测：远程访问出密码框、错密码提示且保持遮罩、对密码关遮罩并挂载（3 个项目卡
+    渲染出来）；无 token 的 /api/call 回 401、带 token 回 200；/ 与 style.css 公开；
+    设置切 127.0.0.1 后局域网连不上、切回 0.0.0.0 又能连。269 用例 2707 断言全过。
+
+<66>(SOLVED): 三种访问方式是并列的 + 端口修改真正生效。
+  - 用户指出：本地服务只是和 webview、WhaleUI 并列的访问方式，有原生界面就不该再起
+    服务。上一版让桌面版也起服务器，结果是"两个界面、两个端口"的困惑。
+    改：只有 Web 版启动内嵌服务（那里服务就是 UI），Webview / WhaleUI 只开窗口。
+  - 端口"没生效"的真因：`text_input` 的 on_input 每敲一个字符就 `set_setting`，
+    于是"1"→"18"→"189"… 逐位重绑；每次重绑都关掉还在传下一个按键的那条连接，
+    最后一次可能落在没人指定的端口上。改成**只在 Enter 提交**，输入过程中只更新
+    本地 draft（否则重渲染会用保存值把正在输入的内容抹掉）。
+  - 换端口后页面必然失联（Web 版的 UI 就是从这台服务器加载的，无法跟着换源）。
+    重绑前先通过 SSE 推 `server.moved`，页面显示"服务已更换地址"卡片 + 新地址链接。
+  - `restart()` 现在是异步的（detached 线程 + 400ms 让响应和 server.moved 先送达），
+    所以状态查询要能识别"正在重绑"，否则设置页读到的是旧端口。加 `rebinding` 标志
+    并延迟重读一次。
+  - 实测：webview 版启动后端口 18997 完全不通（无服务）；Web 版改端口 56566→18777
+    →18788 每次都真的重新监听，日志逐条打印；旧页面收到"服务已更换地址"并给出正确
+    的新链接；新地址打开后 3 个项目卡正常、SSE readyState=1。269 用例全过。
+
+<67>(SOLVED): 重绑不换端口 + 换端口时页面自动跳转。
+  - 用户指出：重启（改密码/改地址）不该把端口换掉——刚释放的端口马上就能再绑，不该
+    当作"不可用"。真因是重绑走了 `port = 0` 那条路（0 = 启动时自动选），于是每次重绑
+    都重新随机。现在只有明确写了不同端口才换，否则沿用当前端口。
+  - 重绑顺序改成**先绑新端口、再关旧监听**。原来先 stop 再 start，中间有一段没有任何
+    监听的窗口，页面轮询正好落在那里就失败；先绑也顺带验证了新端口可用，绑不上就保留
+    原监听并把错误显示在设置页。
+  - 路由注册抽成 `configure(Server&)`，重绑对新实例重放（httplib 的 Server 不能改绑定
+    地址，必须换实例）。
+  - 页面自动跳转：`server.moved` 只带**端口**，URL 由页面用自己的 hostname 拼（之前发
+    绝对地址，远程客户端会被送到它自己的 127.0.0.1；而且用的是配置里的 port，自动模式
+    下是 0，于是跳到了 `:0`）。收到后先 `no-cors` 探测新端口，通了才 replace —— 立即
+    跳会落在浏览器错误页。探测失败 6s 才出"服务已更换端口"卡片；SSE readyState=2 时
+    也提示，避免页面无声死掉。
+  - 设置页的 "Web 服务" 只在 Web 版显示（`backend_name() == "wasm"`）：桌面版没有服务。
+  - 实测：改密码/改地址后端口保持不变（53999 → 53999）；改端口 53888→53999 后旧页面
+    自动跳到新地址；绑到被占用端口时保留原监听。269 用例 2707 断言全过。
+
+<68>(SOLVED): Web 服务改端口/改地址真的生效了（根因是 SSE 把 stop() 卡死）。
+  - 用户报告："输入端口没有反应"、"改本地/局域网把本地改成了 ::65535"、
+    "0.0.0.0 没有服务"。用 curl 直接打 /api/call 验证：改 host、改 port 在 HTTP
+    层全都成功——所以问题不在设置写入，而在重绑本身。
+  - **真正的根因**：页面永远挂着一条 `/api/stream`（SSE）。SSE 的 chunked 处理器
+    不会自己结束，它一直在 `cv.wait_for` 等下一个事件；而 httplib 的 `stop()` 会
+    join 监听线程，监听线程退出时 join 线程池，这个 SSE 处理器正占着池里一个线程。
+    于是 `stop()` 永远阻塞 → 重绑线程卡死 → 旧监听一直没关、新监听也没起来 =
+    "改端口没反应 / 0.0.0.0 没有服务"。HTTP 层单独测（不挂 SSE）时全都正常，就是
+    这个原因。
+  - 修法：加 `stopping` 标志。`stop()` 先置位并 `notify_all()`；SSE 处理器每次醒来
+    先看这个标志，置位就 `return false` 结束这个请求（chunked provider 返回 false
+    会让 httplib 以 Canceled 退出循环），线程池才能 join 成功。重绑里换上新实例后
+    再清掉标志（重绑不走 `start()`，得手动清）。同时把 SSE 的 keep-alive 等待从
+    15s 降到 500ms，让 stop() 最坏也就等半秒。
+  - 端口框现在 **Enter 或失焦**都提交（`text_input` 新增 on_blur），提示文案改成
+    "回车或点到别处生效"——之前只有 Enter 生效，点了别处就当没改过。
+  - 端口输入改成**校验**而不是静默钳位：非数字或超出 0-65535 一律拒绝并 toast
+    提示，不再 `p > 65535 → 65535`。配置里那个 65535 就是钳位留下的假端口。
+  - 设置页显示了真实的局域网 IP（`UiServer::lan_ip()`：开一个未连接的 UDP socket
+    connect 到 8.8.8.8、读 getsockname，跨平台且自动跳过 down/虚拟网卡），不再是
+    没法照抄的 `<本机 IP>` 占位符。状态刷新改成 rebinding 时轮询到落定（最多 20
+    次），不再只延迟重读一次。
+  - 实测：页面挂着 SSE 时改 host/port 都在 10ms 内返回且监听真的搬到新地址
+    （0.0.0.0:8850）；SSE 在重绑时被服务端正常关闭（EventSource 会自动重连）。
+    270 用例 2710 断言全过；web / webview 两个变体都编译通过。
+

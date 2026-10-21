@@ -12,7 +12,13 @@
 
 #include "fs_path.hpp"
 #include "fs_simhash.hpp"  // 未用，保持 include 习惯统一
+
+// libregexp is C. The upstream header has no extern "C" guard (it is meant to be
+// compiled as part of QuickJS), so without this the C++ compiler mangles the
+// names and every lre_* call fails to link.
+extern "C" {
 #include "libregexp.h"
+}
 
 namespace fs {
 

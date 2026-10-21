@@ -610,6 +610,12 @@ class WhaleDom : public IDom {
     if (kind == EventKind::kKeyDown) {
       return str_of(whaleui_dom_event_key(ev));
     }
+    if (kind == EventKind::kContextMenu) {
+      // Same wire format as the browser adapters: "x\ty" in viewport pixels, so
+      // the context menu opens where the user clicked.
+      return std::to_string(whaleui_dom_event_mouse_x(ev)) + "\t" +
+             std::to_string(whaleui_dom_event_mouse_y(ev));
+    }
     whaleui_dom_element_t* el = whaleui_dom_event_target(ev);
     if (!el) return std::string();
     if (is_control(el)) {

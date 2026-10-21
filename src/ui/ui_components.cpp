@@ -156,7 +156,8 @@ H title_button(const std::string& label, bool active, EventFn on_click) {
 // ---------- tabs ----------
 
 H tab_strip(const std::vector<TabSpec>& tabs, const std::string& active_key,
-            EventFn on_select, EventFn on_close, EventFn on_add) {
+            EventFn on_select, EventFn on_close, EventFn on_add,
+            EventFn on_context) {
   H bar = el("div", "tabs");
   for (size_t i = 0; i < tabs.size(); ++i) {
     const TabSpec& t = tabs[i];
@@ -165,6 +166,15 @@ H tab_strip(const std::vector<TabSpec>& tabs, const std::string& active_key,
     tab.attr("data-key", t.key);
     std::string k = t.key;
     tab.on(EventKind::kClick, [on_select, k](const std::string&) { on_select(k); });
+    // Right-click a tab: rename / close. The browser's own menu is suppressed
+    // globally, so without this a right-click on a tab did nothing at all.
+    // The tab key is prepended because one callback serves every tab and the
+    // event value only carries the pointer position ("<key>\t<x>\t<y>").
+    if (on_context) {
+      tab.on(EventKind::kContextMenu, [on_context, k](const std::string& v) {
+        on_context(k + "\t" + v);
+      });
+    }
     if (t.dirty) tab.add(el("span", "dot"));
     tab.add(el("span", "tab-title").text(t.title));
     if (t.badge >= 0) tab.add(badge(itos(t.badge), "tab-badge"));
@@ -241,13 +251,14 @@ H field(const std::string& label, const H& control, const std::string& hint) {
 }
 
 H text_input(const std::string& value, const std::string& placeholder,
-             EventFn on_input, EventFn on_enter) {
+             EventFn on_input, EventFn on_enter, EventFn on_blur) {
   H i = el("input", "text-input");
   i.attr("type", "text");
   i.attr("value", value);
   if (!placeholder.empty()) i.attr("placeholder", placeholder);
   i.on(EventKind::kInput, on_input);
   if (on_enter) i.on(EventKind::kKeyEnter, on_enter);
+  if (on_blur) i.on(EventKind::kBlur, on_blur);
   return i;
 }
 
@@ -548,8 +559,15 @@ std::string chat_message_key(const std::string& sid, int64_t uid) {
 }
 
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
-               EventFn on_think_toggle, EventFn on_turn_action) {
+               EventFn on_think_toggle, EventFn on_turn_action,
+               EventFn on_context) {
   H wrap = el("div", "msg " + m.role);
+  // Right-click belongs to the MESSAGE, not to the browser: the shell opens its
+  // own menu with copy / branch / rollback / forget. Bound on the wrapper so it
+  // fires anywhere inside the bubble, the answer or the tool blocks.
+  if (on_context) {
+    wrap.on(EventKind::kContextMenu, on_context);
+  }
   if (m.role == "system") {
     wrap.add(el("div", "sys").text(m.text));
     return wrap;
@@ -634,6 +652,23 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   if (!m.summary.empty()) wrap.add(turn_summary(m.summary));
   H meta = el("div", "meta");
   if (!m.time.empty()) meta.add(el("span", "time").text(m.time));
+  // Turn timing, always visible (not hover-only): "how long did this take" is
+  // the question you ask while waiting and right after it lands.
+  //   * streaming: elapsed so far, refreshed by the UI timer
+  //   * finished : wall-clock finish time + total duration
+  if (m.streaming && m.started_at > 0 && m.now_ms >= m.started_at) {
+    H live = el("span", "turn-live");
+    live.add(el("i", "fa fa-circle-notch fa-spin"));
+    live.add(el("span").text(fmt_duration(m.now_ms - m.started_at)));
+    meta.add(live);
+  } else if (!m.streaming && m.ended_at > 0) {
+    H done = el("span", "turn-timing");
+    if (m.started_at > 0 && m.ended_at >= m.started_at) {
+      done.add(el("span", "turn-dur").text(fmt_duration(m.ended_at - m.started_at)));
+    }
+    done.add(el("span", "turn-clock").text(fmt_clock(m.ended_at)));
+    meta.add(done);
+  }
   H cp = el("button", "mini-btn");
   cp.attr("type", "button");
   cp.text(tr("复制"));

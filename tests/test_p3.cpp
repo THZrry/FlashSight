@@ -40,7 +40,7 @@ FS_TEST(loop_send_text_turn) {
   opts.event = [&events](const std::string& e, const Json&) { events.push_back(e); };
   AgentLoop loop(std::move(opts));
   EXPECT_EQ(loop.state(), LoopState::kIdle);
-  loop.call_model = [](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+  loop.call_model = [](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
     out->text = "hello";
     out->error = "";
     return FsResult::success();
@@ -68,7 +68,7 @@ FS_TEST(loop_send_while_busy_queues) {
   opts.event = [](const std::string&, const Json&) {};
   AgentLoop loop(std::move(opts));
   // 第一轮：模型返回 tool 调用（高风险 -> waiting）
-  loop.call_model = [](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+  loop.call_model = [](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
     out->text = "";
     Json call = Json::object();
     call["name"] = "file.write";
@@ -94,7 +94,7 @@ FS_TEST(loop_approve_deny) {
   opts.event = [](const std::string&, const Json&) {};
   AgentLoop loop(std::move(opts));
   int calls = 0;
-  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
     ++calls;
     if (calls == 1) {
       Json call = Json::object();
@@ -125,7 +125,7 @@ FS_TEST(loop_suspend_stops) {
   opts.event = [&events](const std::string& e, const Json&) { events.push_back(e); };
   AgentLoop loop(std::move(opts));
   int calls = 0;
-  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
     ++calls;
     out->text = "t";
     Json call = Json::object();
@@ -533,7 +533,8 @@ FS_TEST(m3_manual_e2e_persist) {
         s, tid.is_string() ? tid.get<std::string>() : "", p);
   };
   deps.call_model = [&conn, &net](const ModelCallRequest& req,
-                                  ModelCallResult* out) -> FsResult {
+                                  ModelCallResult* out,
+                                  const std::function<void(const std::string&)>&) -> FsResult {
     ChatRequest creq;
     creq.model = req.model.empty() ? "m" : req.model;
     creq.messages = req.messages;
@@ -928,7 +929,7 @@ FS_TEST(loop_permission_levels) {
       if (events) events->push_back(e);
     };
     AgentLoop* loop = new AgentLoop(std::move(opts));
-    loop->call_model = [path](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+    loop->call_model = [path](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
       Json call = Json::object();
       call["name"] = "file.write";
       call["args"] = Json{{"path", path}, {"content", "x"}};

@@ -90,6 +90,13 @@ UiApi::UiApi(FsApi* api) {
   reg("session.cancelWake", [api](const Json& a) {
     return api->session_cancel_wake(s(a, "sid"));
   });
+  reg("session.schedule", [api](const Json& a) {
+    return api->session_schedule(s(a, "sid"), (int64_t)i(a, "delayMs", 0),
+                                 s(a, "note"));
+  });
+  reg("session.pendingWakes", [api](const Json& a) {
+    return api->session_pending_wakes(s(a, "sid"));
+  });
   reg("session.loopState", [api](const Json& a) {
     return api->session_loop_state(s(a, "sid"));
   });
@@ -215,6 +222,16 @@ UiApi::UiApi(FsApi* api) {
   reg("settings.set", [api](const Json& a) {
     return api->settings_set(s(a, "key"), a.contains("value") ? a["value"] : Json(),
                              s(a, "pid"));
+  });
+  reg("server.status", [api](const Json&) { return api->server_status(); });
+  // Auth probe: the page asks this before showing anything. Loopback is always
+  // authenticated, so the desktop/browser-on-the-same-machine case never sees the
+  // password gate.
+  reg("server.authRequired", [api](const Json&) {
+    return api->server_auth_required();
+  });
+  reg("server.login", [api](const Json& a) {
+    return api->server_login(s(a, "password"));
   });
   reg("settings.unset", [api](const Json& a) {
     return api->settings_unset(s(a, "key"), s(a, "pid"));

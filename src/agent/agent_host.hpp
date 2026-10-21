@@ -28,8 +28,10 @@ struct AgentHostDeps {
   std::function<FsResult(const std::string&, Json*)> load_full;
   std::function<FsResult(const std::string&, const Json&)> append_turn;
   std::function<FsResult(const std::string&, const Json&)> write_patch;
-  // 模型调用（ProviderClient 包装）
-  std::function<FsResult(const ModelCallRequest&, ModelCallResult*)> call_model;
+  // 模型调用（ProviderClient 包装）。第三个参数是流式回调：每段文本到达时调一次。
+  std::function<FsResult(const ModelCallRequest&, ModelCallResult*,
+                         const std::function<void(const std::string&)>&)>
+      call_model;
   // 事件扇出（UI 订阅）
   EventFn event;
   // 终端回调（FsApi 的 TerminalManager；工具层只调回调）
@@ -51,9 +53,12 @@ class AgentHost {
   void register_builtin_tools(McpRegistry* mcp);
 
   // ----- send/append（FsApi session.send/append）-----
+  // model 是会话当前选中的模型：会话页换模型后立刻发送时必须带上，否则 loop
+  // 会一直用创建时的模型（空串则回退到第一个 provider 的默认模型）。
   FsResult send(const std::string& sid, const std::string& text,
                 const Json& attachments, bool auto_mode,
-                const std::string& permission = "permissive");
+                const std::string& permission = "permissive",
+                const std::string& model = "");
   FsResult append(const std::string& sid, const std::string& text);
 
   // 打断后续接（addon2 任务健壮性）：给原任务发送特定引导并续跑

@@ -75,21 +75,40 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
   // an empty cwd and every absolute path looked "outside" - the loop needs it.
   if (deps_.load_full) {
     Json full;
-    if (deps_.load_full(sid, &full).ok() && full.contains("meta") &&
-        full["meta"].is_object()) {
-      opts.cwd = jsonutil::get<std::string>(full["meta"], "cwd", "");
-      opts.pid = jsonutil::get<std::string>(full["meta"], "pid", "");
+    if (deps_.load_full(sid, &full).ok()) {
+      if (full.contains("meta") && full["meta"].is_object()) {
+        opts.cwd = jsonutil::get<std::string>(full["meta"], "cwd", "");
+        opts.pid = jsonutil::get<std::string>(full["meta"], "pid", "");
+      }
+      // The session's model belongs to the loop as much as its cwd: without it
+      // the first turn used the default model regardless of what the session
+      // had selected.
+      Json ss = full.value("sessionSettings", Json::object());
+      opts.model = jsonutil::get<std::string>(ss, "model", "");
     }
   }
   opts.event = [this](const std::string& e, const Json& p) { emit(e, p); };
   (void)auto_mode;
   auto loop = std::unique_ptr<AgentLoop>(new AgentLoop(std::move(opts)));
   // 模型调用走宿主注入的 call_model
-  loop->call_model = [this](const ModelCallRequest& req, ModelCallResult* out) -> FsResult {
+  loop->call_model = [this](const ModelCallRequest& req, ModelCallResult* out,
+                            const std::function<void(const std::string&)>& on_delta)
+      -> FsResult {
     if (!deps_.call_model) {
       return FsResult::error(ErrCode::kNotSupported, "model not wired");
     }
-    return deps_.call_model(req, out);
+    return deps_.call_model(req, out, on_delta);
+  };
+  // 多轮对话：每轮重建 messages 都要读会话的 full.json（含全部 turns）。
+  std::string hist_sid = sid;
+  loop->load_history = [this, hist_sid](Json* out) -> FsResult {
+    if (!deps_.load_full) return FsResult::error(ErrCode::kNotSupported, "no history");
+    return deps_.load_full(hist_sid, out);
+  };
+  // 落库：每轮结束把 user/assistant 写回会话文件，下一轮的 load_history 才
+  // 有东西可读。
+  loop->persist_turn = [this, hist_sid](const Json& turn) {
+    persist_turn(hist_sid, turn);
   };
   // 工具执行走宿主注入的 invoke_tool（addon2：工具真调）
   // 用 make_ctx 重建完整上下文（含 terminal/net/todo 回调），再补 Loop 已知字段
@@ -192,9 +211,11 @@ int AgentHost::todo_pending(const std::string& owner) const {
 
 FsResult AgentHost::send(const std::string& sid, const std::string& text,
                          const Json& attachments, bool auto_mode,
-                         const std::string& permission) {
+                         const std::string& permission,
+                         const std::string& model) {
   (void)attachments;
   AgentLoop& loop = loop_for(sid, auto_mode, permission);
+  if (!model.empty()) loop.set_model(model);
   return loop.send(text);
 }
 

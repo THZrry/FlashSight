@@ -11,14 +11,192 @@
 <body>
 <!-- The C++ UI (wasm) builds the entire DOM into #fs-root on startup. -->
 <div id="fs-root"></div>
+
+<!--
+  Password gate (remote access only).
+
+  This has to be plain HTML/JS, NOT part of the C++ UI: it must be able to block
+  the page BEFORE the wasm module mounts, and the wasm app's own API calls would
+  all be rejected by the server until a token exists.
+
+  The server answers GET /api/auth with {required, authed}. Loopback always
+  answers required=false, so a browser on the same machine never sees this.
+  A remote connection gets the form; /api/login exchanges the password for a
+  token, which is kept in sessionStorage and sent as `Authorization: Bearer ...`
+  on every later request (see the fetch wrapper below).
+-->
+<div id="fs-auth" class="auth-gate" hidden>
+  <form class="auth-box" id="fs-auth-form">
+    <div class="auth-title">FlashSight</div>
+    <div class="auth-sub">此服务器要求密码</div>
+    <input class="auth-input" id="fs-auth-pw" type="password" autocomplete="current-password"
+           placeholder="访问密码" required>
+    <div class="auth-error" id="fs-auth-err" hidden></div>
+    <button class="auth-btn" type="submit" id="fs-auth-go">连接</button>
+  </form>
+</div>
+
+<script>
+(function () {
+  // ---- token plumbing -----------------------------------------------------
+  // Every request the app makes must carry the token once one exists. Wrapping
+  // fetch here (before the wasm module runs) covers /api/call, /api/events and
+  // the EventSource polyfill path alike.
+  var TOKEN_KEY = 'fs_token';
+  var token = sessionStorage.getItem(TOKEN_KEY) || '';
+  var origFetch = window.fetch.bind(window);
+  window.__fsToken = function () { return token; };
+  window.fetch = function (url, opts) {
+    opts = opts || {};
+    var u = String(url);
+    if (u.indexOf('/api/') >= 0 && token) {
+      var h = new Headers(opts.headers || {});
+      if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + token);
+      opts.headers = h;
+    }
+    return origFetch(url, opts);
+  };
+
+  var gate = document.getElementById('fs-auth');
+  var form = document.getElementById('fs-auth-form');
+  var pw = document.getElementById('fs-auth-pw');
+  var err = document.getElementById('fs-auth-err');
+  var go = document.getElementById('fs-auth-go');
+
+  function showGate(msg) {
+    gate.hidden = false;
+    if (msg) { err.textContent = msg; err.hidden = false; }
+    setTimeout(function () { pw.focus(); }, 30);
+  }
+
+  function startApp() {
+    gate.hidden = true;
+    // The module may have finished loading while the gate was up (its
+    // onRuntimeInitialized skipped the start because the gate was visible), so
+    // this is the one place that decides when the app begins.
+    if (window.Module && typeof window.Module._fs_ui_start === 'function') {
+      window.Module._fs_ui_start();
+    } else {
+      // Not loaded yet: onRuntimeInitialized will start it (the gate is hidden
+      // by then, so its own check passes).
+      window.__fsStartWhenReady = true;
+    }
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    go.disabled = true;
+    err.hidden = true;
+    origFetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw.value }),
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        go.disabled = false;
+        if (j && j.ok) {
+          token = (j.data && j.data.token) || '';
+          sessionStorage.setItem(TOKEN_KEY, token);
+          startApp();
+        } else {
+          showGate('密码不正确');
+        }
+      })
+      .catch(function () {
+        go.disabled = false;
+        showGate('无法连接服务器');
+      });
+  });
+
+  // Ask whether this connection needs a password at all.
+  origFetch('/api/auth', { headers: token ? { 'Authorization': 'Bearer ' + token } : {} })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      var d = (j && j.data) || {};
+      if (!d.required || d.authed) {
+        startApp();
+      } else {
+        showGate('');
+      }
+    })
+    .catch(function () {
+      // If the probe fails (e.g. the server is still starting), let the app try:
+      // its own requests will surface the real error.
+      startApp();
+    });
+
+  // The Web build serves its own UI, so changing the listen PORT moves the app
+  // away from the origin this page was loaded from. Follow it automatically: a
+  // dead tab that merely says "moved" is not what anyone wants, and the user
+  // just made the change themselves.
+  //
+  // The server sends only the new port; the URL is rebuilt from THIS page's own
+  // hostname, so a remote client follows to its own address rather than being
+  // sent to 127.0.0.1 (which would be its own machine).
+  //
+  // WAIT FOR THE NEW LISTENER. The frame arrives while the old socket is still
+  // up; the server needs a moment to rebind. Navigating immediately landed on
+  // the browser's error page (the port was not open yet). Probe it first with a
+  // no-cors request - that resolves for any HTTP answer, including 401, and
+  // rejects only when nothing is listening.
+  window.__fsServerMoved = function (newPort) {
+    if (!newPort) return;
+    var url = location.protocol + '//' + location.hostname + ':' + newPort + '/';
+    if (url === location.href) return;
+    var tries = 0;
+    function probe() {
+      tries++;
+      fetch(url, { mode: 'no-cors', cache: 'no-store' })
+        .then(function () { location.replace(url); })
+        .catch(function () {
+          if (tries < 40) {           // ~6s at 150ms
+            setTimeout(probe, 150);
+          } else {
+            showMovedCard(url);
+          }
+        });
+    }
+    probe();
+  };
+
+  // If the stream dies and cannot reconnect, the server may have moved without
+  // us hearing about it (the "moved" frame travels on the very socket that is
+  // about to close). Rather than sitting on a dead page, say so and offer a
+  // reload - the app itself is still running.
+  window.__fsConnLost = function () {
+    if (document.getElementById('fs-conn-lost')) return;
+    var box = document.createElement('div');
+    box.className = 'auth-gate';
+    box.id = 'fs-conn-lost';
+    box.innerHTML =
+      '<div class="auth-box"><div class="auth-title">与服务的连接已断开</div>' +
+      '<div class="auth-sub">如果刚改过端口，请用新端口的地址重新打开。</div>' +
+      '<button class="auth-btn" onclick="location.reload()">重新加载</button></div>';
+    document.body.appendChild(box);
+  };
+
+  function showMovedCard(url) {
+    var box = document.createElement('div');
+    box.className = 'auth-gate';
+    box.innerHTML =
+      '<div class="auth-box"><div class="auth-title">服务已更换端口</div>' +
+      '<div class="auth-sub">新地址没有响应，可能端口被占用。设置已保存，' +
+      '重启后会用新端口。</div>' +
+      '<a class="auth-btn" href="' + url + '">重试</a></div>';
+    document.body.appendChild(box);
+  }
+})();
+</script>
+
 <script src="fs_ui.js"></script>
 <script>
-  // emscripten runtime ready -> start the C++ UI
+  // emscripten runtime ready -> start the C++ UI (unless the auth gate is up).
+  // If the gate is up, startApp() starts it once the password is accepted.
   var Module = Module || {};
   Module.onRuntimeInitialized = function () {
-    if (typeof Module._fs_ui_start === 'function') {
-      Module._fs_ui_start();
-    }
+    if (typeof Module._fs_ui_start !== 'function') return;
+    var gate = document.getElementById('fs-auth');
+    if (!gate || gate.hidden) Module._fs_ui_start();
   };
 </script>
 </body>

@@ -1,6 +1,0 @@
-[0mchecking for Mingw SDK ... [32;1mC:\Program Files\mingw64 (x86_64-w64-mingw32-)[0m
-[0m[1;31;1merror: [0m.\xmake.lua:79: attempt to call a nil value (field 'absolute')
-stack traceback:
-    [.\xmake.lua:79]: in function 'mbedtls_link'
-    [.\xmake.lua:96]: in main chunk
-[0m

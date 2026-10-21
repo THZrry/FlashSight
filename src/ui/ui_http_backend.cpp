@@ -96,6 +96,58 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_api_done(int id, int ok, const char* bod
   if (done) done(r);
 }
 
+// ---- Server-Sent Events client -------------------------------------------
+// The browser throttles timers in background/occluded tabs to ~1 Hz, so a
+// polling UI drains slower than a fast model emits and the reply is still
+// catching up after generation finished. EventSource has no timer: the server
+// pushes each delta the moment it exists.
+EM_JS(void, fs_api_sse_open, (const char* url), {
+  var u = UTF8ToString(url);
+  if (globalThis.__fsSse) { try { globalThis.__fsSse.close(); } catch (e) {} }
+  if (typeof EventSource === 'undefined') return;
+  var es = new EventSource(u);
+  globalThis.__fsSse = es;
+  es.onmessage = function (ev) {
+    var text = ev.data;
+    if (!text) return;
+    // "The server is moving" is a PAGE-level concern: the app cannot act on it
+    // (its own socket is about to die), but the page can follow the new port.
+    // Handled here, before the frame reaches the app.
+    try {
+      var f = JSON.parse(text);
+      if (f && f.event === 'server.moved' && window.__fsServerMoved) {
+        window.__fsServerMoved(f.payload && f.payload.port);
+      }
+    } catch (e) {}
+    var len = lengthBytesUTF8(text) + 1;
+    var ptr = _malloc(len);
+    stringToUTF8(text, ptr, len);
+    Module._fs_api_sse_event(ptr);
+    _free(ptr);
+  };
+  es.onerror = function () {
+    // EventSource reconnects on its own while the server is briefly away (a
+    // rebind). Only when it gives up for good (CLOSED) does the page need to say
+    // something - typically because the server moved to another port and the
+    // "moved" frame never arrived.
+    if (es.readyState === 2 && window.__fsConnLost) {
+      window.__fsConnLost();
+    }
+  };
+});
+
+EM_JS(void, fs_api_sse_close, (), {
+  if (globalThis.__fsSse) {
+    try { globalThis.__fsSse.close(); } catch (e) {}
+    globalThis.__fsSse = null;
+  }
+});
+
+// One SSE frame, dispatched to the UI subscribers. Same shape as one element of
+// the polling response, so the app side does not care which transport is used.
+// (Defined after HttpBackend: it needs the complete type.)
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_api_sse_event(const char* json);
+
 class HttpBackend : public IUiBackend {
  public:
   HttpBackend() {
@@ -104,6 +156,19 @@ class HttpBackend : public IUiBackend {
   }
   ~HttpBackend() override {
     if (g_pending == &pending_) g_pending = nullptr;
+  }
+
+  // Feed one SSE frame to the subscribers (called from JS).
+  void deliver_event(const Json& ev) {
+    std::string name = jsonutil::get<std::string>(ev, "event", "");
+    Json payload = ev.contains("payload") ? ev["payload"] : Json::object();
+    if (ev.contains("id")) {
+      last_event_id_ = jsonutil::get_int(ev, "id", last_event_id_);
+    }
+    ++delivered_;
+    for (size_t k = 0; k < subs_.size(); ++k) {
+      if (subs_[k]) subs_[k](name, payload);
+    }
   }
 
   // Synchronous path is unavailable in the browser (would block the UI).
@@ -132,26 +197,17 @@ class HttpBackend : public IUiBackend {
     };
   }
 
-  // Poll /api/events?since=N; deliver each event to subscribers.
+  // The event channel is a server push (SSE), opened once. poll() is still
+  // called by the app's pump timer, but it only has to make sure the stream is
+  // OPEN - it never fetches events. Browsers throttle timers in occluded tabs
+  // to ~1 Hz, so a polling UI fell behind a fast model and the reply was still
+  // being painted after generation had finished; a held-open response has no
+  // timer to throttle.
   void poll() override {
-    std::string url = "/api/events?since=" + std::to_string(last_event_id_);
-    int id = ++g_seq;
-    pending_[id] = [this](const BackendResult& r) {
-      if (!r.ok || !r.data.contains("events")) return;
-      const Json& evs = r.data["events"];
-      if (r.data.contains("next")) {
-        last_event_id_ = jsonutil::get_int(r.data, "next", last_event_id_);
-      }
-      for (size_t i = 0; i < evs.size(); ++i) {
-        std::string name = jsonutil::get<std::string>(evs[i], "event", "");
-        Json payload = evs[i].contains("payload") ? evs[i]["payload"] : Json::object();
-        ++delivered_;
-        for (size_t k = 0; k < subs_.size(); ++k) {
-          if (subs_[k]) subs_[k](name, payload);
-        }
-      }
-    };
-    fs_api_fetch(id, url.c_str(), "GET", "");
+    if (!sse_started_) {
+      sse_started_ = true;
+      fs_api_sse_open("/api/stream");
+    }
   }
 
   // diagnostics (debug export)
@@ -164,7 +220,19 @@ class HttpBackend : public IUiBackend {
   std::vector<BackendEvent> subs_;
   int64_t last_event_id_ = 0;
   int delivered_ = 0;
+  bool sse_started_ = false;
 };
+
+extern "C" EMSCRIPTEN_KEEPALIVE void fs_api_sse_event(const char* json) {
+  if (!g_backend || !json) return;
+  Json j;
+  try {
+    j = Json::parse(json);
+  } catch (...) {
+    return;
+  }
+  static_cast<HttpBackend*>(g_backend)->deliver_event(j);
+}
 
 IDom* make_platform_dom();  // ui_dom_wasm.cpp
 

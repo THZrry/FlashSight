@@ -482,6 +482,14 @@ void UiApp::call_async(const std::string& method, const Json& args,
 
 void UiApp::pump() {
   if (backend_) backend_->poll();
+  // Flush a delta that the 25 ms floor held back. Deltas normally paint from the
+  // SSE frame itself (see apply_session_event) - this is only the tail of a
+  // burst, and it is the last paint of a streaming turn.
+  if (stream_dirty_) {
+    stream_dirty_ = false;
+    render();
+    follow_history_if_pinned();
+  }
   // Drive the backend's non-blocking terminal poller. On desktop FsApi runs it
   // on a thread already, so only the browser needs this tick; any output still
   // arrives as a terminal.output event.
@@ -497,6 +505,32 @@ void UiApp::pump() {
   // drop subtrees whose exit animation is over (they are outside the tree, so
   // only this timer can clean them up)
   sweep_exits(dom_, now_ms());
+  // Countdowns in the wake bar are only correct if they are refreshed. The
+  // interval is deliberately coarse: this is a "5 分钟后" label, not a clock.
+  if (!st_.pending_wakes.empty()) {
+    int64_t now = now_ms();
+    if (now - last_wake_refresh_ms_ > 5000) {
+      last_wake_refresh_ms_ = now;
+      refresh_pending_wakes();
+    }
+  }
+  // Live turn timer. A streaming message shows "how long has this been running",
+  // which only moves if something repaints it. Once a second is enough for a
+  // counter and cheap: it rebuilds the ONE streaming message, not the transcript.
+  {
+    int64_t now = now_ms();
+    if (now - last_stream_tick_ms_ >= 1000) {
+      for (size_t i = 0; i < st_.messages.size(); ++i) {
+        if (st_.messages[i].streaming) {
+          last_stream_tick_ms_ = now;
+          st_.messages[i].now_ms = now;
+          st_.messages[i].rev = next_msg_rev_++;
+          render();
+          break;
+        }
+      }
+    }
+  }
 }
 
 // Terminal refresh, driven by its own (faster) timer: a terminal must keep up
@@ -646,6 +680,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.session_input = st_.session_input;
   v.model = st_.model;
   v.model_index = st_.model_index;
+  v.model_available = st_.model_available;
   v.permission = st_.permission;
   v.perm_index = st_.perm_index;
   v.auto_mode = st_.auto_mode;
@@ -654,6 +689,9 @@ void UiApp::save_session_view(const std::string& sid) {
   v.suspended = st_.suspended;
   v.interrupted = st_.interrupted;
   v.interrupt_reason = st_.interrupt_reason;
+  v.pending_wakes = st_.pending_wakes;
+  v.schedule_open = st_.schedule_open;
+  v.schedule_text = st_.schedule_text;
   v.enter_send = st_.enter_send;
   v.context_pct = st_.context_pct;
   v.session_cost = st_.session_cost;
@@ -714,6 +752,7 @@ void UiApp::load_session_view(const std::string& sid) {
     }
   }
   st_.model_index = v.model_index;
+  st_.model_available = v.model_available;
   st_.permission = v.permission;
   st_.perm_index = v.perm_index;
   st_.auto_mode = v.auto_mode;
@@ -722,6 +761,9 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.suspended = v.suspended;
   st_.interrupted = v.interrupted;
   st_.interrupt_reason = v.interrupt_reason;
+  st_.pending_wakes = v.pending_wakes;
+  st_.schedule_open = v.schedule_open;
+  st_.schedule_text = v.schedule_text;
   st_.enter_send = v.enter_send;
   st_.context_pct = v.context_pct;
   st_.session_cost = v.session_cost;
@@ -780,6 +822,9 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   st_.model_picker_open = false;
   st_.skill_menu_open = false;
   st_.side_menu_open = false;
+  // A context menu belongs to what was right-clicked; navigating away leaves
+  // nothing for it to act on.
+  st_.ctx_open = false;
   // Switching tabs also dismisses a modal page: it was opened ON TOP of a tab,
   // so navigating away means it is done with.
   st_.modal_page.clear();
@@ -866,8 +911,13 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   m.uid = abs_index;
   m.turn_id = jsonutil::get<std::string>(t, "turnId", "");
   m.role = jsonutil::get<std::string>(t, "role", "");
-  m.text = jsonutil::get<std::string>(t, "text",
-             jsonutil::get<std::string>(t, "streamSummary", ""));
+  // A stored turn uses a different field per role: a user turn keeps the prompt
+  // in `promptRaw`, an assistant turn keeps the reply in `streamSummary`. Reading
+  // only `text`/`streamSummary` made every reloaded USER message empty - the
+  // transcript showed the answers with no questions above them.
+  m.text = jsonutil::get<std::string>(t, "text", "");
+  if (m.text.empty()) m.text = jsonutil::get<std::string>(t, "promptRaw", "");
+  if (m.text.empty()) m.text = jsonutil::get<std::string>(t, "streamSummary", "");
   // Reasoning is part of the stored turn when the provider returned it.
   m.thinking = jsonutil::get<std::string>(t, "thinking",
                  jsonutil::get<std::string>(t, "reasoning", ""));
@@ -953,6 +1003,12 @@ void UiApp::load_session(const std::string& sid) {
       st_.perm_index = v.perm_index;
       st_.auto_mode = v.auto_mode;
       st_.enter_send = v.enter_send;
+      // The wake list is per session, so it has to be re-read when a session is
+      // opened - a scheduled task survives a reload and must still be visible.
+      refresh_pending_wakes();
+      // The remembered model may have been disabled or its provider deleted
+      // while this session was closed.
+      refresh_model_availability();
     }
     render();
   });
@@ -1174,6 +1230,9 @@ void UiApp::load_session_usage(const std::string& sid) {
     int pct = -1;
     if (window > 0 && last_in > 0) {
       pct = static_cast<int>((last_in * 100) / window);
+      // A real but tiny usage (a few thousand tokens in a 1M window) rounds to 0,
+      // which reads the same as "not computed". Keep it visibly non-zero.
+      if (pct <= 0) pct = 1;
       if (pct > 100) pct = 100;
     }
     std::string cost_text;
@@ -1810,6 +1869,12 @@ void UiApp::follow_history_if_pinned() {
 void UiApp::apply_session_event(const std::string& sid, const std::string& event,
                                 const Json& payload) {
   bool is_active = sid.empty() || sid == st_.active_tab;
+  // A fast stream delivers hundreds of deltas in one poll burst. Rendering once
+  // per delta starves the browser's event loop: the next poll never runs, and
+  // the transcript appears frozen until the burst ends - which is exactly the
+  // "it is not really streaming" feeling. Deltas only append text, so they are
+  // coalesced: mark dirty, let pump() paint at most every ~50 ms.
+  bool coalesced = false;
   // only touch views_ for a background session; a fresh one gets the default
   // panels seeded so opening it later does not look empty
   SessionView* vp = nullptr;
@@ -1818,12 +1883,20 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     std::string text = jsonutil::get<std::string>(payload, "text", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     int& total = is_active ? st_.history_total : vp->history_total;
-    if (m.empty() || m.back().role != "assistant") {
+    // A NEW reply starts a NEW message. Testing only `role != "assistant"` was
+    // wrong: the previous turn's answer is also an assistant message (just no
+    // longer streaming), so the next turn's text was appended onto it - two
+    // answers fused into one bubble.
+    if (m.empty() || m.back().role != "assistant" || !m.back().streaming) {
       comp::ChatMsg a;
       a.role = "assistant";
       a.streaming = true;
       a.rev = next_msg_rev_++;
-      // Newest message of this session: a uid no loaded turn can have.
+      // The live timer counts from the moment the first token arrives, which is
+      // the only start time the UI can observe (the request itself is async and
+      // the backend does not report when it was sent).
+      a.started_at = now_ms();
+      // Newest message of this session: a distinct uid no loaded turn can have.
       a.uid = total + static_cast<int64_t>(m.size());
       m.push_back(a);
       ++total;
@@ -1831,10 +1904,45 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     m.back().text += text;
     m.back().streaming = true;
     m.back().rev = next_msg_rev_++;
+    // PAINT NOW, not on a timer. The SSE frame that delivered this delta is a
+    // normal task, so painting from here is not throttled; a timer-driven paint
+    // is (Chrome clamps timers in occluded/background pages to ~1 Hz, which made
+    // a whole reply appear in one or two lumps after it had finished).
+    //
+    // The 25 ms floor is self-clocking rather than a timer: while deltas keep
+    // arriving, the next one past the floor does the paint; when they stop,
+    // turn.done paints the final state. Nothing depends on setInterval.
+    //
+    // `coalesced` means "this event already handled its own paint" - the shell
+    // must not render a second time for the same delta.
+    coalesced = true;
+    int64_t now = now_ms();
+    // Stamp the live counter on the same clock that paints it: pump() may be
+    // throttled to 1 Hz in an occluded tab, and the elapsed time must still move
+    // while deltas keep arriving.
+    m.back().now_ms = now;
+    if (now - last_stream_paint_ms_ >= 25) {
+      last_stream_paint_ms_ = now;
+      stream_dirty_ = false;
+      render();
+      follow_history_if_pinned();
+    } else {
+      stream_dirty_ = true;
+    }
   } else if (event == "turn.done") {
+    // The final paint of the turn: flush any delta held back by the 25 ms floor.
+    stream_dirty_ = false;
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     if (!m.empty() && m.back().role == "assistant") {
       m.back().streaming = false;
+      // Prefer the backend's own start/end: it knows when the request went out,
+      // while the UI only sees the first delta. Falling back to local times
+      // keeps the counter correct if an older backend sends no timestamps.
+      int64_t be = jsonutil::get_int(payload, "endedAt", 0);
+      int64_t bs = jsonutil::get_int(payload, "startedAt", 0);
+      m.back().ended_at = be > 0 ? be : now_ms();
+      if (bs > 0) m.back().started_at = bs;
+      if (m.back().started_at <= 0) m.back().started_at = m.back().ended_at;
       m.back().rev = next_msg_rev_++;
     }
     // The turn just spent tokens, so the side panel's cost/context numbers are
@@ -1918,10 +2026,15 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
 void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   ++event_count_;
   std::string sid = jsonutil::get<std::string>(payload, "sid", "");
+  // A delta only appends text, and a fast model emits hundreds per poll burst.
+  // Repainting per delta starves the browser's event loop (the next poll never
+  // runs), which makes the stream LOOK frozen. pump() paints them on a ~50 ms
+  // cadence instead; every other event repaints immediately.
+  const bool coalesced = (event == "stream.delta");
   // session-scoped events go to their own view (may be a background tab)
   if (!sid.empty() && sid != st_.active_tab) {
     apply_session_event(sid, event, payload);
-    render();
+    if (!coalesced) render();
     return;
   }
   if (event == "stream.delta" || event == "turn.done" || event == "tool.update" ||
@@ -1956,11 +2069,16 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       st_.interrupted = false;
       st_.interrupt_reason.clear();
     }
-    if (!sid.empty()) refresh_loop_state(sid);
+    if (!sid.empty()) {
+      refresh_loop_state(sid);
+      refresh_pending_wakes();
+    }
   }
-  render();
-  // AFTER the render: only now does the container know its new scrollHeight, so
-  // a pinned view can stay at the end while a reply streams in.
+  // Deltas paint inline from apply_session_event (the SSE frame itself is the
+  // clock, so occluded-tab timer throttling cannot delay them); this is only the
+  // "last delta of a burst was held back by the 25 ms floor" case, and it runs on
+  // the next delta or on turn.done.
+  if (!coalesced) render();
   if (event == "stream.delta" || event == "tool.update" || event == "turn.done") {
     follow_history_if_pinned();
   }
@@ -2110,6 +2228,14 @@ void UiApp::render() {
         });
       }
     }
+    // Context menu: closes on a press outside, WITHOUT swallowing that press -
+    // so right-clicking another row closes this menu and immediately opens the
+    // menu for what was just clicked.
+    if (st_.ctx_open && ctx_menu_node_.valid()) {
+      dom_.bind_outside_click(ctx_menu_node_, [this]() {
+        update([&](AppState& s) { s.ctx_open = false; });
+      });
+    }
     // Side panel tabs: same drag-to-reorder as the top strip.
     VNodePtr sidetabs = find_by_key(tree_, "side-tabs");
     if (sidetabs && sidetabs->dom.valid()) {
@@ -2133,6 +2259,10 @@ void UiApp::render() {
     // document-level keys (Escape dismisses transient overlays)
     dom_.bind_global_key([this](const std::string& key) {
       if (key != "Escape") return;
+      if (st_.ctx_open) {
+        update([&](AppState& s) { s.ctx_open = false; });
+        return;
+      }
       if (st_.skill_menu_open || st_.side_menu_open) {
         update([&](AppState& s) {
           s.skill_menu_open = false;
@@ -2316,7 +2446,25 @@ void UiApp::build_shell_into(H& win) {
       tabs, st_.active_tab,
       [this](const std::string& k) { show(k); },
       [this](const std::string& k) { close_tab(k); },
-      [this](const std::string&) { open_new_tab(); });
+      [this](const std::string&) { open_new_tab(); },
+      [this](const std::string& v) {
+    // "<tabKey>\t<x>\t<y>" - the key is prepended by tab_strip because one
+    // handler serves every tab.
+    size_t t1 = v.find('\t');
+    if (t1 == std::string::npos) return;
+    std::string key = v.substr(0, t1);
+    size_t t2 = v.find('\t', t1 + 1);
+    int x = std::atoi(v.substr(t1 + 1, t2 == std::string::npos ? std::string::npos
+                                                               : t2 - t1 - 1).c_str());
+    int y = t2 == std::string::npos ? 0 : std::atoi(v.substr(t2 + 1).c_str());
+    update([&](AppState& s) {
+      s.ctx_open = true;
+      s.ctx_x = x;
+      s.ctx_y = y;
+      s.ctx_kind = "tab";
+      s.ctx_id = key;
+    });
+  });
   strip.key("top-tabs");
   // 侧栏开关放在标签条最右端：这是"整窗"级别的控制，属于标题栏区域，而不是
   // 夹在会话内容中间的那条细缝。原来只有分隔条上那个小箭头，太难点。
@@ -2541,6 +2689,19 @@ VNodePtr UiApp::build_nav_rail() {
       H row = el("div", s.sid == st_.active_tab ? "nav-session active" : "nav-session");
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
+      });
+      // Right-click a session in the rail: same menu as the project card row.
+      row.on(EventKind::kContextMenu, [this, sid](const std::string& v) {
+        size_t t = v.find('\t');
+        int x = std::atoi(v.substr(0, t).c_str());
+        int y = t == std::string::npos ? 0 : std::atoi(v.substr(t + 1).c_str());
+        update([&](AppState& s2) {
+          s2.ctx_open = true;
+          s2.ctx_x = x;
+          s2.ctx_y = y;
+          s2.ctx_kind = "session";
+          s2.ctx_id = sid;
+        });
       });
       H nd = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count);
       nd.cls("nav-dot");  // same colour rules, rail-sized
@@ -3041,6 +3202,22 @@ VNodePtr UiApp::build_home_projects() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
+      // Right-click a session row: open / rename / delete. The hover buttons
+      // already do this, but they only appear on hover - right-click is the
+      // conventional path, and with the browser menu suppressed it would
+      // otherwise do nothing.
+      row.on(EventKind::kContextMenu, [this, sid](const std::string& v) {
+        size_t t = v.find('\t');
+        int x = std::atoi(v.substr(0, t).c_str());
+        int y = t == std::string::npos ? 0 : std::atoi(v.substr(t + 1).c_str());
+        update([&](AppState& s2) {
+          s2.ctx_open = true;
+          s2.ctx_x = x;
+          s2.ctx_y = y;
+          s2.ctx_kind = "session";
+          s2.ctx_id = sid;
+        });
+      });
       H dot = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count);
       row.add(dot);
       row.add(el("span", "ps-title").text(s.title));
@@ -3474,6 +3651,28 @@ VNodePtr UiApp::build_session() {
                                [this, uid](const std::string& v) {
       int i = find_message_by_uid(uid);
       if (i >= 0) turn_action(static_cast<size_t>(i), v);
+    },
+                               [this, uid](const std::string& v) {
+      // "<x>\t<y>" from the DOM adapter. The menu content depends on WHAT was
+      // clicked, so the message body and its turn id are captured here - the
+      // menu itself only knows the state fields.
+      int i = find_message_by_uid(uid);
+      if (i < 0) return;
+      int x = 0, y = 0;
+      size_t tab = v.find('\t');
+      if (tab != std::string::npos) {
+        x = std::atoi(v.substr(0, tab).c_str());
+        y = std::atoi(v.substr(tab + 1).c_str());
+      }
+      comp::ChatMsg m = st_.messages[static_cast<size_t>(i)];
+      update([&](AppState& s) {
+        s.ctx_open = true;
+        s.ctx_x = x;
+        s.ctx_y = y;
+        s.ctx_kind = "message";
+        s.ctx_id = m.turn_id;
+        s.ctx_label = m.text;
+      });
     });
     node.key(key);
     MsgNode mn;
@@ -3659,6 +3858,64 @@ VNodePtr UiApp::build_session() {
 
   // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");
+  // Right-click anywhere in the composer (including the textarea) opens the
+  // app's own edit menu. The browser's menu is suppressed globally, so without
+  // this a right-click in the input did nothing at all.
+  comp_box.on(EventKind::kContextMenu, [this](const std::string& v) {
+    size_t t = v.find('\t');
+    int x = std::atoi(v.substr(0, t).c_str());
+    int y = t == std::string::npos ? 0 : std::atoi(v.substr(t + 1).c_str());
+    update([&](AppState& s) {
+      s.ctx_open = true;
+      s.ctx_x = x;
+      s.ctx_y = y;
+      s.ctx_kind = "composer";
+      s.ctx_id.clear();
+      s.ctx_label.clear();
+    });
+  });
+  // Scheduled wake-ups: the same bar slot as the interrupt notice, because both
+  // answer the same question - "is this task parked, and what will happen next?"
+  // A timer the user set is a promise the UI has to show; a countdown that only
+  // exists in the backend is indistinguishable from nothing being scheduled.
+  if (!st_.pending_wakes.empty()) {
+    for (size_t i = 0; i < st_.pending_wakes.size(); ++i) {
+      const PendingWake& w = st_.pending_wakes[i];
+      H bar = el("div", "interrupt-bar wake-bar");
+      bar.add(el("i", "fa fa-clock"));
+      std::string label = w.source == "timer" ? tr("定时唤醒") : tr("待唤醒");
+      bar.add(el("span", "ib-text").text(label));
+      std::string when;
+      if (w.in_ms > 0) {
+        long long secs = (w.in_ms + 999) / 1000;
+        when = secs >= 60 ? (std::to_string(secs / 60) + tr(" 分钟后"))
+                          : (std::to_string(secs) + tr(" 秒后"));
+      }
+      if (!when.empty()) bar.add(el("span", "ib-reason dim").text(when));
+      if (!w.note.empty()) {
+        bar.add(el("span", "ib-reason dim").text("· " + w.note));
+      }
+      bar.add(el("span", "grow"));
+      size_t idx = i;
+      bar.add(comp::button(tr("取消"), [this, idx](const std::string&) {
+        std::string sid = active_sid();
+        if (sid.empty()) return;
+        call_async("session.cancelWake", Json{{"sid", sid}},
+                   [this, idx](const BackendResult& r) {
+          if (!r.ok) {
+            toast(tr("取消失败：") + r.message);
+            return;
+          }
+          update([&](AppState& s) {
+            if (idx < s.pending_wakes.size()) {
+              s.pending_wakes.erase(s.pending_wakes.begin() + idx);
+            }
+          });
+        });
+      }, "ghost"));
+      comp_box.add(bar);
+    }
+  }
   // Interrupted task: a persistent bar with the action that actually helps.
   // The loop can continue from its saved point, so this is one click instead of
   // retyping the request.
@@ -3714,7 +3971,13 @@ VNodePtr UiApp::build_session() {
     comp_box.add(att);
   }
 
-  H ta = comp::textarea(st_.session_input, tr("输入消息…（Enter 发送，Shift+Enter 换行）"),
+  // The placeholder has to match the CURRENT Enter setting: it used to say
+  // "Enter sends" even with Ctrl+Enter selected, which is exactly the kind of
+  // hard-coded text that makes a working setting look broken.
+  const char* hint_key = st_.enter_send == "ctrlEnter"
+                             ? "输入消息…（Ctrl+Enter 发送，Enter 换行）"
+                             : "输入消息…（Enter 发送，Shift+Enter 换行）";
+  H ta = comp::textarea(st_.session_input, tr(hint_key),
                         [this](const std::string& v) {
     st_.session_input = v;  // no re-render while typing (avoid caret jumps)
   },
@@ -3801,6 +4064,64 @@ VNodePtr UiApp::build_session() {
     auto_btn.attr("title", st_.auto_mode ? tr("自动模式（点击切到手动）")
                                         : tr("手动模式（点击切到自动）"));
     left_tools.add(auto_btn);
+    // 定时任务：自动模式下"过 N 分钟自己再跑一轮"。这是模型自设唤醒的用户
+    // 入口（后端 session.schedule 早就有调度器，缺的正是这个按钮）。手动模式
+    // 下不显示：没有自动续跑，定了也不会有人跑。
+    if (st_.auto_mode) {
+      H sched_btn = comp::icon_text_button("clock", tr("定时"),
+                                           [this](const std::string&) {
+        bool open = !st_.schedule_open;
+        update([&](AppState& s) {
+          s.schedule_open = open;
+          if (!open) s.schedule_text.clear();
+        });
+      }, st_.schedule_open ? "ghost on" : "ghost");
+      sched_btn.key("schedule-btn");
+      sched_btn.attr("title", tr("定时唤醒：过一会儿自动再跑一轮"));
+      left_tools.add(sched_btn);
+    }
+  }
+  // Inline schedule input: a small popover-style row under the toolbar. It only
+  // appears after the button above, so it never competes with the composer for
+  // attention during normal typing.
+  if (st_.schedule_open && st_.auto_mode) {
+    H row = el("div", "composer-schedule");
+    row.add(el("i", "fa fa-clock"));
+    row.add(comp::text_input(st_.schedule_text, tr("分钟数，如 5"),
+                             [this](const std::string& v) {
+      st_.schedule_text = v;  // no re-render while typing
+    }));
+    row.add(comp::button(tr("设定"), [this](const std::string&) {
+      int mins = std::atoi(st_.schedule_text.c_str());
+      if (mins <= 0) {
+        toast(tr("请填一个大于 0 的分钟数"));
+        return;
+      }
+      std::string sid = active_sid();
+      if (sid.empty()) return;
+      call_async("session.schedule",
+                 Json{{"sid", sid}, {"delayMs", (int64_t)mins * 60 * 1000},
+                      {"note", ""}},
+                 [this](const BackendResult& r) {
+        if (!r.ok) {
+          toast(tr("设定失败：") + r.message);
+          return;
+        }
+        toast(tr("已设定定时唤醒"));
+        update([&](AppState& s) {
+          s.schedule_open = false;
+          s.schedule_text.clear();
+        });
+        refresh_pending_wakes();
+      });
+    }, "primary"));
+    row.add(comp::button(tr("取消"), [this](const std::string&) {
+      update([&](AppState& s) {
+        s.schedule_open = false;
+        s.schedule_text.clear();
+      });
+    }, "ghost"));
+    comp_box.add(row);
   }
   // 权限: a compact select, but with the three levels spelled out (the values
   // alone - approve/permissive/full - mean nothing). The wording states what
@@ -3861,6 +4182,13 @@ VNodePtr UiApp::build_session() {
   model_btn.add(comp::model_icon("", st_.model));
   model_btn.add(el("span", "mpb-name").text(st_.model.empty() ? tr("选择模型") : st_.model));
   model_btn.add(el("span", "mpb-caret").text("\u25be"));
+  if (!st_.model_available) {
+    // The remembered model is gone. The box is already empty (refresh cleared
+    // it); mark it so the reason is visible at a glance instead of the user
+    // wondering why send is dead.
+    model_btn.cls("warn");
+    model_btn.attr("title", tr("上次使用的模型已不可用，请重新选择"));
+  }
   // 上下文水位：贴在模型按钮底边的一小段线，而不是输入框下面横贯整行的一条
   // （那是"进度条"的语汇，放在这里既抢眼又和发送按钮没有关系）。它是按钮
   // 自身的装饰，宽度跟着按钮走，水位高了颜色才变，所以平时几乎看不见。
@@ -3875,8 +4203,20 @@ VNodePtr UiApp::build_session() {
     if (st_.context_pct >= 85) lvl_fill.cls("hot");
     else if (st_.context_pct >= 60) lvl_fill.cls("warm");
     lvl.add(lvl_fill);
-    lvl.attr("title", tr("上下文水位 ") + itos(st_.context_pct) + "%");
+    lvl.attr("title", st_.context_pct < 0
+                          ? tr("上下文水位：还没有用量数据")
+                          : (tr("上下文水位 ") + itos(st_.context_pct) + "%"));
     mb.add(lvl);
+    // A 2px hairline is not readable as a number. Once the level is known, show
+    // it as text too: "-1%" told the user nothing was computed, and 1% looked
+    // identical to 0%.
+    if (st_.context_pct >= 0) {
+      H txt = el("span", "model-ctx-pct");
+      txt.text(itos(st_.context_pct) + "%");
+      if (st_.context_pct >= 85) txt.cls("hot");
+      else if (st_.context_pct >= 60) txt.cls("warm");
+      mb.add(txt);
+    }
     right_tools.add(mb);
   }
   // 思考档位: only shown when the current model actually has levels - a control
@@ -3953,10 +4293,19 @@ VNodePtr UiApp::build_session() {
     right_tools.add(cancel_wake);
   }
   right_tools.add(suspend);
+  // Sending needs a usable model: a session whose remembered model was disabled
+  // (or whose provider was deleted) cannot send, and a click that only produces
+  // a backend error is worse than a visibly disabled button.
+  bool can_send = !backend_ || (!st_.model.empty() && st_.model_available);
   H send = comp::icon_text_button("paper-plane", tr("发送"),
                                   [this](const std::string&) { send_message(); },
                                   "primary");
   send.key("send-btn").cls("text-wide");
+  if (!can_send) {
+    send.cls("disabled");
+    send.attr("title", st_.model.empty() ? tr("请先选择模型")
+                                         : tr("该模型已不可用，请重新选择"));
+  }
   right_tools.add(send);
   tools.add(right_tools);
   comp_box.add(tools);
@@ -5212,6 +5561,7 @@ const SettingsItem kSettingsNav[] = {
     {"模型", "skills", "Skill"},
     {"模型", "memory", "长期记忆"},
     {"权限", "network", "网络"},
+    {"权限", "webserver", "Web 服务"},
     {"权限", "terminal", "终端"},
     {"权限", "files", "文件"},
     {"权限", "environment", "环境"},
@@ -5427,6 +5777,9 @@ void UiApp::load_settings_section(const std::string& section) {
   if (section == "terminal" && st_.shell_rows.empty()) {
     load_shells();
   }
+  if (section == "webserver") {
+    refresh_server_status();
+  }
 }
 
 // Execute a command picked from the composer's menu.
@@ -5589,6 +5942,115 @@ void UiApp::refresh_loop_state(const std::string& sid) {
   });
 }
 
+// A session remembers the model it last used, but that model can disappear: the
+// user disabled it, or the provider was deleted outright. Sending then fails
+// deep in the provider layer with an error that reads like a network problem,
+// and the model box keeps showing a model that no longer exists.
+//
+// So the composer asks which models are usable and, if the remembered one is not
+// among them, CLEARS the model box (it must not silently keep a dead name) and
+// disables send. Choosing a model again re-enables it.
+void UiApp::refresh_model_availability() {
+  std::string sid = active_sid();
+  call_async("model.allEnabled", Json::object(),
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) return;   // a failed check must not block sending
+    std::vector<std::string> ids;
+    if (r.data.contains("models") && r.data["models"].is_array()) {
+      const Json& arr = r.data["models"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        std::string id = jsonutil::get<std::string>(arr[i], "id", "");
+        if (!id.empty()) ids.push_back(id);
+      }
+    }
+    // The reply belongs to whatever session was active when it was asked. If the
+    // user switched tabs meanwhile, only the background view is updated.
+    bool same_tab = (sid == st_.active_tab) || sid.empty();
+    bool gone = false;
+    std::string cur = same_tab ? st_.model : views_.get_or_create(sid).model;
+    if (!cur.empty()) {
+      gone = true;
+      for (size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] == cur) { gone = false; break; }
+      }
+    }
+    if (!same_tab) {
+      SessionView& v = views_.get_or_create(sid);
+      v.available_model_ids = ids;
+      v.model_available = !gone;
+      if (gone) v.model.clear();
+      return;
+    }
+    update([&](AppState& s) {
+      s.available_model_ids = ids;
+      s.model_available = !gone;
+      if (gone) {
+        // Clearing the name is the point: an empty box says "pick one", while a
+        // dead name next to a disabled send button says nothing useful.
+        s.model.clear();
+        s.context_pct = -1;
+        toast(tr("上次使用的模型已不可用，请重新选择"));
+      }
+    });
+  });
+}
+
+void UiApp::refresh_server_status() {
+  call_async("server.status", Json::object(), [this](const BackendResult& r) {
+    if (!r.ok) return;
+    // The rebind happens on a helper thread (see UiServer::restart), so a status
+    // read right after the settings write can still see the OLD listener. Poll
+    // again shortly instead of reporting a stale port as "current".
+    bool pending = jsonutil::get<bool>(r.data, "rebinding", false);
+    update([&](AppState& s) {
+      s.server_running = jsonutil::get<bool>(r.data, "running", false);
+      s.server_host = jsonutil::get<std::string>(r.data, "host", "");
+      s.server_port = static_cast<int>(jsonutil::get_int(r.data, "port", 0));
+      s.server_requires_password = jsonutil::get<bool>(r.data, "password", false);
+      s.server_error = jsonutil::get<std::string>(r.data, "error", "");
+      // A LAN URL is only meaningful when listening on all interfaces. Build it
+      // from the machine's real address (server.lanIp, best-effort) so the user
+      // can copy it straight into a phone.
+      std::string lan_ip = jsonutil::get<std::string>(r.data, "lanIp", "");
+      s.server_lan_url = (s.server_host == "0.0.0.0" && !lan_ip.empty())
+                             ? ("http://" + lan_ip + ":" + itos(s.server_port) + "/")
+                             : "";
+    });
+    // The rebind happens on a helper thread (see UiServer::restart), so a status
+    // read right after the settings write can still see the OLD listener. Re-read
+    // until "rebinding" clears; a single fixed delay silently reported the old
+    // address as current whenever the swap took longer than the delay.
+    if (pending && ++server_status_polls_ < 20) {
+      dom_.schedule(250, [this]() { refresh_server_status(); });
+    } else {
+      server_status_polls_ = 0;
+    }
+  });
+}
+
+void UiApp::refresh_pending_wakes() {
+  std::string sid = active_sid();
+  if (sid.empty()) return;
+  call_async("session.pendingWakes", Json{{"sid", sid}},
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    std::vector<PendingWake> list;
+    const Json& arr = r.data.contains("wakes") ? r.data["wakes"] : r.data;
+    if (arr.is_array()) {
+      for (size_t i = 0; i < arr.size(); ++i) {
+        PendingWake w;
+        w.source = jsonutil::get<std::string>(arr[i], "source", "");
+        w.note = jsonutil::get<std::string>(arr[i], "ref", "");
+        w.at_ms = jsonutil::get_int(arr[i], "at", 0);
+        w.in_ms = jsonutil::get_int(arr[i], "inMs", 0);
+        list.push_back(w);
+      }
+    }
+    if (st_.active_tab != sid) return;
+    update([&](AppState& s) { s.pending_wakes = list; });
+  });
+}
+
 void UiApp::load_preset_agents() {
   call_async("subagent.presets", Json::object(), [this](const BackendResult& r) {
     std::vector<AppState::PresetRow> rows;
@@ -5660,8 +6122,15 @@ VNodePtr UiApp::build_settings() {
   H cols = el("div", "settings-cols");
   H nav = el("div", "settings-nav");
   std::string last_group;
+  // The Web-service page only exists in the Web build: that is the only variant
+  // whose UI IS the HTTP server. Webview / WhaleUI open a native window and never
+  // start one, so offering "listen address / port / password" there would be a
+  // page of switches that cannot do anything.
+  const bool has_web_server =
+      std::string(dom_.backend_name()) == "wasm" || !backend_;
   for (size_t i = 0; i < kSettingsNavCount; ++i) {
     const SettingsItem& it = kSettingsNav[i];
+    if (std::string(it.key) == "webserver" && !has_web_server) continue;
     if (last_group != it.group) {
       nav.add(el("div", "snav-grp").text(tr(it.group)));
       last_group = it.group;
@@ -6862,6 +7331,140 @@ VNodePtr UiApp::build_settings() {
         }
       }));
     }
+  } else if (sec == "webserver") {
+    body.add(comp::section_title(tr("Web 服务")));
+    body.add(el("div", "field-hint").text(tr(
+        "Web 版用这个服务提供界面；Webview / WhaleUI 版有原生窗口，不启动服务。"
+        "改动立即生效：端口/地址变化会重新监听（当前页面会断开，请用新地址重开）。"
+        "本机访问始终免密，密码只约束远程来源。")));
+    // 监听地址：两个明确的选项，而不是让人填 IP。绝大多数人只需要"仅本机"和
+    // "局域网/远程"两种；填错 IP 的结果是服务器起不来，而错误信息在远程端看不见。
+    {
+      std::vector<comp::ChoiceOption> hosts;
+      comp::ChoiceOption o;
+      o.value = "127.0.0.1";
+      o.icon = "desktop";
+      o.title = tr("仅本机");
+      o.desc = tr("只有这台机器能访问（默认）");
+      hosts.push_back(o);
+      o.value = "0.0.0.0";
+      o.icon = "globe";
+      o.title = tr("局域网 / 远程");
+      o.desc = tr("监听所有网卡，其他设备可以连进来");
+      hosts.push_back(o);
+      std::string cur = sv_str(st_.settings_values, "server.host", "127.0.0.1");
+      if (cur.empty()) cur = "127.0.0.1";
+      body.add(comp::field(tr("监听地址"), comp::choice_list(
+          hosts, cur, [this](const std::string& v) {
+        set_setting("server.host", v);
+        refresh_server_status();
+      })));
+    }
+    // Port and password are typed, so they commit on ENTER (or when focus
+    // leaves the field) - never on every keystroke. Committing per character
+    // rebinds the listener once per digit ("1", "18", "189"...), each rebind
+    // closes the connection that is still carrying the next keystroke, and the
+    // last one can land on a port nobody asked for. That is exactly why editing
+    // the port appeared to do nothing.
+    //
+    // The box shows the draft while there is one: the saved value does not change
+    // until commit, and re-rendering from it would erase what is being typed.
+    std::string port_text = !st_.server_port_draft.empty()
+                                ? st_.server_port_draft
+                                : std::to_string(sv_int(st_.settings_values, "server.port", 0));
+    // Commit the port. Shared by Enter and blur so clicking away applies too.
+    // A value that is not a whole number in [0, 65535] is REJECTED and said so -
+    // the old code clamped silently, which is where the mysterious 65535 in the
+    // saved config came from: a non-numeric string parsed to 0 by atoi, but the
+    // "too big" clamp turned a typo into a real (and unusable) port.
+    auto commit_port = [this](const std::string& v) {
+      std::string s = v;
+      // trim ASCII whitespace
+      size_t b = s.find_first_not_of(" \t\r\n");
+      size_t e = s.find_last_not_of(" \t\r\n");
+      s = (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1);
+      bool digits = !s.empty();
+      for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] < '0' || s[i] > '9') { digits = false; break; }
+      }
+      int p = 0;
+      if (!s.empty()) {
+        if (!digits) {
+          st_.server_port_draft.clear();
+          set_setting("server.port", sv_int(st_.settings_values, "server.port", 0));
+          toast(tr("端口要是 0-65535 的数字"));
+          render();
+          return;
+        }
+        // strtol so "99999" is caught as out of range instead of wrapping.
+        long n = std::strtol(s.c_str(), nullptr, 10);
+        if (n < 0 || n > 65535) {
+          st_.server_port_draft.clear();
+          set_setting("server.port", sv_int(st_.settings_values, "server.port", 0));
+          toast(tr("端口要在 0-65535 之间"));
+          render();
+          return;
+        }
+        p = static_cast<int>(n);
+      }
+      st_.server_port_draft.clear();   // the saved value is the source of truth now
+      set_setting("server.port", p);
+      toast(p > 0 ? (tr("端口已改为 ") + itos(p))
+                  : tr("已设为自动（下次启动生效）"));
+      refresh_server_status();
+    };
+    body.add(comp::field(tr("端口"), comp::text_input(
+        port_text, "0",
+        [this](const std::string& v) {
+      // Local echo only: keeps what was typed visible without touching the
+      // server. The commit happens on Enter or blur.
+      st_.server_port_draft = v;
+    },
+        commit_port,
+        commit_port), tr("0 = 启动时自动选端口；回车或点到别处生效")));
+    std::string pw_text = !st_.server_password_draft.empty()
+                              ? st_.server_password_draft
+                              : sv_str(st_.settings_values, "server.password", "");
+    auto commit_pw = [this](const std::string& v) {
+      if (v == sv_str(st_.settings_values, "server.password", "")) return;
+      st_.server_password_draft.clear();
+      set_setting("server.password", v);
+      toast(v.empty() ? tr("已关闭访问密码") : tr("访问密码已更新"));
+      refresh_server_status();
+    };
+    body.add(comp::field(tr("访问密码"), comp::text_input(
+        pw_text,
+        tr("留空 = 不设密码"),
+        [this](const std::string& v) {
+      st_.server_password_draft = v;
+    },
+        commit_pw,
+        commit_pw), tr("远程连接时需要；本机始终免密；回车或点到别处生效")));
+    // 当前生效的地址：用户需要知道该在另一台机器上输入什么。
+    if (st_.server_running) {
+      H st_row = el("div", "settings-note");
+      std::string line = tr("正在监听 ") + st_.server_host + ":" +
+                         itos(st_.server_port);
+      if (st_.server_requires_password) line += tr("（远程需密码）");
+      st_row.text(line);
+      body.add(st_row);
+      if (st_.server_host == "0.0.0.0") {
+        // Show a real, copyable address. The literal "<本机 IP>" placeholder that
+        // used to be here could not be typed on a phone.
+        std::string lan = !st_.server_lan_url.empty()
+                              ? st_.server_lan_url
+                              : (tr("http://<本机 IP>:") + itos(st_.server_port) + "/");
+        body.add(el("div", "settings-note dim").text(tr("局域网地址：") + lan));
+      }
+    } else {
+      body.add(el("div", "settings-note dim").text(tr("当前没有运行 Web 服务。")));
+    }
+    // A failed rebind must not look like "the setting did nothing": the address
+    // may be taken or the port reserved, and the only place that says so is here.
+    if (!st_.server_error.empty()) {
+      body.add(el("div", "settings-note err").text(
+          tr("重新监听失败：") + st_.server_error + tr("（已保留原监听）")));
+    }
   } else if (sec == "network") {
     body.add(comp::section_title(tr("网络")));
     body.add(comp::field(tr("网络总开关"), comp::toggle(
@@ -7264,6 +7867,105 @@ VNodePtr UiApp::build_overlays() {
     t.text(st_.toast);
     layer.add(t);
   }
+  // ---- right-click menu ----
+  // Positioned at the pointer, unlike the other popups (which anchor to a
+  // control): a context menu belongs to the click, not to an element.
+  if (st_.ctx_open) {
+    H menu = el("div", "ctx-menu");
+    menu.key("ctx-menu");
+    // Inline placement: the framework has no "absolute at (x,y)" primitive and
+    // the menu lives in the overlay layer, which is already fixed-positioned.
+    menu.attr("style", "left:" + std::to_string(st_.ctx_x) + "px;top:" +
+                           std::to_string(st_.ctx_y) + "px");
+    auto item = [&](const std::string& label, const std::string& icon,
+                    std::function<void()> fn, bool danger = false) {
+      H it = el("div", danger ? "ctx-item danger" : "ctx-item");
+      if (!icon.empty()) it.add(el("i", "fa fa-" + icon));
+      it.add(el("span").text(label));
+      it.on(EventKind::kClick, [this, fn](const std::string&) {
+        update([&](AppState& s) { s.ctx_open = false; });
+        fn();
+      });
+      menu.add(it);
+    };
+    auto sep = [&]() { menu.add(el("div", "ctx-sep")); };
+
+    if (st_.ctx_kind == "message") {
+      std::string text = st_.ctx_label;   // the message body, captured on click
+      std::string turn_id = st_.ctx_id;
+      item(tr("复制"), "copy", [this, text]() {
+        dom_.copy_text(text);
+        toast(tr("已复制"));
+      });
+      sep();
+      // These three only make sense for a stored assistant turn, and they all
+      // address the turn by its stable id (never by position: paging shifts it).
+      item(tr("从这里分叉"), "code-branch", [this, turn_id]() {
+        std::string sid = active_sid();
+        if (sid.empty() || turn_id.empty()) return;
+        call_async("session.fork", Json{{"sid", sid}, {"turnId", turn_id}},
+                   [this](const BackendResult& r) {
+          toast(r.ok ? tr("已分叉") : (tr("分叉失败：") + r.message));
+          if (r.ok) load_projects();
+        });
+      });
+      item(tr("回滚到这里"), "rotate-left", [this, turn_id]() {
+        std::string sid = active_sid();
+        if (sid.empty() || turn_id.empty()) return;
+        update([&](AppState& s) {
+          s.confirm_kind = "rollback";
+          s.confirm_id = sid;
+          s.confirm_arg = turn_id;
+          s.confirm_text = tr("回滚会撤销这之后的所有轮次（文件改动也会一并还原）。确定？");
+        });
+      });
+      item(tr("忘记这一轮"), "eraser", [this, turn_id]() {
+        std::string sid = active_sid();
+        if (sid.empty() || turn_id.empty()) return;
+        update([&](AppState& s) {
+          s.confirm_kind = "forget";
+          s.confirm_id = sid;
+          s.confirm_arg = turn_id;
+          s.confirm_text = tr("忘记后这一轮不再进入上下文（文件不动）。确定？");
+        });
+      }, true);
+    } else if (st_.ctx_kind == "tab") {
+      std::string tab = st_.ctx_id;
+      item(tr("重命名"), "pen", [this, tab]() { begin_rename_session(tab); });
+      item(tr("关闭"), "xmark", [this, tab]() { close_tab(tab); });
+    } else if (st_.ctx_kind == "session") {
+      std::string sid = st_.ctx_id;
+      item(tr("打开"), "arrow-up-right-from-square", [this, sid]() {
+        open_session(sid);
+      });
+      item(tr("重命名"), "pen", [this, sid]() { begin_rename_session(sid); });
+      sep();
+      item(tr("删除会话"), "trash", [this, sid]() {
+        update([&](AppState& s) {
+          s.confirm_kind = "session";
+          s.confirm_id = sid;
+          s.confirm_text = tr("删除后会话记录不可恢复。确定？");
+        });
+      }, true);
+    } else if (st_.ctx_kind == "composer") {
+      // The textarea gets the app's own menu too (the browser's is suppressed
+      // globally, so there is no native fallback to fall back to).
+      item(tr("剪切"), "scissors", [this]() { dom_.exec_edit("cut"); });
+      item(tr("复制"), "copy", [this]() { dom_.exec_edit("copy"); });
+      item(tr("粘贴"), "paste", [this]() { dom_.exec_edit("paste"); });
+      item(tr("全选"), "arrow-up-from-bracket", [this]() { dom_.exec_edit("selectAll"); });
+      sep();
+      item(tr("清空输入"), "eraser", [this]() {
+        update([&](AppState& s) { s.session_input.clear(); });
+      }, true);
+    }
+    layer.add(menu);
+    // No full-screen backdrop: it would swallow the right-click that is supposed
+    // to open the NEXT menu. `bind_outside_click` closes the menu on any press
+    // outside it while letting the event continue to whatever was clicked, so
+    // right-clicking another row closes this menu and opens that row's menu.
+    ctx_menu_node_ = menu.get()->dom;
+  }
   return layer.get();
 }
 
@@ -7273,6 +7975,14 @@ VNodePtr UiApp::build_overlays() {
 void UiApp::send_message() {
   // A message may be attachments only (dropping a file and hitting send).
   if (st_.session_input.empty() && st_.attachments.empty()) return;
+  // Same guard as the disabled button: sending without a usable model can only
+  // fail in the provider layer, where the error no longer mentions the model.
+  // Skipped when there is no backend at all (the local demo path) - that mode has
+  // no model to resolve and is used by the UI tests and the standalone preview.
+  if (backend_ && (st_.model.empty() || !st_.model_available)) {
+    toast(st_.model.empty() ? tr("请先选择模型") : tr("该模型已不可用，请重新选择"));
+    return;
+  }
   std::string text = st_.session_input;
   // Attachments travel with the message as explicit paths. The model reads them
   // with its file tools, so the text carries the list rather than a mystery
@@ -8067,7 +8777,10 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
   });
   if (target.empty()) {
     // the session's model
-    update([&](AppState& s) { s.model = model_id; });
+    update([&](AppState& s) {
+      s.model = model_id;
+      s.model_available = true;   // an explicit pick is by definition usable
+    });
     if (!sid.empty()) {
       call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}},
                  [this, sid](const BackendResult&) {

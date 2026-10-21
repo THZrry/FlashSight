@@ -40,6 +40,18 @@ constexpr char kKeyModelPrefSummary[] = "model.pref.summary";     // {model} 空
 // 形状：{providerId: [ModelEntry...]}；存的是**用户改过**的模型，
 // 所以"是否启用/能力标签/思考档位/重试"这些覆盖项都在这里，与 provider 连接分开。
 constexpr char kKeyProviderModels[] = "provider.models";
+// 上一次从 API 获取到的模型列表。与 provider.models 分开：那是用户改过的覆盖项，
+// 这是机器取回的事实（上下文长度/最大输出/思考档位）。必须持久化——只放在内存里
+// 的话，重启后 resolve() 拿不到 context_len，上下文水位就静悄悄地不显示了。
+constexpr char kKeyProviderApiModels[] = "provider.apiModels";
+// Web 服务（远程访问）：监听地址、端口、访问密码。
+//   server.host     "127.0.0.1"（默认，仅本机）或 "0.0.0.0"（局域网/远程可达）
+//   server.port     0 = 系统分配；>0 = 固定端口
+//   server.password 非空时，远程访问需要密码（本机回环始终免密）
+// 改动即时生效：FsApi 收到 set 后重启内嵌服务器。
+constexpr char kKeyServerHost[] = "server.host";
+constexpr char kKeyServerPort[] = "server.port";
+constexpr char kKeyServerPassword[] = "server.password";
 // 子代理开关/模型（settings-子代理；预置名见 builtin_preset_agents）
 constexpr char kKeySubagents[] = "subagents";                     // {name: {enabled, model}}
 // 长期记忆（provider.md 5：用户偏好管理）

@@ -1119,12 +1119,27 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .msg .meta {
   display: flex; align-items: center; gap: 8px;
   margin-top: 4px;
-  opacity: 0;
-  transition: opacity .12s ease;
   min-height: 18px;
 }
-.msg:hover .meta { opacity: 1; }
+/* The row itself stays visible: the end clock and the total duration are facts
+   you want at a glance. Only the ACTIONS (copy / fork / rollback / forget) and
+   the old timestamp hide until hover - a transcript should read as prose, but
+   "how long did this take" should not be a hunt. */
+.msg .meta > * { opacity: 0; transition: opacity .12s ease; }
+.msg .meta .turn-timing,
+.msg .meta .turn-live { opacity: 1; }
+.msg:hover .meta > * { opacity: 1; }
 .msg.user .meta { justify-content: flex-end; }
+/* A finished turn: "1m 20s · 14:32". A live one: spinner + elapsed. */
+.turn-timing, .turn-live {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--text-faint);
+}
+.turn-timing .turn-dur { color: var(--text-dim); }
+.turn-timing .turn-clock::before { content: "·"; margin-right: 5px; opacity: .6; }
+.turn-live { color: var(--accent); }
+.turn-live .fa { font-size: 10px; }
 /* interrupted-task bar: the loop stopped and can be continued from its saved
    point. It sits at the TOP of the composer so it is next to the input the user
    would otherwise retype into. */
@@ -1799,8 +1814,7 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 
 /* ---- attachments: chips ABOVE the input ---- */
-.composer-attach { display: flex; flex-wrap: wrap; gap: 6px; }
-.att-chip {
+.composer-attach { display: flex; flex-wrap: wrap; gap: 6px; }.att-chip {
   display: inline-flex; align-items: center; gap: 5px;
   max-width: 220px;
   padding: 2px 2px 2px 7px;
@@ -1815,12 +1829,41 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .att-chip .icon-btn { width: 20px; height: 20px; font-size: 11px; }
 
+/* ---- scheduled wake-up: inline row inside the composer ----
+   Deliberately the same visual language as .interrupt-bar (thin, one line,
+   left accent) because both describe the parked task, not a new message. */
+.composer-schedule {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.composer-schedule .fa { font-size: 11px; opacity: .8; }
+.composer-schedule .text-input {
+  flex: 1 1 auto; min-width: 0;
+  padding: 2px 6px; font-size: 12px;
+}
+.composer-schedule .btn { padding: 2px 10px; font-size: 12px; }
+
 /* ---- 上下文水位：贴边小指示器 ----
    It hugs the BOTTOM EDGE of the model button (2px, the button's own width), not
    a full-width bar under the input: the water level describes the model's
    context, so it belongs to the model control. At low levels it is a faint
    hairline; only 60%+ starts to colour, 85%+ goes red. */
-.model-btn-wrap { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
+.model-btn-wrap { position: relative; display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+/* The percentage next to the model button. The 2px hairline below says "how
+   full"; this says "how full, numerically" - a bar at 1% is indistinguishable
+   from an empty one, and the user reads it as "not computed". */
+.model-ctx-pct {
+  font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-faint);
+  flex: none;
+}
+.model-ctx-pct.warm { color: var(--warn-text); }
+.model-ctx-pct.hot { color: var(--err); }
 .model-level {
   position: absolute;
   left: 3px; right: 3px; bottom: -1px;
@@ -2807,6 +2850,20 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
   flex: 1 1 100%; margin-left: 132px;
   color: var(--text-faint); font-size: 12px;
 }
+/* A standalone explanatory / status line inside a settings section (not tied to
+   one field): the Web-service page uses it for "currently listening on …" and
+   for a failed rebind. */
+.settings-note {
+  font-size: 12px; color: var(--text-dim);
+  margin: 4px 0 12px;
+}
+.settings-note.dim { color: var(--text-faint); }
+.settings-note.err { color: var(--err); }
+/* The short paragraph at the top of a section. */
+.field-hint {
+  font-size: 12px; color: var(--text-faint);
+  margin: -2px 0 12px; line-height: 1.5;
+}
 
 .section-title {
   font-size: 13px; font-weight: 600;
@@ -2845,7 +2902,84 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
 .dot-sep { color: var(--text-faint); }
 
 /* ============================ overlays ============================ */
+/* ---- password gate (remote access) ----
+   Plain HTML drawn before the wasm UI mounts: it has to be able to block the
+   page before any app code runs, and it is the first thing a remote user sees. */
+.auth-gate {
+  position: fixed; inset: 0;
+  z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+}
+.auth-gate[hidden] { display: none; }
+.auth-box {
+  display: flex; flex-direction: column; gap: 10px;
+  min-width: 260px;
+  padding: 22px 24px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--pop);
+}
+.auth-title { font-size: 16px; font-weight: 600; }
+.auth-sub { font-size: 12.5px; color: var(--text-dim); }
+.auth-input {
+  font-family: var(--font); font-size: 13px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  outline: none;
+}
+.auth-input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+.auth-btn {
+  font-family: var(--font); font-size: 13px;
+  padding: 7px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+.auth-btn:disabled { opacity: .6; cursor: default; }
+.auth-error { font-size: 12px; color: var(--err); }
+
 .overlay-layer { position: fixed; inset: 0; pointer-events: none; }
+
+/* ---- right-click menu ----
+   The browser's own menu is suppressed by the DOM adapters; this replaces it
+   with only the actions that actually apply to what was clicked. Position comes
+   from the pointer (inline left/top), so the menu appears where the click was,
+   not under some control. */
+/* No backdrop: the menu closes on an outside press (bind_outside_click), which
+   leaves the press itself intact so right-clicking another target opens ITS
+   menu. A full-screen overlay would eat that second right-click. */
+.ctx-menu {
+  position: fixed;
+  z-index: 61;
+  min-width: 168px; max-width: 260px;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--pop);
+  pointer-events: auto;
+  display: flex; flex-direction: column;
+  animation: anim-pop .1s ease-out;
+}
+.ctx-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item .fa { width: 13px; font-size: 11.5px; opacity: .75; }
+.ctx-item:hover { background: var(--hover); }
+.ctx-item.danger { color: var(--err); }
+.ctx-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 .modal-back {
   position: fixed; inset: 0;
   background: rgba(0, 0, 0, .35);

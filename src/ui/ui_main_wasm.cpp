@@ -41,8 +41,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_start() {
   g_backend = make_platform_backend();
   g_app = new UiApp(*dom, g_state, g_backend);
   g_app->mount();
-  // ~4 events/sec is plenty for a local server; keeps the tab idle-cheap.
-  emscripten_set_interval(fs_ui_tick, 250, nullptr);
+  // Event pump. One non-overlapping local request per tick, and it is what makes
+  // a streamed reply appear token by token: at 250ms the text arrived in visible
+  // lumps, so the cadence is now ~8/sec.
+  emscripten_set_interval(fs_ui_tick, 120, nullptr);
   // The terminal gets its own, much tighter cadence (~20/sec). It is a no-op
   // unless the drawer is open on a running terminal, so the idle cost is zero.
   emscripten_set_interval(fs_ui_term_tick, 50, nullptr);

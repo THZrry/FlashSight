@@ -152,6 +152,15 @@ struct TermItem {
   std::string status;  // "running" | "exited"
 };
 
+// A wake-up the backend will fire for this session (auto mode). Declared at
+// namespace scope because both AppState and SessionView hold one.
+struct PendingWake {
+  std::string source;   // "timer" | "terminal-exit" | "subagent-done"
+  std::string note;     // what the user scheduled it for
+  int64_t at_ms = 0;
+  int64_t in_ms = 0;
+};
+
 // The app state. Everything the UI shows derives from this.
 struct AppState {
   // ---- top tabs ----
@@ -223,6 +232,15 @@ struct AppState {
   bool hist_follow = true;
   std::string model;
   int model_index = 0;
+  // Whether `model` still exists among the ENABLED models. A session remembers
+  // the model it last used, but that model can disappear - the user disabled it,
+  // or the whole provider was deleted. Sending would then fail with a provider
+  // error unrelated to "this model is gone", so the composer clears the model box
+  // and blocks the send button instead.
+  bool model_available = true;
+  // Checked against model.allEnabled; empty = not asked yet.
+  std::vector<std::string> available_model_ids;
+  std::string model_check_sid;
   std::string permission = "permissive";
   int perm_index = 1;
   bool auto_mode = true;
@@ -234,6 +252,13 @@ struct AppState {
   // Why the loop stopped (provider error / HTTP status). Shown in the interrupt
   // bar: "interrupted" without a reason reads like a UI bug.
   std::string interrupt_reason;
+  // Scheduled wake-ups for this session (auto mode). Shown in the same bar slot
+  // as the interrupt notice: both mean "the task is parked and something will
+  // happen without you", so they belong in the same place above the input.
+  std::vector<PendingWake> pending_wakes;
+  // Inline "schedule a wake-up" input in the composer (auto mode only).
+  bool schedule_open = false;
+  std::string schedule_text;
   // "enter" (default) or "ctrlEnter": whether plain Enter sends. It is a SESSION
   // setting, and the DOM adapter reads it from the textarea's data-enter-send
   // attribute, so it must live in the session state.
@@ -554,6 +579,19 @@ struct AppState {
   std::string file_blacklist_text;  // 文件黑名单（多行编辑草稿）
   std::string file_whitelist_text;  // 文件白名单（多行编辑草稿）
   std::string about_version = "0.1.0";
+  // Web 服务当前状态（设置-Web 服务页回显；server.status）
+  bool server_running = false;
+  std::string server_host;
+  int server_port = 0;
+  bool server_requires_password = false;
+  std::string server_lan_url;
+  // 上一次重新监听失败的原因（空 = 正常）
+  std::string server_error;
+  // Typing drafts for the Web-service fields. They hold what is in the box while
+  // the user types; only Enter commits (a per-keystroke commit would rebind the
+  // listener once per digit).
+  std::string server_port_draft;
+  std::string server_password_draft;
 
   // ---- overlays ----
   bool ask_modal = false;
@@ -565,6 +603,16 @@ struct AppState {
   std::string confirm_id;
   std::string confirm_arg;    // second value (turnId / permission level)
   std::string confirm_text;
+  // ---- right-click menu ----
+  // The browser's native menu is suppressed (see the DOM adapters); this is what
+  // replaces it. Only the actions that make sense for what was right-clicked are
+  // offered, so it is never a wall of disabled browser items.
+  bool ctx_open = false;
+  int ctx_x = 0;              // viewport coords of the click
+  int ctx_y = 0;
+  std::string ctx_kind;       // "message" | "tab" | "session" | "composer" | ""
+  std::string ctx_id;         // turnId / tab id / session id
+  std::string ctx_label;      // what the menu header shows
   bool plan_open = false;
   std::vector<std::string> plan_steps;
   // Inline plan editing: -1 = no step being edited. The plan is user-editable,
@@ -607,6 +655,11 @@ struct SessionView {
   // 默认模型时用那一个（见 build_session / send_message）。
   std::string model;
   int model_index = 0;
+  // See AppState::model_available: false = the remembered model is gone, so the
+  // composer shows an empty model box and the send button is disabled.
+  bool model_available = true;
+  std::vector<std::string> available_model_ids;
+  std::string model_check_sid;
   std::string permission = "permissive";
   int perm_index = 1;
   bool auto_mode = true;
@@ -615,6 +668,9 @@ struct SessionView {
   // Why the loop stopped (provider error / HTTP status). Shown in the interrupt
   // bar: "interrupted" without a reason reads like a UI bug.
   std::string interrupt_reason;
+  std::vector<PendingWake> pending_wakes;
+  bool schedule_open = false;
+  std::string schedule_text;
   std::string enter_send = "enter";
   int context_pct = -1;
   // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
@@ -766,6 +822,14 @@ class UiApp {
   // mirror it into `suspended`. The button label follows the BACKEND, not the
   // click: suspension is a request that the loop may take a moment to honour.
   void refresh_loop_state(const std::string& sid);
+  // Pull the session's pending wake-ups (scheduled tasks / event wakes) into
+  // state so the composer can show a countdown and offer to cancel them.
+  void refresh_pending_wakes();
+  // 读取 Web 服务当前监听状态（设置-Web 服务页）
+  void refresh_server_status();
+  // Ask which models are usable and clear the composer's model box if the one
+  // this session remembered has been disabled or its provider deleted.
+  void refresh_model_availability();
   // Loaders for the settings sections.
   void load_preset_agents();  void load_skills();
   void load_provider_templates();
@@ -926,8 +990,20 @@ class UiApp {
   std::string last_rendered_tab_;
   std::function<void()> unsubscribe_events_;
   int64_t last_stream_turn_ = -1;
+  // Last time the wake countdown was refreshed (the label only needs to be
+  // right to the minute, so this throttles the request to once per 5 s).
+  int64_t last_wake_refresh_ms_ = 0;
+  // Last repaint of the live "generating for 12s" counter (once a second).
+  int64_t last_stream_tick_ms_ = 0;
+  // Stream text arrived since the last paint, and when that paint happened. See
+  // pump(): deltas are coalesced instead of rendering once per token.
+  bool stream_dirty_ = false;
+  int64_t last_stream_paint_ms_ = 0;
   int event_count_ = 0;
   int render_count_ = 0;
+  // How many times refresh_server_status has re-read while a rebind was in
+  // flight; capped so a stuck rebind cannot poll forever.
+  int server_status_polls_ = 0;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
   bool render_pending_ = false;
   // ask the next render to focus the terminal surface (only on spawn / tab
@@ -963,6 +1039,10 @@ class UiApp {
   // on AppState are the live copy of whichever scope is active.
   KeyedStore<SessionView> views_;
   std::string last_session_key_;  // sid whose view the flat fields currently hold
+  // The live context menu's DOM node. Rendering has to bind "click outside
+  // closes it" to THIS node; using a full-screen backdrop would swallow the next
+  // right-click instead of letting it open that target's menu.
+  Node ctx_menu_node_;
   // Rendered message nodes, keyed by "msg:<sid>:<index>". A session can hold
   // hundreds of turns; without this every render re-parsed every markdown block
   // and rebuilt every node, and the diff then compared all of them against

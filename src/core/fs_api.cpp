@@ -61,18 +61,39 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
         sid, tid.is_string() ? tid.get<std::string>() : "", patch);
   };
   const Clock* clk = clock_;
-  deps.call_model = [ps, mt, net, us, clk](const ModelCallRequest& req,
-                                           ModelCallResult* out) -> FsResult {
+  deps.call_model = [ps, mt, net, us, clk](
+                        const ModelCallRequest& req, ModelCallResult* out,
+                        const std::function<void(const std::string&)>& on_delta)
+      -> FsResult {
     if (!out) return FsResult::error(ErrCode::kInvalidArg, "null result");
-    // 按模型名找 provider：v1 用第一个启用的连接
+    // 按模型名找 provider。**不能**只取第一个启用的：多供应商时那会把
+    // "deepseek-chat" 发到 Anthropic 端点上（用户配了两家就必然踩到），
+    // 返回一个与模型无关的 403/404。先按"哪个供应商的模型表里有这个模型"
+    // 匹配，认不出来才回退到第一个启用的连接。
     std::vector<ProviderConn> conns = ps->list();
     ProviderConn conn;
     bool found = false;
-    for (auto& c : conns) {
-      if (c.enabled) {
-        conn = c;
-        found = true;
-        break;
+    if (!req.model.empty()) {
+      for (auto& c : conns) {
+        if (!c.enabled) continue;
+        std::vector<ModelEntry> models = mt->list_models(c.id);
+        for (size_t i = 0; i < models.size(); ++i) {
+          if (models[i].id == req.model) {
+            conn = c;
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+    }
+    if (!found) {
+      for (auto& c : conns) {
+        if (c.enabled) {
+          conn = c;
+          found = true;
+          break;
+        }
       }
     }
     if (!found) {
@@ -85,11 +106,15 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     creq.model = req.model.empty() ? "gpt-4o-mini" : req.model;
     creq.messages = req.messages;
     creq.tools = req.tools;
-    creq.stream = false;
+    // Streaming whenever the UI will consume deltas. On the desktop the delta
+    // callback fires on the caller's thread (in-process), and on the server the
+    // SSE bytes arrive on this request's thread - either way the UI can render
+    // while the model is still talking instead of waiting for the whole reply.
+    creq.stream = static_cast<bool>(on_delta);
     creq.session_id = req.session_id;  // kPlan: x-opencode-session 亲和 id
     ProviderRuntime runtime(conn, net, us, clk);
     ChatResponse cresp;
-    FsResult r = runtime.call(creq, &cresp, nullptr);
+    FsResult r = runtime.call(creq, &cresp, on_delta);
     if (!r.ok()) {
       out->error = cresp.error.empty() ? r.message : cresp.error;
       return r;
@@ -172,6 +197,9 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   agent_host_->skills().load_user(settings_->get_value(kKeySkills, Json::array()));
   // 逐模型设置：从设置恢复用户覆盖（启用状态/能力/档位/重试/图标）
   model_table_->load_user_models(settings_->get_value(kKeyProviderModels, Json::object()));
+  // 以及上一次从 API 取回的模型列表（上下文长度等事实的唯一来源）
+  model_table_->load_api_models(
+      settings_->get_value(kKeyProviderApiModels, Json::object()));
   apply_proxy_settings();  // 代理设置立即生效
   // 文件黑白名单：从设置装载（黑 > 白 > 三档默认）
   {
@@ -200,6 +228,44 @@ void FsApi::apply_proxy_settings() {
   Json pv = settings_->get_value(kKeyNetworkProxyPort, Json(0));
   int port = pv.is_number() ? static_cast<int>(pv.get<int64_t>()) : 0;
   if (net_) net_->set_default_proxy(host, port);
+}
+
+void FsApi::apply_server_settings() {
+  if (!ui_server_restart_) return;   // no server in this process (tests)
+  std::string host = settings_->get_value(kKeyServerHost, Json("127.0.0.1")).is_string()
+                         ? settings_->get_value(kKeyServerHost, Json("127.0.0.1"))
+                               .get<std::string>()
+                         : "127.0.0.1";
+  if (host.empty()) host = "127.0.0.1";
+  Json pv = settings_->get_value(kKeyServerPort, Json(0));
+  int port = pv.is_number() ? static_cast<int>(pv.get<int64_t>()) : 0;
+  std::string pw = settings_->get_value(kKeyServerPassword, Json("")).is_string()
+                       ? settings_->get_value(kKeyServerPassword, Json(""))
+                             .get<std::string>()
+                       : "";
+  ui_server_restart_(port, host, pw);
+}
+
+FsResult FsApi::server_status() {
+  if (!ui_server_status_) {
+    return FsResult::success(Json{{"running", false},
+                                  {"host", ""},
+                                  {"port", 0},
+                                  {"password", false},
+                                  {"url", ""}});
+  }
+  return FsResult::success(ui_server_status_());
+}
+
+// The page asks these before mounting. The HTTP layer already enforces the
+// token; these two only exist so the UI knows whether to draw the gate.
+FsResult FsApi::server_auth_required() {
+  return FsResult::success(Json{{"required", false}, {"authed", true}});
+}
+
+FsResult FsApi::server_login(const std::string& password) {
+  (void)password;
+  return FsResult::success(Json{{"token", ""}});
 }
 
 // 事件扇出：给所有监听者（本地 UI + HTTP API 服务）；无监听者则丢弃（后端不依赖 UI）
@@ -600,7 +666,11 @@ FsResult FsApi::session_send(const std::string& sid, const std::string& text,
   Json ss = full.value("sessionSettings", Json::object());
   bool auto_mode = jsonutil::get<bool>(ss, "autoMode", false);
   std::string perm = jsonutil::get<std::string>(ss, "filePerm", "permissive");
-  return agent_host_->send(sid, text, attachments, auto_mode, perm);
+  // The session's current model goes to the loop as well: the loop outlives a
+  // turn, so without this a model switch would only take effect in a brand new
+  // session (the loop kept whatever model it was created with).
+  std::string sess_model = jsonutil::get<std::string>(ss, "model", "");
+  return agent_host_->send(sid, text, attachments, auto_mode, perm, sess_model);
 }
 
 FsResult FsApi::session_append(const std::string& sid, const std::string& text) {
@@ -617,6 +687,37 @@ FsResult FsApi::session_resume(const std::string& sid) {
 
 FsResult FsApi::session_cancel_wake(const std::string& sid) {
   return agent_host_->cancel_wake(sid);
+}
+
+// 定时任务：让自动模式在指定时间后自己再跑一轮。这是"模型自设唤醒"的用户
+// 入口——调度器早就有了（WakeScheduler），但没有任何接口能建一个定时唤醒，
+// 所以此前只能靠终端退出/子代理完成这类事件触发。
+FsResult FsApi::session_schedule(const std::string& sid, int64_t delay_ms,
+                                 const std::string& note) {
+  if (!agent_host_) return FsResult::error(ErrCode::kInternal, "no agent host");
+  if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "no session");
+  if (delay_ms <= 0) return FsResult::error(ErrCode::kInvalidArg, "delay must be > 0");
+  int64_t at = (clock_ ? clock_->now_ms() : WallClock().now_ms()) + delay_ms;
+  agent_host_->wakes().schedule(sid, WakeSource::kTimer, at, note);
+  return FsResult::success(Json{{"at", at}, {"delayMs", delay_ms}});
+}
+
+// 当前会话的待唤醒（定时任务 + 事件唤醒）。UI 用它显示"还有多久"和取消按钮。
+FsResult FsApi::session_pending_wakes(const std::string& sid) {
+  Json arr = Json::array();
+  if (agent_host_) {
+    int64_t now = clock_ ? clock_->now_ms() : WallClock().now_ms();
+    std::vector<PendingWake> list = agent_host_->wakes().pending_for_sid(sid);
+    for (size_t i = 0; i < list.size(); ++i) {
+      Json o = Json::object();
+      o["source"] = wake_source_str(list[i].source);
+      o["at"] = list[i].at_ms;
+      o["inMs"] = list[i].at_ms > 0 ? list[i].at_ms - now : 0;
+      o["ref"] = list[i].ref;
+      arr.push_back(o);
+    }
+  }
+  return FsResult::success(Json{{"wakes", arr}});
 }
 
 FsResult FsApi::session_loop_state(const std::string& sid) {
@@ -951,6 +1052,10 @@ void FsApi::start_terminal_poller() {
   poller_.reset(new std::thread([this]() {
     while (!poller_stop_.load()) {
       terminal_tick();
+      // Scheduled wake-ups have to be polled by someone, and this thread already
+      // exists and ticks often enough for a "5 minutes later" timer. Without it
+      // a wake stayed in the queue forever: nothing ever called on_timer_tick.
+      if (agent_host_) agent_host_->on_timer_tick();
       // The desktop has no fast grid timer, so this thread is what keeps the
       // browser's event stream live; 60ms keeps the terminal feeling like a
       // keyboard without busy-waiting.
@@ -1245,6 +1350,10 @@ FsResult FsApi::settings_set(const std::string& key, const Json& value, const st
   if (key == kKeyNetworkProxyHost || key == kKeyNetworkProxyPort) {
     apply_proxy_settings();
   }
+  // Web 服务设置（监听地址/端口/密码）：立即重启内嵌服务器
+  if (key == kKeyServerHost || key == kKeyServerPort || key == kKeyServerPassword) {
+    apply_server_settings();
+  }
   // 文件黑白名单变化立即生效
   if (key == kKeyPermFileBlacklist || key == kKeyPermFileWhitelist) {
     std::vector<std::string> b, w;
@@ -1261,8 +1370,7 @@ FsResult FsApi::settings_set(const std::string& key, const Json& value, const st
   }
   return r;
 }
-FsResult FsApi::settings_unset(const std::string& key, const std::string& pid) {
-  if (pid.empty()) return settings_->unset_global(key);
+FsResult FsApi::settings_unset(const std::string& key, const std::string& pid) {  if (pid.empty()) return settings_->unset_global(key);
   if (path_for(pid).empty()) return FsResult::error(ErrCode::kNotFound, "project not found: " + pid);
   return store_for(pid).unset_project(key);
 }
@@ -1652,6 +1760,10 @@ FsResult FsApi::provider_list_models(const std::string& providerId) {
     // back to the built-in preset every time, so "获取模型列表" looked like it
     // kept returning the same few fake models.
     model_table_->set_api_models(providerId, models);
+    // Persist it: the context window and output cap reported here are what the
+    // context water level and the token controls are computed from, and they are
+    // not recoverable from anywhere else.
+    settings_->set_global(kKeyProviderApiModels, model_table_->api_models_json());
   } else {
     level = "local";
     message = res.message;

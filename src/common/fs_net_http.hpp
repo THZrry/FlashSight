@@ -13,6 +13,12 @@ class HttplibNetClient : public NetClient {
   ~HttplibNetClient() override;
 
   FsResult request(const HttpRequest& req, HttpResponse* out) const override;
+  // True streaming: bytes are handed to `on_chunk` as they arrive, which is what
+  // makes an SSE reply render token by token instead of appearing all at once.
+  FsResult request_stream(
+      const HttpRequest& req,
+      const std::function<bool(const char*, size_t)>& on_chunk,
+      HttpResponse* out) const override;
 
   // 默认代理（设置 permissions.network.proxyHost/Port；请求未指定时套用）
   void set_default_proxy(const std::string& host, int port) {

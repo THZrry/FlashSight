@@ -2353,6 +2353,12 @@ class DemoBackend : public IUiBackend {
           {"turns", Json::array()}};
     } else if (method == "project.list" || method == "session.list") {
       r.data = Json::array();
+    } else if (method == "model.allEnabled") {
+      // The composer asks this to decide whether the session's remembered model
+      // still exists. A backend that answered with an empty list would look like
+      // "that model was deleted", and the composer would clear it - which is
+      // exactly the behaviour the availability check is there to provide.
+      r.data = Json{{"models", Json::array({Json{{"id", "claude-sonnet-4"}}})}};
     }
     return r;
   }
@@ -3033,6 +3039,56 @@ FS_TEST(uiapp_load_session_applies_settings) {
   EXPECT_FALSE(d.find("还没有选择模型") != std::string::npos);
 }
 
+// A session remembers the model it last used, but that model can be disabled or
+// its whole provider deleted. Sending then fails deep in the provider layer with
+// an error that never mentions the model, and the box keeps showing a dead name.
+// The composer must instead clear the box and disable send.
+class ModelGoneBackend : public IUiBackend {
+ public:
+  BackendResult call(const std::string& method, const Json&) override {
+    BackendResult r;
+    r.ok = true;
+    if (method == "session.get" || method == "session.info") {
+      r.data = Json{
+          {"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}, {"cwd", "/tmp/p"}}},
+          {"sessionSettings", Json{{"model", "claude-sonnet-4"},
+                                   {"filePerm", "permissive"},
+                                   {"autoMode", true}}},
+          {"turns", Json::array()}};
+    } else if (method == "project.list" || method == "session.list") {
+      r.data = Json::array();
+    } else if (method == "model.allEnabled") {
+      // Only a DIFFERENT model is enabled now.
+      r.data = Json{{"models", Json::array({Json{{"id", "gpt-4o"}}})}};
+    }
+    return r;
+  }
+  std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+};
+
+FS_TEST(uiapp_unavailable_model_clears_composer) {  NullDom dom;
+  AppState st = AppState::make();
+  ModelGoneBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.show("home");
+  app.show("sess_a");  // loads settings, then asks model.allEnabled
+  // The remembered model is gone: the box is empty and send is blocked.
+  EXPECT_EQ(app.state().model, std::string(""));
+  EXPECT_FALSE(app.state().model_available);
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("还没有选择模型") == std::string::npos);
+  EXPECT_TRUE(d.find("选择模型") != std::string::npos);  // placeholder is back
+  // The send button carries the `disabled` class (NullDom dumps class as text).
+  EXPECT_TRUE(d.find("disabled") != std::string::npos);
+  // Sending is refused (no user turn is appended).
+  size_t before = app.state().messages.size();
+  app.update([](AppState& s) { s.session_input = "hello"; });
+  app.send_message();
+  EXPECT_EQ(app.state().messages.size(), before);
+}
+
 // Thinking is a foldable block, closed by default; opening it shows the body.
 // Reasoning and tool calls live in ONE folded "工作过程" group: the answer is
 // what you read, the process is what you open.
@@ -3323,4 +3379,26 @@ FS_TEST(uiapp_subagent_history_and_timing) {
   std::string o = dom.dump();
   EXPECT_TRUE(o.find("look for z-index") != std::string::npos);
   EXPECT_TRUE(o.find("found 7") != std::string::npos);
+}
+
+// The Web-service section must show a REAL, copyable address when the machine
+// has one. It used to print the literal "<本机 IP>", which reads as a bug and
+// cannot be typed on a phone.
+FS_TEST(uiapp_webserver_shows_real_lan_url) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.open_modal_page("settings");
+  app.update([](AppState& s) {
+    s.settings_nav = "webserver";
+    s.server_running = true;
+    s.server_host = "0.0.0.0";
+    s.server_port = 8812;
+    s.server_lan_url = "http://10.6.217.30:8812/";
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("正在监听 0.0.0.0:8812") != std::string::npos);
+  EXPECT_TRUE(d.find("http://10.6.217.30:8812/") != std::string::npos);
+  EXPECT_TRUE(d.find("<本机 IP>") == std::string::npos);
 }

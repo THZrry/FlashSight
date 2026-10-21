@@ -232,7 +232,7 @@ FS_TEST(addon2_continue_task) {
   opts.event = [](const std::string&, const Json&) {};
   AgentLoop loop(std::move(opts));
   int calls = 0;
-  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out) -> FsResult {
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
     ++calls;
     if (calls == 1) {
       out->error = "network hiccup";
