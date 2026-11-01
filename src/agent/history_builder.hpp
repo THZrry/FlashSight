@@ -1,5 +1,10 @@
-// history_builder.hpp - HistoryBuilder (session-history.md 3, agent-loop 3)
-// 从 full.json 构建运行时 history（provider 消息数组）。
+// history_builder.hpp - full.json -> neutral conversation (session-history.md 3)
+//
+// The output is PROVIDER-NEUTRAL. prompt::adapt() turns it into the wire format
+// of whichever endpoint the session uses. Keeping the neutral form as the
+// intermediate (instead of building OpenAI/Anthropic shapes directly) is what
+// lets one history replay into any provider and lets the same transcript be
+// re-sent after the user switches models mid-session.
 #pragma once
 
 #include <string>
@@ -11,10 +16,12 @@ namespace fs {
 
 // 运行时 history 构建结果
 struct HistoryResult {
-  Json messages = Json::array();   // provider 消息数组（给 ProviderClient）
+  Json messages = Json::array();   // 中性消息数组（prompt::adapt 之前）
   bool compressed = false;         // 本轮是否发生压缩
   int64_t compressed_from = 0;     // 压缩区间（turn 下标）
   int64_t compressed_to = 0;
+  int64_t dropped_turns = 0;       // 被折叠的 turn 数
+  int64_t est_tokens = 0;          // 估算的对话 token（不含 system）
 };
 
 // 提示词前缀装配（session-history.md 3 定稿顺序）：
@@ -22,38 +29,93 @@ struct HistoryResult {
 class HistoryBuilder {
  public:
   struct Options {
-    int recent_turns = 20;        // 短视图 N（最近 N 轮全量）
-    int64_t token_budget = 8000;  // token 预算（粗略估算）
-    std::string system_prefix;    // 前缀说明（如 agent 行为提示）
-    Json env = Json::object();    // 环境信息
-    Json tools = Json::array();   // 工具定义
-    Json mcp = Json::object();    // skills 与 MCP
+    std::string system_prefix;    // 前缀说明（AgentContext::build_system 产出）
+    Json env = Json::object();    // 环境信息（旧字段，保留兼容）
+    Json tools = Json::array();   // 工具定义（旧字段，保留兼容）
+    Json mcp = Json::object();    // skills 与 MCP（旧字段，保留兼容）
     Json disabled_system_tools = Json::array();  // 被禁用的系统工具
+    // 上一次压缩留下的摘要（runtime.json）。没有就把被折叠轮的要点重新拼一遍。
+    std::string prior_summary;
+    // 被折叠区间最多保留多少条要点，防止摘要自己撑爆预算。
+    int max_fold_points = 40;
+    // Messages to replay BEFORE the current turn, for a run that continues an
+    // earlier conversation (a subagent follow-up). They are placed after the
+    // system prompt and before the newest user message, exactly like stored
+    // history - so the model sees its own previous turns and their tool results.
+    Json seed_messages = Json::array();
+
+    // ----- 水位驱动压缩 -----
+    // 上一次请求的 prompt tokens（0 = 未知/首轮）。这是压缩的**主触发条件**：
+    // 水位达到 compress_at_pct 就主动压缩，不等撑爆预算。
+    int64_t last_prompt_tokens = 0;
+    // 模型上下文窗口（0 = 未知）。未知时水位触发不可用，只有显式"立即压缩"。
+    int64_t context_limit = 0;
+    // 水位阈值（百分比）。<=0 关闭水位触发。
+    int compress_at_pct = 80;
+    // 压缩后至少保留的最近轮数：压缩不等于清空，最近几轮必须全量在。
+    int keep_turns = 8;
+    // 强制压缩（用户点"压缩"/UI 提示时）。
+    bool force_compress = false;
   };
 
   explicit HistoryBuilder(Options opts) : opts_(std::move(opts)) {}
 
-  // 从 full.json 构建 history（含压缩决策；OpenAI 兼容格式）
+  // 从 full.json 构建中性消息（含压缩决策）
+  HistoryResult build_neutral(const Json& full) const;
+
+  // 压缩是否该触发（水位 / 预算 / 强制）。暴露给 UI 与单测：
+  // "现在该压缩了"是一个可观测的判断，不应该只藏在 build 里。
+  struct CompressDecision {
+    bool compress = false;
+    std::string reason;      // "water-level" | "token-budget" | "forced" | ""
+    int64_t prompt_tokens = 0;
+    int64_t context_limit = 0;
+    int pct = 0;             // 水位百分比（窗口未知时 0）
+  };
+  static CompressDecision should_compress(const Options& opts, int64_t turns_tokens);
+
+  // 兼容旧调用：OpenAI Chat 形态（system 在 messages 里）
   HistoryResult build(const Json& full) const;
 
-  // Anthropic 形态：{system, messages:[{role, content:[{type:text/tool_use/tool_result}]}]}
-  // system 单独字段；tool 结果为 user 角色的 tool_result 块
+  // 兼容旧调用：Anthropic 形态（{system, messages:[{role, content:[blocks]}]}）
   HistoryResult build_anthropic(const Json& full) const;
 
-  // 估算 token 数（粗略：英文 4 字符/token，中文 1.5 字符/token）
+  // 估算 token 数（粗略：英文 4 字符/token，CJK 1 字符/token）
   static int64_t estimate_tokens(const std::string& s);
   static int64_t estimate_tokens(const Json& j);
+
+  // 把一组 turn 压成一段可读摘要（首句 + 要点）。供压缩轮与 runtime 缓存使用。
+  static std::string fold_summary(const Json& turns, size_t from, size_t to,
+                                  int max_points);
+
+  // What a tool result looks like when it is REPLAYED into the next request.
+  //
+  // The stored `detail` is the whole result, pretty-printed and capped at 4000
+  // characters - it exists so the user can read what the tool did. Sending that
+  // back verbatim on every later turn is what made a long session burn its
+  // context: a read_file body, a list_dir with 800 entries, an edit's before/
+  // after text, all re-sent forever.
+  //
+  // The model only needs what lets it CONTINUE: did it work, which file, which
+  // lines, what hash to edit with, and a bounded sample of the payload. That is
+  // the projection below - per tool, because "what matters" differs (an edit's
+  // before/after text is bulk, a terminal's TAIL is the signal).
+  //
+  // `result` is the structured result (compact JSON); `detail` is the display
+  // text. Either may be empty; the projection falls back to the other.
+  static std::string project_tool_result(const std::string& name,
+                                         const Json& result,
+                                         const std::string& detail);
 
  private:
   Options opts_;
 
-  // 把 turn 转成 provider 消息（user/assistant；OpenAI 格式）
-  static Json turn_to_message(const Json& turn);
-  // Anthropic content blocks 装配（text/tool_use/tool_result）
-  static Json turn_to_anthropic(const Json& turn);
-  // 生成折叠 summary（首句截断，P3 摘要模型升级留接口）
-  static std::string fallback_summary(const std::string& text);
-  // 装配前缀
+  // 单个 turn -> 若干中性消息（user 轮可能带 tool 结果）
+  static void turn_to_neutral(const Json& turn, Json* out);
+  // 生成折叠摘要（含 keyPoints）
+  static std::string make_fold(const Json& turns, size_t from, size_t to,
+                               const std::string& prior, int max_points);
+  // 装配前缀（legacy：直接用 system_prefix + env/tools/mcp 拼接）
   Json build_system() const;
 };
 

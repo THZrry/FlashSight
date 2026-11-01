@@ -65,6 +65,32 @@
 - **不支持 toolUse 的模型拒绝进会话**（创建时硬拒绝，UI 明示）。
 - 供应商虚标能力导致运行时报错：原样透出，不归工具层兜底。
 
+### 4.1 思考档位：三处必须一致
+
+档位（`thinking.levels`）从"模型表"流到"请求体"要经过三段，任一段漏掉都会表现为
+"设了档位但没效果"或者"控件根本不出现"：
+
+1. **来源**：`ModelEntry.thinking.levels`。优先用用户/API 配置的值；只有为空时才
+   由 `thinking_levels_for(id)` 按名字粗猜（o1/claude/gemini/deepseek-r/qwen3…）。
+2. **UI 渲染**：输入区的控件只在 `model_thinking_levels` 非空时出现。**一个
+   `caps.thinking=false` 且档位表为空的模型（例如用户自定义的 `deepseek-flash`）
+   会让控件永远不出现** —— 这曾经被误判成 CSS/宽度问题。现在档位表为空且已选模型时
+   回退成 `disable` / `enable` 两档；默认项是"默认"（= 发空值），所以渲染本身不会
+   改变请求，只有用户明确选"开"才发提示。
+3. **出网**：`wire_thinking()` 是**唯一**把档位写进请求体的地方，负责归一化：
+   `disable/off/disabled/none` → **整个字段省略**；`enable/on/enabled` → `medium`；
+   其余原样。没有哪个厂商接受字面上的 `enable`（OpenAI 只认
+   minimal/low/medium/high；Anthropic 没有命名档位；其他家把未知 effort 当 400）。
+   - OpenAI Chat：`reasoning_effort`
+   - OpenAI Responses：`reasoning.effort`（此前**完全没处理**）
+   - Anthropic：`thinking.budget_tokens`，minimal 1024 / low 2048 / medium 4096 /
+     high 8192 / max 16384，且必须小于 `max_tokens`
+
+测试：`provider_thinking_effort_normalised`（三态归一化）、
+`provider_thinking_anthropic_budget`（预算与省略）、
+`uiapp_composer_thinking_falls_back_to_disable_enable`、
+`uiapp_composer_thinking_prefers_configured_levels`。
+
 ## 5. 模型相关设置面（设置-模型）
 
 - 供应商设置：三形态 + 自定义 header + 套餐；常见模型名默认设置；一键获取列表。

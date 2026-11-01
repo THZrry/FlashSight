@@ -41,6 +41,8 @@ class UiApi {
  private:
   void reg(const std::string& name, std::function<FsResult(const Json&)> fn);
   std::map<std::string, std::function<FsResult(const Json&)> > methods_;
+  // Kept so call() can take the backend's shared lock (see ui_api.cpp).
+  FsApi* api_ = nullptr;
 };
 
 }  // namespace ui

@@ -45,21 +45,21 @@
 
 ## 子代理
 
-- [x] `subagent.spawn{task,model|inherit,cwd,permission≤父,timeout,depth+1}`；
+- [x] `subagent_spawn{task,model|inherit,cwd,permission≤父,timeout,depth+1}`；
   单会话并行上限默认 4（设置可调），深度上限 3；取消与超时落库。
 - [x] 结果 summary 回父 + 全文进侧栏历史（事件 `subagent.done`）。
 - [x] 预置 research、explore 等常用代理，各设开关/模型（设置-子代理）。
 
 ## 内置工具（src/tools，逐个接，每接一个单测+权限门联调）
 
-- [x] file.read（offset/limit + 二进制守卫）/ ls / find-grep。
-- [x] file.write / diffWrite（dtl；上下文对不上直接失败；diff 进 patches/）。
-- [x] file.rm（直接删除；确认走批准门；删前快照保证可回滚）。
-- [x] terminal.exec/spawn/kill/poll（reproc；前台超 5min 自动转后台并通知+事件；
+- [x] read_file（offset/limit + 二进制守卫）/ ls / find-grep。
+- [x] write_file / diffWrite（dtl；上下文对不上直接失败；diff 进 patches/）。
+- [x] remove_file（直接删除；确认走批准门；删前快照保证可回滚）。
+- [x] terminal_exec/spawn/kill/poll（reproc；前台超 5min 自动转后台并通知+事件；
   后台退出→wake 或徽标；输出流式 `terminal.output/exit`）。
-- [x] network.fetch（method/headers/timeout/sizeCap/证书开关；脱敏 trace）。
-- [ ] network.search（先调研开源实现，有则用，无则接可配 HTTP 搜索 API）。
-- [x] vision.screenshot（屏/窗口/区域，权限门）/ readImage（最大边+质量压缩可设）。
+- [x] fetch_url（method/headers/timeout/sizeCap/证书开关；脱敏 trace）。
+- [ ] search_web（先调研开源实现，有则用，无则接可配 HTTP 搜索 API）。
+- [x] screenshot（屏/窗口/区域，权限门）/ readImage（最大边+质量压缩可设）。
 - [x] MCP 与 Skill：本地工具管理，从外部文件夹导入（claude code、open code 等路径预置）；
   自定义工具启用状态变化进前缀（见 HistoryBuilder）。
 - [x] 长期记忆：用户偏好读写（设置-模型-长期记忆），前缀按需注入（策略实现时定）。

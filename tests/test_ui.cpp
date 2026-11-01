@@ -284,9 +284,18 @@ FS_TEST(comp_tab_strip) {
   t2.closable = true;
   t2.dirty = true;
   tabs.push_back(t2);
+  comp::TabSpec t3;
+  t3.key = "s2";
+  t3.title = "会话2";
+  t3.closable = true;
+  tabs.push_back(t3);
 
   H strip = comp::tab_strip(tabs, "s1", nullptr, nullptr, nullptr);
-  EXPECT_EQ(strip.get()->children.size(), size_t(3));
+  // Two slots: the pinned one (主页) and the scrolling one (sessions + "+").
+  ASSERT_TRUE(strip.get()->children.size() == size_t(2));
+  // 主页 stays in the pinned slot, so it cannot be scrolled out of reach.
+  EXPECT_EQ(strip.get()->children[0]->children.size(), size_t(1));
+  // The session tabs and the "+" are in the scrolling slot.
   EXPECT_EQ(strip.get()->children[1]->children.size(), size_t(3));
 }
 
@@ -391,7 +400,7 @@ FS_TEST(comp_chat_roles) {
 
 FS_TEST(comp_tool_block_and_summary) {
   comp::ToolBlock tb;
-  tb.name = "file.read";
+  tb.name = "read_file";
   tb.summary = "120 lines";
   tb.detail = "code";
   tb.expanded = false;

@@ -27,6 +27,15 @@ bool pick_file_dialog(std::string* out, const std::string& filter_desc = "",
 // Opens `path` in the OS file manager. Returns false on failure.
 bool reveal_in_file_manager(const std::string& path);
 
+// Opens an http(s) URL in the user's default browser. Used by markdown links in
+// chat: the UI has no address bar of its own, and navigating the app window away
+// from itself would destroy the session view.
+bool open_url_in_browser(const std::string& url);
+
+// Opens one file with a specific program (the "open with" dropdown). `app` is a
+// template like "code" / "notepad" / "" (system default).
+bool open_path_with(const std::string& path, const std::string& app);
+
 // Roots worth searching for a dropped folder: standard user folders and the
 // fixed drive roots (Windows). Order = priority.
 std::vector<std::string> default_search_roots();

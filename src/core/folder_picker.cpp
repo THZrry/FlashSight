@@ -130,6 +130,31 @@ bool reveal_in_file_manager(const std::string& path) {
   return std::system(cmd.c_str()) != -1;
 }
 
+// Launch a URL in the default browser. ShellExecute is used rather than `start`
+// because it does not go through cmd.exe, so a URL containing '&' or '"' cannot
+// turn into a command injection.
+bool open_url_in_browser(const std::string& url) {
+  if (url.empty()) return false;
+  // Only http(s): a markdown link is model output, and "file://" or a custom
+  // protocol would let it launch arbitrary local handlers.
+  if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0) {
+    return false;
+  }
+  HINSTANCE r = ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  return reinterpret_cast<intptr_t>(r) > 32;
+}
+
+bool open_path_with(const std::string& path, const std::string& app) {
+  if (path.empty()) return false;
+  if (app.empty()) {
+    HINSTANCE r = ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr,
+                                SW_SHOWNORMAL);
+    return reinterpret_cast<intptr_t>(r) > 32;
+  }
+  std::string cmd = "\"" + app + "\" \"" + path + "\"";
+  return std::system(cmd.c_str()) != -1;
+}
+
 std::vector<std::string> default_search_roots() {
   std::vector<std::string> roots;
   char buf[MAX_PATH];
@@ -226,6 +251,20 @@ bool pick_file_dialog(std::string*, const std::string&, const std::string&) {
 bool reveal_in_file_manager(const std::string& path) {
   if (path.empty()) return false;
   return std::system(("xdg-open \"" + path + "\" >/dev/null 2>&1 &").c_str()) != -1;
+}
+
+bool open_url_in_browser(const std::string& url) {
+  if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0) {
+    return false;
+  }
+  return std::system(("xdg-open \"" + url + "\" >/dev/null 2>&1 &").c_str()) != -1;
+}
+
+bool open_path_with(const std::string& path, const std::string& app) {
+  if (path.empty()) return false;
+  std::string cmd = app.empty() ? ("xdg-open \"" + path + "\"")
+                                : ("\"" + app + "\" \"" + path + "\"");
+  return std::system((cmd + " >/dev/null 2>&1 &").c_str()) != -1;
 }
 
 std::vector<std::string> default_search_roots() {

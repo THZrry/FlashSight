@@ -5,6 +5,51 @@
 
 namespace fs {
 
+namespace {
+
+// Build the error string for a non-2xx response.
+//
+// The status code alone is not actionable: every provider explains the problem
+// in the body ({"error":{"message":"tools[3].function.name: string does not
+// match pattern..."}}), and the UI shows this string to the user. Keeping a
+// readable excerpt turns "http 400" into "http 400: tools[3]... invalid name",
+// which is the difference between a guess and a fix.
+std::string http_error_text(const HttpResponse& resp) {
+  std::string text = "http " + std::to_string(resp.status);
+  std::string body = resp.body;
+  if (body.empty()) return text;
+  // Prefer the provider's structured message when there is one.
+  try {
+    Json j = Json::parse(body);
+    if (j.is_object()) {
+      if (j.contains("error")) {
+        const Json& e = j["error"];
+        if (e.is_object()) {
+          std::string m = jsonutil::get<std::string>(e, "message", "");
+          if (!m.empty()) body = m;
+        } else if (e.is_string()) {
+          body = e.get<std::string>();
+        }
+      } else if (j.contains("message") && j["message"].is_string()) {
+        body = j["message"].get<std::string>();
+      }
+    }
+  } catch (...) {
+    // Not JSON (a proxy's HTML error page): use the raw body.
+  }
+  // One line, bounded: the toast is not a log viewer.
+  std::string flat;
+  for (char c : body) flat.push_back((c == '\n' || c == '\r' || c == '\t') ? ' ' : c);
+  size_t start = flat.find_first_not_of(' ');
+  if (start != std::string::npos) flat = flat.substr(start);
+  const size_t kMax = 400;
+  if (flat.size() > kMax) flat = flat.substr(0, kMax) + "…";
+  if (flat.empty()) return text;
+  return text + ": " + flat;
+}
+
+}  // namespace
+
 std::string mask_secret(const std::string& s) {
   if (s.size() <= 8) return std::string(s.size(), '*');
   return s.substr(0, 4) + "****" + s.substr(s.size() - 4);
@@ -119,12 +164,31 @@ void merge_tool_call_deltas(const Json& deltas, Json* acc) {
 }
 }  // namespace
 
+// The composer's fallback ladder is disable/enable, because a model with no
+// configured levels has no known vocabulary. No provider accepts those words
+// verbatim: OpenAI wants minimal/low/medium/high, Anthropic has no named levels
+// at all, and anything else treats an unknown effort as a 400. Normalise here,
+// at the single place that talks to the wire:
+//   disable -> omit the field entirely (off means "no reasoning hint")
+//   enable  -> a middling named level, the safest thing a reasoning model accepts
+// It returns "" when the field should be omitted.
+std::string wire_thinking(const std::string& v) {
+  if (v.empty()) return "";
+  if (v == "disable" || v == "disabled" || v == "off" || v == "none") return "";
+  if (v == "enable" || v == "enabled" || v == "on") return "medium";
+  return v;
+}
+
 FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* out,
                                           const StreamDeltaFn& on_delta) const {
   Json body = Json::object();
   body["model"] = req.model;
   body["messages"] = req.messages;
   if (!req.tools.is_null() && !req.tools.empty()) body["tools"] = req.tools;
+  // Reasoning effort: only sent when the caller picked a level. Sending it to a
+  // model that has no levels is a 400, so an empty value must mean "omit".
+  std::string effort = wire_thinking(req.thinking);
+  if (!effort.empty()) body["reasoning_effort"] = effort;
   body["temperature"] = req.temperature;
   body["max_tokens"] = req.max_tokens;
   body["stream"] = req.stream;
@@ -174,6 +238,9 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
     // on_delta immediately, so the UI renders while the model is still talking.
     SseReader reader;
     nr = net_->request_stream(http, [&](const char* data, size_t len) {
+      // 停止生成: drop the connection instead of reading an answer nobody wants.
+      // Returning false aborts the transfer (NetClient::request_stream contract).
+      if (req.cancel && req.cancel()) return false;
       std::vector<std::string> payloads;
       reader.feed(data, len, &payloads);
       if (!payloads.empty()) saw_sse = true;
@@ -227,6 +294,14 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
       }
       return true;
     }, &resp);
+    if (!nr.ok()) {
+      // A transfer WE aborted is not a network failure: report it as a
+      // cancellation so the loop can park the turn instead of calling it broken.
+      if (req.cancel && req.cancel()) {
+        return FsResult::error(ErrCode::kCancelled, "stopped by user");
+      }
+      return nr;
+    }
   } else {
     nr = net_->request(http, &resp);
   }
@@ -241,7 +316,11 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
     return FsResult::error(ErrCode::kRemote, out->error);
   }
   if (resp.status != 200) {
-    out->error = "http " + std::to_string(resp.status);
+    // Keep the server's own message. "http 400" alone is undiagnosable: the
+    // reason (an illegal tool name, an unsupported field, a bad model id) is
+    // only ever in the response body, and dropping it turned a one-line fix
+    // into a guessing game.
+    out->error = http_error_text(resp);
     return FsResult::error(ErrCode::kRemote, out->error);
   }
   // Streaming already accumulated the text - unless the server ignored
@@ -266,25 +345,50 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
     out->in_tokens = jsonutil::get_int(u, "prompt_tokens", 0);
     out->out_tokens = jsonutil::get_int(u, "completion_tokens", 0);
     out->cache_tokens = jsonutil::get_int(u, "prompt_tokens_cached", 0);
-    // cost（opencode 实证：Zen 注入 .cost；"0"=配额内，美元字符串=余额扣费）
-    // 成本三态：cost=="0" -> quota；可解析金额 -> money；否则连接层 quota/unknown
+    if (out->cache_tokens == 0) {
+      // [OI] spells the same number two ways; DeepSeek and OpenRouter use the
+      // nested form, and missing it made the cache-hit rate read 0%.
+      if (u.contains("prompt_cache_hit_tokens")) {
+        out->cache_tokens = jsonutil::get_int(u, "prompt_cache_hit_tokens", 0);
+      } else if (u.contains("prompt_tokens_details") &&
+                 u["prompt_tokens_details"].is_object()) {
+        out->cache_tokens =
+            jsonutil::get_int(u["prompt_tokens_details"], "cached_tokens", 0);
+      }
+    }
+    // Cost. Only what the ENDPOINT reports is shown: a number computed from
+    // hard-coded list prices looks exactly like a bill, and reconciling it
+    // against a real invoice is a losing game (prices change, discounts exist,
+    // cache billing differs per provider). So:
+    //   * a `cost` field (opencode/Zen style) or `usage.cost` (OpenRouter),
+    //   * otherwise quota / unknown - never a guess.
+    double reported = -1.0;
     std::string cost_str = jsonutil::get<std::string>(j, "cost", "");
     if (!cost_str.empty()) {
       if (cost_str == "0" || cost_str == "0.0" || cost_str == "0.00000000") {
         out->cost_kind = "quota";
         out->cost = 0.0;
+        reported = 0.0;
       } else {
         try {
-          out->cost = std::stod(cost_str);
-          out->cost_kind = "money";
+          reported = std::stod(cost_str);
         } catch (...) {
-          out->cost_kind = conn_.has_quota ? conn_.quota_kind : "unknown";
-          out->cost = conn_.has_quota ? conn_.quota_value : 0.0;
+          reported = -1.0;
         }
       }
+    }
+    if (reported < 0 && u.contains("cost") && u["cost"].is_number()) {
+      reported = u["cost"].get<double>();
+    }
+    if (reported >= 0) {
+      out->cost = reported;
+      if (out->cost_kind != "quota") out->cost_kind = "money";
+    } else if (conn_.has_quota) {
+      out->cost_kind = conn_.quota_kind;
+      out->cost = conn_.quota_value;
     } else {
-      out->cost_kind = conn_.has_quota ? conn_.quota_kind : "unknown";
-      out->cost = conn_.has_quota ? conn_.quota_value : 0.0;
+      out->cost_kind = "unknown";
+      out->cost = 0.0;
     }
     // The server ignored "stream": true and sent one complete body. Push it as
     // a single delta so a streaming consumer still renders it.
@@ -303,6 +407,11 @@ FsResult ProviderClient::chat_openai_response(const ChatRequest& req, ChatRespon
   body["model"] = req.model;
   body["input"] = req.messages;  // Response API 用 input 数组
   if (!req.tools.is_null() && !req.tools.empty()) body["tools"] = req.tools;
+  // The Responses API names the same knob `reasoning.effort`, as a nested object.
+  // It was simply missing here, so picking a thinking level on an
+  // OpenAI-Responses provider did nothing.
+  std::string effort = wire_thinking(req.thinking);
+  if (!effort.empty()) body["reasoning"] = Json{{"effort", effort}};
   body["max_output_tokens"] = req.max_tokens;
   body["stream"] = req.stream;
 
@@ -322,7 +431,7 @@ FsResult ProviderClient::chat_openai_response(const ChatRequest& req, ChatRespon
   if (!nr.ok()) return nr;
   out->http_status = resp.status;
   if (resp.status != 200) {
-    out->error = "http " + std::to_string(resp.status);
+    out->error = http_error_text(resp);
     return FsResult::error(ErrCode::kRemote, out->error);
   }
   try {
@@ -363,6 +472,28 @@ FsResult ProviderClient::chat_anthropic(const ChatRequest& req, ChatResponse* ou
   Json body = Json::object();
   body["model"] = req.model;
   body["messages"] = req.messages;  // role/user/assistant；system 单独字段
+  // Anthropic requires `system` at the top level, never as a message. It used to
+  // be dropped entirely, so the model ran with no instructions at all.
+  if (!req.system.empty()) body["system"] = req.system;
+  if (!req.thinking.empty()) {
+    // Extended thinking: budget must be below max_tokens and above the API
+    // minimum. Levels map to budgets because Anthropic has no named levels.
+    // disable/off mean "omit the field" (see wire_thinking).
+    std::string lvl = wire_thinking(req.thinking);
+    if (lvl.empty()) {
+      // reasoning explicitly disabled: send nothing at all
+    } else {
+      int64_t budget = 4096;  // enable/medium and anything unknown
+      if (lvl == "minimal") budget = 1024;
+      else if (lvl == "low") budget = 2048;
+      else if (lvl == "high") budget = 8192;
+      else if (lvl == "max" || lvl == "xhigh" || lvl == "extra-high") budget = 16384;
+      if (req.max_tokens > 0 && budget >= req.max_tokens) budget = req.max_tokens / 2;
+      if (budget > 0) {
+        body["thinking"] = Json{{"type", "enabled"}, {"budget_tokens", budget}};
+      }
+    }
+  }
   body["max_tokens"] = req.max_tokens;
   if (!req.tools.is_null() && !req.tools.empty()) body["tools"] = req.tools;
   body["stream"] = req.stream;
@@ -387,6 +518,8 @@ FsResult ProviderClient::chat_anthropic(const ChatRequest& req, ChatResponse* ou
     // text_delta, text}}; message_delta carries the final usage numbers.
     SseReader reader;
     nr = net_->request_stream(http, [&](const char* data, size_t len) {
+      // 停止生成: same abort contract as the OpenAI shape above.
+      if (req.cancel && req.cancel()) return false;
       std::vector<std::string> payloads;
       reader.feed(data, len, &payloads);
       if (!payloads.empty()) saw_sse = true;
@@ -426,13 +559,21 @@ FsResult ProviderClient::chat_anthropic(const ChatRequest& req, ChatResponse* ou
       }
       return true;
     }, &resp);
+    if (!nr.ok()) {
+      // A transfer WE aborted is not a network failure: report it as a
+      // cancellation so the loop can park the turn instead of calling it broken.
+      if (req.cancel && req.cancel()) {
+        return FsResult::error(ErrCode::kCancelled, "stopped by user");
+      }
+      return nr;
+    }
   } else {
     nr = net_->request(http, &resp);
   }
   if (!nr.ok()) return nr;
   out->http_status = resp.status;
   if (resp.status != 200) {
-    out->error = "http " + std::to_string(resp.status);
+    out->error = http_error_text(resp);
     return FsResult::error(ErrCode::kRemote, out->error);
   }
   if (!out->error.empty()) return FsResult::error(ErrCode::kRemote, out->error);

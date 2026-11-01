@@ -45,7 +45,7 @@ Json make_write_patch(const std::string& path, const std::string& before,
 }
 
 FsResult apply_patch_forward(const ProjectStore& ps, const Json& patch) {
-  // 正向：把 after 写盘（file.write 工具直接写盘后再留 patch；此处用于重建/测试）
+  // 正向：把 after 写盘（write_file 工具直接写盘后再留 patch；此处用于重建/测试）
   if (!patch.is_object() || !patch.contains("changes") || !patch["changes"].is_array()) {
     return FsResult::error(ErrCode::kInvalidArg, "invalid patch");
   }

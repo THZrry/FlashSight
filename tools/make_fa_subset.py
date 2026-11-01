@@ -31,6 +31,13 @@ WANTED = [
     'circle-info', 'trash', 'pen', 'floppy-disk', 'bolt', 'clock', 'list-check',
     'comments', 'file-lines', 'bars', 'ellipsis', 'circle-notch', 'spinner',
     'right-from-bracket', 'plug', 'server', 'wand-magic-sparkles', 'shield-halved',
+    'eye', 'volume-high', 'video', 'file-pdf', 'brackets-curly', 'brain', 'hand',
+    'folder-tree', 'list', 'pen-to-square', 'square-plus',
+    'arrow-right-arrow-left', 'user-lock', 'lock', 'lock-open', 'house',
+    'grip-vertical', 'folder-plus',
+    # 思考档位: one distinct glyph per level (see thinking_icon()).
+    'power-off', 'feather', 'gauge', 'gauge-high', 'fire', 'infinity',
+    'lightbulb', 'bell-slash',
 ]
 
 # Codepoints for icons we need whose upstream rule may be missing or an alias
@@ -41,6 +48,19 @@ FALLBACK = {
     'pause': '\\f04c',
     'rotate-left': '\\f2ea',
     'paper-plane': '\\f1d8',
+    # Not present in the 6.5.2 rule set this repo generated from, but the shipped
+    # WOFF2 is the full solid font and carries the glyph.
+    'brackets-curly': '\\f7ea',
+    # 思考档位 levels. All exist in the shipped WOFF2; listed here so a subset
+    # rebuild cannot silently drop them (a missing rule = a blank button).
+    'power-off': '\\f011',
+    'feather': '\\f52d',
+    'gauge': '\\f624',
+    'gauge-high': '\\f625',
+    'fire': '\\f06d',
+    'infinity': '\\f534',
+    'lightbulb': '\\f0eb',
+    'bell-slash': '\\f1e6',
 }
 
 OUT_CSS = os.path.join('web', 'icons', 'fa-subset.css')

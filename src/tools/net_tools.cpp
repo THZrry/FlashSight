@@ -1,13 +1,13 @@
-// net_tools.cpp - network.fetch/search（回调式；search 走可配 HTTP 搜索 API）
+// net_tools.cpp - fetch_url / search_web（回调式；search 走可配 HTTP 搜索 API）
 #include "net_tools.hpp"
 
 namespace fs {
 
 void register_net_tools(ToolRegistry* registry) {
-  // network.fetch（高风险；证书开关；sizeCap；脱敏 trace 由宿主负责）
+  // fetch_url（高风险；证书开关；sizeCap；脱敏 trace 由宿主负责）
   {
     ToolDef def;
-    def.name = "network.fetch";
+    def.name = "fetch_url";
     def.description = "HTTP(S) 抓取（高风险；method/headers/timeoutMs/sizeCap/verifyCert）";
     Json params = Json::object();
     params["type"] = "object";
@@ -21,7 +21,7 @@ void register_net_tools(ToolRegistry* registry) {
     params["properties"] = props;
     params["required"] = Json::array({"url"});
     def.parameters = params;
-    registry->register_tool("network.fetch", def,
+    registry->register_tool("fetch_url", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         if (!ctx.net_fetch) {
           return FsResult::error(ErrCode::kNotSupported, "network fetch not wired");
@@ -32,31 +32,43 @@ void register_net_tools(ToolRegistry* registry) {
       });
   }
 
-  // network.search（可配 HTTP 搜索 API；宿主通过 net_fetch 转发到配置的搜索 endpoint）
+  // search_web（走可配搜索 API；配置与解析见 search_backend.hpp）
   {
     ToolDef def;
-    def.name = "network.search";
-    def.description = "Web 搜索（走可配搜索 API；宿主配置 endpoint）";
+    def.name = "search_web";
+    def.description =
+        "Web 搜索（需在 设置-模型-搜索 配置后端：tavily/brave/searxng/custom）. "
+        "Web search. Returns {hits:[{title,url,snippet}]}. Requires a configured "
+        "search backend; without one the error says where to configure it.";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
     props["query"] = Json{{"type", "string"}, {"description", "搜索词"}};
-    props["count"] = Json{{"type", "integer"}, {"description", "条数（默认10）"}};
+    props["count"] = Json{{"type", "integer"}, {"description", "条数（默认5）"}};
     params["properties"] = props;
     params["required"] = Json::array({"query"});
     def.parameters = params;
-    registry->register_tool("network.search", def,
+    registry->register_tool("search_web", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
-        if (!ctx.net_fetch) {
-          return FsResult::error(ErrCode::kNotSupported, "network search not wired");
+        std::string query = jsonutil::get<std::string>(args, "query", "");
+        if (query.empty()) {
+          return FsResult::error(ErrCode::kInvalidArg, "empty query");
         }
-        // 宿主把 search 转成配置的搜索 API 调用（通过 net_fetch 的特殊标记）
-        Json fwd = Json::object();
-        fwd["search"] = true;
-        fwd["query"] = jsonutil::get<std::string>(args, "query", "");
-        fwd["count"] = jsonutil::get_int(args, "count", 10);
+        // A dedicated callback, NOT net_fetch: search has its own request shape
+        // and response parsing. Routing it through net_fetch (the old
+        // `{search:true}` marker) made every call fail with "empty url" because
+        // that callback only reads `url`.
+        if (!ctx.web_search) {
+          return FsResult::error(
+              ErrCode::kNotSupported,
+              "web search is not configured: pick a backend in Settings > "
+              "Model > Search (tavily / brave / searxng / custom)");
+        }
+        Json req = Json::object();
+        req["query"] = query;
+        req["count"] = jsonutil::get_int(args, "count", 0);
         Json out;
-        FsResult r = ctx.net_fetch(fwd, &out);
+        FsResult r = ctx.web_search(req, &out);
         return r.ok() ? FsResult::success(out) : r;
       });
   }

@@ -1,6 +1,8 @@
 // fs_store.cpp - resolve global & project file layout
 #include "fs_store.hpp"
 
+#include <cstdio>
+
 #include "fs_path.hpp"
 
 namespace fs {
@@ -29,6 +31,15 @@ ghc::filesystem::path ProjectStore::session_dir(const std::string& sid) const {
 }
 ghc::filesystem::path ProjectStore::full_json(const std::string& sid) const {
   return session_dir(sid) / "full.json";
+}
+ghc::filesystem::path ProjectStore::turns_dir(const std::string& sid) const {
+  return session_dir(sid) / "turns";
+}
+ghc::filesystem::path ProjectStore::turn_shard(const std::string& sid,
+                                               int index) const {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%03d.json", index);
+  return turns_dir(sid) / buf;
 }
 ghc::filesystem::path ProjectStore::runtime_json(const std::string& sid) const {
   return session_dir(sid) / "runtime.json";

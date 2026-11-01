@@ -371,21 +371,27 @@ class WhaleDom : public IDom {
   }
 
   void bind_outside_click(Node popup, std::function<void()> cb) override {
-    // Close on a press anywhere else. The document-level listener is the same
-    // mechanism the global-key binding uses.
+    // One callback per popup (keyed by the popup node). A single slot meant the
+    // newest binding replaced the previous one while BOTH document listeners
+    // stayed installed, so a press outside ran the wrong popup's dismissal.
     whaleui_dom_element_t* el = el_of(popup);
     if (!el) return;
-    outside_cb_ = cb;
+    int id = ++outside_seq_;
+    if (cb) outside_cbs_[id] = std::move(cb);
+    outside_by_node_[popup.id] = id;
     bind_aux(outside_, reinterpret_cast<whaleui_dom_element_t*>(doc_), "mousedown",
-             [this, el](whaleui_dom_event_t* ev) {
-      if (!outside_cb_) return;
+             [this, el, id](whaleui_dom_event_t* ev) {
+      std::map<int, std::function<void()> >::iterator it = outside_cbs_.find(id);
+      if (it == outside_cbs_.end() || !it->second) return;
       whaleui_dom_element_t* t =
           reinterpret_cast<whaleui_dom_element_t*>(whaleui_dom_event_target(ev));
       while (t) {
         if (t == el) return;                 // inside the popup
         t = whaleui_dom_parent(t);
       }
-      outside_cb_();
+      std::function<void()> fn = it->second;
+      outside_cbs_.erase(it);  // one-shot: the popup is going away
+      fn();
     });
   }
 
@@ -432,7 +438,34 @@ class WhaleDom : public IDom {
   // element, which can be null (nothing clicked yet) and then no DOM listener
   // would ever see the key. The window callback always fires.
   void bind_global_key(std::function<void(const std::string&)> cb) override {
-    global_key_cb_ = cb;  // delivered by on_window_key (installed in the ctor)
+    global_key_cb_ = cb;
+    // Prefer the document keydown (carries modifiers); the window callback stays
+    // as the fallback for an engine build that cannot dispatch one.
+    bind_global_key_dom();
+  }
+
+  // ---- document-level keydown with modifiers -----------------------------
+  // Escape is delivered by the window key callback, which carries no modifiers.
+  // The shortcut table needs them (Ctrl+W / Ctrl+T), and WhaleUI's structured
+  // event dispatch carries the full key + modifier mask, so bind a real document
+  // keydown listener here for the app's global shortcuts. Installed lazily on
+  // the first bind_global_key call; kept for the adapter's lifetime.
+  void bind_global_key_dom() {
+    if (key_down_aux_) return;
+    bind_aux(key_down_aux_, reinterpret_cast<whaleui_dom_element_t*>(doc_),
+             "keydown", [this](whaleui_dom_event_t* ev) {
+      if (!global_key_cb_) return;
+      std::string key = str_of(whaleui_dom_event_key(ev));
+      if (key.empty()) key = key_name(whaleui_dom_event_key_code(ev));
+      if (key.empty()) return;
+      int mods = whaleui_dom_event_mods(ev);
+      std::string out;
+      if (mods & WHALEUI_MOD_CTRL) out += "Ctrl+";
+      if (mods & WHALEUI_MOD_META) out += "Meta+";
+      if (mods & WHALEUI_MOD_ALT) out += "Alt+";
+      if (mods & WHALEUI_MOD_SHIFT) out += "Shift+";
+      global_key_cb_(out + key);
+    });
   }
 
   // ---- terminal keyboard input (node-scoped, with modifiers) -------------
@@ -969,6 +1002,10 @@ class WhaleDom : public IDom {
     (void)app;
     WhaleDom* self = static_cast<WhaleDom*>(ud);
     if (!self || !pressed || !self->global_key_cb_) return;
+    // The document-level keydown listener (installed by bind_global_key_dom)
+    // reports the richer "Ctrl+Key" form and must be the single source: reporting
+    // from here as well would fire every global shortcut twice.
+    if (self->key_down_aux_) return;
     std::string key = key_name(keycode);
     if (key.empty()) return;
     self->global_key_cb_(key);
@@ -1034,8 +1071,13 @@ class WhaleDom : public IDom {
   Listener* drop_over_ = nullptr;
   Listener* drop_drop_ = nullptr;
   std::function<void(const std::string&, const std::string&)> drop_cb_;
-  std::function<void()> outside_cb_;  // press outside an open popup
+  std::map<int, std::function<void()> > outside_cbs_;
+  std::map<uint64_t, int> outside_by_node_;
+  int outside_seq_ = 0;
   std::function<void(const std::string&)> global_key_cb_;
+  // Document-level keydown listener for app shortcuts (installed by
+  // bind_global_key_dom; carries modifiers, which the window key callback lacks).
+  Listener* key_down_aux_ = nullptr;
   std::function<void(const KeyPress&)> key_input_cb_;
   std::function<void(int, int)> cell_cb_;
   std::function<void(bool)> scroll_pin_cb_;

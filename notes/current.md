@@ -1,4 +1,4 @@
-# FlashSight Notes
+﻿# FlashSight Notes
 
 The process of project: P0 环境搭建 + P1 AppCore
 
@@ -107,7 +107,7 @@ The process of project: P0 环境搭建 + P1 AppCore
     可靠路径，源码全仓扫描干净。
 ## 当前状态（更新）
 
-- P0+P1+P2+P3 完成。roadmap 30-agent.md 已勾选（剩 network.search 调研）。
+- P0+P1+P2+P3 完成。roadmap 30-agent.md 已勾选（剩 search_web 调研）。
 - 下一步：P4 UI（等 WhaleUI；fs_ui 空壳+事件类型先行）或收尾提交。
 
 <11>(SOLVED): P0-P3 回顾审计出的缺口（用户 2026-10-11 提出复查，已全部落地）：
@@ -118,7 +118,7 @@ The process of project: P0 环境搭建 + P1 AppCore
   3. Anthropic 会话调不通工具：HistoryBuilder 只产 OpenAI 格式 tool_calls，
      Anthropic 的 tool_use/content-blocks 装配缺失。
   4. x-opencode-session 套餐协议未落地（等调研子代理结果）。
-  5. 单会话持久记忆缺：需新增 session.summarize 工具（每轮记要点到 turn 要点字段），
+  5. 单会话持久记忆缺：需新增 summarize_session 工具（每轮记要点到 turn 要点字段），
      HistoryBuilder 压缩时把要点附加到上下文（平衡调用与记忆，支持几百轮）。
 
 <12>(SOLVED): 缺口补齐落地细节（39 用例 340 断言全过）：
@@ -126,7 +126,7 @@ The process of project: P0 环境搭建 + P1 AppCore
      merged_env()/merged_cli_tools()（全局+项目覆盖，ignoreGlobal 只取项目）。
   2. Anthropic 装配：HistoryBuilder.build_anthropic（system 单独字段 + text/tool_use/tool_result
      blocks；兼容扁平与 OpenAI 原生 toolCalls；tool 结果经 turn.toolResults 回填）。
-  3. 持久记忆：session.summarize 工具（points 数组 -> session.keypoint 事件）；
+  3. 持久记忆：summarize_session 工具（points 数组 -> session.keypoint 事件）；
      AgentHost.emit 闭包自动注入 sid；pending_keypoints_ 在 persist_turn 写入 turn.keyPoints；
      build/build_anthropic 压缩时收集被裁 turns 要点（最多 20 条）附加到折叠条。
   4. x-opencode-session（子代理实证 opencode 仓库）：亲和/路由 id 非 token；
@@ -180,8 +180,8 @@ The process of project: P0 环境搭建 + P1 AppCore
 
 <17>(SOLVED): addon2 后端增强全部落地（68 用例 516 断言全过；UI 零改动）。
   - A 工具：A1 工具真执行（execute_tool + run_loop 循环回填，修了原占位 "(tool executed by host)"）；
-    A2 dir.check；A3 file.regex（QuickJS 引擎移植，见 <15>）；A4 权限门（full 才可项目外）；
-    A5 噪声检测（罕见 script 短串+引号佐证）；A6 file.ls 基础/详细双模式。
+    A2 check_dir；A3 file_regex（QuickJS 引擎移植，见 <15>）；A4 权限门（full 才可项目外）；
+    A5 噪声检测（罕见 script 短串+引号佐证）；A6 list_dir 基础/详细双模式。
   - B 健壮性：B1 中断-继续（saved_messages_ 断点 + session.continue；子代理 steer）；
     B2 进程 todo（TodoStore，owner=sid/子代理 id，独立进程树）；B3 计划评审 revise（评价注入引导）。
   - C 工作流：WorkflowStore（步骤状态机 + graph_json 给侧栏图/嵌套列表）；
@@ -258,8 +258,8 @@ The process of project: P0 环境搭建 + P1 AppCore
     自动转后台；输出累积（上限 1MB）；shell 经 ShellDetector 解析（cmd/pwsh/bash 参数不同）。
   - FsApi 构造 TerminalManager 并注入 AgentHostDeps 的 terminal_spawn/poll/kill；
     make_ctx 补齐 sid（注册表按会话归属终端）+ terminal/net 回调。
-  - network.fetch 回调也接上（NetClient，method/headers/body/timeoutMs/sizeCap/verifyCert）。
-  - vision.screenshot/readImage 改为明确的 not-supported（之前经 net_fetch 转发是错的：
+  - fetch_url 回调也接上（NetClient，method/headers/body/timeoutMs/sizeCap/verifyCert）。
+  - screenshot/readImage 改为明确的 not-supported（之前经 net_fetch 转发是错的：
     net 接线后它会真发网络请求）；需要平台截图/图像解码后端，暂缓。
   - 新增 tests/test_terminal.cpp（真实起 shell 验证输出/kill）；86 用例 578 断言通过。
 
@@ -323,7 +323,7 @@ The process of project: P0 环境搭建 + P1 AppCore
     （openai-chat/openai-response/anthropic/plan/custom）；测试连接/获取模型列表/删除。
   - x-opencode-session 透传：ModelCallRequest.session_id -> ChatRequest.session_id
     （agent_loop 用 opts_.sid 填充），plan 形态自动作为亲和头发送。
-  - MCP/Skill 做实：McpRegistry upsert/set_enabled/remove/dump/load；FsApi mcp.list/
+  - MCP/Skill 做实：McpRegistry upsert/set_enabled/remove/dump/load；FsApi mcp_list/
     import/add/setEnabled/remove/detect（探测 ~/.claude/skills、~/.config/opencode/skills 等）；
     注册表持久化到设置 mcp.entries（重启恢复）；UI 列出、启停、新增（含目录浏览）、移除。
   - 设置补齐：新增「会话默认」「浏览器控制」「电脑控制」分区；外观加字体族/字号/等宽字体；
@@ -410,7 +410,7 @@ The process of project: P0 环境搭建 + P1 AppCore
     节点重建不丢。终端栏右侧状态文字删掉（用户反馈无意义），改成标题旁的小徽标
     （运行数/总数），无终端时不显示。
   - 新建终端 = “设置里的 shell”，不是手输命令：表单改为 shell 下拉
-    （settings.detectShells 结果）+ 可选名称，terminal.spawn（interactive=true）
+    （settings.detectShells 结果）+ 可选名称，terminal_spawn（interactive=true）
     起交互式会话（cmd /Q、pwsh -NoLogo -NoProfile、bash -i；stdin=pipe）；
     新增 terminal.write 把输入行写进 stdin，输出区下方有输入行
     （仅单终端视图且 running 时可用，Enter 发送、发完清空；聚合视图无单 stdin）。
@@ -1049,7 +1049,7 @@ The process of project: P0 环境搭建 + P1 AppCore
     approve=所有写/删/网络/终端都问；permissive=项目内直接放行，项目外路径/
     终端/网络要问；full=不问。`ToolContext::approved` 让"批准过的这一次"真的
     放行（否则问完还拒绝）。`file_tools` 的写门也按"是否逃出项目"判定，
-    `file.ls` 走 `resolve_by_perm`。`AgentHost::loop_for` 现在从 full.json 的
+    `list_dir` 走 `resolve_by_perm`。`AgentHost::loop_for` 现在从 full.json 的
     meta 读 cwd/pid（之前 Loop 的 cwd 是空的，项目内外根本无从判断）。
     三档图标也分开：逐次批准=手、宽松=文件夹、完全放行=闪电。
   - **i18n 补齐**：新增 ~295 条英文条目，并把 `ui_app.cpp` 里 200+ 处直接写死的
@@ -1152,7 +1152,7 @@ The process of project: P0 环境搭建 + P1 AppCore
     元素（CSS counter 会数到折行后的视觉行）。复制走新的 `IDom::copy_text`
     （浏览器 `navigator.clipboard` + textarea 回退；Whale 暂不支持）。
   - **子代理历史**：`SubagentRow` 增加 transcript / started_at / ended_at /
-    model / summary / open；`subagent.list` 本来就带 `full`，现在解析并渲染成
+    model / summary / open；`subagent_list` 本来就带 `full`，现在解析并渲染成
     可展开的对话记录（角色 + 内容），卡片头显示模型、已运行/耗时与结束时刻。
   - **终端**：去掉每行 `.ts-row` 的入场动画（一行终端会"往上抖"，40 行会播 40 次
     动画），改为整块 `.ts-lines` 淡入；同时裁掉网格末尾的空行——新终端只有一行
@@ -1276,7 +1276,7 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 255 用例 / 2580 断言。
   - **接线盘点**（120 个方法，UI 已用 72 个）：未接的 48 个里，多数是"设计上不该由
     UI 直接调用"的（lock.*、tool.invoke、steering.*、workflow.* 由 agent 侧驱动，
-    subagent.spawn 由模型调用）。真正属于"界面应该有、还没做"的见下一轮清单。
+    subagent_spawn 由模型调用）。真正属于"界面应该有、还没做"的见下一轮清单。
 
 <55>(TODO): 下一轮接线清单（按优先级）
   A. 会话生命周期（界面已有入口但没接全）
@@ -1298,14 +1298,14 @@ The process of project: P0 环境搭建 + P1 AppCore
      13. model.allEnabled 作为模型选择器的数据源（目前用 provider.listModels 聚合）
   E. Skill / MCP 管理
      14. skill.setEnabled / skill.remove / skill.create（设置-Skill 页目前只能导入和加载）
-     15. mcp.import（设置-MCP 页缺"从目录导入"）
+     15. mcp_import（设置-MCP 页缺"从目录导入"）
   F. 设置
      16. settings.unset（"恢复默认"按钮）
      17. settings.setIgnoreGlobal（项目级忽略全局设置）
      18. thinking.setLang（思考语言选择器的写入口）
   G. 其它
      19. workflow.*（工作流页整页未做；后端 define/list/start/get/retryStep/skipStep/steer 全在）
-     20. plan.update / plan.review（规划面板只读，不能编辑步骤或评审）
+     20. plan_update / plan.review（规划面板只读，不能编辑步骤或评审）
      21. terminal.show / terminal.setEncoding（终端详情与编码切换）
 
 <56>(SOLVED): 接线完成（21 项清单全部接上，UI 覆盖率 122 中 102）
@@ -1337,7 +1337,7 @@ The process of project: P0 环境搭建 + P1 AppCore
     providerId，切换供应商零请求）。
   - **E Skill/MCP**：Skill 卡片有启用开关和删除（仅用户导入的），新增「新建」
     表单（名称/标题/正文 → `skill.create`）；MCP 页「手动导入」改走
-    `mcp.import`（整目录导入），不再假装走单条添加。
+    `mcp_import`（整目录导入），不再假装走单条添加。
   - **F 设置**：文件页加「恢复默认」（`settings.unset` 清黑白名单与自动 git
     init）和项目级「忽略全局设置」（`settings.setIgnoreGlobal`，状态从
     settings.dump 的 `ignoreGlobal` 读回，不是猜的）；思考语言写入时同步
@@ -1346,12 +1346,12 @@ The process of project: P0 环境搭建 + P1 AppCore
     * 新增「工作流」侧栏面板：运行中的 run + 每步状态 + 失败步的「重试/跳过」
       与运行步的「引导」，以及可启动的定义列表。为此补了 `workflow.runs`
       （按 sid 列 run；之前只有 workflow.get(runId)，UI 无从发现 run）。
-    * 规划面板可编辑：逐步内联编辑、删除、添加步骤，均整体写回 `plan.update`；
+    * 规划面板可编辑：逐步内联编辑、删除、添加步骤，均整体写回 `plan_update`；
       底部有评审（通过/驳回/按意见修改 → `plan.review`）。
     * 终端标签加「编码」按钮，循环 系统默认 → UTF-8 → GBK，走
       `terminal.show` + `terminal.setEncoding`。
   - **仍未接的 20 个**（都是"不该由 UI 直接调用"）：`lock.*`（权限门的内部锁）、
-    `tool.invoke` / `subagent.spawn` / `steering.*`（模型侧调用）、
+    `tool.invoke` / `subagent_spawn` / `steering.*`（模型侧调用）、
     `workflow.define`（定义由内置表提供，暂无编辑器）、`session.get`（已被
     info+turns 取代）、`session.open/close/append`（内部生命周期）、
     `project.get` / `settings.get`（dump 已覆盖）、`browser.load`（skill 加载走
@@ -1759,3 +1759,616 @@ The process of project: P0 环境搭建 + P1 AppCore
     whaleui/release，release needs 正确；把 CI 的资源断言脚本在本地跑了一遍
     （`build/windows/x64/release` 下两个 exe 全部通过）；272 用例 2735 断言全过。
 
+
+<72>(SOLVED): Agent 上下文重做（三层上下文 + 中性消息 + 三形态适配）。
+  - **根因**：`AgentHost::loop_for` 从未给 `AgentLoop` 填 `history.tools / env /
+    system_prefix`。模型收到的是 `tools: []` 和空系统提示——"agent core 太简单"的
+    真实原因不是提示词写得少，而是**根本没有提示词**（`HistoryBuilder` 只用
+    `system_prefix` 拼，而它一直是空串）。上下文设计见 `doc-internal/agent-context.md`。
+  - **三层**：
+    1. 稳定前缀（system，逐字节稳定）：身份/工作方式/规划与工作流建议/工具索引/
+       skills 与 MCP/环境/项目约定/长期偏好/思考语言。
+    2. 对话（中性消息数组）：`user` / `assistant(toolCalls)` / `tool(result)`。
+    3. 每轮状态块（追加在**最新一条用户消息**里）：时间/规划/清单/子代理/水位。
+    易变字段不进前缀，否则前缀每轮都变、前缀缓存全废；状态块包在 `<runtime>` 里，
+    落库存原文（`promptRaw`），`unwrap_user_text` 回读。
+  - **规划与工作流显式建议**（用户点名要求的那段）：todo 用于"3 步以上或改多个文件"
+    的一次性任务；plan 是左侧规划栏、未闭合是自动模式继续的依据；子代理的判断标准
+    是**上下文成本**（要读很多文件才得出结论、而你只要结论）；工作流只在"同一条流水线
+    要反复跑 / 每步要单独重试跳过"时用。每块都写"什么时候**不用**"。
+  - **同时补工具**：`plan_update/get`、`subagent_spawn/list/cancel/steer`、
+    `workflow_list/start`（`src/tools/orchestration_tools.*`）。此前 PlanStore /
+    SubagentManager / WorkflowStore 在工具表里**一个入口都没有**，提示词等于描述
+    模型没有的手。
+  - **中性格式 + `provider::prompt::adapt`**：旧实现把 Anthropic 的
+    `{type:"tool_result"}` 塞进 user 消息发给所有端点，`[OI]` 端点忽略它 →
+    模型看不到结果 → 无限重发同一调用（直到 20 次上限）。现在按
+    `[OI]`（`role:"tool"` + `tool_call_id`）/ Anthropic（`tool_use`/`tool_result`
+    blocks + 顶层 `system`）/ Responses（`function_call_output`）分别渲染；
+    Anthropic 额外修"相邻同角色合并""首条必须是 user"。
+  - **整组调用**：一条回复里多个 toolCall 逐个执行，每个结果单独一条 `tool` 消息
+    （带 call id）。审批门按**整组**保存（`gate_messages_/gate_calls_/gate_index_`），
+    批准后继续执行剩余调用——旧实现只记一个 pending，组里其余调用直接丢掉。
+    拒绝时把 `permission-denied` 回填（不静默）。参数 JSON 解析失败**不执行**
+    （否则 `write_file` 的坏参数会变成"清空文件"）。
+  - **边界**：单轮往返 60、连续相同调用 3、自动续跑 12；触发就结束本轮并在回答里
+    注明原因（不再返回错误让 UI 以为 send 失败）。自动续跑前把模型上一条回答放进
+    历史，否则看起来像"用户凭空说继续"。
+  - **历史**：预算从**最新往回**累加（旧实现正序累加 + 一超预算就 `break`，把最新的
+    对话全丢了）；assistant 消息后紧跟它的 tool 结果；折叠摘要带 `prior_summary` 与
+    `keyPoints`；工具正文按字符边界截到 8000。
+  - **子代理真正执行**：`AgentHost::run_subagent` 起独立 `AgentLoop`——不读父会话历史、
+    不落库、只读预置代理只拿只读工具、权限不超过父；worker 线程跑完
+    `complete_with_summary` + `subagent.done`；宿主析构 join 所有线程（线程捕获 this）。
+  - **UTF-8 坑**（花了最久）：`find_first_of("。.\n")` 匹配的是**字节集合**，`。` 是
+    `E3 80 82`，其中 `0x80/0x82` 也是别的汉字的续字节 → 从汉字中间切开 → 非法
+    UTF-8 → `json::dump()` 抛 `type_error 316`，整轮崩（`m3_manual_e2e_persist` 就是
+    这么挂的）。同理 `substr(0, 4000)`。新增 `common/fs_utf8`（`truncate` 只切字符
+    边界、`sanitize` 兜底、`valid` 自检），所有截断改走它；多字节分隔符一律 `find`。
+  - 新增 25 个用例：`tests/test_context.cpp`（前缀稳定性、规划/工作流建议存在、
+    runtime 不污染前缀、三形态适配、结构修复、参数归一化、历史预算/遗忘/keyPoints）、
+    `tests/test_loop_flow.cpp`（整组调用、审批中断续跑、拒绝回填、坏参数不执行、
+    重复熔断、自动续跑、宿主接线真的带工具表和非空系统提示）。
+  - 实测：297 用例 2891 断言全过；`--variant=web` 与 `--variant=webview` 都编译通过。
+
+<73>(SOLVED): 水位驱动压缩 + edit_file 协议 + 用量口径 + 按步骤派子代理。
+  - 用户反馈四条：① 压缩应该看水位（设置里有阈值），不是固定预算；② 侧栏用量
+    只给相对水位和输出 token，缺缓存命中、单轮/总成本、钱/额度/未知三态；
+    ③ 子代理应该拆解单轮任务、每步单独派 step 子代理，工作过程可显示但不进历史；
+    ④ 文件工具应该是 edit_file（行号替换 + 哈希），不是 diffWrite 文本替换；
+    另外还要求确认"模型记忆对齐（哈希 + 二次验证）"和"read 防大文件"。
+  - **压缩改成水位驱动**：`HistoryBuilder::should_compress()` 是独立可测的决策函数，
+    三种触发——水位（`history.compressAtPct` 默认 80，读上一次请求的 prompt tokens /
+    模型窗口）、预算（`history.tokenBudget` 默认 32000，窗口未知时兜底）、强制
+    （用户点压缩）。**关键修复**：旧实现只是把预算调小，短会话仍然放得下 →
+    "点了压缩什么都没发生"。现在决定压缩就必然保留 `keepTurns` 条并折叠其余。
+  - **水位跨重启有效**：水位从用量日志读回（`usage.session.lastIn`），不是只存在
+    内存里；`deps.last_prompt_tokens` 注入宿主，重开会话第一轮就能正确判断。
+  - **edit_file 协议**（`edit_file`，移除 `file.diffWrite`）：读返回整文件 `hash`
+    （xxh64 前 12 位），编辑带 `hash` + 每段 `expect`。两道校验各防一种错：
+    hash 不符 = 文件被改过（返回 `currentHash` + `stale`）；expect 不符 = 行号对但
+    内容不是模型以为的（返回 `actual`）。多段编辑按原始行号解释、从下往上应用；
+    区间重叠拒绝；行号越界拒绝（不静默追加）；`newText` 空 = 删行。
+  - **行尾与末尾换行**：`split_text` 显式记录 `final_newline`。测试抓到真 bug——
+    旧实现每次编辑都会吃掉文件末尾的换行（POSIX 违规 + 整文件 diff）。CRLF 文件
+    编辑后仍是 CRLF；插入的多行按文件自己的 EOL 拼接。
+  - **read 守卫**：>32MB 拒绝、>1MB 需显式 offset/limit、单行 >4000 字符截断并标记、
+    前 4KB 含 NUL 判二进制。`find_files` 的 grep 也跳过超大文件。
+  - **用量口径**：`UsageSummary` 加 `cache_hit_ratio`（分母只算**上报过 cache**的行，
+    未上报 = -1 而不是 0%）、`cost_kind_by_provider`（一个会话可同时有付费与套餐
+    供应商，加在一起是错的）、`recent[]` 最近 50 行（UI 据此算"本轮"）。
+    侧栏显示：水位百分比 + 绝对值、缓存命中率 + 命中 token 数、本轮 tokens/成本、
+    会话累计成本、调用次数；超阈值直接给"压缩上下文"按钮。设置页补阈值档位、
+    保留轮数、token 上限、"立即压缩"，并把键名从不存在的 `history.compressPct`
+    统一成 `history.compressAtPct`。
+  - **按步骤派子代理**：前缀的规划节明确写"清单建好后逐项 subagent_spawn
+    （kind=complete-step、step=标题、todoId=id）"，并写依赖顺序。子代理上下文加
+    `subagent_step`："只做这一项，做不了说明原因，不要扩大范围"——不再要求它
+    重新规划整个任务。`subagent_steps_` 记录 step↔todo 映射，完成时自动
+    `todo_check`（进度条不会和现实漂移）。
+  - **上下文隔离**：子代理的 `stream.delta` / `tool.*` 事件现在带
+    `sid=父会话` + `subagentId` + `fromSubagent`：主界面能显示"正在做什么"，
+    但这些内容**不进 full.json、不进父会话 messages**。这是"工作过程可显示但不
+    进入历史"的实现。
+  - **unattended 模式**：子代理遇到需要批准的动作直接拒绝并回填
+    `howToProceed`，不会挂在 `waiting` 等一个永远没人按的按钮。
+  - 新增 `src/common/fs_hash.*`（xxh64，无依赖，附已知向量测试）、
+    `tests/test_agent_v2.cpp`（19 个用例）。总计 318 用例 3008 断言全过；
+    web / webview 两个变体编译通过。
+  - **踩坑**：用 PowerShell 的 `Get-Content`/`Set-Content` 批量改 `.cpp` 会把 UTF-8
+    中文按 ANSI 读写、整文件乱码（且 `-replace` 会把 `\n` 吞进注释）。已
+    `git checkout` 回滚并改用 Edit 工具。以后批量替换一律走 Edit/脚本文件，
+    不要用 PowerShell 文本管道改源码。
+
+<74>(SOLVED): "任务已中断 http 400" 的两个真根因（工具名非法 + 错误体被丢）。
+  - 用户报告：接上真 provider 后每轮都失败，UI 只显示"任务已中断 http 400"。
+  - **根因一：工具名带点号**。OpenAI 与 Anthropic 都要求工具名匹配
+    `^[a-zA-Z0-9_-]{1,64}$`。上一轮我把工具表真正发给了模型（之前根本没发），
+    于是 `file.read` / `plan.update` 这类点号名字让**每个请求**在到达模型前就被
+    400 拒绝。全部改成下划线风格：`read_file` / `write_file` / `edit_file` /
+    `list_dir` / `find_files` / `remove_file` / `terminal_exec` / `fetch_url` /
+    `todo_add` / `plan_update` / `subagent_spawn` / `load_skill` …（共 37 个）。
+  - **两层防护**：`ToolRegistry::register_tool` 现在调用 `wire_safe_tool_name()`
+    规范化（`.`/`/` → `_`、超长截断），并把 `ToolDef.name` 同步成规范名——
+    注册表键 / schema / 模型回调三者永远一致；以后新增或导入的工具写错也不会
+    再让整个请求 400。新增 `tests/test_wire_names.cpp` 遍历真实注册表断言合法性。
+  - **根因二：错误体被丢掉**。`provider_client` 把非 2xx 压成 `"http 400"`，
+    而端点其实回了 `tools[2].function.name: does not match pattern ...`。
+    现在 `http_error_text()` 解析 `{"error":{"message":...}}`（Anthropic 同形态）、
+    非 JSON 用原文、压成单行截 400 字符。这条让以后所有 provider 错误都能直接定位。
+  - **注意区分**：事件名（`subagent.done`）、FsApi 路由（`plan.update`）、
+    设置键（`history.compressAtPct`）不进请求体，保持点号不变。
+  - **批量重命名踩的坑**：`scripts/rename_tools.py` 做纯字符串替换，把
+    `subagent.steered`（事件）、`plan_update` 的 FsApi 路由、`deps.plan_update`
+    也一起改了。已用 `scripts/fix_event_names.py` 反向修回，并逐条确认剩下的
+    点号只出现在事件名/路由/注释里。
+  - 顺带修：`file_regex` 曾出现在只读子代理的白名单里（它会写文件），已移除；
+    新增 `set_subagent_tool_probe` / `wait_subagents` 测试钩子，
+    用例 `read_only_agent_has_no_write_tools` 断言只读代理拿不到
+    `write_file`/`edit_file`/`remove_file`/`file_regex`/`terminal_*`。
+  - 端到端验证：写了个临时探针打印**真实请求体**（37 工具、三种 provider 形态），
+    确认非法名 0 个、`assistant.tool_calls[0].function.name` 与
+    `tool.message.tool_call_id` 正确配对、整体是合法 UTF-8。
+  - 325 用例 3313 断言全过；web / webview 两个变体编译通过。
+  - 详见 doc-internal/agent-context.md §2.5.1（命名表）与 §10.3（错误信息）。
+
+<75>(SOLVED): 图片/搜索真接线 + 桌面端流式卡死（低级错误）。
+  - 用户实测三条：① image 两个函数没接线（截图只测过 Win32，要求全平台）；
+    ② search 也没接线；③ Webview 下对话不是流式、直接卡死。
+  - **卡死根因（最严重）**：`NativeBackend` 没重写 `IUiBackend::call_async`，
+    用的是接口默认实现——**同步调用**。于是桌面版每次 `session.send` 都在 UI 线程
+    上跑完整个 turn（模型往返 + 所有工具 + 下一轮），窗口冻住、delta 全排队、
+    什么都不流式。浏览器版走 HttpBackend 天生异步，所以从没暴露。
+    修法：`call_async` 入 FIFO 队列，由**单个**工作线程执行；`FsApi` 不是线程安全
+    的（持有 map），多线程会踩数据，单线程既安全又不挡 UI。结果与事件共用一条
+    队列，`poll()` 在 UI 线程交付（webview 的 ticker 已经用 `webview_dispatch`
+    跳到 UI 线程，所以 DOM 调用仍只在 UI 线程）。析构停线程。
+  - **图片链路**：
+    * 截图：`common/fs_screen` 三平台实现——Windows GDI `BitBlt`、macOS
+      CoreGraphics、Linux X11 `XGetImage`；Wayland 明确报不支持（没有可移植 API）。
+    * 解码：`common/fs_image` 自写 PNG 解码（stored/fixed/dynamic Huffman inflate）
+      + 32 位 BMP；JPEG/GIF/WebP 不重编码、原字节放行。
+    * 缩放/编码：双线性（只缩不放，长边受限）+ 自写 PNG 编码。
+    * **模型能看见**：工具返回 `dataUri`，loop 把它从 JSON 里取出变成中性 `parts`
+      块，adapter 渲染成 OpenAI `image_url` / Anthropic `image` base64 source。
+      只返回路径的话模型根本看不到图——这是"接线"的关键一步。
+    * Windows 非交互会话（锁屏/未连接 RDP/服务）BitBlt "成功"但全黑：现在检测
+      全黑并报错说明原因，不把黑图喂给视觉模型。
+  - **搜索链路**：`tools/search_backend` 支持 tavily/brave/searxng/custom，
+    各自请求形态与响应解析；缺 key、未配置、HTTP 错误都给人话；空结果不算错。
+    原来 `search_web` 把 `{search:true}` 塞进 `net_fetch`，而那个回调只读 `url`
+    → 每次 "empty url"。现在有独立的 `web_search` 回调，设置页在"权限-网络"下
+    可选 provider 并填 key/endpoint。
+  - 新增 21 个用例（`test_vision_search.cpp` 17 + `test_native_backend.cpp` 4）：
+    PNG 往返/坏数据/缩放/base64、read_image 返回 dataUri、screenshot 不再是
+    not-supported、电脑控制开关、四种搜索请求形态与解析、异步不阻塞/串行执行。
+  - 实测：本机截图能拿到 2048x1280 的真实位图，PNG 往返像素完全一致（用探针验证，
+    探针已删）。346 用例 3419 断言全过；web / webview 编译通过。
+  - 踩坑：PowerShell 批量改 .cpp 会破坏 UTF-8（上次已记）；这次改用 Python 脚本
+    （显式 utf-8）做批量替换，一次性脚本用完即删。
+
+<76>(SOLVED): 桌面端卡死重做（多线程）+ 截图改 DXGI 优先 + 图片改用 stb。
+  - 用户指出三条：① Webview 的修法不靠谱（"实在不行开多线程也不是不行"）；
+    ② 截图 BitBlt 是旧做法，1909+ 主流是 Modern API（Desktop Duplication），
+    建议优先它、全黑时 fallback BitBlt；③ 图片建议用 stb_image + stb_image_resize2。
+  - **卡死重做**：上一版用"单个工作线程串行"，能跑但一个长 turn 期间所有其他
+    调用（打开面板、点停止）都得排队，仍然不对。现在改成：
+    * **工作线程池**（按需增长到 4）：turn 占一个，UI 调用还有别的可用；
+    * `FsApi` 非线程安全（持有 map），所以在 UI→后端边界 `UiApi::call` 取
+      **一把递归锁**，130 个路由一次覆盖，以后新增的自动受保护；
+    * `session.send` / `tool.invoke` **不**在这把锁里（前者整个 turn、后者可能跑
+      一条终端命令），各自只锁短前奏，否则等于回到"冻住"；
+    * **嵌套调用内联**：turn 回调里再调后端时，`thread_local` 标记识别后直接执行，
+      排队会等自己→必然死锁（新增用例 `native_backend_nested_call_does_not_deadlock`）；
+    * `AgentLoop` 的 `state_`/`suspend_requested_`/`saved_valid_`/
+      `compress_requested_`/`context_limit` 改 `atomic`——UI 每帧读它们画状态点，
+      原来是数据竞争。
+  - **截图改 DXGI 优先**：`Desktop Duplication`（D3D11 + DXGI）读的是 DWM 合成后的
+    表面，锁屏/未连接 RDP/多 GPU/HDR 下 BitBlt 返回全黑而它正常；Duplication 不可用
+    （无适配器、被占用）才回落 GDI。`Capture::backend` 报告实际用了哪个。
+    实测本机：Duplication 在这台机器上不可用（返回失败），自动落到 GDI 并成功
+    截到 2048x1280 —— fallback 路径验证过了。
+  - **图片改用 stb**：`3rdparty/stb`（三个单头，MIT/公有领域，已加进
+    `scripts/fetch_3rdparty.py`）。`stb_image` 解 PNG/JPEG/GIF/BMP/TGA/PSD/HDR
+    （WebP 无解码器，明确报错并给真实尺寸）；`stb_image_resize2` 做 sRGB 感知缩放
+    （文字缩到 1600px 仍可读，朴素双线性做不到）；`stb_image_write` 出真压缩 PNG
+    （自写的 stored-deflate 会把一张截图撑到几 MB）。解码前用 `stbi_info` 读头部，
+    按 `kMaxPixels` 拦解压炸弹。
+  - xmake：`3rdparty/stb` 加入 include；Windows 链 `d3d11`/`dxgi`；Linux 链 `X11`。
+  - 347 用例 3421 断言全过；web / webview 编译通过。
+  - 详见 current.md <76>、doc-internal/agent-context.md §10.4、thirdparty.md。
+
+<77>(SOLVED): ask 静默失败 + 自动轮无预告/无小圆点/混进历史 + 失败轮丢用户输入。
+  - 用户实测五条：① ask 不挂起、静默失败；② 自动轮没有任何预告；③ 主页没有
+    "后台运行"紫色小圆点；④ 自动轮完全没有界面显示、稀里糊涂；⑤ 输入提示失败但
+    后台跑起来了，回来输出在、输入没了；⑥ 冒出 "tool round limit reached (60)"。
+  - **ask 静默失败（根因）**：工具自己发 `ask.prompt` 然后返回 `asked:true`，
+    于是模型以为"用户已经回答了"，本轮继续跑，用户的选择从未回填。
+    现在：工具只返回 `awaiting_user`，**loop 像权限门一样挂起本轮**（state=waiting），
+    用户选择由 `answer_ask` 作为该次工具调用的结果回填后 `run_loop` 续跑。
+    过期 askId 被拒绝（不会用旧对话框的选择去回答当前问题）。
+  - **ask 界面**：原来复用权限确认框（只有"允许/拒绝"两个按钮），选项根本没显示。
+    现在单独的 ask 弹窗：问题 + 选项列表（标"推荐"）+ 可选自由输入；关闭弹窗也会
+    回填"(dismissed)"，不会把本轮永远挂着。
+  - **自动轮预告**：`auto.next` 事件带 round/maxRounds，UI 弹 toast「自动继续（第 N
+    轮）：原因」。原来这个事件 UI 根本没处理，所以"没有任何预告"。
+  - **紫色小圆点**：`session_dot` 新增 auto_round 参数——有自动轮时走 background
+    分支（紫）；`session.list` 也回 `autoRound`，主页/项目卡片不用打开标签页就能看到。
+    原来自动轮既不是 running 也不是 terminal，所以显示成"空闲"。
+  - **自动轮混进历史**：自动轮的 nudge 文本被当成用户输入存成 user turn，重载后
+    渲染成用户气泡、和上一轮粘在一起。现在存档带 `autoRound` + `system:true`，
+    `turn_to_message` 把它转成 system 分隔条（带左右横线 + "自动继续 · 第 N 轮"），
+    加载时也不再被 `role == user/assistant` 过滤掉。
+  - **失败轮丢输入**：`run_loop` 首发失败时只保存了断点、**从不落库 user turn**，
+    所以重开会话只看到后来后台跑出来的回答、没有当初的提问。现在失败时先
+    `persist_user_turn_only()` 再返回。
+  - **"tool round limit reached (60)"**：这是我上一轮自己加的安全上限，用户没设计过。
+    现在：默认值 60 → 200（真正的安全网），措辞改成"本轮工具调用达到上限，已暂停，
+    可以继续"，事件从 `loop.interrupted`（会弹"失败，可继续"）改成 `loop.paused`
+    （只提示，不冒充失败）。
+  - 新增 6 个用例（`test_ui_flow.cpp`）：ask 挂起+回填、过期 askId 拒绝、自动轮
+    带轮数预告、自动轮存档标记、失败轮仍存输入、工具上限是暂停不是中断。
+  - 353 用例 3455 断言全过；web / webview 编译通过。
+
+<78>(SOLVED): ask 面板重做（覆盖输入框/多问题/手动发送）+ SYSTEM 前缀 + round limit 自动开新轮 + 成本估算 + markdown 表格/引用/链接。
+  - 用户反馈六条：① ask 弹窗效果差，分辨不出选项，应覆盖输入框区域、显式给出选项、
+    手动点击发送；需要标题/问题正文/预置选项+自定义，支持一次多个提问并显示 1/x；
+    ② 自动发送的消息要带 `SYSTEM:` 前缀；与用户消息放一起可以，但应是系统消息不是气泡；
+    ③ round limit 有道理，但实测 1h8m/93 次工具调用，200 次并非不可达——建议 200 次后
+    自动开新的一轮，并要求模型审视工作（**指明是工具自动发的通知**，否则会误导模型
+    提前结束超长任务）；④ 成本统计仍无效果（DeepSeek 官方 API 有金额数据）；
+    ⑤ markdown 没有引用/TIP/WARNING/表格；⑥ 链接未测，指向文件的应在侧边栏打开。
+  - **ask 面板重做**：从浮层对话框改为**占据输入框区域**的 `ask-panel`——标题（含
+    `1/3` 计数）+ 问题正文 + 选项行（单选圆点 + 推荐标记）+ 自定义输入 + 发送按钮。
+    点选项只是**选中**，必须点"发送回答"才提交（用户明确要求手动发送，避免误点）。
+    多个提问按顺序展示，"下一个"切换；一次提交所有已答项，后端收齐才续跑。
+  - **多问题**：`run_tool_group` 把同一回复里的所有 ask 调用合并成一个 `ask.prompt`
+    （带 `asks[]`），而不是逐条弹出；`answer_ask` 按 askId 收集答案，**全部答完**
+    才把每个结果依次回填并 `run_loop`。
+  - **SYSTEM 前缀**：自动续跑的 nudge 改为 `SYSTEM: ...`，存档仍是 user turn 但带
+    `autoRound`+`system:true`，渲染成系统分隔条（不是气泡）。
+  - **round limit 改为自动开新轮**：达到上限不再"暂停等用户"，而是结束本轮、
+    发 `auto.next`、开新一轮；nudge 明确写"这是**系统自动切分**，不是用户要求停止，
+    也不代表任务完成，请先审视已完成的工作再继续"。默认上限 60→200 保留作为安全网。
+  - **成本**：`ModelCapabilities` 加三个单价（每百万 token：in/out/cache）。
+    `ProviderClient` 按优先级取：端点回报的 `cost` > `usage.cost` > **单价×token 估算**
+    （标 `estimated`）> quota > unknown。缓存字段兼容 `prompt_cache_hit_tokens`
+    （DeepSeek）与 `prompt_tokens_details.cached_tokens`。UI 里 `estimated` 显示
+    `≈¥x（估算）`，绝不冒充真实账单；预置表补了 deepseek/gemini 的单价。
+  - **markdown**：新增 blockquote（`>`，带左侧竖线）、`---` 分隔线、**表格**
+    （表头+对齐行+单元格）、`[text](url)` 链接（锚点带 `data-href` 不带真实 href，
+    点击由应用决定去向）。
+  - **链接打开**：新增 `link.open` 路由 + `FsApi::open_link`：http(s) 交给系统浏览器
+    （ShellExecute/xdg-open，白名单协议）；项目内相对路径返回给 UI 打开**侧边栏预览**；
+    `file://` 与自定义协议拒绝。两个 DOM 适配器都加了 `data-href` 的点击值提升。
+  - 358 用例 3489 断言全过；web / webview 编译通过。
+
+<79>(SOLVED): 子代理 403 + 压缩设置不生效 + MCP/Skill 混淆 + 工具结果要投影 + i18n 补齐 + 快捷键接线 + 弹窗失焦 + 滚动状态。
+  - 用户反馈八条：① 子代理被 403，且 step 该显示在主会话、其他该进侧栏；② 设置-模型偏好-压缩里
+    的阈值选项"没有意义"；③ MCP 有误（gsd 在 MCP 里启用但指令跑到 Skill）；④ 上下文占用太多，
+    工具结果应在下次 API 调用时只给摘要（去掉无用键、紧凑 json）；⑤ placeholder / 侧栏标签说明
+    大多没 i18n；⑥ 快捷键尤其是 Enter 相关"就是摆设"；⑦ 所有弹窗都不能失焦自动关闭（右键菜单、
+    选择模型）；⑧ 组件状态管理没做好：切换会话不保存滚动状态。
+  - **子代理 403 的真根因**：`AgentHost::send` 用 `loop->context().model` 建上下文，而 context 在
+    新 loop 上是空的（`set_context` 才填）——于是 `ctx.model` 为空，`session_ctx_` 里存的就是空模型，
+    子代理 spawn 时 seed 也是空 → `FsApi` 的 provider 路由"认不出模型就回退到第一个启用的连接"
+    → DeepSeek 模型被发到 Anthropic 端点，403。改为读 `loop->model()`（新增访问器），并加
+    `AgentLoop::model()`/`live_state()` 的注释说明为什么不能读 context。
+  - **压缩设置"没有意义"**：`history.*` 阈值只在 loop 创建时读一次，改设置要重启才生效。
+    `AgentHost::send` 现在每轮重读 `recentTurns/tokenBudget/compressAtPct/keepTurns` 并
+    `set_history_options`（该 setter 保留 tools，避免把工具表清空）。
+  - **MCP/Skill 混淆**：`mcp_detect` 探测的是 `~/.claude/skills`、`~/.claude/commands` 这些
+    **Skill 目录**，把每个子目录注册成一条 MCP 条目——用户配置里 72 条 `mcp.entries` 全是
+    `gsd-*` 这类 skill 目录，且和 `skills.entries` 完全重复。现在：
+    * `mcp_detect` 读**服务器定义**（`mcpServers` / `mcp.servers` / `servers`），新增
+      `McpRegistry::import_config_file`；
+    * 新增 `skill_detect`（skill 目录探测）+ `skill.detect` 路由，Skill 页的"自动探测"
+      不再调用 `mcp_detect`；
+    * 条目带 `kind`（server|dir）与 `server`（command/url/args），MCP 卡片显示真实命令行；
+    * **启动时迁移**：旧表里 `dir` 落在 skills 目录下的条目，导入 skill 注册表并从 MCP 表移除
+      （实测把用户的 72 条 MCP 条目清成 0，skills 仍是 72 条）。
+  - **工具结果投影（上下文优化）**：新增 `HistoryBuilder::project_tool_result`——按工具保留
+    "能继续干活"的字段（路径/行号/hash/exitCode/todo 项/失败原因），丢掉 bulk（read_file 正文
+    压到 900 字符、edit 的 before/after 只留行区间与条数、list_dir 只留名字样本、终端取 **尾部**、
+    图片不留 dataUri）。老格式（只有 `detail` 文本）先尝试解析成 JSON，失败则保留截断文本，
+    不会把结果整个丢掉。同一轮内（模型还要据此干活）保留原文，只做 16KB 上限。
+  - **i18n 补齐**：写了三个静态审计脚本（`temp/i18n_*.ps1`）扫出 tr() 键缺 en 条目 124 条、
+    只写中文没套 tr() 的可见文案 7 处。补齐后剩 1 条（头文件里的注释）。特别修了侧栏面板
+    标题/说明（`side_title` 现在过 tr()）与 `kSideKinds` 的描述、Web 服务页、压缩页、快捷键页。
+  - **快捷键接线**：`bind_global_key` 的值从裸键名改成带修饰符的 `"Ctrl+W"`（wasm/webview/whale
+    三个适配器都改；WhaleUI 新增 document 级 keydown 监听，window 回调仅在无它时兜底，
+    避免双触发）。`render()` 里按设置表匹配"关闭标签页/新建标签页"；"发送消息"含 Ctrl 时
+    输入框切到 Ctrl+Enter 发送（否则尊重会话自己的设置）。快捷键页的说明文字也不再写
+    "桌面端接入后生效"。
+  - **弹窗失焦关闭**：`comp::modal` 的 backdrop 点击保留，另外在 shell 里对 `modal:*` 绑定
+    `bind_outside_click`；**权限门的"关闭"是拒绝**（loop 正停在那里，不表态会挂住整轮），
+    confirm 弹窗则只清状态。Esc 的分支顺序改为 模态 > picker > 右键菜单 > 菜单，且模态分支
+    同样处理权限门拒绝。同时修了两个适配器里 `outside` 的父容器豁免——原来豁免整个
+    parent（`host.contains(t)`），点 popup 的兄弟节点都不关闭，看起来"关不掉"。
+  - **滚动状态**：webview 适配器 `set_scroll_top` 现在**同步回写**镜像（它的读是异步的，
+    原来切走时读到的是旧值，于是保存的是旧位置）；滚动事件里也顺手更新 `hist_scroll`，
+    不再只在切标签那一刻读一次。新增用例覆盖（切走再回来 offset 保持）。
+  - **子代理事件分流的落地**：`complete-step` 的 stream/tool 事件进主会话，其余（research/
+    explore/check-files）只进侧栏——宿主在每个事件上带 `subagentKind`，`apply_session_event`
+    据此过滤。新增用例覆盖两个方向。
+  - **ask 自定义行**：补 `.ask-option.custom` / `.ask-custom-wrap` 样式（与其他选项同形、
+    选中后在场内展开输入框）。
+  - **测试**：新增 6 用例（工具结果投影、弹窗失焦、confirm 不失焦误删、会话滚动 offset、
+    快捷键改 Enter 行为、子代理事件分流）。363 用例 3506 断言全过；web / webview 编译通过；
+    实测 web 服务起来后 `skill.detect` 能发现 skills 目录、`mcp.detect` 不再返回 skill 目录。
+
+<80>(SOLVED): 子代理线程栈泄漏 + 弹窗失焦（单回调覆盖/僵尸监听）+ 规划不实时/可乱改 +
+  子代理看不到内容/引导是摆设/follow-up + 历史分片 + 顶栏主页驻留。
+  - 用户反馈：① plan_update 和 todo_add 看着像一回事，实测规划没更新面板、面板里手动添加
+    是画蛇添足、完成状态和"据此判断继续"都没落地；② 子代理侧栏只能看到"在运行"和"引导"，
+    看不到在跑什么，引导按钮不知道在干什么，工作过程窗口太小、点不进历史；③ agent 工具其实
+    可以在返回后继续给子代理引导；④ **疑似严重内存泄漏**（webview 无响应，机器险些重启）；
+    ⑤ 弹窗（右键菜单、设置里的模型选择）依然无法失焦关闭；⑥ 顶栏标签多了以后访问不到，
+    应做成主页驻留 + 其余滚动。
+  - **内存泄漏（最要紧）**：`subagent_threads_` 是个只增不减的 `vector<std::thread>`——
+    线裎跑完但没 join 时**仍占着线程栈**（Windows 每个保留 MB 级地址空间），而它只在
+    `wait_subagents()`（析构）里被 swap 出去。于是**每个子代理都泄漏一份栈**，长时间会话
+    必炸。改为 `SubagentThread{id, thread}`，新增 `reap_subagent_threads()`：按**记录状态**
+    判定完成 → 移出 → 在**不持锁**的情况下 join（线程最后一步是 emit，持锁 join 会死锁），
+    在每次 spawn 前与 `on_timer_tick` 调用；并用 `thread_local g_in_subagent_thread` 防止
+    嵌套 spawn 时 join 自己的祖先/自己。
+  - **弹窗失焦（根因有三层）**：
+    * 适配器只保留**一个** outside 回调（`outside_cb_` / `outside_cbs().clear()`），多个弹窗
+      同时存在时后者覆盖前者；而且**文档级监听器不会随节点移除**，所以旧弹窗的监听器会去调
+      **当前**那个回调 → 关错对象/关不掉。改成**按 popup 节点 keyed 的回调表**（webview/wasm/
+      whale 三个适配器），并在 JS 侧加 `isConnected` 判断（已脱离 DOM 的弹窗不再生效）。
+    * 右键菜单用**缓存的 `ctx_menu_node_`** 绑定，菜单重建后指向已脱离的节点 → 绑定到空气。
+      改为渲染时按 key 查 `ctx-menu`。
+    * 权限门/确认框的失焦关闭保持（关闭=拒绝，否则挂住整轮）。
+  - **规划**：宿主一直发 `plan.update`，**UI 从没监听**（面板只在点按钮时 `plan.get`），所以
+    模型写好的规划看不见 → 加事件处理（后台会话落到 stash 视图）。`plan_steps` 从
+    `vector<string>` 改为带 `status/note` 的结构（兼容老的 `done` 布尔与裸字符串），面板显示
+    状态标记 + `已完成 n/总数`（**与 `should_auto_continue` 同一条件**）。**删掉手动增删改**：
+    规划是模型的工作状态，手改等于写一份模型没同意过的树；保留评审（通过/驳回/改）。
+  - **子代理面板**：运行中显示 `live_text`（带 `subagentId` 的 delta/tool.start 累积、只留
+    尾部 2KB）；转录里补上 tool call 名字（以前工具行整段消失）；「引导」改成**输入框 + 发送**：
+    运行中 → `subagent.steer`，**已结束 → `subagent.followUp`**（同一 id、带原转录再跑，
+    同步返回新摘要）。为此加 `SubagentManager::reopen_for_follow_up/transcript_for`、
+    `AgentHost::subagent_follow_up`、工具 `subagent_follow_up`、路由 `subagent.followUp`，
+    以及 `HistoryBuilder::Options::seed_messages`（把上一轮的转录作为历史回放）。
+    工作过程展开区从 `min(10*1.55em+3em, 50vh)` 提到 `min(28em, 70vh)`，工具详情 220px → 60vh。
+  - **历史分片**：`full.json` 原来**每追加一轮就整份重写**（O(n)/轮，6 轮就 90 KB）。
+    改为 `turns/NNN.json`（每片 16 轮）+ full.json 只留 meta/settings/ops；`load_full()` 仍
+    返回完整 `turns`（读时拼接），**上层零改动**。所有改写历史的路径走 `save_full()`（`forget`
+    原本直接写 full.json，被这次改动抓出来修正）；rollback/trim 后删多余分片（否则被裁的轮次
+    会复活）。**兼容旧格式**：老会话内联 turns 照读，下次追加自动迁移；判定用"存在分片文件"
+    而非"存在 turns/ 目录"（后者会把老文件误判、丢掉全部历史——用例抓到了）。
+  - **顶栏标签**：`tab_strip` 拆成 `tabs-fixed`（主页）+ `tabs-scroll`（会话标签 + "+"），
+    开再多会话主页也不会被推出屏幕。
+  - **测试**：新增 3 用例（规划实时更新、规划只读+评审、分片读写+回滚删片、老格式兼容），
+    改 3 个受影响的旧用例。366 用例 3553 断言全过；web / webview 编译通过。
+
+<81>(SOLVED): 急性卡死（定时器持锁 join + 子代理 delta 每帧重绘）+ spawn wait 无效 +
+  list 撑爆 + 子代理记录进独立标签 + 过程说明进工作过程。
+  - 用户纠正：卡死**不是慢性泄漏**，而是"生成子代理后几秒内"发生；中途输出不显示；
+    子代理应可点卡片跳新标签看历史（工作过程里的"生成子代理"也要能点），否则
+    **子代理一结束就永久看不到**，是设计缺陷。附 AI 实测：`spawn(wait=true)` 不阻塞、
+    无 summary；`subagent_list` 3 个代理就被截断（每项内嵌 ~10KB system prompt）。
+  - **卡死根因（两个，都在子代理路径上）**：
+    1. **定时器持锁 join**：`on_timer_tick()` 持 host 锁调 `reap_subagent_threads()`，
+       而它 join 已完成的子代理线程；子代理线程最后一步是 `emit()`（要同一把锁）
+       → 定时器等线程退出、线程等锁。tick 是 60ms 周期，所以表现为"派完子代理几秒后
+       整个应用冻住"。改为 **reap 在取锁之前**（并写进函数注释当契约）。
+    2. **子代理 delta 每帧全量重绘**：上一轮我加的"侧栏实时内容"直接 `render()`，
+       子代理一开口每秒上百个 delta → 事件循环被饿死（主对话早就用 25ms 下限节流，
+       这条路径漏了）。改成只置 `subagent_stream_dirty_`，由 `pump()` 按人类节奏画。
+    3. 附带修掉**数据竞争**：子代理线程的收尾块（`complete_with_summary` +
+       `subagent_steps_` + `todo_op`）没有 host 锁，而主线程并发读同一批 `std::map`。
+  - **`spawn(wait=true)`**：参数以前完全没读。现在**轮询记录状态**直到报回（不是 join
+    线程，否则重现死锁），返回值带 `summary`。
+  - **`subagent_list` 撑爆**：`to_json()` 不再带 `full`（转录里每条消息都含 system prompt
+    副本），只给 `transcriptMessages` 条数；完整记录走新路由 `subagent.detail`。
+  - **子代理记录可看**：侧栏卡片**可点击** → 打开独立标签 `sa:<id>`
+    （`SessionTab::kind="subagent"` + `build_subagent_page`），页面显示任务/摘要/耗时/
+    **完整转录**（不折叠不截断）；`subagent.done` 会刷新已打开的标签。工作过程里
+    `subagent_spawn`/`follow_up` 的行从结果里解析出 `id`，加「打开记录」按钮
+    → 同一个标签。这解决了"一结束就永久看不到"。
+  - **中途输出（过程说明）**：模型在工具调用之间的旁白既不是答案、也没被保存——以前
+    只有最后一轮的文本落库，中间说明关掉会话就消失，流式时还被粘在答案气泡里。
+    现在每轮发 `assistant.interim`，UI 归入工作过程的"过程说明"一节，并随 turn 落库
+    （`turn.interim`），折叠标题也标出 `N 段过程说明`。
+  - **高度**：工作过程折叠区 28em/70vh → **78vh**，单次调用详情 60vh → **65vh**
+    （工作过程内 70vh）。
+  - **cancel** 现在区分"取消了运行中的"与"本来就没在运行"（返回 `cancelled:true/false`）。
+  - **测试**：新增 3 用例（tick 与完成中的子代理不死锁——用循环 tick 覆盖"已标记完成、
+    线程未退出"的窗口；list 不带转录 + detail 有；interim 事件与落库）。
+    369 用例 3572 断言全过；web / webview 编译通过。
+
+<82>(SOLVED): 卡死真因（follow_up 持锁跑 loop + collect_runtime 无锁读）+ 工作过程不显示
+  （纯工具轮次没有 assistant 消息）+ 子代理记录改回侧栏 + 记录表上限。
+  - 用户补充的关键线索：**"spawn 第二个子代理才会出现"**、完全卡死后程序自己退出
+    （既是死锁又像内存问题）。上一轮我只修了 tick 持锁 join，没修到这条路径。
+  - **卡死真因 1：`subagent_follow_up` 持着 host 锁跑整轮 agent loop。** 它 emit（要锁）、
+    还可能嵌套 spawn（worker 要锁）——第二个子代理一出现就硬锁死。改为锁内只做快照
+    （kind/parent/transcript/seed + `reopen_for_follow_up`），**释放后再跑**。
+  - **卡死真因 2：`collect_runtime()` 无锁读 `records_` / `todos_`**，而子代理线程在并发写。
+    无锁读 `std::map` 是数据竞争：会 corrupt（崩）或自旋（卡）。这解释了"只有第二个
+    子代理才出现"——单个代理时没有并发写者。现在持 host 锁。
+  - **真因 3（内存）**：`records_` 永不清理，每条记录带整份转录、转录里每条消息又带一份
+    system prompt → 每会话几 MB。新增 `prune_finished(sid, 40)`，tick 里按会话调用，
+    只删已结束的（运行中永不删）。
+  - **工作过程依旧不显示的真因**：模型常常**只发工具调用、不发文本**，于是没有
+    `stream.delta` → 没有 assistant 消息；而 `tool.start`/`tool.update` 都要求
+    `m.back().role == "assistant"`，于是**工具块被整个丢弃**。同一个原因也解释了
+    **计时器不显示**（计时器渲染在那条消息上）。新增 `ensure_turn_message()`，在
+    `tool.start`/`tool.update`/`assistant.interim` 里按需创建该轮消息。
+    另外工作过程的渲染门槛加上了 `interim`（只有旁白的轮次也要有折叠块）。
+  - **高度**：工作过程与工具详情**都不再设上限**（10 行 / 28em / 78vh / 220px / 65vh 都试过，
+    都让看长结果变成在小盒子里滚动），随内容增长、由页面滚动。
+  - **子代理记录放回侧栏**：上一轮做成了全屏页面（`sa:<id>` 标签），用户指出两点问题——
+    子代理就该在侧栏、且全屏页关不回会话。现在是一个 `kind="subagent"` 的**侧栏标签**
+    （带 `subagent_id`、可多开、可关闭），卡片点击与工作过程「打开记录」都指向它；
+    已结束的代理照样能打开。全屏页面与 `build_subagent_page` 已删除。
+  - **测试**：新增 3 用例（两个并发子代理 + 持续 tick/list 不死锁；follow_up 不持锁能返回；
+    记录剪枝且运行中永不剪）。372 用例 3589 断言全过；web / webview 编译通过。
+
+<83>(SOLVED): 闪退丢记录（live 快照落盘）+ webview 关闭崩溃（dispatch 悬垂指针）+
+  挂起等后端 + 发送变中止 + 模型带供应商 + 思考档位真接线 + 侧栏记录可滚动 + 去掉手动定时。
+  - 用户反馈：① `Failed to unregister class Chrome_WidgetWin_0. Error = 1411`，子代理窗口
+    似乎不能滚动；② 模型显示要带供应商，"自动唤醒"手动按钮不要，思考强度按钮没做出来；
+    ③ 挂起不该点一下就切换（要等后端状态）；④ 发送后按钮应变"中止"；⑤ **闪退的聊天记录
+    没记下来**，说明不是真实时（内存缓存没在异常时写盘），上一轮内容丢失。
+  - **闪退丢记录（真 bug）**：一轮只在**结束时**才 append 到会话文件，所以进程一崩整轮就没了；
+    之前的 live 快照只在内存里——崩溃正好把它一起带走。现在 `maybe_persist_live()` 在**流式期间
+    每 ~2s** 把在飞回合写进 `runtime.json` 的 `live`（正文 + **userText** + startedAt），
+    落地时写一次 `{running:false}` 清空（否则重开会把已入库的回答当崩溃恢复再显示一遍）。
+    `session.liveTurn` 变两级：内存在跑→原样返回；没跑但盘上有 running 快照→
+    `{crashed:true, running:false}`，UI 渲染成一条**已完成**消息并提示已恢复。
+  - **webview 关闭崩溃（`Chrome_WidgetWin_0`）**：`webview_dispatch` 的任务捕获 `&ui`，
+    而 `webview_run()` 返回后队列里可能还有未执行的任务 → 它们在 `webview_destroy()` 期间
+    访问已析构的 `UiApp`（Chrome 注销窗口类正好撞上，所以报的是 unregister class）。
+    改为 `PumpCtx{app, alive}` + `shared_ptr<atomic<bool>>`（按值进回调），关闭顺序
+    `running=false → join → alive=false → app=nullptr`，回调先查 alive。
+  - **侧栏记录不能滚动**：`.side-body` 是 flex 列，而 `.sap-msg` / `.subagent-card` 带
+    `overflow:hidden` 且默认可收缩 → 内容被裁掉而不是溢出，面板没有可滚动的内容。
+    加 `flex:none`（并给长 token `overflow-wrap:anywhere`）。
+  - **思考档位"没做"**：合成器用 `thinking_levels_for(模型名)` —— 那是硬编码白名单
+    （o1/claude/gemini/deepseek-r…），任何自定义/新模型都返回空 → 控件**根本不渲染**。
+    改用 `model.allEnabled` 里该模型的 `thinking.levels`（模型表是权威），猜名只作兜底。
+  - **挂起等后端**：点击只发请求，`refresh_loop_state` 回读 `session.loopState` 决定文案；
+    请求在飞时按钮禁用（连点会发出 suspend+resume 两条相反请求）。
+  - **发送 ↔ 中止同键**：新增 `turn_running`（来自 turn.started / turn.done /
+    loop.interrupted / loop.paused / session.loopState），为真显示**中止**
+    （走 `session.suspend`：当前工具返回后 park、保留转录、可继续）。
+  - **模型按钮带供应商**：`主名 · 供应商`（dim、非等宽），数据来自 `providerName`。
+  - **去掉手动"定时唤醒"**：排程是模型的动作（`session.schedule`）；用户唯一相关的操作是
+    **取消**一个已排唤醒，只在真有待唤醒时出现在挂起旁边。
+  - **测试**：新增 2 用例（流式期间有带正文+问题的快照、落地后最后一次写是清空；
+    换一个 FsApi 进程仍能读回快照并标记 crashed）。374 用例 3583 断言全过；
+    web / webview 编译通过。
+  
+ 
+<84>(SOLVED): 思考档位终于出现（无档位模型回退 disable/enable + 出网归一化）+ 输入框
+  补全可用（Tab 真的能接受）+ markdown 提示条从不显示的真因 + ui_app.cpp 批量误删后的恢复。
+  - **背景**：上一轮我跑批量文本替换时执行了 `.replace('tr("','"')`，把 `src/ui/ui_app.cpp`
+    里约 680 处 `tr()` 调用前缀删掉，还顺带损伤了 `c_str(`→`c_s`、`attr(`→`.at`、`substr(`→`subs(`。
+    之后每一版"修复脚本"都让文件更糟。最终收尾办法是 **token 级对齐**：把当前文件与 HEAD
+    各做一遍词法切分、都去掉 `tr(` 后做 `difflib.SequenceMatcher`，只对"与 HEAD 唯一对应且
+    差异恰好是删除 tr() 包裹"的行按 HEAD 还原（24 行），其余靠编译器逐条修。教训已写进
+    this entry 的末尾。
+  - **思考档位从来没有渲染（真因）**：用户的模型（`deepseek-flash` / `deepseek-v4-pro`）在
+    配置里就是 `caps.thinking=false` + 空档位表，而 UI 的渲染条件是"档位表非空"。于是控件
+    永远不出现，跟样式、宽度、CSS 都无关。现在：档位表为空且已选模型时，回退成最粗的两档
+    **关 / 开**（`disable` / `enable`），默认项仍是"默认"（= 什么都不发），所以仅仅渲染这个
+    控件不会把请求改坏；用户明确选了"开"才发提示。
+  - **回退值不能直接出网**：没有哪个厂商接受字面上的 `enable`（OpenAI 认 minimal/low/medium/
+    high，Anthropic 根本没有命名档位，其他家把未知 effort 当 400）。新增 `wire_thinking()`
+    在**唯一触碰网络的那一层**归一化：`disable/off` → 整个字段省略；`enable` → `medium`；
+    其他原样透传。Anthropic 分支同时补齐 minimal/max 的预算映射，OpenAI **Responses** API
+    补上 `reasoning.effort`（此前完全没处理，"Responses 供应商上设思考档位毫无作用"）。
+  - **输入框补全：Tab 真的能接受了**。`accept_complete()` 只改 `st_.session_input`，而框架
+    **故意**不给获得焦点的 textarea 回写 value（否则每次敲键都跳光标）——所以接受的文本从未
+    进 DOM，表现就是"按 Tab 菜单关了但一个字没插入"。现在照 `send_message` 清空输入框的做法，
+    把新文本**直接写进节点**。同时两个浏览器后端在 `data-keys-capture` 存在时对 Tab/↑/↓/Esc
+    调 `preventDefault`：不然浏览器先移焦点/滚页，按键根本轮不到 app；只有补全菜单开着时
+    才带这个属性，别处的 Tab 导航与方向键滚动不受影响。
+  - **markdown 提示条从不显示（真因）**：检测代码写在 `build_session()` 里，而它只在 `render()`
+    期间跑；本 UI 又故意"打字不重绘"。结果检测函数位于唯一永远不会被调用的位置。现在拆出
+    `maybe_update_md_hint()` 在**输入回调**里调用，且只在识别集合变化时才安排一次重绘
+    （不是每次按键）。实测：输入 `**bold** 和 \`code\`` → 显示 `bold · inline code`，
+    原文一字未改。
+  - **设置页只剩两个阈值旋钮**：`自动压缩阈值`（60/70/80/90/关闭）与 `保留最近轮数`。
+    "最近轮次"窗口和"token 硬上限"已删除——它们是**每轮都会触发**的隐形压缩，跟水位无关。
+    新增用例把这两个幸存者钉住，防止以后被悄悄加回来。
+  - **测试**：新增 6 用例（无档位回退、有档位优先、wire 归一化三态、Anthropic 预算、
+    markdown 提示条打字即现且不改原文、设置页只剩两个旋钮）。380 用例 3611 断言全过；
+    web / webview 双变体编译通过。
+  - **浏览器实测（127.0.0.1 真实页面）**：思考控件出现且为 `默认/关/开`；输入区仍是**单行**
+    28px 无溢出；供应商 `DeepSeek` 存在但在窄宽度下 `display:none`（紧凑模式不显示厂家）；
+    开头 `/` 弹技能列表、↑/↓ 移动选中、**Tab 插入 `/new `**；句中 `./sr` 弹 `src/` 候选；
+    markdown 提示条显示 `bold · inline code`。
+  - **踩坑记录（写给下一次）**：**不要**对源码做"先删再补"式的批量正则替换。字面量
+    `.replace('tr("','"')` 这类操作会删掉函数名前缀并留下不成对的括号，而后续每一版修补脚本
+    都会在已经损坏的文本上继续猜，越修越坏。正确做法是 token 级比对 + 按行还原，或者
+    `git checkout` 后重放编辑。无法用 Edit 工具时，用 `io.open(..., encoding='utf-8', newline='')`
+    的 Python 脚本，绝不用 PowerShell 重写含中文的源文件。
+
+<85>(SOLVED): 思考档位按模型配置（去掉伪"默认"）+ 空图标按钮 + 删掉 markdown 提示条 + 子代理记录落盘 + 滚动恢复延后。
+  - **用户纠正了我上一轮的设计错误**："你不会以为用'默认'表示模型设置里的吧？应该是模型配置了
+    选项这里放上，我说的 enable 那些是作为 fallback 的" —— 完全正确。现在下拉框只列模型表里
+    的 `thinking.levels`，并预选模型自己的 `thinking.default`；`disable`/`enable` 仅在该模型
+    没有任何档位时才作为 fallback 出现。伪"默认"选项已删除。
+  - **"模型选择与思考强度中间的空按钮"真因**：`thinking_icon()` 对"默认/关/未知"返回
+    `lightbulb`，而图标子集里**没有** `fa-lightbulb`（只有 `fa-brain`），于是渲染成一个空白
+    按钮。改用存在的 `fa-brain`（关档用 `fa-bolt` 区分两端）。
+  - **改完模型设置输入框不更新**：`save_model()` / `toggle_model_enabled()` 之后只重载设置页的
+    模型列表，从不刷新合成器。两处都补 `refresh_model_availability()`。
+  - **markdown 提示条删除**："我输入什么上面给我一个 bold 之类的字样…还不是实时的…甚至显示还会
+    让输入框失去焦点"。textarea 无法局部上样式，而"打字不重绘"是硬约束（否则跳光标），所以那
+    个提示条既不实时也无用。整套（`md_hint_for_inner` / `maybe_update_md_hint` / 状态字段 /
+    `.composer-mdhint` 渲染）已移除。
+  - **滚动恢复真因（第二轮）**：之前把 `set_scroll_top` 放在 `render()` 之后**同步**执行。
+    render 只是 patch 了 VNode，浏览器还没对新内容做布局——此时赋 `scrollTop` 会被**旧高度**
+    钳位（500 → 0），随后该次 scroll 事件又把 0 写回保存值。现在抽出
+    `schedule_history_scroll_restore()`，在下一个 tick 执行，并再延一 tick 才松开
+    `restoring_scroll_` 守卫。实测：滚到 500 → 切到别的会话 → 切回来，仍是 500。
+  - **子代理记录打不开（用户猜对了）**：记录只在内存里，重启即丢；而且 `turn_to_message()`
+    重建历史时**没有**恢复 `subagent_id`，所以刷新后"打开记录"按钮本身就消失了。三处修复：
+    ① 循环把 `subagentId` 作为正式字段写进 toolCall；② UI 重建历史时优先读该字段、回落到
+    解析 detail JSON；③ 记录完成时落盘到 `<session>/subagents/<id>.json`，
+    `subagent.detail` 新增 `subagent_detail_in(sid, id)` 在内存 miss 时读盘。
+  - **顺手清掉死字段**：`HistoryBuilder::Options::recent_turns` / `token_budget` 已无任何
+    读取点（压缩只剩水位 + 强制），连同测试里的赋值一并删除，避免以后再被误当成"有效旋钮"。
+  - **测试**：新增/改写 6 用例（档位 fallback、档位用模型配置并预选默认、会话选择优先、
+    滚动恢复延后、子代理 id 跨重载存活、记录跨进程存活、id 清洗）。384 用例 3635 断言全过。
+  - **构建踩坑**：emcc 的 acorn 压缩步骤偶发崩溃（返回码 3221225477 = 0xC0000005 访问违例），
+    重试即可；`-Os` 触发。另注意 wasm 目标是 per-variant 的：切到 webview 后 `fs_ui_wasm`
+    不再是有效目标，要 `xmake f --variant=web` 才会回来。
+
+<86>(SOLVED): 思考档位只剩一个控件（每档一个图标 + 未知用灯泡）+ 挂起/恢复真的能继续 + 模型选择器打开在对应页 + 页面切换滚动改同帧恢复。
+  - **"思考档位，思考档位（重复！这个按钮按下没反应）"**：合成器里其实是**两个**东西——
+    一个 `icon_text_button(..., nullptr, ...)`（没有 handler，按了当然没反应）紧挨着一个
+    原生 `<select>`，两者显示同一个值。现在只剩**一个**图标按钮：点开是档位列表，每行带
+    自己的图标和勾选。窄容器时 `.it-label` 自动收起 → 只剩图标（容器查询，不是新机制）。
+  - **"图标也只有关闭和其他"**：`thinking_icon()` 对除 off 以外的档位一律返回 `brain`。
+    现在每一档一个专属字形：关=power-off、最低=feather、低=gauge、中=brain、高=fire、
+    超高=gauge-high、最大=infinity、自动=wand-magic-sparkles，**未知档位统一灯泡**
+    （"未知的选项就用个通用的灯泡或大脑吧"）。顺手发现图标子集里 `fa-brain` 的码位是
+    `f19c`（错的字形），重新生成后是 `f5dc`；`fa-lightbulb`/`fa-fire`/`fa-gauge*`/
+    `fa-power-off`/`fa-feather`/`fa-infinity` 一并补进 `tools/make_fa_subset.py` 的
+    WANTED + FALLBACK，重新生成 `web/icons/fa-subset.css`（旧图标零丢失，已用脚本对比）。
+  - **挂起"功能疑似没做全"**（三处真缺陷）：① 循环真正停车后 `suspend_requested_` 已被清掉，
+    `loop_state()` 于是报 "idle"，UI 立刻退回"挂起"按钮——看起来像任务结束；新增
+    `AgentLoop::parked_`，停车时置位，`loop_state()` 也认它。② `resume()` 只清标志，停车后
+    没有任何线程会再看它，**恢复是空操作**；新增 `resume_task()` 重跑 `saved_messages_`，
+    `AgentHost::resume` 在**锁外**调用（同 `send()` 的约束）。③ 空闲会话上常驻一个
+    永远无效的 挂起 按钮；现在只有 `turn_running || suspended` 才渲染。另外挂起中发消息
+    走 `continue_task(text)`（带引导继续），不再开新轮把停住时的工具结果丢掉。
+  - **模型选择器"不会自动放到选择的那一页"**：左列是供应商列表，打开时用
+    `provider_selected`/第一个供应商，当前模型常常在别的页。`open_model_picker` 现在记下
+    `model_picker_focus`（会话模型 / 设置项当前值），`allEnabled` 回来后再把左列切到该模型
+    的供应商。
+  - **页面切换滚动（第三轮，这次改机制）**：前两版都错在同一点——**在后面的 tick 里设
+    scrollTop**：内联版本按旧高度钳位成 0 并被 scroll 事件写回；延后一拍版本先以 0 画出
+    来再跳过去（"这次是到顶上了"）。现在 `request_history_scroll_restore()` 只记目标，
+    **同一个 `render()` 里** patch 之后先读 `scroll_height()/client_height()` 强制布局、
+    再 `set_scroll_top()`——第一次绘制就是对的。`switch_tab` 也走这条路径（缓存视图
+    已有消息，不必等网络）。恢复期间 `restoring_scroll_` 抬起两拍，滚动回调不写回。
+  - **测试**：新增/改写 8 个用例（单一思考控件 + 菜单打开/点击选中、每档独立图标、未知档位
+    灯泡、挂起后 `resume_task` 真的继续、挂起中发消息续跑而不是开新轮、滚动恢复**同一 render**
+    生效）。388 用例 3642 断言全过；web / webview 双变体编译通过。
+  - **验证方式的坑**：这次内置浏览器面板起不来（`browser guest not attached (webview not
+    ready)`，两次都一样），于是改用 **HTTP 断言**验证产物：服务端 `/style.css` 里
+    `.think-menu` 存在、`.thinking-group` 已删除；`/fs_ui.wasm` 里 `think-menu` 出现 4 次、
+    `thinking-sel` 0 次。UI 结构本身由 NullDom 用例逐条断言（比肉眼更可靠）。
+
+<87>(SOLVED): 编辑并重发（按钮此前根本不渲染）+ 停止/挂起后消息定格 + webview 滚动三处真因（切页回顶部 / 到顶不加载更早 / 终端不跟随）+ 删除假的浏览器控制 skill。
+  - **"4 并没有修好，我试了还是原来那样" 的真因**：`chat_message()` 的 user 分支在拼完
+    `bubble + meta` 后直接 `return`，而 `编辑` 按钮只加在 assistant 分支的动作行里——
+    按钮**从来没有渲染出来过**（用 CDP 查 `.msg.user .msg-actions` 得空数组）。
+    现在 user 气泡 hover 出 `编辑`，且只给**最后一条** user 消息（改更早的问题会让之后的
+    回答全悬空，那是 回滚 的活）。
+  - **编辑改成"先 arm、发送时才截断"**：点击只把文本放回输入框并记 `edit_turn_id`，转录一行
+    不动，合成器上方出现"正在编辑上一条消息 / 取消编辑"条；真正发送时先
+    `session.trimHistory`，回调里把本地转录从那一轮截掉，再走原来的 `dispatch_message()`。
+    这样点了编辑又改主意、或 trim 失败，都不会丢历史、也不会留下重复的问题。
+  - **停止生成/挂起确实没做全**：park 不发 `turn.done`，最后一条 assistant 消息的
+    `streaming` 永远为真（转圈 + 计时器继续走）。`loop.state = suspended` 现在自己定格
+    （`streaming=false`、补 `ended_at`），一个字都没产出的空消息直接丢弃。顺手删掉一个
+    永远走不到的重复 `loop.paused` 分支。
+  - **webview 切页回到顶部（真因，三处都在 glue 里）**：
+    ① `bind_scroll_edges`/`bind_scroll_pin` 传的是空字符串当"回调 id"，JS 里
+    `parseInt("")||0` = 0，监听器开头 `if (!el.__fsEdgeCb) return` 直接退出；
+    ② 滚动镜像 `push('scroll', el.__fsEdgeCb, …)` 用回调 id，而宿主 `on_push` 按**节点 id**
+    写槽位，于是宿主眼里的滚动位置恒为 0 → 切走保存 0、切回恢复 0；
+    ③ 连带 `at_top` 从不触发，回到顶部**不会加载更早的轮次**（终端 at-bottom 也一样死）。
+    修法：绑定传 `"1"` 作启用标志、镜像用节点索引 `i`；`at_top` 与 wasm 对齐成 24px。
+  - **本地第一次真正验证到原生窗口**：给 WebView2 加
+    `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9229`，直接用 CDP 驱动
+    `flashsight-webview.exe` 的页面。结果：长会话滚到 500 → 主页 → 切回仍是 500（修前 0）；
+    顶栏标签互切（长会话 700 ↔ 第二个会话 3140）也各自保持；
+    滚到顶 30 → 47 条（加载更早一页）；思考菜单在按钮上方 6px、右边缘对齐；
+    最后一条 user 消息有 `编辑`、更早的没有；气泡圆角 `10px 2px 10px 10px`。
+  - **假完成继续清**：删除内置 skill `browser-control` 和 `browser.load` 路由——它描述
+    navigate/query/act/eval，却没有注册任何对应工具，还指向已删除的"设置-浏览器控制"页；
+    留着只会让模型照文档编造结果。验证浏览器改走 Playwright/本地引擎 + terminal。
+    压缩页只剩 `自动压缩阈值`（`history_keep` 连状态字段一起删了）；`取消唤醒` 用的
+    `fa-bell-slash` 之前不在图标子集里（空白图标），已补进 `fa-subset.css` 与生成脚本。
+  - **测试**：391 用例 3670 断言全过；web / webview 双变体编译通过。新增
+    `uiapp_last_user_message_is_editable`（按钮只在最后一条 + 点击只 arm + 发送才 trim/send）、
+    `uiapp_suspend_finalizes_the_live_message`（park 定格、空消息丢弃）；skill 双语用例改用 lsp。

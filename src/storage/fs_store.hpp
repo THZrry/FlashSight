@@ -31,6 +31,10 @@ struct ProjectStore {
   // 会话路径
   ghc::filesystem::path session_dir(const std::string& sid) const;
   ghc::filesystem::path full_json(const std::string& sid) const;
+  // 历史分片：老的 turns 落在 turns/000.json、001.json…，full.json 只留
+  // meta/settings/最近一段。见 session-history.md §2.1。
+  ghc::filesystem::path turns_dir(const std::string& sid) const;
+  ghc::filesystem::path turn_shard(const std::string& sid, int index) const;
   ghc::filesystem::path runtime_json(const std::string& sid) const;
   ghc::filesystem::path patches_dir(const std::string& sid) const;
   ghc::filesystem::path patch(const std::string& sid, const std::string& turn_id) const;

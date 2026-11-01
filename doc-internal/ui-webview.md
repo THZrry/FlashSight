@@ -208,3 +208,23 @@ Windows 上按 PE 导入表决定要带哪些运行时 DLL：MinGW 链的是 `li
 - **远程是明文 HTTP**：密码和令牌都不加密。局域网/内网可用，公网请走隧道
   （SSH 端口转发 / Tailscale 之类），不要在公网直接暴露端口。
 - **密码设置向导**还没做；遮罩层已经就位，将来加向导（首次启动配置模型等）复用同一层。
+
+## 7. 窗口关闭时的 use-after-free（`Chrome_WidgetWin_0` 崩溃）
+
+用户看到过 `Failed to unregister class Chrome_WidgetWin_0. Error = 1411`。
+
+根因不在 webview 库，在本进程：驱动器线程用 `webview_dispatch` 把 `UiApp::pump()` 投递到
+UI 线程，**回调里捕获的是 `&ui`**。`webview_run()` 在窗口关闭后返回，但**队列里可能还有
+已投递、尚未执行的任务**——它们随后在 `webview_destroy()` 期间（以及 `UiApp` 已经析构之后）
+执行，于是访问了已销毁的对象；Chrome 注销窗口类正好撞在这个时间窗上，因此报的是
+"unregister class"。
+
+修法（`ui_main_webview.cpp`）：
+
+1. 投递的任务改用一个 `PumpCtx{app, alive}`，`alive` 是 `shared_ptr<atomic<bool>>`，
+   **按值**进入回调（按引用会是被捕获对象本身的 use-after-free）；
+2. 关闭顺序固定：`running=false` → `ticker.join()` → `alive=false` → `ctx.app=nullptr`；
+3. 回调先看 `alive`：已置假就直接返回，**不碰 `UiApp`**。
+
+这条规则适用于任何"把任务投到别的线程 / 事件循环"的适配器：**跨线程投递的 lambda
+不能捕获指向栈对象（或任何会先于队列被销毁的对象）的裸指针**。

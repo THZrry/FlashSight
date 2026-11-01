@@ -7,11 +7,11 @@
 | 项 | 落地 | 文件 |
 |---|---|---|
 | A1 工具真执行 | `AgentLoop::execute_tool` + `run_loop` 循环回填；批准/拒绝后从断点续跑 | `agent_loop.cpp` |
-| A2 `dir.check` | 子代理筛目录（复用 `file.ls`，带 `requirement`/`hint`） | `check_dir_tools.*` |
-| A3 `file.regex` | QuickJS 正则引擎；多文件替换；`$&`/`$1..$9`/`$$`；返回 before/after 可回滚 | `regex_tools.*`、`3rdparty/qjs-regex/` |
+| A2 `check_dir` | 子代理筛目录（复用 `list_dir`，带 `requirement`/`hint`） | `check_dir_tools.*` |
+| A3 `file_regex` | QuickJS 正则引擎；多文件替换；`$&`/`$1..$9`/`$$`；返回 before/after 可回滚 | `regex_tools.*`、`3rdparty/qjs-regex/` |
 | A4 权限门 | `resolve_by_perm`/`check_write_perm`：full 可项目外，其余仅项目内且拒绝对路径 | `file_tools.cpp` |
 | A5 噪声检测 | 罕见 script 短串（阿拉伯/希伯来/泰/高棉/天城/西里尔补充）+ 引号不平衡佐证 | `noise_detect.*` |
-| A6 `file.ls` 双模式 | 基础=仅文件名（默认省 token）；详细=`name,type,date,size` CSV | `file_tools.cpp` |
+| A6 `list_dir` 双模式 | 基础=仅文件名（默认省 token）；详细=`name,type,date,size` CSV | `file_tools.cpp` |
 
 ## 阶段 B：任务健壮性
 
@@ -19,7 +19,7 @@
   `session.continue`（`session_continue`）追加引导并 `run_loop` 续跑；发 `loop.interrupted`/`loop.resumed` 事件。
   子代理同理：`SubagentManager::steer`/`drain_steering`（子代理无轮概念，只需当前引导）。
 - **B2 进程（todo）**：`TodoStore`（owner=sid 或子代理 id，独立进程树）；
-  `todo.add/list/check/clear` 工具；`AgentHost::todo_op`；子代理经 spawn 时另建 ctx 得到独立树。
+  `todo_add/list/check/clear` 工具；`AgentHost::todo_op`；子代理经 spawn 时另建 ctx 得到独立树。
 - **B3 计划评审**：`PlanStore::review` + `plan.reviewed`；`approve/reject/revise`，
   revise 的评价经 `steering_push(immediate)` 注入下一轮微调。
 
@@ -41,7 +41,7 @@
 ## 双语 skill
 
 - `SkillRegistry`：中英 title/desc/body；`ThinkLang`（auto/zh/en）经设置键 `model.thinkingLang` 切换；
-  auto 跟随 i18n 系统语言。工具：`tool.skill.load` / `tool.skill.list`。
+  auto 跟随 i18n 系统语言。工具：`load_skill` / `list_skills`。
 - 全部新增工具 description 均为中英双语（简明），按 addon2 要求。
 
 ## 测试

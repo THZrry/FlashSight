@@ -78,6 +78,37 @@ static void collect_msg_nodes(const VNodePtr& v, const std::string& prefix,
   }
 }
 
+// Click handler id of the first node carrying class `cls` whose subtree contains
+// the exact text `text`. Used to "press" a generated menu row: rows are built in
+// a loop, so they have no stable key to look up.
+static int click_hid_in(const VNodePtr& n, const std::string& cls,
+                        const std::string& text) {
+  if (!n) return 0;
+  std::string classes;
+  for (size_t i = 0; i < n->attrs.size(); ++i) {
+    if (n->attrs[i].key == "class") classes = n->attrs[i].value;
+  }
+  if (classes.find(cls) != std::string::npos) {
+    bool has_text = false;
+    std::function<void(const VNodePtr&)> scan = [&](const VNodePtr& m) {
+      if (!m || has_text) return;
+      if (m->is_text() && m->text == text) { has_text = true; return; }
+      for (size_t k = 0; k < m->children.size(); ++k) scan(m->children[k]);
+    };
+    scan(n);
+    if (has_text) {
+      for (size_t i = 0; i < n->events.size(); ++i) {
+        if (n->events[i].kind == EventKind::kClick) return n->events[i].hid;
+      }
+    }
+  }
+  for (size_t i = 0; i < n->children.size(); ++i) {
+    int hid = click_hid_in(n->children[i], cls, text);
+    if (hid) return hid;
+  }
+  return 0;
+}
+
 FS_TEST(uiapp_mounts_home) {
   NullDom dom;
   AppState st = AppState::make();
@@ -288,13 +319,13 @@ FS_TEST(uiapp_escape_dismisses_skill_menu) {
   app.update([](AppState& s) {
     s.skill_menu_open = true;
     AppState::CommandRow c;
-    c.name = "browser-control";
-    c.title = "Browser Control";
-    c.action = "skill:browser-control";
+    c.name = "lsp";
+    c.title = "LSP";
+    c.action = "skill:lsp";
     c.group = "skill";
     s.command_menu.push_back(c);
   });
-  EXPECT_TRUE(dump_has(dom, "/browser-control"));
+  EXPECT_TRUE(dump_has(dom, "/lsp"));
   dom.fire_key_for_test("Escape");
   EXPECT_FALSE(app.state().skill_menu_open);
   dom.fire_key_for_test("a");  // other keys must not close it
@@ -606,9 +637,9 @@ FS_TEST(uiapp_terminal_close_tab_keeps_process) {
   EXPECT_EQ(app.state().terminals.size(), size_t(1));
   EXPECT_EQ(app.state().term_tab, std::string("all"));
   EXPECT_EQ(app.state().term_hidden.size(), size_t(1));
-  // and the terminal was NOT killed (no terminal.kill was issued)
+  // and the terminal was NOT killed (no terminal_kill was issued)
   for (size_t i = 0; i < dom.calls().size(); ++i) {
-    EXPECT_TRUE(dom.calls()[i].detail.find("terminal.kill") == std::string::npos);
+    EXPECT_TRUE(dom.calls()[i].detail.find("terminal_kill") == std::string::npos);
   }
   // closing is not a dead end: the overview card reopens it
   app.reopen_terminal_tab("1");
@@ -1165,13 +1196,14 @@ FS_TEST(uiapp_settings_page) {
   EXPECT_TRUE(dump_has(dom, "请求体覆盖"));
   // every nav entry must render its own body (nav key == body branch).
   // 常规 is 界面显示 + 会话行为 (UI behaviour); 上下文 was dropped entirely and
-  // MCP/Skill are two pages now.
-  const char* sec_keys[] = {"general", "appearance", "browser", "computer",
+  // MCP/Skill are two pages now. 浏览器控制 is gone: nothing drove a browser, so
+  // every switch on that page was inert.
+  const char* sec_keys[] = {"general", "appearance", "computer",
                             "providers", "session_defaults",
                             "model_prefs", "subagents", "mcp", "skills", "memory",
                             "network", "terminal", "files", "environment",
                             "shortcuts", "about"};
-  const char* sec_text[] = {"界面显示", "主题", "浏览器控制", "电脑控制",
+  const char* sec_text[] = {"界面显示", "主题", "截图",
                             "Endpoint", "会话默认",
                             "输出语言", "并行上限", "手动导入", "搜索 Skill", "长期记忆",
                             "网络总开关", "重新探测", "自动 git init",
@@ -1180,6 +1212,47 @@ FS_TEST(uiapp_settings_page) {
     std::string key = sec_keys[i];
     app.update([&](AppState& s) { s.settings_nav = key; });
     EXPECT_TRUE(dump_has(dom, sec_text[i]));
+  }
+}
+
+// Compaction has exactly ONE control: the water-level threshold. "最近轮次" as a
+// window and "token 硬上限" were removed because both compacted on EVERY turn
+// regardless of the water level. "保留最近轮数" and "立即压缩" followed: the
+// first is an internal detail nobody can observe, the second only armed a flag
+// for the NEXT turn and so did nothing when pressed. This test pins the survivors
+// so a future edit cannot quietly bring the fake knobs back.
+FS_TEST(uiapp_history_settings_keep_only_the_threshold_knobs) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.open_modal_page("settings");
+  app.update([](AppState& s) { s.settings_nav = "model_prefs"; });
+  EXPECT_TRUE(dump_has(dom, "自动压缩阈值"));
+  EXPECT_TRUE(dump_has(dom, "关闭"));  // the "off" option of the threshold
+  EXPECT_FALSE(dump_has(dom, "保留最近轮数"));
+  EXPECT_FALSE(dump_has(dom, "立即压缩"));
+  EXPECT_FALSE(dump_has(dom, "最近轮次"));
+  EXPECT_FALSE(dump_has(dom, "硬上限"));
+  EXPECT_FALSE(dump_has(dom, "tokenBudget"));
+  EXPECT_FALSE(dump_has(dom, "recentTurns"));
+}
+
+// A settings page that only writes keys nobody reads is a lie. The browser and
+// "computer control" pages were exactly that (no driver, no mouse/keyboard
+// tools); the proxy "mode" selector was too (the network layer applies
+// host+port unconditionally). They must not be in the nav at all.
+FS_TEST(uiapp_settings_has_no_inert_fake_pages) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.open_modal_page("settings");
+  EXPECT_FALSE(dump_has(dom, "浏览器控制"));
+  const char* gone[] = {"启用浏览器控制", "驱动路径", "允许操作证书",
+                        "启用电脑控制", "跟随系统", "自定义"};
+  for (size_t i = 0; i < sizeof(gone) / sizeof(gone[0]); ++i) {
+    EXPECT_FALSE(dump_has(dom, gone[i]));
   }
 }
 
@@ -1232,8 +1305,17 @@ FS_TEST(uiapp_mcp_section_lists_and_adds) {
     // MCP has its own page now (Skill is separate: they are both long lists and
     // their import flows differ).
     s.settings_nav = "mcp";
-    s.mcp_tools.push_back(AppState::McpRow{"my-tools", "C:/tools/skills", "本地工具", true});
-    s.mcp_tools.push_back(AppState::McpRow{"other", "C:/other", "", false});
+    AppState::McpRow a;
+    a.name = "my-tools";
+    a.dir = "C:/tools/skills";
+    a.description = "本地工具";
+    a.enabled = true;
+    s.mcp_tools.push_back(a);
+    AppState::McpRow b;
+    b.name = "other";
+    b.dir = "C:/other";
+    b.enabled = false;
+    s.mcp_tools.push_back(b);
   });
   EXPECT_TRUE(dump_has(dom, "my-tools"));
   EXPECT_TRUE(dump_has(dom, "C:/tools/skills"));
@@ -1253,9 +1335,9 @@ FS_TEST(uiapp_skill_section_separate_from_mcp) {
   app.update([](AppState& s) {
     s.settings_nav = "skills";
     AppState::SkillRow a;
-    a.name = "browser-control";
-    a.title = "浏览器驱动技能";
-    a.description = "驱动外部浏览器";
+    a.name = "lsp";
+    a.title = "语言服务";
+    a.description = "符号重构";
     a.loadable = true;
     a.kind = "mcp";  // a built-in MCP, NOT a skill the user can type
     s.skills.push_back(a);
@@ -1300,14 +1382,52 @@ FS_TEST(uiapp_plan_toggle) {
   app.mount();
   app.update([](AppState& s) {
     seed_session(s);
-    s.plan_steps.push_back("重写 DOM Adapter");
+    AppState::PlanStep p;
+    p.title = "重写 DOM Adapter";
+    p.status = "running";
+    AppState::PlanStep q;
+    q.title = "补测试";
+    q.status = "done";
+    s.plan_steps.push_back(p);
+    s.plan_steps.push_back(q);
+    s.plan_goal = "把适配器重写完";
   });
   EXPECT_FALSE(dump_has(dom, "任务规划"));
   app.update([](AppState& s) { s.plan_open = true; });
   EXPECT_TRUE(dump_has(dom, "任务规划"));
   EXPECT_TRUE(dump_has(dom, "重写 DOM Adapter"));
+  EXPECT_TRUE(dump_has(dom, "把适配器重写完"));
+  // The panel shows PROGRESS, which is what the loop reads to continue.
+  EXPECT_TRUE(dump_has(dom, "1 / 2"));
+  // ...and the status is in the markup so the stylesheet can colour it.
+  EXPECT_TRUE(dump_has(dom, "st-running"));
+  EXPECT_TRUE(dump_has(dom, "st-done"));
 }
 
+// A plan the MODEL writes appears in the panel without the user toggling it: the
+// host emitted plan.update and nothing listened, so a mid-turn plan was invisible.
+FS_TEST(uiapp_plan_event_updates_panel_live) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.plan_open = true;
+  });
+  EXPECT_TRUE(dump_has(dom, "暂无规划步骤"));
+  Json tree = Json::object();
+  tree["goal"] = "ship the parser";
+  tree["steps"] = Json::array({Json{{"title", "write lexer"}, {"status", "done"}},
+                               Json{{"title", "write parser"}, {"status", "running"}}});
+  app.on_backend_event_for_test(
+      "plan.update", Json{{"sid", "sess_a"}, {"plan", tree}});
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("write lexer") != std::string::npos);
+  EXPECT_TRUE(d.find("write parser") != std::string::npos);
+  EXPECT_TRUE(d.find("ship the parser") != std::string::npos);
+  EXPECT_TRUE(d.find("1 / 2") != std::string::npos);
+}
 FS_TEST(uiapp_modal) {
   NullDom dom;
   AppState st = AppState::make();
@@ -1315,9 +1435,9 @@ FS_TEST(uiapp_modal) {
   app.mount();
   app.update([](AppState& s) {
     s.ask_modal = true;
-    s.ask_text = "允许执行 terminal.exec？";
+    s.ask_text = "允许执行 terminal_exec？";
   });
-  EXPECT_TRUE(dump_has(dom, "允许执行 terminal.exec"));
+  EXPECT_TRUE(dump_has(dom, "允许执行 terminal_exec"));
 }
 
 FS_TEST(uiapp_stream_delta_appends) {
@@ -1337,15 +1457,61 @@ FS_TEST(uiapp_stream_delta_appends) {
   EXPECT_FALSE(app.state().messages[0].streaming);
 }
 
+// 停止/挂起 ends the turn MID-STREAM, so no turn.done follows. The live message
+// has to be finalized by the state event itself - otherwise the transcript kept
+// a spinner and a counting timer for a task that had already stopped, which is
+// one of the ways 挂起 looked half-done.
+FS_TEST(uiapp_suspend_finalizes_the_live_message) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class SuspendBackend : public IUiBackend {
+   public:
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.loopState") r.data = Json{{"state", "suspended"}};
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.messages.clear();
+    s.turn_running = true;
+  });
+  app.on_backend_event_for_test("stream.delta",
+                                Json{{"sid", "sess_a"}, {"text", "half an ans"}});
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  EXPECT_TRUE(app.state().messages[0].streaming);
+  app.on_backend_event_for_test("loop.state",
+                                Json{{"sid", "sess_a"}, {"state", "suspended"}});
+  EXPECT_FALSE(app.state().messages[0].streaming);
+  EXPECT_FALSE(app.state().turn_running);
+  EXPECT_TRUE(app.state().suspended);   // from session.loopState, not the click
+  // A park before the first token leaves no empty bubble behind.
+  app.update([](AppState& s) {
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.streaming = true;
+    m.rev = 1;
+    s.messages.push_back(m);
+  });
+  app.on_backend_event_for_test("loop.state",
+                                Json{{"sid", "sess_a"}, {"state", "suspended"}});
+  EXPECT_TRUE(app.state().messages.size() == 1);
+}
+
 FS_TEST(uiapp_permission_prompt_opens_modal) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
   app.update([](AppState& s) { seed_session(s); });
-  app.on_backend_event_for_test("permission.prompt", Json{{"tool", "file.write"}});
+  app.on_backend_event_for_test("permission.prompt", Json{{"tool", "write_file"}});
   EXPECT_TRUE(app.state().ask_modal);
-  EXPECT_TRUE(dump_has(dom, "file.write"));
+  EXPECT_TRUE(dump_has(dom, "write_file"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2499,6 +2665,89 @@ FS_TEST(uiapp_turn_actions_are_addressable) {
             std::string("t_a"));
 }
 
+// 编辑并重发. Two rules, both of which used to be false:
+//   * the button must RENDER on the last user bubble (the user branch of
+//     chat_message returned before the action row was built, so it never did);
+//   * clicking it must only ARM the turn. The trim happens when the edited text
+//     is sent, so changing your mind after clicking 编辑 loses nothing.
+FS_TEST(uiapp_last_user_message_is_editable) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class EditBackend : public IUiBackend {
+   public:
+    std::vector<std::string> methods;
+    std::vector<Json> args;
+    Json args_for(const std::string& m) const {
+      for (size_t i = methods.size(); i-- > 0;) if (methods[i] == m) return args[i];
+      return Json::object();
+    }
+    BackendResult call(const std::string& method, const Json& a) override {
+      methods.push_back(method);
+      args.push_back(a);
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.info") {
+        r.data = Json{{"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}}},
+                      {"sessionSettings", Json::object()},
+                      {"systemOps", Json::array()}};
+      }
+      if (method == "session.turns") {
+        r.data = Json{{"turns", Json::array(
+                          {Json{{"role", "user"}, {"text", "first q"}, {"turnId", "t_a"}},
+                           Json{{"role", "assistant"}, {"text", "first a"}, {"turnId", "t_b"}},
+                           Json{{"role", "user"}, {"text", "second q"}, {"turnId", "t_c"}},
+                           Json{{"role", "assistant"}, {"text", "second a"}, {"turnId", "t_d"}}})},
+                      {"start", 0}, {"total", 4}, {"hasMore", false}};
+      }
+      // Without this the composer decides the remembered model is gone and
+      // refuses the send, which would look like the edit path not running.
+      if (method == "model.allEnabled") {
+        r.data = Json{{"models", Json::array({Json{{"id", "m1"}}})}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "m1";
+    s.model_available = true;
+  });
+  app.show("sess_a");
+  ASSERT_TRUE(app.state().messages.size() == 4);
+  // The action exists on the NEWEST question only: rewriting an older one would
+  // orphan every answer after it.
+  std::vector<VNodePtr> msgs;
+  collect_msg_nodes(app.tree_for_test(), "msg:", &msgs);
+  ASSERT_TRUE(msgs.size() == 4);
+  EXPECT_EQ(click_hid_in(msgs[0], "mini-btn", "\u7f16\u8f91"), 0);
+  int hid = click_hid_in(msgs[2], "mini-btn", "\u7f16\u8f91");
+  ASSERT_TRUE(hid != 0);
+
+  bus().fire(hid, "");
+  // Armed, not executed: the text is back in the composer and the history is
+  // untouched until the send.
+  EXPECT_EQ(app.state().session_input, std::string("second q"));
+  EXPECT_EQ(app.state().edit_turn_id, std::string("t_c"));
+  EXPECT_EQ(app.state().messages.size(), size_t(4));
+  EXPECT_TRUE(backend.args_for("session.trimHistory").empty());
+
+  app.send_message();
+  // Trim FIRST, then send: the old question and its answer are gone instead of
+  // being duplicated.
+  EXPECT_EQ(jsonutil::get<std::string>(backend.args_for("session.trimHistory"), "turnId", ""),
+            std::string("t_c"));
+  EXPECT_EQ(jsonutil::get<std::string>(backend.args_for("session.send"), "text", ""),
+            std::string("second q"));
+  EXPECT_TRUE(app.state().edit_turn_id.empty());
+  ASSERT_TRUE(app.state().messages.size() == 3);
+  EXPECT_EQ(app.state().messages[1].text, std::string("first a"));
+  EXPECT_EQ(app.state().messages[2].role, std::string("user"));
+  EXPECT_EQ(app.state().messages[2].text, std::string("second q"));
+}
+
 // The command menu renders whatever the backend listed - title, description and
 // all - and picking one runs ITS action.
 FS_TEST(uiapp_command_menu_is_backend_driven) {
@@ -2571,7 +2820,7 @@ FS_TEST(uiapp_workflow_panel_shows_runs) {
     BackendResult call(const std::string& method, const Json&) override {
       BackendResult r;
       r.ok = true;
-      if (method == "workflow.list") {
+      if (method == "workflow_list") {
         r.data = Json{{"defs", Json::array(
             {Json{{"name", "refactor"}, {"description", "big one"}, {"steps", Json::array()}}})}};
       } else if (method == "workflow.runs") {
@@ -2609,45 +2858,31 @@ FS_TEST(uiapp_workflow_panel_shows_runs) {
   EXPECT_TRUE(d.find("跳过") != std::string::npos);
 }
 
-// The plan panel is editable: adding a step writes the whole tree back.
-FS_TEST(uiapp_plan_edits_persist) {
+// The plan panel is a READ view of the model's plan plus the review actions.
+// Manual add/edit of steps was removed on purpose: the loop reads those
+// statuses to decide whether to continue, so hand-editing them writes a tree the
+// model never agreed to. What the panel must offer is the review path.
+FS_TEST(uiapp_plan_review_actions_only) {
   NullDom dom;
   AppState st = AppState::make();
-  class PlanBackend : public IUiBackend {
-   public:
-    Json last_plan;
-    int updates = 0;
-    BackendResult call(const std::string& method, const Json& a) override {
-      BackendResult r;
-      r.ok = true;
-      if (method == "plan.update") {
-        last_plan = a["plan"];
-        ++updates;
-      }
-      return r;
-    }
-    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
-  } backend;
-  UiApp app(dom, st, &backend);
+  UiApp app(dom, st, nullptr);
   app.mount();
   app.update([](AppState& s) {
     seed_session(s, "sess_a");
     s.plan_open = true;
-    s.plan_steps.push_back("first");
+    AppState::PlanStep p;
+    p.title = "first";
+    p.status = "pending";
+    s.plan_steps.push_back(p);
   });
-  app.update([](AppState& s) { s.plan_new_text = "second"; });
-  // the add button's handler is in the tree; call the same path through a click
-  // on the plan-add icon (last icon button in .plan-add)
   std::string d = dom.dump();
-  EXPECT_TRUE(d.find("plan-add") != std::string::npos);
+  // No authoring controls any more.
+  EXPECT_TRUE(d.find("plan-add") == std::string::npos);
+  EXPECT_TRUE(d.find("plan-no") == std::string::npos);
+  // Review stays: approving/revising is how the user steers a plan.
   EXPECT_TRUE(d.find("plan-review") != std::string::npos);
-  // editing state renders an input for that step (keys are framework-level, so
-  // this is asserted on the tree, not on the DOM dump)
-  app.update([](AppState& s) {
-    s.plan_editing = 0;
-    s.plan_edit_text = "first (edited)";
-  });
-  EXPECT_TRUE(find_by_key(app.tree_for_test(), "plan-edit-input").get() != nullptr);
+  EXPECT_TRUE(d.find("通过") != std::string::npos);
+  EXPECT_TRUE(d.find("驳回") != std::string::npos);
 }
 
 // Enter-to-send is a real setting: the textarea carries it so the DOM adapter's
@@ -3016,6 +3251,148 @@ FS_TEST(uiapp_history_follows_only_when_pinned) {
   EXPECT_TRUE(dom.count_of("scroll_to_bottom") > 0);
 }
 
+// The composer's thinking control must exist even for a model whose table carries
+// no level ladder. The user's own models report caps.thinking=false with an empty
+// ladder, and the old rule - "render only when model_thinking_levels is
+// non-empty" - meant the control they kept asking for never appeared. The
+// disable/enable pair is a FALLBACK, not the normal case.
+FS_TEST(uiapp_composer_thinking_falls_back_to_disable_enable) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "deepseek-flash";
+    s.model_thinking_levels.clear();  // nothing configured for this model
+    s.model_thinking_default.clear();
+  });
+  app.show("sess_a");
+  std::string d = dom.dump();
+  // ONE control: an icon button that opens the level list. There is no second
+  // widget next to it any more ("思考档位，思考档位（重复！）").
+  EXPECT_TRUE(d.find("thinking-btn") != std::string::npos);
+  EXPECT_TRUE(d.find("thinking-sel") == std::string::npos);
+  EXPECT_TRUE(d.find("fa-power-off") != std::string::npos);  // 关 = power-off
+  // No synthetic "默认" row: with a real ladder configured, the model's own
+  // default IS the default. A literal 默认 next to concrete levels was
+  // meaningless ("你不会以为用'默认'表示模型设置里的吧").
+  EXPECT_TRUE(d.find("\"\u9ed8\u8ba4\"") == std::string::npos);
+  // Opening the button lists BOTH fallback levels, each with its own glyph.
+  app.update([](AppState& s) { s.thinking_menu_open = true; });
+  std::string m = dom.dump();
+  EXPECT_TRUE(m.find("think-menu") != std::string::npos);
+  EXPECT_TRUE(m.find("\"\u5173\"") != std::string::npos);  // 关 (disable)
+  EXPECT_TRUE(m.find("\"\u5f00\"") != std::string::npos);  // 开 (enable)
+}
+
+// A model's configured ladder is used verbatim AND its configured default is the
+// level shown. The control is built from the model table, so what the user set in
+// the model settings is what the composer displays.
+FS_TEST(uiapp_composer_thinking_prefers_configured_levels) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "deepseek-flash";
+    s.model_thinking_levels.push_back("low");
+    s.model_thinking_levels.push_back("medium");
+    s.model_thinking_levels.push_back("high");
+    s.model_thinking_default = "high";   // what the model settings configured
+  });
+  app.show("sess_a");
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("thinking-btn") != std::string::npos);
+  // The button shows the configured default, not the first level.
+  EXPECT_TRUE(d.find("\u9ad8") != std::string::npos);  // 高
+  // "开/关" belong to the fallback pair only; their absence proves the configured
+  // levels were used instead.
+  EXPECT_TRUE(d.find("\"\u5f00\"") == std::string::npos);
+  EXPECT_TRUE(d.find("\"\u5173\"") == std::string::npos);
+  // The list offers every configured level, each with its OWN icon: 低=gauge,
+  // 中=brain, 高=fire. One shared glyph made them indistinguishable
+  // ("图标也只有关闭和其他").
+  app.update([&](AppState& s) { s.thinking_menu_open = true; });
+  std::string m = dom.dump();
+  EXPECT_TRUE(m.find("\u4f4e") != std::string::npos);  // 低
+  EXPECT_TRUE(m.find("\u4e2d") != std::string::npos);  // 中
+  EXPECT_TRUE(m.find("fa-gauge") != std::string::npos);
+  EXPECT_TRUE(m.find("fa-brain") != std::string::npos);
+  EXPECT_TRUE(m.find("fa-fire") != std::string::npos);
+}
+
+// A level chosen in the session wins over the model's default (the session stores
+// its own `thinking`, and reloading must not silently reset it).
+FS_TEST(uiapp_composer_thinking_session_choice_wins) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "deepseek-flash";
+    s.model_thinking_levels.push_back("low");
+    s.model_thinking_levels.push_back("high");
+    s.model_thinking_default = "high";
+    s.thinking = "low";  // the session overrode it
+  });
+  app.show("sess_a");
+  // the state keeps the session's choice
+  EXPECT_EQ(app.state().thinking, std::string("low"));
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("\u4f4e") != std::string::npos);
+  EXPECT_TRUE(d.find("thinking-btn") != std::string::npos);
+  EXPECT_TRUE(d.find("fa-gauge") != std::string::npos);  // 低's glyph
+}
+
+// Clicking a row of the thinking list sets the level and closes the list. This is
+// what the old decorative icon button never did ("这个按钮按下没反应").
+FS_TEST(uiapp_composer_thinking_menu_click_sets_level) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "deepseek-flash";
+    s.model_thinking_levels.push_back("low");
+    s.model_thinking_levels.push_back("high");
+    s.model_thinking_default = "high";
+  });
+  app.show("sess_a");
+  app.update([](AppState& s) { s.thinking_menu_open = true; });
+  // The 低 row is the one carrying that label; drive its click handler exactly
+  // the way the DOM adapter would.
+  int hid = click_hid_in(app.tree_for_test(), "think-menu-item", "\u4f4e");
+  ASSERT_TRUE(hid != 0);
+  bus().fire(hid, "");
+  EXPECT_EQ(app.state().thinking, std::string("low"));
+  EXPECT_FALSE(app.state().thinking_menu_open);
+}
+
+// A model level whose name we do not know still gets an icon (the generic bulb),
+// never a blank button - "未知的选项就用个通用的灯泡或大脑吧".
+FS_TEST(uiapp_composer_thinking_unknown_level_has_fallback_icon) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "deepseek-flash";
+    s.model_thinking_levels.push_back("hyperdrive");  // not a known level
+    s.model_thinking_default = "hyperdrive";
+  });
+  app.show("sess_a");
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("thinking-btn") != std::string::npos);
+  EXPECT_TRUE(d.find("fa-lightbulb") != std::string::npos);
+  // the raw value is still shown as the label (we do not invent a translation)
+  EXPECT_TRUE(d.find("hyperdrive") != std::string::npos);
+}
+
 // load_session must apply the session's OWN settings: the composer showed
 // "choose model" on a session that already had one, and sending used the wrong
 // model after a reload.
@@ -3134,7 +3511,7 @@ FS_TEST(uiapp_tool_call_start_and_complete) {
 
   app.on_backend_event_for_test(
       "tool.start",
-      Json{{"name", "file.read"}, {"args", Json{{"path", "main.cpp"}}}});
+      Json{{"name", "read_file"}, {"args", Json{{"path", "main.cpp"}}}});
   // The row exists while it runs, with the arguments already captured (they are
   // shown in the expandable body, so assert on the stored detail).
   EXPECT_EQ(app.state().messages.back().tools.size(), 1u);
@@ -3142,12 +3519,12 @@ FS_TEST(uiapp_tool_call_start_and_complete) {
   EXPECT_TRUE(app.state().messages.back().tools[0].detail.find("main.cpp") !=
               std::string::npos);
   std::string running = dom.dump();
-  EXPECT_TRUE(running.find("file.read") != std::string::npos);
+  EXPECT_TRUE(running.find("read_file") != std::string::npos);
   EXPECT_TRUE(running.find("tool-block running") != std::string::npos);
 
   app.on_backend_event_for_test(
       "tool.update",
-      Json{{"name", "file.read"}, {"ok", true},
+      Json{{"name", "read_file"}, {"ok", true},
            {"summary", "42 lines"}, {"detail", "line1\nline2"}});
   // Completed IN PLACE: still one row, no longer running, verdict visible.
   EXPECT_EQ(app.state().messages.back().tools.size(), 1u);
@@ -3159,10 +3536,10 @@ FS_TEST(uiapp_tool_call_start_and_complete) {
 
   // A failure marks the row, and the detail is kept for the expandable body.
   app.on_backend_event_for_test(
-      "tool.start", Json{{"name", "file.write"}, {"args", Json::object()}});
+      "tool.start", Json{{"name", "write_file"}, {"args", Json::object()}});
   app.on_backend_event_for_test(
       "tool.update",
-      Json{{"name", "file.write"}, {"ok", false},
+      Json{{"name", "write_file"}, {"ok", false},
            {"summary", "permission denied"}, {"detail", "denied"}});
   const std::vector<comp::ToolBlock>& tools = app.state().messages.back().tools;
   EXPECT_EQ(tools.size(), 2u);
@@ -3231,7 +3608,7 @@ FS_TEST(uiapp_work_group_shows_time_and_folds) {
     m.text = "the answer";
     m.thinking = "reasoning";
     comp::ToolBlock tb;
-    tb.name = "file.read";
+    tb.name = "read_file";
     tb.summary = "a.cpp";
     m.tools.push_back(tb);
     m.started_at = 1700000000000LL;
@@ -3245,12 +3622,12 @@ FS_TEST(uiapp_work_group_shows_time_and_folds) {
   EXPECT_TRUE(d.find("完成") != std::string::npos);
   // folded: the reasoning and the tool rows are not rendered
   EXPECT_TRUE(d.find("reasoning") == std::string::npos);
-  EXPECT_TRUE(d.find("file.read") == std::string::npos);
+  EXPECT_TRUE(d.find("read_file") == std::string::npos);
   // opening it shows both
   app.update([](AppState& s) { s.messages[0].work_open = true; });
   std::string o = dom.dump();
   EXPECT_TRUE(o.find("reasoning") != std::string::npos);
-  EXPECT_TRUE(o.find("file.read") != std::string::npos);
+  EXPECT_TRUE(o.find("read_file") != std::string::npos);
 }
 
 // Code blocks carry a language label, a line-number gutter and a copy button.
@@ -3373,7 +3750,9 @@ FS_TEST(uiapp_plan_floats_without_touching_history) {
 
   app.update([](AppState& s) {
     s.plan_open = true;
-    s.plan_steps.push_back("step one");
+    AppState::PlanStep p;
+    p.title = "step one";
+    s.plan_steps.push_back(p);
   });
   std::string d = dom.dump();
   EXPECT_TRUE(d.find("plan-float") != std::string::npos);
@@ -3458,4 +3837,230 @@ FS_TEST(uiapp_webserver_shows_real_lan_url) {
   EXPECT_TRUE(d.find("正在监听 0.0.0.0:8812") != std::string::npos);
   EXPECT_TRUE(d.find("http://10.6.217.30:8812/") != std::string::npos);
   EXPECT_TRUE(d.find("<本机 IP>") == std::string::npos);
+}
+
+// A modal loses focus -> it dismisses. The permission gate is special: dismissing
+// it must DENY (the loop is parked on an answer), not leave the turn hanging.
+FS_TEST(uiapp_modal_dismisses_on_outside_click) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class RecBackend : public IUiBackend {
+   public:
+    std::vector<std::string> methods;
+    BackendResult call(const std::string& m, const Json&) override {
+      methods.push_back(m);
+      return BackendResult{};
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  };
+  RecBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  // A permission prompt parks the loop; the modal is up.
+  app.on_backend_event_for_test("permission.prompt", Json{{"sid", "sess_a"},
+                                                          {"tool", "write_file"}});
+  EXPECT_TRUE(app.state().ask_modal);
+  dom.clear_calls();
+  dom.fire_outside_click_for_test();
+  EXPECT_FALSE(app.state().ask_modal);
+  // ...and the gate was DENIED, so the parked turn can continue.
+  bool denied = false;
+  for (auto& m : backend.methods) {
+    if (m == "session.approve") denied = true;
+  }
+  EXPECT_TRUE(denied);
+}
+
+// A confirm modal (delete session etc.) also dismisses on an outside press, and
+// does so without running the destructive action.
+FS_TEST(uiapp_confirm_modal_dismisses_without_acting) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.confirm_kind = "session";
+    s.confirm_id = "sess_a";
+    s.confirm_text = "删除？";
+  });
+  EXPECT_TRUE(dump_has(dom, "删除？"));
+  dom.fire_outside_click_for_test();
+  EXPECT_TRUE(app.state().confirm_kind.empty());
+  // the session is still there (nothing was deleted)
+  EXPECT_EQ(app.state().tab_ids.size(), size_t(2));  // home + sess_a
+}
+
+// The chat scroll offset is remembered per session, so switching away and back
+// returns to where the reader was. The offset is read from the DOM at switch
+// time, so the test scrolls the real node.
+FS_TEST(uiapp_session_scroll_offset_is_per_session) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    SessionTab t;
+    t.id = "sess_b";
+    t.title = "b";
+    s.sessions.push_back(t);
+    s.tab_ids.push_back("sess_b");
+  });
+  app.show("sess_a");
+  // scroll the transcript node the way a user drag would
+  {
+    std::vector<VNodePtr> hits;
+    collect_msg_nodes(app.tree_for_test(), "chat-history", &hits);
+    ASSERT_TRUE(!hits.empty());
+    ASSERT_TRUE(hits[0]->dom.valid());
+    dom.set_scroll_top(hits[0]->dom, 400);
+  }
+  app.show("sess_b");
+  app.show("sess_a");
+  EXPECT_EQ(app.state().hist_scroll, 400);
+}
+
+// The remembered offset must be applied by the SAME render that puts the
+// transcript on screen.
+//
+// The first version applied it inline after render() without forcing layout, so
+// scrollTop was clamped against the old (short) height and the scroll event wrote
+// that back ("重新点进来却变成顶上"). The second version deferred it a tick: the
+// clamp was gone, but the page was painted at the top first and jumped afterwards
+// - still wrong to the eye. Now the render that patches the messages also forces
+// layout and sets scrollTop before the browser paints.
+FS_TEST(uiapp_scroll_restore_happens_in_the_same_render) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    SessionTab t;
+    t.id = "sess_b";
+    t.title = "b";
+    s.sessions.push_back(t);
+    s.tab_ids.push_back("sess_b");
+  });
+  app.show("sess_a");
+  // The reader scrolls to 400, then leaves: 400 is what the view remembers.
+  {
+    std::vector<VNodePtr> hits;
+    collect_msg_nodes(app.tree_for_test(), "chat-history", &hits);
+    ASSERT_TRUE(!hits.empty());
+    ASSERT_TRUE(hits[0]->dom.valid());
+    dom.set_scroll_top(hits[0]->dom, 400);
+  }
+  app.show("sess_b");
+  EXPECT_EQ(app.state().hist_scroll, -1);  // b was never scrolled
+  app.show("sess_a");
+  EXPECT_EQ(app.state().hist_scroll, 400);
+  // No tick needed: the position is already correct when show() returns, i.e.
+  // before the browser ever paints the transcript.
+  std::vector<VNodePtr> hits;
+  collect_msg_nodes(app.tree_for_test(), "chat-history", &hits);
+  ASSERT_TRUE(!hits.empty());
+  ASSERT_TRUE(hits[0]->dom.valid());
+  EXPECT_EQ(dom.scroll_top(hits[0]->dom), 400);
+  // ...and the restore's own scroll event must not overwrite the remembered
+  // value when it finally arrives.
+  dom.run_scheduled_for_test();
+  EXPECT_EQ(app.state().hist_scroll, 400);
+}
+
+// A subagent's id must survive a transcript reload: without it the work-log row
+// loses its "打开记录" button, which is "子代理还是无法在历史记录里打开".
+FS_TEST(uiapp_subagent_id_survives_history_reload) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.show("sess_a");
+  // A stored assistant turn whose subagent call kept its id as a first-class
+  // field, plus one that only has it inside the result detail (older sessions).
+  Json turns = Json::array();
+  Json user = Json::object();
+  user["role"] = "user";
+  user["promptRaw"] = "spawn one";
+  turns.push_back(user);
+  Json asst = Json::object();
+  asst["role"] = "assistant";
+  asst["streamSummary"] = "done";
+  Json calls = Json::array();
+  Json c1 = Json::object();
+  c1["name"] = "subagent_spawn";
+  c1["ok"] = true;
+  c1["summary"] = "ok";
+  c1["subagentId"] = "sub_7";
+  calls.push_back(c1);
+  Json c2 = Json::object();
+  c2["name"] = "subagent_spawn";
+  c2["ok"] = true;
+  c2["summary"] = "ok";
+  c2["detail"] = "{\"id\":\"sub_9\",\"summary\":\"ok\"}";
+  calls.push_back(c2);
+  asst["toolCalls"] = calls;
+  turns.push_back(asst);
+  // Drive the same reconstruction the loader uses.
+  std::vector<comp::ChatMsg> msgs;
+  for (size_t i = 0; i < turns.size(); ++i) {
+    msgs.push_back(app.turn_to_message_for_test(turns[i], static_cast<int64_t>(i)));
+  }
+  bool saw7 = false, saw9 = false;
+  for (size_t i = 0; i < msgs.size(); ++i) {
+    for (size_t k = 0; k < msgs[i].tools.size(); ++k) {
+      if (msgs[i].tools[k].subagent_id == "sub_7") saw7 = true;
+      if (msgs[i].tools[k].subagent_id == "sub_9") saw9 = true;
+    }
+  }
+  EXPECT_TRUE(saw7);  // first-class field
+  EXPECT_TRUE(saw9);  // recovered from the stored result detail
+}
+
+// Enter behaviour honours the 快捷键 page: rebinding 发送消息 to a Ctrl combo
+// makes plain Enter a newline (it used to be four fields nothing read).
+FS_TEST(uiapp_shortcut_rebinding_changes_enter_behaviour) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.settings_values["shortcuts.发送消息"] = Json{{"value", "Ctrl+Enter"}};
+  });
+  EXPECT_TRUE(dom.dump().find("data-enter-send=\"ctrlEnter\"") != std::string::npos);
+  // A plain-Enter binding leaves the session's own choice in charge.
+  app.update([](AppState& s) {
+    s.settings_values["shortcuts.发送消息"] = Json{{"value", "Enter"}};
+    s.enter_send = "enter";
+  });
+  EXPECT_TRUE(dom.dump().find("data-enter-send=\"enter\"") != std::string::npos);
+}
+
+// A research subagent's stream/tool events must NOT land in the conversation;
+// a complete-step's must. The distinction is what keeps side work out of the
+// transcript.
+FS_TEST(uiapp_subagent_events_split_by_kind) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  // research: tagged event is ignored inline
+  app.on_backend_event_for_test(
+      "stream.delta", Json{{"sid", "sess_a"},
+                           {"text", "research noise"},
+                           {"fromSubagent", true},
+                           {"subagentKind", "research"}});
+  EXPECT_TRUE(dom.dump().find("research noise") == std::string::npos);
+  // complete-step: shown inline
+  app.on_backend_event_for_test(
+      "stream.delta", Json{{"sid", "sess_a"},
+                           {"text", "step output"},
+                           {"fromSubagent", true},
+                           {"subagentKind", "complete-step"}});
+  EXPECT_TRUE(dom.dump().find("step output") != std::string::npos);
 }

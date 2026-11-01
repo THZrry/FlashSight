@@ -34,36 +34,16 @@ ThinkLang effective_think_lang(ThinkLang l) {
 std::vector<Skill> builtin_skills() {
   std::vector<Skill> v;
 
-  // 浏览器控制（addon2：做成 skill，按需加载，不直接提供）
-  {
-    Skill s;
-    s.name = "browser-control";
-    s.title_zh = "浏览器控制";
-    s.title_en = "Browser Control";
-    s.desc_zh = "控制外部浏览器（选择/查询元素、提交事件、执行 JS）";
-    s.desc_en = "Drive an external browser (select/query elements, dispatch events, run JS)";
-    s.body_zh =
-        "用法：先确认设置-浏览器控制已开启并配置 Browser Driver。\n"
-        "可用操作：\n"
-        "- 打开 URL / 导航 / 后退\n"
-        "- 选择元素（CSS 选择器）/ 查询属性与文本\n"
-        "- 提交事件（click/input/submit）\n"
-        "- 执行 JS 片段并取回结果\n"
-        "建议流程：navigate -> query(定位) -> act(操作) -> 截图/校验。\n"
-        "注意：wasm 模式下在侧栏启用。";
-    s.body_en =
-        "Usage: first ensure Settings > Browser Control is enabled with a Browser Driver.\n"
-        "Operations:\n"
-        "- open URL / navigate / back\n"
-        "- select elements (CSS selector) / query attributes and text\n"
-        "- dispatch events (click/input/submit)\n"
-        "- run a JS snippet and read back the result\n"
-        "Suggested flow: navigate -> query -> act -> screenshot/verify.\n"
-        "Note: in wasm mode enable it from the sidebar.";
-    s.loadable = true;
-    s.kind = "mcp";  // 内置 MCP：模型自主调用，不是用户 /命令
-    v.push_back(s);
-  }
+  // 浏览器控制 has NO skill entry on purpose.
+  //
+  // It used to describe navigate/query/act/eval and point at a
+  // "Settings > Browser Control" page. No driver and no tool ever existed
+  // behind it: loading it told the model to call operations that are not
+  // registered, and the settings page it referenced was itself a wall of inert
+  // switches (removed with it). A capability that only exists as documentation
+  // is worse than a missing one - it turns every UI-verification task into the
+  // model inventing results. Verification drives a REAL browser (Playwright /
+  // the local engine) through the terminal tool instead.
 
   // LSP（addon2：内置 MCP，适合符号重构/整项目级操作）
   {
@@ -328,10 +308,10 @@ void SkillRegistry::load_user(const Json& j) {
 }
 
 void register_skill_tools(ToolRegistry* registry, SkillRegistry* skills) {
-  // tool.skill.load：按需加载 skill 正文（addon2：不直接提供，按需加载）
+  // load_skill：按需加载 skill 正文（addon2：不直接提供，按需加载）
   {
     ToolDef def;
-    def.name = "tool.skill.load";
+    def.name = "load_skill";
     def.description =
         "加载 skill 详细用法. Load a skill's detailed usage on demand. "
         "如 browser-control / lsp. 按设置思考语言返回中/英.";
@@ -342,7 +322,7 @@ void register_skill_tools(ToolRegistry* registry, SkillRegistry* skills) {
     params["properties"] = props;
     params["required"] = Json::array({"name"});
     def.parameters = params;
-    registry->register_tool("tool.skill.load", def,
+    registry->register_tool("load_skill", def,
       [skills](const ToolContext& ctx, const Json& args) -> FsResult {
         std::string name = jsonutil::get<std::string>(args, "name", "");
         if (name.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty skill name");
@@ -350,16 +330,16 @@ void register_skill_tools(ToolRegistry* registry, SkillRegistry* skills) {
       });
   }
 
-  // tool.skill.list：列出可用 skill 简述
+  // list_skills：列出可用 skill 简述
   {
     ToolDef def;
-    def.name = "tool.skill.list";
+    def.name = "list_skills";
     def.description = "列出可用 skill. List available skills (bilingual).";
     Json params = Json::object();
     params["type"] = "object";
     params["properties"] = Json::object();
     def.parameters = params;
-    registry->register_tool("tool.skill.list", def,
+    registry->register_tool("list_skills", def,
       [skills](const ToolContext& ctx, const Json&) -> FsResult {
         return FsResult::success(skills->list_json(parse_think_lang(ctx.thinking_lang)));
       });

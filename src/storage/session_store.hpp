@@ -21,8 +21,15 @@ class SessionFileStore {
   FsResult create(const std::string& sid, const Json& meta,
                   const Json& session_settings);
 
-  // 读 full.json（宽容：缺失/坏 parse 返回 kNotFound / kParse）
+  // 读 full.json（宽容：缺失/坏 parse 返回 kNotFound / kParse）。
+  // Sharded: the returned object always carries a complete `turns` array (the
+  // shards are read and concatenated), so every caller sees the same shape it
+  // always did.
   FsResult load_full(const std::string& sid, Json* out) const;
+  // Write a full.json-shaped object back: `turns` goes to the shards, everything
+  // else to full.json. Used by the paths that replace the whole history
+  // (rollback, fork, forget).
+  bool save_full(const std::string& sid, const Json& full, std::string* err) const;
   // 是否存在
   bool exists(const std::string& sid) const;
   bool full_exists(const std::string& sid) const;

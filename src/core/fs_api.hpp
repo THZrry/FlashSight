@@ -6,6 +6,8 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -60,8 +62,15 @@ class FsApi {
   FsResult project_resolve_drop(const std::string& name);
   // 在资源管理器中打开项目文件夹：{pid} -> {}
   FsResult project_reveal(const std::string& pid);
+  // Open a link from a chat message. http(s) goes to the system browser; a
+  // project-relative path is reported back so the UI can open its preview panel.
+  // Anything else (file://, custom protocols) is refused.
+  FsResult open_link(const std::string& sid, const std::string& href);
   // 侧栏文件树：列出一个目录（相对 pid 的项目根）-> {entries:[{name,isDir,size,mtime}]}
   FsResult project_files(const std::string& pid, const std::string& rel);
+  // Composer path completion: what does `typed` (a partial path, relative to the
+  // project root, or "./"-absolute) expand to? -> {dir, prefix, entries, blocked?}
+  FsResult complete_path(const std::string& sid, const std::string& typed);
   // 读取项目内文件（侧栏预览）-> {content}
   FsResult project_read_file(const std::string& pid, const std::string& rel);
   // 保存上传的文件（聊天附件）：写进 <project>/.flashsight/uploads/，
@@ -76,12 +85,23 @@ class FsApi {
   FsResult session_close(const std::string& sid);
   FsResult session_fork(const std::string& sid, const std::string& turnId);
   FsResult session_rollback(const std::string& sid, const std::string& turnId);
+  // 截断转录（保留文件改动）：编辑最后一条消息并重发时用
+  FsResult session_trim_history(const std::string& sid, const std::string& turnId);
   FsResult session_forget(const std::string& sid, const std::string& scope);
   FsResult session_list(const std::string& pid);
   // 删除会话（连同 patches/terminals）；不可恢复，UI 负责确认
   FsResult session_delete(const std::string& sid);
   // 重命名会话（写 meta.title）
   FsResult session_rename(const std::string& sid, const std::string& title);
+  // Ask the model for a session title from the transcript (the right-click
+  // "AI 重命名"). Uses the summary-model preference, falling back to the session
+  // model; returns the new title.
+  FsResult session_ai_title(const std::string& sid);
+  // Automatic title upkeep, called after each persisted turn.
+  //   * no title yet      -> first sentence of the first user message
+  //   * >=3 turns or >=10 tool calls in the first turn -> model summary
+  // Never overwrites a title the USER typed (meta.titleUser = true).
+  void maybe_upgrade_title(const std::string& sid);
   FsResult session_set_model(const std::string& sid, const std::string& model);
   FsResult session_set_thinking(const std::string& sid, const std::string& thinking);
   FsResult session_set_permission(const std::string& sid, const std::string& perm);
@@ -128,6 +148,12 @@ class FsApi {
   FsResult session_continue(const std::string& sid, const std::string& guidance);
   // approve 档权限门：批准/拒绝当前等待的 tool
   FsResult session_approve(const std::string& sid, bool yes);
+  // 上下文压缩：强制压缩一次 / 查询水位（含阈值与"是否该压缩"）
+  FsResult session_compress(const std::string& sid);
+  FsResult session_context(const std::string& sid);
+  // The turn currently streaming for this session (empty when idle). A tab that
+  // was closed mid-turn and reopened renders this until the turn is on disk.
+  FsResult session_live_turn(const std::string& sid);
 
   // ----- terminal.*（注册表部分 P1；spawn/exec 实际执行 P3 reproc）-----
   FsResult terminal_list(const std::string& sid);
@@ -198,7 +224,7 @@ class FsApi {
   FsResult workflow_define(const Json& def);
   FsResult workflow_list();
   // Runs belonging to one session (the panel shows the live pipeline). A run is
-  // created by workflow.start; this is how the UI discovers the ones it did not
+  // created by workflow_start; this is how the UI discovers the ones it did not
   // start itself (another window, a resumed app).
   FsResult workflow_runs(const std::string& sid);
   FsResult workflow_start(const std::string& sid, const std::string& name);
@@ -228,6 +254,13 @@ class FsApi {
                           int depth, int64_t timeout_ms);
   FsResult subagent_cancel(const std::string& id);
   FsResult subagent_list(const std::string& sid);
+  // One subagent's full record (transcript included) for the detail view.
+  FsResult subagent_detail(const std::string& id);
+  // Same, but with the owning session so a record whose in-memory copy is gone
+  // can be read back from <session>/subagents/<id>.json.
+  FsResult subagent_detail_in(const std::string& sid, const std::string& id);
+  // Continue a finished subagent with more work (same id, keeps its transcript).
+  FsResult subagent_follow_up(const std::string& id, const std::string& text);
   // addon2：子代理引导（子代理无轮概念，只需当前引导）
   FsResult subagent_steer(const std::string& id, const std::string& text);
   // ----- steering.*（addon1.md 引导队列）-----
@@ -265,16 +298,17 @@ class FsApi {
                         const std::string& description, const std::string& body);
   FsResult skill_set_enabled(const std::string& name, bool enabled);
   FsResult skill_remove(const std::string& name);
-  // 浏览器控制 skill 的加载口（addon2：不直接提供，用 /browser-load 按需加载）
-  FsResult browser_load();
   // ----- mcp.*（外部工具/技能包管理；注册表持久化到设置 mcp.entries）-----
   FsResult mcp_list();
   FsResult mcp_import(const std::string& dir);
   FsResult mcp_add(const std::string& name, const std::string& dir, bool enabled);
   FsResult mcp_set_enabled(const std::string& name, bool enabled);
   FsResult mcp_remove(const std::string& name);
-  // 常见外部工具目录探测（claude code / opencode / 用户 .config 等）
+  // MCP 服务器定义探测（读取 Claude / opencode 的 mcpServers 配置）
   FsResult mcp_detect();
+  // Skill 目录探测（SKILL.md / <name>.md）——与 mcp_detect 分开：两者是不同
+  // 的东西，共用一个按钮会把 skill 目录注册成 MCP 条目。
+  FsResult skill_detect();
   // 思考语言（"auto|zh|en"）
   FsResult set_thinking_lang(const std::string& lang);
 
@@ -302,6 +336,24 @@ class FsApi {
   void set_event_sink(std::function<void(const std::string&, const Json&)> sink) {
     if (sink) add_event_listener(std::move(sink));
   }
+
+  // ---------------------------------------------------------------------
+  // Concurrency
+  // ---------------------------------------------------------------------
+  // FsApi holds maps (session -> project, agent loops, todos, subagents) and
+  // reads/writes session files. It is not thread-safe by construction, and the
+  // desktop UI calls it from a worker thread while a turn runs on its own
+  // thread - so the UI->backend boundary takes this ONE recursive mutex (see
+  // UiApi::call).
+  //
+  // Recursive, because routes call each other (session_send ->
+  // sessions_->load_full) and because the turn's callbacks re-enter while a
+  // control call may be in flight.
+  //
+  // The turn itself is NOT wrapped: session_send blocks for the whole turn, and
+  // holding the lock for minutes would freeze every other call. AgentHost takes
+  // it around its short setup, and each turn callback takes it individually.
+  std::recursive_mutex& mutex() const { return mu_; }
 
  private:
   // 确保某个 pid 的项目级 SettingsStore 已构建（无 pid 用空路径占位 = 只有全局）
@@ -342,6 +394,10 @@ class FsApi {
   std::unique_ptr<WorkflowStore> workflows_;
   std::map<int, std::function<void(const std::string&, const Json&)> > event_listeners_;
   int next_listener_id_ = 1;
+  // Guards the mutable state above for callers that are not the turn thread.
+  // Recursive: a public method may call another (session_send ->
+  // sessions_->load_full), and control calls re-enter while a turn is parked.
+  mutable std::recursive_mutex mu_;
   // P2: provider 层
   std::unique_ptr<ProviderStore> providers_;
   std::unique_ptr<ModelTable> model_table_;
@@ -349,6 +405,11 @@ class FsApi {
   // P3: agent 宿主（Loop/工具/子代理/唤醒/引导队列）
   std::unique_ptr<AgentHost> agent_host_;
   std::unique_ptr<McpRegistry> mcp_registry_;
+  // The model-call function, kept for one-shot utility calls (session title
+  // summarisation) that are not part of an agent turn.
+  std::function<FsResult(const ModelCallRequest&, ModelCallResult*,
+                         const std::function<void(const std::string&)>&)>
+      call_model_fn_;
   // 终端后台轮询线程（桌面端；~FsApi 时停止）
   std::atomic<bool> poller_stop_{false};
   std::unique_ptr<std::thread> poller_;

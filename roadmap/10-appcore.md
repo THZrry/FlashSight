@@ -48,7 +48,7 @@
 
 ## PlanStore
 
-- [x] 规划树 CRUD（目标→子目标→状态），`plan.get/update`。
+- [x] 规划树 CRUD（目标→子目标→状态），`plan_get/update`。
 - [x] 每 turn `planDelta` 落库。
 
 ## UsageStore

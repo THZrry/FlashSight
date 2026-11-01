@@ -25,7 +25,7 @@ namespace fs {
 // }
 
 // 正向应用 patch（把 after 落到磁盘；用于 send 后落库——本函数不改变 patch 内容）
-// 实际上 file.write 工具直接写盘，patch 仅留记录；这里提供正向应用便于重建场景
+// 实际上 write_file 工具直接写盘，patch 仅留记录；这里提供正向应用便于重建场景
 FsResult apply_patch_forward(const ProjectStore& ps, const Json& patch);
 
 // 逆向还原（回滚用）：从磁盘当前状态还原到 before。

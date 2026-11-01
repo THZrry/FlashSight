@@ -11,6 +11,80 @@
 
 namespace fs {
 
+namespace {
+
+// How many turns live in one shard file.
+//
+// Why shard at all: every append re-wrote the WHOLE full.json (read-modify-write
+// of one file), so a session with hundreds of turns paid O(n) on every single
+// turn and the file grew to hundreds of KB. The user's own session hit 90 KB
+// after six turns because tool results are stored in full.
+//
+// 16 turns per shard keeps each file in the tens-of-KB range for typical use
+// (the report suggested ~16 KB per file). `turns/000.json` holds turns 0-15,
+// `turns/001.json` the next 16, and so on.
+constexpr int kTurnsPerShard = 16;
+
+// Load every shard for a session into one array, oldest first.
+Json read_turns_sharded(const ProjectStore& ps, const std::string& sid) {
+  Json all = Json::array();
+  std::error_code ec;
+  if (!ghc::filesystem::is_directory(ps.turns_dir(sid), ec)) return all;
+  for (int i = 0;; ++i) {
+    ghc::filesystem::path p = ps.turn_shard(sid, i);
+    if (!ghc::filesystem::is_regular_file(p, ec)) break;
+    std::ifstream ifs(p.string(), std::ios::binary);
+    if (!ifs) break;
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    try {
+      Json part = Json::parse(ss.str());
+      if (part.is_array()) {
+        for (size_t k = 0; k < part.size(); ++k) all.push_back(part[k]);
+      }
+    } catch (...) {
+      // A corrupt shard must not lose the shards after it: stop reading this
+      // one but keep what was already parsed.
+      break;
+    }
+  }
+  return all;
+}
+
+// Write shards [from_index, ...) from `turns`, and delete shards past the end so
+// a rollback (which shortens the history) cannot leave stale turns on disk.
+bool write_turns_sharded(const ProjectStore& ps, const std::string& sid,
+                         const Json& turns, int from_index, bool write_from_scratch,
+                         std::string* err) {
+  std::error_code ec;
+  ghc::filesystem::create_directories(ps.turns_dir(sid), ec);
+  if (!turns.is_array()) return true;
+  int total = static_cast<int>(turns.size());
+  int first = write_from_scratch ? 0 : from_index;
+  if (first < 0) first = 0;
+  int first_shard = first / kTurnsPerShard;
+  int last_shard = total > 0 ? (total - 1) / kTurnsPerShard : -1;
+  for (int s = first_shard; s <= last_shard; ++s) {
+    Json part = Json::array();
+    int lo = s * kTurnsPerShard;
+    int hi = lo + kTurnsPerShard;
+    if (hi > total) hi = total;
+    for (int i = lo; i < hi; ++i) part.push_back(turns[static_cast<size_t>(i)]);
+    if (!jsonutil::write_atomic(ps.turn_shard(sid, s).string(), part, err)) {
+      return false;
+    }
+  }
+  // Drop shards that no longer have turns (rollback / forget).
+  for (int s = last_shard + 1;; ++s) {
+    ghc::filesystem::path p = ps.turn_shard(sid, s);
+    if (!ghc::filesystem::is_regular_file(p, ec)) break;
+    ghc::filesystem::remove(p, ec);
+  }
+  return true;
+}
+
+}  // namespace
+
 Json default_session_settings(const Json& defaults) {
   Json s = Json::object();
   s["model"] = jsonutil::get<std::string>(defaults, "model", "");
@@ -34,6 +108,7 @@ FsResult SessionFileStore::create(const std::string& sid, const Json& meta,
   std::error_code ec;
   ghc::filesystem::create_directories(ps_.patches_dir(sid), ec);
   ghc::filesystem::create_directories(ps_.terminals_dir(sid), ec);
+  ghc::filesystem::create_directories(ps_.turns_dir(sid), ec);
   Json full = Json::object();
   full["meta"] = meta;
   full["sessionSettings"] = session_settings;
@@ -41,7 +116,7 @@ FsResult SessionFileStore::create(const std::string& sid, const Json& meta,
   full["systemOps"] = Json::array();
   full["snapshots"] = Json::array();
   std::string err;
-  if (!jsonutil::write_atomic(full_path(sid).string(), full, &err)) {
+  if (!save_full(sid, full, &err)) {
     return FsResult::error(ErrCode::kIo, err);
   }
   return FsResult::success(full);
@@ -53,22 +128,110 @@ FsResult SessionFileStore::load_full(const std::string& sid, Json* out) const {
   if (!ifs) return FsResult::error(ErrCode::kIo, "cannot open full.json: " + full_path(sid).string());
   std::stringstream ss;
   ss << ifs.rdbuf();
+  Json j;
   try {
-    Json j = Json::parse(ss.str());
-    if (out) *out = std::move(j);
-    return FsResult::success();
+    j = Json::parse(ss.str());
   } catch (const std::exception& e) {
     return FsResult::error(ErrCode::kParse, std::string("full.json parse: ") + e.what());
   }
+  // Sharded layout: turns live in turns/*.json and full.json keeps only
+  // meta/settings/ops. A session written by an older build has `turns` inline -
+  // that form is still read as-is (and migrated on the next append), so nothing
+  // is lost when moving between versions.
+  //
+  // The rule is "do SHARD FILES exist", not "does the turns/ directory exist":
+  // every session directory carries an empty turns/ from creation, so testing
+  // the directory would make a legacy file look sharded and silently drop its
+  // inline history.
+  Json inline_turns = j.contains("turns") && j["turns"].is_array() ? j["turns"]
+                                                                  : Json::array();
+  Json sharded = read_turns_sharded(ps_, sid);
+  if (!sharded.empty()) {
+    j["turns"] = sharded;
+  } else {
+    j["turns"] = inline_turns;
+  }
+  if (!j["turns"].is_array()) j["turns"] = Json::array();
+  if (out) *out = std::move(j);
+  return FsResult::success();
+}
+
+// Write a full.json-shaped object back: turns go to shards, everything else to
+// full.json (which is small and cheap to rewrite).
+bool SessionFileStore::save_full(const std::string& sid, const Json& full,
+                                 std::string* err) const {
+  Json head = Json::object();
+  for (auto it = full.begin(); it != full.end(); ++it) {
+    if (it.key() == "turns") continue;  // sharded
+    head[it.key()] = it.value();
+  }
+  if (!jsonutil::write_atomic(full_path(sid).string(), head, err)) return false;
+  return write_turns_sharded(ps_, sid,
+                             full.contains("turns") ? full["turns"] : Json::array(), 0,
+                             true, err);
 }
 
 FsResult SessionFileStore::append_turn(const std::string& sid, const Json& turn) {
-  Json full;
-  FsResult r = load_full(sid, &full);
+  // Append without rewriting the whole history.
+  //
+  // The old body read full.json, pushed onto `turns` and re-wrote the entire
+  // file - O(n) JSON work per turn, with the file growing without bound (the
+  // user's session reached 90 KB in six turns). The count lives in full.json
+  // (tiny), so an append only touches the LAST shard plus that head file.
+  Json head;
+  FsResult r = load_full(sid, &head);
   if (!r.ok()) return r;
-  full["turns"].push_back(turn);
+  int count = static_cast<int>(head.contains("turns") && head["turns"].is_array()
+                                   ? head["turns"].size() : 0);
+  int shard_idx = count / kTurnsPerShard;
+
+  // MIGRATION: a legacy session keeps its turns inline in full.json and has no
+  // shard files. Append the new turn at the end of that inline array and let
+  // save_full fan the whole thing out to shards; from then on every append
+  // touches only the last shard.
+  {
+    std::error_code ec;
+    bool have_shard = ghc::filesystem::is_regular_file(ps_.turn_shard(sid, 0), ec);
+    if (!have_shard && count > 0) {
+      head["turns"].push_back(turn);
+      std::string merr;
+      if (!save_full(sid, head, &merr)) {
+        return FsResult::error(ErrCode::kIo, merr);
+      }
+      return FsResult::success();
+    }
+  }
+
+  // Read only that shard, append, write it back.
+  Json part = Json::array();
+  {
+    ghc::filesystem::path p = ps_.turn_shard(sid, shard_idx);
+    std::error_code ec;
+    if (ghc::filesystem::is_regular_file(p, ec)) {
+      std::ifstream ifs(p.string(), std::ios::binary);
+      if (ifs) {
+        std::stringstream ss;
+        ss << ifs.rdbuf();
+        try {
+          Json parsed = Json::parse(ss.str());
+          if (parsed.is_array()) part = parsed;
+        } catch (...) {
+        }
+      }
+    }
+  }
+  part.push_back(turn);
+  {
+    std::error_code ec;
+    ghc::filesystem::create_directories(ps_.turns_dir(sid), ec);
+  }
   std::string err;
-  if (!jsonutil::write_atomic(full_path(sid).string(), full, &err)) {
+  if (!jsonutil::write_atomic(ps_.turn_shard(sid, shard_idx).string(), part, &err)) {
+    return FsResult::error(ErrCode::kIo, err);
+  }
+  // The head file keeps no inline turns any more (they are in the shard now).
+  if (head.contains("turns")) head.erase("turns");
+  if (!jsonutil::write_atomic(full_path(sid).string(), head, &err)) {
     return FsResult::error(ErrCode::kIo, err);
   }
   return FsResult::success();
@@ -80,9 +243,7 @@ FsResult SessionFileStore::append_system_op(const std::string& sid, const Json& 
   if (!r.ok()) return r;
   full["systemOps"].push_back(op);
   std::string err;
-  if (!jsonutil::write_atomic(full_path(sid).string(), full, &err)) {
-    return FsResult::error(ErrCode::kIo, err);
-  }
+  if (!save_full(sid, full, &err)) return FsResult::error(ErrCode::kIo, err);
   return FsResult::success();
 }
 
@@ -113,7 +274,7 @@ FsResult SessionFileStore::trim_turns(const std::string& sid, size_t keep) {
     full["snapshots"] = s;
   }
   std::string err;
-  if (!jsonutil::write_atomic(full_path(sid).string(), full, &err)) {
+  if (!save_full(sid, full, &err)) {
     return FsResult::error(ErrCode::kIo, err);
   }
   return FsResult::success();

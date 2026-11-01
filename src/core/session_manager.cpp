@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -269,9 +271,91 @@ FsResult SessionManager::append_system_op(const std::string& sid, const std::str
   return make_store(sid).append_system_op(sid, e);
 }
 
+void SessionManager::write_live_snapshot(const std::string& sid, const Json& live) {
+  if (!valid_sid(sid)) return;
+  // runtime.json is the "cache, safe to delete" file, which is the right home for
+  // an in-flight turn. It merges rather than replaces so the runtime cache's other
+  // fields survive.
+  Json runtime;
+  if (!make_store(sid).read_runtime(sid, &runtime).ok() || !runtime.is_object()) {
+    runtime = Json::object();
+  }
+  runtime["live"] = live;
+  make_store(sid).write_runtime(sid, runtime);
+}
+
+Json SessionManager::read_live_snapshot(const std::string& sid) const {
+  if (!valid_sid(sid)) return Json::object();
+  Json runtime;
+  if (!make_store(sid).read_runtime(sid, &runtime).ok()) return Json::object();
+  if (!runtime.is_object() || !runtime.contains("live")) return Json::object();
+  return runtime["live"];
+}
+
+// ----- 子代理记录落盘 -----
+// <session dir>/subagents/<id>.json. One file per record, so pruning or reading a
+// single agent never rewrites a growing aggregate. Failures are swallowed: this is
+// a durability nicety, and a subagent must not fail because a write failed.
+void SessionManager::write_subagent_record(const std::string& sid,
+                                           const std::string& id,
+                                           const Json& record) const {
+  if (!valid_sid(sid) || id.empty()) return;
+  std::string pid = pid_of(sid);
+  if (pid.empty()) return;
+  Json p = proj_->registry().get(pid);
+  if (!p.is_object() || !p.contains("path") || !p["path"].is_string()) return;
+  ProjectStore store(ProjectStore::of(ghc::filesystem::path(p["path"].get<std::string>())));
+  ghc::filesystem::path dir = store.session_dir(sid) / "subagents";
+  std::error_code ec;
+  ghc::filesystem::create_directories(dir, ec);
+  // The id is generated internally (sub_1, sub_2...) but treat it as untrusted
+  // input anyway: a path separator here would escape the session directory.
+  std::string safe;
+  for (size_t i = 0; i < id.size(); ++i) {
+    char c = id[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-';
+    safe.push_back(ok ? c : '_');
+  }
+  std::ofstream out((dir / (safe + ".json")).string(), std::ios::binary | std::ios::trunc);
+  if (!out) return;
+  out << record.dump(2);
+}
+
+Json SessionManager::read_subagent_record(const std::string& sid,
+                                          const std::string& id) const {
+  if (!valid_sid(sid) || id.empty()) return Json::object();
+  std::string pid = pid_of(sid);
+  if (pid.empty()) return Json::object();
+  Json p = proj_->registry().get(pid);
+  if (!p.is_object() || !p.contains("path") || !p["path"].is_string()) {
+    return Json::object();
+  }
+  ProjectStore store(ProjectStore::of(ghc::filesystem::path(p["path"].get<std::string>())));
+  std::string safe;
+  for (size_t i = 0; i < id.size(); ++i) {
+    char c = id[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-';
+    safe.push_back(ok ? c : '_');
+  }
+  std::ifstream in((store.session_dir(sid) / "subagents" / (safe + ".json")).string(),
+                   std::ios::binary);
+  if (!in) return Json::object();
+  std::string body((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  if (body.empty()) return Json::object();
+  try {
+    Json j = Json::parse(body);
+    return j.is_object() ? j : Json::object();
+  } catch (...) {
+    return Json::object();
+  }
+}
+
+
 FsResult SessionManager::update_session_settings(const std::string& sid,
-                                                 const Json& fields) {
-  Json full;
+                                                 const Json& fields) {  Json full;
   FsResult r = load_full_checked(sid, &full);
   if (!r.ok()) return r;
   if (!full.contains("sessionSettings") || !full["sessionSettings"].is_object()) {
@@ -281,7 +365,10 @@ FsResult SessionManager::update_session_settings(const std::string& sid,
     full["sessionSettings"][it.key()] = it.value();
   }
   std::string err;
-  bool ok = jsonutil::write_atomic(project_store_of(sid).full_json(sid).string(), full, &err);
+  // Through the store, never a raw write of full.json: the turns live in shards
+  // now, so a direct write would save the head without them (and silently drop
+  // every change made to `full["turns"]`).
+  bool ok = make_store(sid).save_full(sid, full, &err);
   return ok ? FsResult::success() : FsResult::error(ErrCode::kIo, err);
 }
 
@@ -297,9 +384,38 @@ FsResult SessionManager::rename_session(const std::string& sid, const std::strin
   }
   full["meta"]["title"] = title;
   std::string err;
-  bool ok = jsonutil::write_atomic(project_store_of(sid).full_json(sid).string(), full, &err);
+  bool ok = make_store(sid).save_full(sid, full, &err);
   if (!ok) return FsResult::error(ErrCode::kIo, err);
   return FsResult::success(Json{{"sid", sid}, {"title", title}});
+}
+
+// A title the USER set is final: mark it so the automatic upkeep stops touching
+// it. Renaming is an explicit action, and silently replacing it later with a
+// model-generated name is exactly the kind of "the app undid my work" that
+// destroys trust in an editor.
+FsResult SessionManager::rename_session_by_user(const std::string& sid,
+                                                const std::string& title) {
+  FsResult r = rename_session(sid, title);
+  if (!r.ok()) return r;
+  return set_meta_flag(sid, Json{{"titleUser", true}});
+}
+
+FsResult SessionManager::set_meta_flag(const std::string& sid, const Json& fields) {
+  if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty sid");
+  Json full;
+  FsResult r = load_full_checked(sid, &full);
+  if (!r.ok()) return r;
+  if (!full.contains("meta") || !full["meta"].is_object()) {
+    full["meta"] = Json::object();
+  }
+  for (auto it = fields.begin(); it != fields.end(); ++it) {
+    full["meta"][it.key()] = it.value();
+  }
+  std::string err;
+  if (!make_store(sid).save_full(sid, full, &err)) {
+    return FsResult::error(ErrCode::kIo, err);
+  }
+  return FsResult::success();
 }
 
 FsResult SessionManager::set_model(const std::string& sid, const std::string& model) {
@@ -371,11 +487,10 @@ FsResult SessionManager::refresh_config(const std::string& sid) {
   full["configVersion"] = ver;
   full["continuousFailures"] = 0;
   std::string err;
-  bool ok = jsonutil::write_atomic(project_store_of(sid).full_json(sid).string(), full, &err);
+  bool ok = make_store(sid).save_full(sid, full, &err);
   if (!ok) return FsResult::error(ErrCode::kIo, err);
   return append_system_op(sid, "refreshConfig", Json{{"configVersion", ver}});
 }
-
 FsResult SessionManager::rollback(const std::string& sid, const std::string& turn_id,
                                   std::vector<std::string>* reverse_errors) {
   Json full;
@@ -416,6 +531,26 @@ FsResult SessionManager::rollback(const std::string& sid, const std::string& tur
            {"errors", reverse_errors ? Json(*reverse_errors) : Json::array()}});
 }
 
+FsResult SessionManager::trim_history(const std::string& sid,
+                                      const std::string& turn_id) {
+  Json full;
+  FsResult r = load_full_checked(sid, &full);
+  if (!r.ok()) return r;
+  if (!full.contains("turns") || !full["turns"].is_array()) {
+    return FsResult::error(ErrCode::kNotFound, "no turns");
+  }
+  long idx = -1;
+  for (long i = 0; i < (long)full["turns"].size(); ++i) {
+    if (full["turns"][i].is_object() &&
+        jsonutil::get<std::string>(full["turns"][i], "turnId", "") == turn_id) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) return FsResult::error(ErrCode::kNotFound, "turn not found: " + turn_id);
+  return make_store(sid).trim_turns(sid, static_cast<size_t>(idx));
+}
+
 FsResult SessionManager::fork(const std::string& sid, const std::string& turn_id) {
   Json full;
   FsResult r = load_full_checked(sid, &full);
@@ -450,8 +585,9 @@ FsResult SessionManager::fork(const std::string& sid, const std::string& turn_id
     new_full["snapshots"] = ns;
   }
   std::string err;
-  bool ok = jsonutil::write_atomic(project_store_of(sid).full_json(new_sid).string(),
-                                   new_full, &err);
+  // A fork writes a NEW session under the SAME project store as its source:
+  // make_store(new_sid) cannot resolve it yet (it is not registered).
+  bool ok = SessionFileStore(project_store_of(sid)).save_full(new_sid, new_full, &err);
   if (!ok) return FsResult::error(ErrCode::kIo, err);
   sid_pid_[new_sid] = pid_of(sid);
   return FsResult::success(Json{{"sid", new_sid}});
@@ -476,7 +612,8 @@ FsResult SessionManager::forget(const std::string& sid, const std::string& scope
     if (!found) return FsResult::error(ErrCode::kNotFound, "turn not found: " + scope);
   }
   std::string err;
-  bool ok = jsonutil::write_atomic(project_store_of(sid).full_json(sid).string(), full, &err);
+  // The marked turns live in the shards, so this must go through the store.
+  bool ok = make_store(sid).save_full(sid, full, &err);
   return ok ? FsResult::success() : FsResult::error(ErrCode::kIo, err);
 }
 

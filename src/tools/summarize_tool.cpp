@@ -1,4 +1,4 @@
-// summarize_tool.cpp - session.summarize 实现
+// summarize_tool.cpp - summarize_session 实现
 // 要点经 ToolContext.emit 以 session.keypoint 事件发给宿主，由宿主写入当前 turn。
 #include "summarize_tool.hpp"
 
@@ -6,7 +6,7 @@ namespace fs {
 
 void register_summarize_tool(ToolRegistry* registry) {
   ToolDef def;
-  def.name = "session.summarize";
+  def.name = "summarize_session";
   def.description = "记录本轮要点（持久记忆；压缩时自动附加到上下文）";
   Json params = Json::object();
   params["type"] = "object";
@@ -15,7 +15,7 @@ void register_summarize_tool(ToolRegistry* registry) {
   params["properties"] = props;
   params["required"] = Json::array({"points"});
   def.parameters = params;
-  registry->register_tool("session.summarize", def,
+  registry->register_tool("summarize_session", def,
     [](const ToolContext& ctx, const Json& args) -> FsResult {
       Json points = args.contains("points") && args["points"].is_array()
                         ? args["points"] : Json::array();

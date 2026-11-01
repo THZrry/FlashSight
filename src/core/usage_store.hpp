@@ -50,10 +50,21 @@ struct UsageSummary {
   // not the sum over the whole session - so the aggregate keeps it separately.
   UsageRow last;
   bool has_last = false;
+  // Cache efficiency over the filtered set: cached prompt tokens / all prompt
+  // tokens. -1 = the provider never reported a cache field, which is different
+  // from a real 0% hit rate.
+  double cache_hit_ratio = -1.0;
+  bool cache_reported = false;
+  // Per-provider cost kinds present. A session can mix a money provider with a
+  // quota one; collapsing that into one "cost" number would be a lie.
+  std::map<std::string, std::string> cost_kind_by_provider;
   // provider×model 聚合阶梯（key = "provider::model"）
   std::map<std::string, UsageRow> by_provider_model;
   // time 桶（按天 ts/86400000）
   std::map<int64_t, UsageRow> by_day;
+  // Newest rows, oldest-first (bounded). The side panel shows "this turn" and a
+  // short recent-call list; keeping the tail avoids re-reading the log.
+  std::vector<UsageRow> recent;
   uint64_t calls = 0;
   uint64_t bad_lines = 0;
 };

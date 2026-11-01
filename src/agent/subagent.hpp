@@ -41,6 +41,9 @@ struct SubagentRecord {
   int64_t timeout_ms = 0;
 
   Json to_json() const;
+  // Same, plus `full` (the transcript). Only for a SINGLE agent's detail view:
+  // a list with transcripts inlined blows past the tool-output cap.
+  Json to_json_full() const;
 };
 
 using SubagentDoneFn = std::function<void(const SubagentRecord&)>;
@@ -75,6 +78,16 @@ class SubagentManager {
   // steer：向运行中的子代理发送引导（addon2 任务健壮性：打断后续接；
   // 子代理没有轮的概念，只需要当前引导）。文本进入该子代理的引导队列。
   FsResult steer(const std::string& id, const std::string& text);
+  // follow-up：给一个已经结束的子代理追加任务，让它带着原对话继续跑。
+  //
+  // A finished subagent is not a dead end: the parent often wants "now also do
+  // X in that same context". `steer` refuses a finished agent (nothing is
+  // running to steer), so a follow-up re-opens the record and the host starts a
+  // NEW run seeded with the previous transcript. The record keeps its id, so the
+  // panel row continues instead of appearing as an unrelated second agent.
+  FsResult reopen_for_follow_up(const std::string& id);
+  // The transcript of a subagent (to seed a follow-up run).
+  Json transcript_for(const std::string& id) const;
   // 取出并清空该子代理的引导（子代理执行器在工具调用间隙消费）
   std::string drain_steering(const std::string& id);
   std::vector<std::string> steering_for(const std::string& id) const;
@@ -86,6 +99,12 @@ class SubagentManager {
 
   // 超时检查（时钟注入；返回超时的 id 列表）
   std::vector<std::string> check_timeouts(int64_t now_ms);
+
+  // Drop the oldest FINISHED records of a session once there are more than
+  // `keep`. A record keeps the whole transcript, and every message in it carries
+  // a copy of the system prompt - so an unbounded `records_` grows by megabytes
+  // per session. Finished records stay viewable, just not forever.
+  int prune_finished(const std::string& sid, size_t keep = 40);
 
   void set_done_fn(SubagentDoneFn fn) { done_fn_ = std::move(fn); }
 

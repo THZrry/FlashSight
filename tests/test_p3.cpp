@@ -72,7 +72,7 @@ FS_TEST(loop_send_while_busy_queues) {
   loop.call_model = [](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
     out->text = "";
     Json call = Json::object();
-    call["name"] = "file.write";
+    call["name"] = "write_file";
     call["args"] = Json{{"path", "a.txt"}, {"content", "x"}};
     out->tool_calls = Json::array({call});
     out->error = "";
@@ -90,7 +90,7 @@ FS_TEST(loop_send_while_busy_queues) {
 FS_TEST(loop_approve_deny) {
   AgentLoop::Options opts;
   opts.sid = "s_1";
-  // approve 档：file.rm 也要先问（宽松档下项目内的删除是直接放行的）
+  // approve 档：remove_file 也要先问（宽松档下项目内的删除是直接放行的）
   opts.permission = "approve";
   opts.event = [](const std::string&, const Json&) {};
   AgentLoop loop(std::move(opts));
@@ -99,7 +99,7 @@ FS_TEST(loop_approve_deny) {
     ++calls;
     if (calls == 1) {
       Json call = Json::object();
-      call["name"] = "file.rm";
+      call["name"] = "remove_file";
       call["args"] = Json{{"path", "b.txt"}};
       out->tool_calls = Json::array({call});
     } else {
@@ -147,7 +147,7 @@ FS_TEST(loop_tool_call_events_and_persist) {
     ++calls;
     if (calls == 1) {
       Json call = Json::object();
-      call["name"] = "file.read";
+      call["name"] = "read_file";
       call["id"] = "call_1";
       call["args"] = Json{{"path", "main.cpp"}};
       out->tool_calls = Json::array({call});
@@ -167,7 +167,7 @@ FS_TEST(loop_tool_call_events_and_persist) {
   EXPECT_TRUE(saw_update);
   // start carries the arguments (so the row can say WHAT is running)...
   EXPECT_EQ(jsonutil::get<std::string>(start_payload, "name", ""),
-            std::string("file.read"));
+            std::string("read_file"));
   EXPECT_TRUE(start_payload.contains("args"));
   // ...update carries the verdict and a one-line summary.
   EXPECT_TRUE(jsonutil::get<bool>(update_payload, "ok", false));
@@ -195,7 +195,7 @@ FS_TEST(loop_suspend_stops) {
     ++calls;
     out->text = "t";
     Json call = Json::object();
-    call["name"] = "file.read";
+    call["name"] = "read_file";
     call["args"] = Json{{"path", "a.txt"}};
     out->tool_calls = Json::array({call});
     out->error = "";
@@ -203,7 +203,7 @@ FS_TEST(loop_suspend_stops) {
   };
   loop.suspend();
   EXPECT_TRUE(loop.send("go").ok());
-  // file.read 非高风险 -> 直接执行回填，不再发第二轮（suspend 后停）
+  // read_file 非高风险 -> 直接执行回填，不再发第二轮（suspend 后停）
   EXPECT_TRUE(calls >= 1);
   bool has_suspended = false;
   for (auto& e : events) {
@@ -211,6 +211,99 @@ FS_TEST(loop_suspend_stops) {
   }
   EXPECT_TRUE(has_suspended);
   loop.resume();
+}
+
+// ---------- Loop：停止生成必须真的停住，并且"恢复"必须真的继续 ----------
+//
+// Two things used to be missing. (1) suspend only took effect between tool
+// batches, so a plain streaming answer ran to completion no matter how often the
+// user pressed 停止 - the abort predicate now cuts the transfer. (2) resume()
+// only cleared the request flag; once the loop HAD parked it was idle, nothing was
+// left to notice the flag, so 恢复 did nothing ("挂起功能疑似没做全").
+FS_TEST(loop_resume_task_continues_parked_turn) {
+  AgentLoop::Options opts;
+  opts.sid = "s_1";
+  std::vector<std::string> events;
+  opts.event = [&events](const std::string& e, const Json&) { events.push_back(e); };
+  AgentLoop loop(std::move(opts));
+  AgentLoop* lp = &loop;
+  int calls = 0;
+  bool saw_partial = false;
+  loop.call_model = [lp, &calls, &saw_partial](
+                        const ModelCallRequest& req, ModelCallResult* out,
+                        const std::function<void(const std::string&)>& on_delta)
+      -> FsResult {
+    ++calls;
+    if (calls == 1) {
+      // The model is mid-answer when the user presses 停止生成.
+      out->text = "half an ans";
+      if (on_delta) on_delta("half an ans");
+      lp->suspend();
+      return FsResult::error(ErrCode::kCancelled, "stopped by user");
+    }
+    // The resumed call must still carry what the model already said, otherwise the
+    // user's "continue" asks the model to answer the same question from scratch.
+    for (size_t i = 0; i < req.messages.size(); ++i) {
+      std::string role = jsonutil::get<std::string>(req.messages[i], "role", "");
+      std::string content = jsonutil::get<std::string>(req.messages[i], "content", "");
+      if (role == "assistant" && content.find("stopped by user") != std::string::npos) {
+        saw_partial = true;
+      }
+    }
+    out->text = "done";
+    out->error = "";
+    return FsResult::success();
+  };
+  EXPECT_TRUE(loop.send("go").ok());
+  EXPECT_EQ(calls, 1);
+  EXPECT_TRUE(loop.parked());
+  EXPECT_EQ(std::string(loop_state_str(loop.state())), std::string("idle"));
+  // resume_task re-runs the SAVED transcript - no extra user message, because the
+  // user asked to continue the same task, not to say something new.
+  EXPECT_TRUE(loop.resume_task().ok());
+  EXPECT_FALSE(loop.parked());
+  EXPECT_EQ(calls, 2);
+  EXPECT_TRUE(saw_partial);
+  EXPECT_EQ(std::string(loop_state_str(loop.state())), std::string("turnDone"));
+}
+
+// A message sent while the turn is stopped/suspended CONTINUES it with that text
+// as guidance, instead of starting a new turn that drops the parked transcript.
+FS_TEST(loop_send_while_parked_continues) {
+  AgentLoop::Options opts;
+  opts.sid = "s_1";
+  AgentLoop loop(std::move(opts));
+  AgentLoop* lp = &loop;
+  int calls = 0;
+  bool guidance_seen = false;
+  loop.call_model = [lp, &calls, &guidance_seen](
+                        const ModelCallRequest& req, ModelCallResult* out,
+                        const std::function<void(const std::string&)>& on_delta)
+      -> FsResult {
+    ++calls;
+    if (calls == 1) {
+      out->text = "working";
+      if (on_delta) on_delta("working");
+      lp->suspend();
+      return FsResult::error(ErrCode::kCancelled, "stopped by user");
+    }
+    for (size_t i = 0; i < req.messages.size(); ++i) {
+      if (jsonutil::get<std::string>(req.messages[i], "role", "") == "user" &&
+          jsonutil::get<std::string>(req.messages[i], "content", "")
+                  .find("also check b.txt") != std::string::npos) {
+        guidance_seen = true;
+      }
+    }
+    out->text = "ok";
+    out->error = "";
+    return FsResult::success();
+  };
+  EXPECT_TRUE(loop.send("go").ok());
+  EXPECT_TRUE(loop.parked());
+  EXPECT_TRUE(loop.send("also check b.txt").ok());
+  EXPECT_EQ(calls, 2);
+  EXPECT_TRUE(guidance_seen);
+  EXPECT_FALSE(loop.parked());
 }
 
 // ---------- WakeScheduler：定时唤醒 + 取消 ----------
@@ -281,19 +374,18 @@ FS_TEST(steering_queue_ops) {
 FS_TEST(ask_tool_modes) {
   ToolRegistry reg;
   register_ask_tool(&reg);
-  // 手动：发 ask.prompt
-  bool prompted = false;
+  // 手动模式：工具只声明"在等用户"，不自己回答、也不自己发事件——
+  // 发 ask.prompt 与挂起是 LOOP 的职责（工具返回 awaiting_user 后 loop park）。
+  // 之前工具直接发事件并返回 asked:true，模型以为用户已经回答了。
   ToolContext ctx;
   ctx.auto_mode = false;
-  ctx.emit = [&prompted](const std::string& e, const Json&) {
-    if (e == "ask.prompt") prompted = true;
-  };
   Json args = Json::object();
   args["question"] = "which?";
   args["options"] = Json::array({"a", "b"});
   FsResult r = reg.invoke(ctx, "ask", args);
   ASSERT_TRUE(r.ok());
-  EXPECT_TRUE(prompted);
+  EXPECT_TRUE(jsonutil::get<bool>(r.data, "awaiting_user", false));
+  EXPECT_EQ(jsonutil::get<std::string>(r.data, "question", ""), std::string("which?"));
   // 自动：拒绝
   ToolContext ctx2;
   ctx2.auto_mode = true;
@@ -409,7 +501,7 @@ FS_TEST(preset_agents_cover_addon1) {
   }
 }
 
-// ---------- 文件工具：read/ls/find/write/diffWrite/rm（含二进制守卫+逃逸）----------
+// ---------- 文件工具：read/ls/find/write/edit/rm（含二进制守卫+逃逸）----------
 FS_TEST(file_tools_flow) {
   fstest::TempDir td("filetools");
   ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
@@ -428,16 +520,22 @@ FS_TEST(file_tools_flow) {
   rargs["path"] = "a.txt";
   rargs["offset"] = 2;
   rargs["limit"] = 1;
-  FsResult rr = reg.invoke(ctx, "file.read", rargs);
+  FsResult rr = reg.invoke(ctx, "read_file", rargs);
   ASSERT_TRUE(rr.ok());
   EXPECT_EQ(rr.data["content"].get<std::string>(), std::string("line2\n"));
-  // "line1\nline2\nline3\n" 按行切分含末尾空行 -> 4 行
-  EXPECT_EQ((int)rr.data["totalLines"].get<int64_t>(), 4);
+  // Three lines, not four: the trailing newline terminates line 3 rather than
+  // starting an empty line 4 (an edit addressed at line 4 would otherwise
+  // silently append instead of failing).
+  EXPECT_EQ((int)rr.data["totalLines"].get<int64_t>(), 3);
+  // The hash identifies the whole file, so an edit can prove it read this one.
+  ASSERT_TRUE(rr.data.contains("hash"));
+  std::string file_hash = rr.data["hash"].get<std::string>();
+  EXPECT_TRUE(file_hash.size() >= 8);
 
   // 逃逸拒绝
   Json eargs = Json::object();
   eargs["path"] = "../outside.txt";
-  EXPECT_FALSE(reg.invoke(ctx, "file.read", eargs).ok());
+  EXPECT_FALSE(reg.invoke(ctx, "read_file", eargs).ok());
 
   // 二进制守卫
   {
@@ -446,12 +544,12 @@ FS_TEST(file_tools_flow) {
   }
   Json bargs = Json::object();
   bargs["path"] = "bin.dat";
-  EXPECT_FALSE(reg.invoke(ctx, "file.read", bargs).ok());
+  EXPECT_FALSE(reg.invoke(ctx, "read_file", bargs).ok());
 
   // ls
   Json largs = Json::object();
   largs["path"] = ".";
-  FsResult lr = reg.invoke(ctx, "file.ls", largs);
+  FsResult lr = reg.invoke(ctx, "list_dir", largs);
   ASSERT_TRUE(lr.ok());
   EXPECT_TRUE(lr.data["entries"].is_array());
   EXPECT_TRUE((int)lr.data["entries"].size() >= 2);
@@ -459,7 +557,7 @@ FS_TEST(file_tools_flow) {
   // find 文件名
   Json fargs = Json::object();
   fargs["pattern"] = "a.txt";
-  FsResult fr = reg.invoke(ctx, "file.find", fargs);
+  FsResult fr = reg.invoke(ctx, "find_files", fargs);
   ASSERT_TRUE(fr.ok());
   EXPECT_TRUE(fr.data["results"].size() >= 1);
 
@@ -467,7 +565,7 @@ FS_TEST(file_tools_flow) {
   Json gargs = Json::object();
   gargs["pattern"] = "line2";
   gargs["grep"] = true;
-  FsResult gr = reg.invoke(ctx, "file.find", gargs);
+  FsResult gr = reg.invoke(ctx, "find_files", gargs);
   ASSERT_TRUE(gr.ok());
   EXPECT_TRUE(gr.data["results"].size() >= 1);
 
@@ -475,38 +573,81 @@ FS_TEST(file_tools_flow) {
   Json wargs = Json::object();
   wargs["path"] = "new.txt";
   wargs["content"] = "hello";
-  FsResult wr = reg.invoke(ctx, "file.write", wargs);
+  FsResult wr = reg.invoke(ctx, "write_file", wargs);
   ASSERT_TRUE(wr.ok());
   EXPECT_EQ(wr.data["after"].get<std::string>(), std::string("hello"));
 
-  // diffWrite 精确匹配一次
-  Json dargs = Json::object();
-  dargs["path"] = "a.txt";
-  dargs["oldBlock"] = "line2";
-  dargs["newBlock"] = "LINE2";
-  FsResult dr = reg.invoke(ctx, "file.diffWrite", dargs);
-  ASSERT_TRUE(dr.ok());
-  // 对不上失败
-  Json dargs2 = Json::object();
-  dargs2["path"] = "a.txt";
-  dargs2["oldBlock"] = "no-such-block-xyz";
-  dargs2["newBlock"] = "y";
-  EXPECT_FALSE(reg.invoke(ctx, "file.diffWrite", dargs2).ok());
-  // 多次匹配失败
-  Json dargs3 = Json::object();
-  dargs3["path"] = "a.txt";
-  dargs3["oldBlock"] = "LINE";
-  dargs3["newBlock"] = "y";
-  // "LINE2" 只出现一次 -> 成功；先确认
-  FsResult dr3 = reg.invoke(ctx, "file.diffWrite", dargs3);
-  EXPECT_TRUE(dr3.ok() || !dr3.ok());  // 仅不断言（行内容已变），不断言方向
+  // edit：行号 + hash + expect
+  Json e1 = Json::object();
+  e1["path"] = "a.txt";
+  e1["hash"] = file_hash;
+  e1["edits"] = Json::array({Json{{"start", 2}, {"expect", "line2"}, {"newText", "LINE2"}}});
+  FsResult er = reg.invoke(ctx, "edit_file", e1);
+  ASSERT_TRUE(er.ok());
+  EXPECT_EQ((int)er.data["changes"].size(), 1);
+  EXPECT_EQ(er.data["changes"][0]["before"].get<std::string>(), std::string("line2"));
+  // A successful edit returns the new hash, so the next edit does not have to
+  // re-read the file.
+  ASSERT_TRUE(er.data.contains("hash"));
+  std::string hash2 = er.data["hash"].get<std::string>();
+
+  // 哈希过期 -> 拒绝（文件被外部改过）
+  {
+    std::ofstream ofs((proj / "a.txt").string(), std::ios::binary | std::ios::app);
+    ofs << "appended\n";
+  }
+  Json e2 = Json::object();
+  e2["path"] = "a.txt";
+  e2["hash"] = hash2;
+  e2["edits"] = Json::array({Json{{"start", 1}, {"newText", "X"}}});
+  FsResult er2 = reg.invoke(ctx, "edit_file", e2);
+  EXPECT_FALSE(er2.ok());
+  EXPECT_TRUE(er2.data.contains("stale"));
+
+  // 重新读取后再改：expect 不符 -> 拒绝，并回报真实内容
+  FsResult rr2 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(rr2.ok());
+  Json e3 = Json::object();
+  e3["path"] = "a.txt";
+  e3["hash"] = rr2.data["hash"];
+  e3["edits"] = Json::array({Json{{"start", 1}, {"expect", "WRONG"}, {"newText", "X"}}});
+  FsResult er3 = reg.invoke(ctx, "edit_file", e3);
+  EXPECT_FALSE(er3.ok());
+  EXPECT_EQ(er3.data["actual"].get<std::string>(), std::string("line1"));
+
+  // 行号越界 -> 拒绝（不会静默追加）
+  Json e4 = Json::object();
+  e4["path"] = "a.txt";
+  e4["edits"] = Json::array({Json{{"start", 999}, {"newText", "X"}}});
+  EXPECT_FALSE(reg.invoke(ctx, "edit_file", e4).ok());
+
+  // 重叠编辑 -> 拒绝（顺序歧义）
+  Json e5 = Json::object();
+  e5["path"] = "a.txt";
+  e5["edits"] = Json::array({Json{{"start", 1}, {"end", 2}, {"newText", "A"}},
+                             Json{{"start", 2}, {"end", 3}, {"newText", "B"}}});
+  EXPECT_FALSE(reg.invoke(ctx, "edit_file", e5).ok());
+
+  // 删除行（newText 空）。Line 3 is still "line3": line 2 became "LINE2" and a
+  // line was appended at the end, so the numbering is what the read reports.
+  FsResult rr3 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(rr3.ok());
+  Json e6 = Json::object();
+  e6["path"] = "a.txt";
+  e6["hash"] = rr3.data["hash"];
+  e6["edits"] = Json::array({Json{{"start", 3}, {"expect", "line3"}, {"newText", ""}}});
+  FsResult er6 = reg.invoke(ctx, "edit_file", e6);
+  ASSERT_TRUE(er6.ok());
+  FsResult rr4 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(rr4.ok());
+  EXPECT_TRUE(rr4.data["content"].get<std::string>().find("line3") == std::string::npos);
 
   // rm
   Json rmargs = Json::object();
   rmargs["path"] = "new.txt";
-  FsResult rmr = reg.invoke(ctx, "file.rm", rmargs);
+  FsResult rmr = reg.invoke(ctx, "remove_file", rmargs);
   ASSERT_TRUE(rmr.ok());
-  EXPECT_FALSE(reg.invoke(ctx, "file.rm", rmargs).ok());  // 删过再删 -> 不存在
+  EXPECT_FALSE(reg.invoke(ctx, "remove_file", rmargs).ok());  // 删过再删 -> 不存在
 }
 
 #include "agent/agent_host.hpp"
@@ -547,7 +688,7 @@ class FakeClock4 : public Clock {
 
 }  // namespace
 
-// ---------- M3 手动端到端：send(模型回文本+file.write)->tool 落库 ----------
+// ---------- M3 手动端到端：send(模型回文本+write_file)->tool 落库 ----------
 // 说明：AgentLoop 的工具执行由宿主驱动；此用例验证 Host+SessionManager 落库链。
 FS_TEST(m3_manual_e2e_persist) {
   fstest::TempDir td("m3e2e");
@@ -569,13 +710,13 @@ FS_TEST(m3_manual_e2e_persist) {
   ASSERT_TRUE(sr.ok());
   std::string sid = sr.data["sid"].get<std::string>();
 
-  // AgentHost：FakeNet 模型（回文本 + file.write 工具调用）
+  // AgentHost：FakeNet 模型（回文本 + write_file 工具调用）
   FakeNet3 net;
   HttpResponse ok;
   ok.status = 200;
   ok.body = R"({"choices":[{"message":{"role":"assistant","content":"done",
     "tool_calls":[{"id":"c1","type":"function",
-    "function":{"name":"file.write","arguments":"{\"path\":\"out.txt\",\"content\":\"hi\"}"}}]}}],
+    "function":{"name":"write_file","arguments":"{\"path\":\"out.txt\",\"content\":\"hi\"}"}}]}}],
     "usage":{"prompt_tokens":10,"completion_tokens":5}})";
   net.responses.push_back(ok);
 
@@ -621,12 +762,12 @@ FS_TEST(m3_manual_e2e_persist) {
   AgentHost host(std::move(deps));
   host.register_builtin_tools(nullptr);
 
-  // 工具执行接线：file.write 走真实文件工具（ToolRegistry 直接调）
+  // 工具执行接线：write_file 走真实文件工具（ToolRegistry 直接调）
   // AgentLoop 的工具执行由 Host 驱动——v1 验证 send 走通 + 事件
   // approve 档：手动模式下每次写文件都先问（permissive 档项目内直接放行）
   FsResult sendr = host.send(sid, "write out.txt", Json::object(), false, "approve");
   EXPECT_TRUE(sendr.ok());
-  // 模型回了 file.write（高风险）-> waiting + permission.prompt
+  // 模型回了 write_file（高风险）-> waiting + permission.prompt
   bool has_prompt = false;
   for (auto& e : events) {
     if (e == "permission.prompt") has_prompt = true;
@@ -634,7 +775,7 @@ FS_TEST(m3_manual_e2e_persist) {
   EXPECT_TRUE(has_prompt);
 
   // 批准后继续（Loop 内部流转；v1 验证状态机不停滞）
-  // 直接调 tool_invoke 执行 file.write（cwd=项目根）
+  // 直接调 tool_invoke 执行 write_file（cwd=项目根）
   // 注意：Host 的 make_ctx cwd 为空——v1 用 ToolRegistry 直调验证工具本身
   ToolRegistry reg;
   register_file_tools(&reg);
@@ -643,14 +784,14 @@ FS_TEST(m3_manual_e2e_persist) {
   Json wargs = Json::object();
   wargs["path"] = "out.txt";
   wargs["content"] = "hi";
-  FsResult wr = reg.invoke(tctx, "file.write", wargs);
+  FsResult wr = reg.invoke(tctx, "write_file", wargs);
   ASSERT_TRUE(wr.ok());
   // 落库 turn
   Json turn = Json::object();
   turn["turnId"] = "t1";
   turn["role"] = "assistant";
   turn["streamSummary"] = "done";
-  turn["toolCalls"] = Json::array({Json{{"name", "file.write"},
+  turn["toolCalls"] = Json::array({Json{{"name", "write_file"},
                                          {"args", wargs},
                                          {"resultSummary", "ok"}}});
   EXPECT_TRUE(sm.append_turn(sid, turn).ok());
@@ -664,25 +805,23 @@ FS_TEST(m3_manual_e2e_persist) {
   patch["changes"] = Json::array({chg});
   EXPECT_TRUE(sm.make_store(sid).write_patch(sid, "t1", patch).ok());
 
-  // 读回 full.json：1 轮
+  // 读回 full.json：user turn（发送时就落库）+ 手动追加的 t1 = 2 轮。
+  // 用户输入在 turn 开始时就写盘，正是为了让"关掉标签页再回来"能看到自己说过什么。
   Json full;
   EXPECT_TRUE(sm.load_full(sid, &full).ok());
-  EXPECT_EQ((int)full["turns"].size(), 1);
+  EXPECT_EQ((int)full["turns"].size(), 2);
 
-  // 回滚 -> 文件还原（out.txt 被删，因为 before 为空 -> rm-new 语义由 apply 处理）
-  // 注：此处 patch 是 write 且 before 为空——逆向把内容写回 ""（空文件）
+  // 回滚到 t1 -> t1 及其之后被裁掉；t1 之前的 user turn 保留。
   std::vector<std::string> rerrs;
   EXPECT_TRUE(sm.rollback(sid, "t1", &rerrs).ok());
   Json full2;
   EXPECT_TRUE(sm.load_full(sid, &full2).ok());
-  EXPECT_EQ((int)full2["turns"].size(), 0);
+  EXPECT_EQ((int)full2["turns"].size(), 1);
 }
 
-// ---------- HistoryBuilder：短视图+遗忘剔除+超预算压缩 ----------
+// ---------- HistoryBuilder：全量回放 + 遗忘剔除 + 水位压缩 ----------
 FS_TEST(history_builder_flow) {
   HistoryBuilder::Options opts;
-  opts.recent_turns = 20;
-  opts.token_budget = 100000;
   opts.system_prefix = "You are FlashSight.";
   HistoryBuilder hb(opts);
   Json full = Json::object();
@@ -704,8 +843,9 @@ FS_TEST(history_builder_flow) {
   EXPECT_EQ(hr.messages[0]["role"].get<std::string>(), std::string("system"));
   EXPECT_FALSE(hr.compressed);
 
-  // 超小预算 -> 压缩
-  opts.token_budget = 10;
+  // 压缩现在只由水位（或显式"立即压缩"）触发——token 预算不再是触发器。
+  opts.force_compress = true;
+  opts.keep_turns = 1;
   HistoryBuilder hb2(opts);
   HistoryResult hr2 = hb2.build(full);
   EXPECT_TRUE(hr2.compressed);
@@ -732,8 +872,6 @@ FS_TEST(history_token_estimate) {
 // ---------- Anthropic 装配：tool_use/tool_result blocks ----------
 FS_TEST(anthropic_history_assemble) {
   HistoryBuilder::Options opts;
-  opts.recent_turns = 20;
-  opts.token_budget = 100000;
   opts.system_prefix = "sys";
   HistoryBuilder hb(opts);
   Json full = Json::object();
@@ -749,7 +887,7 @@ FS_TEST(anthropic_history_assemble) {
   a["streamSummary"] = "reading";
   Json call = Json::object();
   call["id"] = "toolu_1";
-  call["name"] = "file.read";
+  call["name"] = "read_file";
   call["args"] = Json{{"path", "a.txt"}};
   a["toolCalls"] = Json::array({call});
   turns.push_back(a);
@@ -775,7 +913,7 @@ FS_TEST(anthropic_history_assemble) {
   EXPECT_EQ(amsg["role"].get<std::string>(), std::string("assistant"));
   bool has_tool_use = false;
   for (auto& b : amsg["content"]) {
-    if (b.is_object() && b["type"] == "tool_use" && b["name"] == "file.read") {
+    if (b.is_object() && b["type"] == "tool_use" && b["name"] == "read_file") {
       has_tool_use = true;
       EXPECT_EQ(b["id"].get<std::string>(), std::string("toolu_1"));
       EXPECT_EQ(b["input"]["path"].get<std::string>(), std::string("a.txt"));
@@ -806,18 +944,18 @@ FS_TEST(summarize_and_compress_points) {
   };
   Json bad = Json::object();
   bad["points"] = Json::array();
-  EXPECT_FALSE(reg.invoke(ctx, "session.summarize", bad).ok());
+  EXPECT_FALSE(reg.invoke(ctx, "summarize_session", bad).ok());
   Json good = Json::object();
   good["points"] = Json::array({"fixed login bug", "added retry"});
-  FsResult r = reg.invoke(ctx, "session.summarize", good);
+  FsResult r = reg.invoke(ctx, "summarize_session", good);
   ASSERT_TRUE(r.ok());
   EXPECT_TRUE(emitted);
   EXPECT_EQ((int)r.data["recorded"].get<int64_t>(), 2);
 
-  // 压缩附加要点（budget 设小，容纳 2 条后超预算触发压缩）
+  // 压缩附加要点。"立即压缩"是显式触发（token 预算不再是触发器）。
   HistoryBuilder::Options opts;
-  opts.recent_turns = 20;
-  opts.token_budget = 20;
+  opts.force_compress = true;
+  opts.keep_turns = 1;
   opts.system_prefix = "sys";
   HistoryBuilder hb(opts);
   Json full = Json::object();
@@ -918,7 +1056,12 @@ FS_TEST(settings_new_keys_defaults) {
   EXPECT_EQ(s.get(kKeyUiTheme).value.get<std::string>(), std::string("default"));
   EXPECT_EQ(s.get(kKeyUsageRetainDays).value.get<int64_t>(), 90);
   EXPECT_EQ(s.get(kKeyHistoryRecentTurns).value.get<int64_t>(), 20);
-  EXPECT_EQ(s.get(kKeyHistoryTokenBudget).value.get<int64_t>(), 8000);
+  // The budget is a hard ceiling, not the primary trigger: compaction is driven
+  // by the context water level (history.compressAtPct). 32000 keeps a large
+  // window usable instead of compacting at ~8k tokens.
+  EXPECT_EQ(s.get(kKeyHistoryTokenBudget).value.get<int64_t>(), 32000);
+  EXPECT_EQ(s.get(kKeyHistoryCompressAtPct).value.get<int64_t>(), 80);
+  EXPECT_EQ(s.get(kKeyHistoryKeepTurns).value.get<int64_t>(), 8);
   EXPECT_EQ(s.get(kKeyOverfitEnabled).value.get<bool>(), false);
   EXPECT_EQ(s.get(kKeySubagentMaxParallel).value.get<int64_t>(), 4);
   EXPECT_EQ(s.get(kKeySubagentMaxDepth).value.get<int64_t>(), 3);
@@ -997,7 +1140,7 @@ FS_TEST(loop_permission_levels) {
     AgentLoop* loop = new AgentLoop(std::move(opts));
     loop->call_model = [path](const ModelCallRequest&, ModelCallResult* out, const std::function<void(const std::string&)>&) -> FsResult {
       Json call = Json::object();
-      call["name"] = "file.write";
+      call["name"] = "write_file";
       call["args"] = Json{{"path", path}, {"content", "x"}};
       out->tool_calls = Json::array({call});
       out->error = "";

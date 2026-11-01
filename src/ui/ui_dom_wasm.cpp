@@ -94,10 +94,33 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
         // keydown carries the key name (not the element value) so handlers can
         // react to Escape / arrow keys; kKeyEnter handles Enter separately.
         v = evt.key === undefined ? "" : String(evt.key);
+        // Elements that own these keys (the composer while its completion menu
+        // is open) opt in, because otherwise the BROWSER acts first: Tab moves
+        // focus and the arrow keys scroll the page before the app can accept a
+        // suggestion. Opt-in rather than blanket so ordinary Tab navigation and
+        // arrow scrolling elsewhere keep working.
+        var cap = el.getAttribute && el.getAttribute('data-keys-capture');
+        if (cap && (v === 'Tab' || v === 'ArrowUp' || v === 'ArrowDown' ||
+                    v === 'Escape')) {
+          evt.preventDefault();
+        }
       } else if (name === 'contextmenu') {
         // The menu opens AT the pointer, so the value is "x\ty" in viewport
         // coordinates (every other event sends the element's text).
         v = String(evt.clientX | 0) + "\t" + String(evt.clientY | 0);
+      } else if (name === 'click' && evt.target && evt.target.closest) {
+        // A markdown link: report its TARGET, not the label. The anchor carries
+        // data-href and no real href (a real one would navigate the app window
+        // away from the session), so the shell needs the value from here.
+        var a = evt.target.closest('[data-href]');
+        if (a) {
+          v = a.getAttribute('data-href') || "";
+          evt.preventDefault();
+        } else if (t === 'INPUT' && el.type === 'checkbox') {
+          v = el.checked ? '1' : '0';
+        } else {
+          v = el.textContent || "";
+        }
       } else if (t === 'INPUT' && el.type === 'checkbox') {
         v = el.checked ? '1' : '0';
       } else if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') {
@@ -480,18 +503,26 @@ EM_JS(void, fs_dom_outside_click, (int popup_node, int cb_id), {
   pop.__fsOutsideCb = cb_id;
   if (pop.__fsOutsideInit) return;
   pop.__fsOutsideInit = true;
-  function onDown(ev) {
+  pop.__fsOutsideHandler = function (ev) {
+    // A popup that has left the DOM must not dismiss whatever is open now: its
+    // document listener outlives the node, and firing the (still-registered)
+    // callback closed the NEXT popup on the first press anywhere.
+    if (!pop.isConnected) return;
     if (!pop.__fsOutsideCb) return;
     var t = ev.target;
     if (pop.contains(t)) return;
-    // The anchor (.model-field / .model-btn-wrap) owns the toggle: a press there
-    // is a toggle, not a dismiss, and closing here would reopen immediately.
-    var host = pop.parentElement;
-    if (host && host.contains(t)) return;
-    if (t && t.closest && t.closest('.model-field, .model-btn-wrap')) return;
+    // The ANCHOR owns the toggle: a press on it is a toggle, not a dismiss -
+    // closing here would reopen immediately on the following click. Only the
+    // anchor is exempt. Testing the whole PARENT container instead (the old
+    // `host.contains(t)`) also ignored every SIBLING of the popup inside that
+    // container, so a press on the popup's own field wrapper or on a sibling
+    // button did nothing and the popup looked impossible to dismiss.
+    if (t && t.closest && t.closest('.model-field, .model-btn-wrap, [data-keep-popup]')) {
+      return;
+    }
     if (Module._fs_ui_outside_click) Module._fs_ui_outside_click(pop.__fsOutsideCb);
-  }
-  document.addEventListener('mousedown', onDown, true);
+  };
+  document.addEventListener('mousedown', pop.__fsOutsideHandler, true);
 });
 
 // Drag the top edge of a bottom panel to set its height. Same shape as
@@ -1044,9 +1075,18 @@ EM_JS(void, fs_dom_global_key, (int cb_id), {
   globalThis.__fsGlobalKeyCb = cb_id;
   document.addEventListener('keydown', function (ev) {
     if (!Module._fs_ui_key) return;
-    var len = Module.lengthBytesUTF8(ev.key) + 1;
+    // Modifiers travel with the key: the shortcut table's bindings are
+    // "Ctrl+W" / "Ctrl+T", and a bare key name cannot express them.
+    var k = ev.key || '';
+    var mods = '';
+    if (ev.ctrlKey) mods += 'Ctrl+';
+    if (ev.metaKey) mods += 'Meta+';
+    if (ev.altKey) mods += 'Alt+';
+    if (ev.shiftKey) mods += 'Shift+';
+    var s = mods + k;
+    var len = Module.lengthBytesUTF8(s) + 1;
     var ptr = Module._malloc(len);
-    Module.stringToUTF8(ev.key, ptr, len);
+    Module.stringToUTF8(s, ptr, len);
     Module._fs_ui_key(globalThis.__fsGlobalKeyCb, ptr);
     Module._free(ptr);
   }, false);
@@ -1246,10 +1286,14 @@ class WasmDom : public IDom {
   }
 
   void bind_outside_click(Node popup, std::function<void()> cb) override {
+    // One callback per popup. A single shared slot meant the newest binding won:
+    // with a picker open and a context menu opened over it, the menu's callback
+    // replaced the picker's, and the document listeners installed by the earlier
+    // popup then fired the WRONG callback (or none) - "clicking elsewhere does
+    // not close it" / "it closes the wrong thing".
     int cb_id = 0;
     if (cb) {
       cb_id = ++outside_seq();
-      outside_cbs().clear();
       outside_cbs()[cb_id] = std::move(cb);
     }
     fs_dom_outside_click(static_cast<int>(popup.id), cb_id);

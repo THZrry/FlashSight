@@ -1,6 +1,8 @@
 // subagent.cpp - SubagentManager implementation
 #include "subagent.hpp"
 
+#include <algorithm>
+
 #include "fs_serialize.hpp"
 
 namespace fs {
@@ -28,6 +30,22 @@ Json SubagentRecord::to_json() const {
   j["startedAt"] = started_at;
   j["endedAt"] = ended_at;
   j["summary"] = summary;
+  // `full` holds the whole transcript, INCLUDING each assistant message's system
+  // prompt copy. It is what the side panel renders, but it must not ride along in
+  // a LIST: three subagents made `subagent_list` exceed the tool-output cap and
+  // the last entry was cut off entirely. Lists carry a size; the transcript is
+  // fetched per agent (`subagent.transcript`).
+  int messages = 0;
+  if (full.is_object() && full.contains("transcript") && full["transcript"].is_array()) {
+    messages = static_cast<int>(full["transcript"].size());
+  }
+  j["transcriptMessages"] = messages;
+  return j;
+}
+
+// The full record (transcript included) for ONE agent, for the detail view.
+Json SubagentRecord::to_json_full() const {
+  Json j = to_json();
   j["full"] = full;
   return j;
 }
@@ -84,9 +102,18 @@ FsResult SubagentManager::cancel(const std::string& id) {
   if (it == records_.end()) {
     return FsResult::error(ErrCode::kNotFound, "subagent not found: " + id);
   }
+  // Report whether anything was actually cancelled. Returning a bare {ok:true}
+  // for an already-finished agent made "cancel" look like it did something when
+  // it was a no-op - and the caller cannot tell the two apart.
+  bool was_running = it->second.status == SubagentStatus::kRunning;
+  if (!was_running) {
+    return FsResult::success(Json{{"id", id}, {"cancelled", false},
+                                 {"status", subagent_status_str(it->second.status)},
+                                 {"note", "already finished; nothing to cancel"}});
+  }
   it->second.status = SubagentStatus::kCancelled;
   it->second.ended_at = clock_->now_ms();
-  return FsResult::success();
+  return FsResult::success(Json{{"id", id}, {"cancelled", true}, {"status", "cancelled"}});
 }
 
 const SubagentRecord* SubagentManager::find(const std::string& id) const {
@@ -107,8 +134,35 @@ FsResult SubagentManager::steer(const std::string& id, const std::string& text) 
   return FsResult::success(Json{{"queued", (int)steering_[id].size()}});
 }
 
-std::string SubagentManager::drain_steering(const std::string& id) {
-  auto it = steering_.find(id);
+// Re-open a finished record so a follow-up run can be started for the SAME id.
+// The transcript is kept (transcript_for() hands it to the new run) and the
+// summary is cleared, because it will be replaced when the follow-up finishes.
+FsResult SubagentManager::reopen_for_follow_up(const std::string& id) {
+  auto it = records_.find(id);
+  if (it == records_.end()) {
+    return FsResult::error(ErrCode::kNotFound, "subagent not found: " + id);
+  }
+  if (it->second.status == SubagentStatus::kRunning) {
+    // Already running: a follow-up is just steering it.
+    return FsResult::error(ErrCode::kBusy, "subagent still running: " + id);
+  }
+  it->second.status = SubagentStatus::kRunning;
+  it->second.summary.clear();
+  it->second.ended_at = 0;
+  it->second.started_at = clock_->now_ms();
+  return FsResult::success();
+}
+
+Json SubagentManager::transcript_for(const std::string& id) const {
+  auto it = records_.find(id);
+  if (it == records_.end()) return Json::array();
+  if (it->second.full.is_object() && it->second.full.contains("transcript")) {
+    return it->second.full["transcript"];
+  }
+  return Json::array();
+}
+
+std::string SubagentManager::drain_steering(const std::string& id) {  auto it = steering_.find(id);
   if (it == steering_.end() || it->second.empty()) return "";
   std::string out;
   for (size_t i = 0; i < it->second.size(); ++i) {
@@ -152,6 +206,24 @@ std::vector<std::string> SubagentManager::check_timeouts(int64_t now_ms) {
     }
   }
   return out;
+}
+
+int SubagentManager::prune_finished(const std::string& sid, size_t keep) {
+  // Collect this session's finished records, oldest first.
+  std::vector<std::pair<int64_t, std::string> > done;
+  for (auto& kv : records_) {
+    if (kv.second.parent_sid != sid) continue;
+    if (kv.second.status == SubagentStatus::kRunning) continue;
+    done.push_back(std::make_pair(kv.second.started_at, kv.first));
+  }
+  if (done.size() <= keep) return 0;
+  std::sort(done.begin(), done.end());
+  size_t drop = done.size() - keep;
+  for (size_t i = 0; i < drop; ++i) {
+    records_.erase(done[i].second);
+    steering_.erase(done[i].second);
+  }
+  return static_cast<int>(drop);
 }
 
 std::vector<PresetAgent> builtin_preset_agents() {

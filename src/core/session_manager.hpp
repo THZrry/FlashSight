@@ -39,6 +39,11 @@ class SessionManager {
   FsResult delete_session(const std::string& sid);
   // 重命名会话（写 meta.title；列表页读的就是它）
   FsResult rename_session(const std::string& sid, const std::string& title);
+  // 重命名并标记为用户设置（自动标题不再覆盖）
+  FsResult rename_session_by_user(const std::string& sid, const std::string& title);
+  // Set arbitrary meta flags (titleSummarized, ...). Used by the automatic title
+  // upkeep so it does not repeat the summary call on every turn.
+  FsResult set_meta_flag(const std::string& sid, const Json& fields);
 
   // ----- 会话设置（即时生效 + 记 systemOps）-----
   FsResult set_model(const std::string& sid, const std::string& model);
@@ -59,10 +64,33 @@ class SessionManager {
   FsResult append_turn(const std::string& sid, const Json& turn);
   FsResult append_system_op(const std::string& sid, const std::string& op,
                             const Json& detail);
+  // Crash-safe snapshot of the turn in flight: written every ~2s while a turn
+  // runs, cleared when it lands. A crashed process (the webview crash) would
+  // otherwise lose the whole answer, because a turn is only appended to the
+  // session when it FINISHES - which is what the user hit.
+  void write_live_snapshot(const std::string& sid, const Json& live);
+  // Read it back (empty when absent). `session.liveTurn` merges it with the
+  // in-memory state so a reopened tab shows a crashed turn too.
+  Json read_live_snapshot(const std::string& sid) const;
+
+  // ----- 子代理记录落盘 -----
+  // A subagent's record (task + summary + transcript) used to live ONLY in the
+  // in-memory SubagentManager, so after a restart every "打开记录" button in the
+  // transcript pointed at nothing - "子代理还是无法在历史记录里打开（也有可能是
+  // 旧的历史记录没存）". Written to <session>/subagents/<id>.json next to the turns,
+  // so it shares the session's lifetime and survives a restart.
+  void write_subagent_record(const std::string& sid, const std::string& id,
+                             const Json& record) const;
+  // Empty object when absent.
+  Json read_subagent_record(const std::string& sid, const std::string& id) const;
 
   // ----- 回滚 / 分叉 / 遗忘 -----
   FsResult rollback(const std::string& sid, const std::string& turn_id,
                     std::vector<std::string>* reverse_errors);
+  // Drop this turn and everything after it from the TRANSCRIPT ONLY - the file
+  // patches are left alone. Used by "edit the last message and resend": editing
+  // what you asked must not undo the work that was already done.
+  FsResult trim_history(const std::string& sid, const std::string& turn_id);
   FsResult fork(const std::string& sid, const std::string& turn_id);
   FsResult forget(const std::string& sid, const std::string& scope);  // "all" | turnId
 

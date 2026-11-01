@@ -73,12 +73,12 @@ session.*   : new(pid,cwd) / open(sid) / close(sid) / fork(sid,turnId) / rollbac
               suspend(sid) / resume(sid) / cancelWake(sid)
               setModel / setThinking / setPermission / setAutoMode / setEnterSend
               refreshConfig(sid)
-tool.*      : file.read/ls/find/write/diffWrite/rm
-              terminal.spawn/exec/kill/poll
-              network.fetch/search
-              vision.screenshot/readImage
+tool.*      : read_file/ls/find/write/edit/rm
+              terminal_spawn/exec/kill/poll
+              fetch_url/search
+              screenshot/readImage
               ask.answer(sid,askId,selection)   # 用户侧回答；自动模式不下发 ask 工具
-              subagent.spawn/cancel/list
+              subagent_spawn/cancel/list
 terminal.*  : list(sid) / show(tid) / kill(tid) / setEncoding(tid,enc)
 usage.*     : query(filter) / exportCsv(filter,path)
 settings.*  : get/set（全局+项目级，带来源标注） / detectShells() / setShell(name)

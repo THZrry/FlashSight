@@ -1,13 +1,13 @@
-// term_tools.cpp - terminal.exec/spawn/kill/poll（回调式实现）
+// term_tools.cpp - terminal_exec/spawn/kill/poll（回调式实现）
 #include "term_tools.hpp"
 
 namespace fs {
 
 void register_term_tools(ToolRegistry* registry) {
-  // terminal.spawn（模型后台任务；前台 exec 超 5min 由宿主转后台）
+  // terminal_spawn（模型后台任务；前台 exec 超 5min 由宿主转后台）
   {
     ToolDef def;
-    def.name = "terminal.spawn";
+    def.name = "terminal_spawn";
     def.description = "后台启动终端任务（高风险；wakeOnExit 可自动唤醒）";
     Json params = Json::object();
     params["type"] = "object";
@@ -20,7 +20,7 @@ void register_term_tools(ToolRegistry* registry) {
     params["properties"] = props;
     params["required"] = Json::array({"command"});
     def.parameters = params;
-    registry->register_tool("terminal.spawn", def,
+    registry->register_tool("terminal_spawn", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         if (!ctx.terminal_spawn) {
           return FsResult::error(ErrCode::kNotSupported, "terminal spawn not wired");
@@ -31,10 +31,10 @@ void register_term_tools(ToolRegistry* registry) {
       });
   }
 
-  // terminal.exec（前台执行，带超时；宿主可转后台）
+  // terminal_exec（前台执行，带超时；宿主可转后台）
   {
     ToolDef def;
-    def.name = "terminal.exec";
+    def.name = "terminal_exec";
     def.description = "前台执行命令（高风险；timeoutMs 超时；超 5min 宿主自动转后台）";
     Json params = Json::object();
     params["type"] = "object";
@@ -45,7 +45,7 @@ void register_term_tools(ToolRegistry* registry) {
     params["properties"] = props;
     params["required"] = Json::array({"command"});
     def.parameters = params;
-    registry->register_tool("terminal.exec", def,
+    registry->register_tool("terminal_exec", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         if (!ctx.terminal_spawn) {
           return FsResult::error(ErrCode::kNotSupported, "terminal exec not wired");
@@ -67,10 +67,10 @@ void register_term_tools(ToolRegistry* registry) {
       });
   }
 
-  // terminal.kill
+  // terminal_kill
   {
     ToolDef def;
-    def.name = "terminal.kill";
+    def.name = "terminal_kill";
     def.description = "终止终端";
     Json params = Json::object();
     params["type"] = "object";
@@ -79,7 +79,7 @@ void register_term_tools(ToolRegistry* registry) {
     params["properties"] = props;
     params["required"] = Json::array({"tid"});
     def.parameters = params;
-    registry->register_tool("terminal.kill", def,
+    registry->register_tool("terminal_kill", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         if (!ctx.terminal_kill) {
           return FsResult::error(ErrCode::kNotSupported, "terminal kill not wired");
@@ -90,10 +90,10 @@ void register_term_tools(ToolRegistry* registry) {
       });
   }
 
-  // terminal.poll
+  // terminal_poll
   {
     ToolDef def;
-    def.name = "terminal.poll";
+    def.name = "terminal_poll";
     def.description = "查询终端状态/输出";
     Json params = Json::object();
     params["type"] = "object";
@@ -102,7 +102,7 @@ void register_term_tools(ToolRegistry* registry) {
     params["properties"] = props;
     params["required"] = Json::array({"tid"});
     def.parameters = params;
-    registry->register_tool("terminal.poll", def,
+    registry->register_tool("terminal_poll", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         if (!ctx.terminal_poll) {
           return FsResult::error(ErrCode::kNotSupported, "terminal poll not wired");

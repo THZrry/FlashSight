@@ -12,6 +12,9 @@
 #include "core/folder_picker.hpp"
 #include "fs_git.hpp"
 #include "fs_path.hpp"
+#include "fs_utf8.hpp"
+#include "provider/prompt_adapter.hpp"
+#include "tools/search_backend.hpp"
 #include "tools/skill_registry.hpp"
 
 namespace fs {
@@ -104,14 +107,24 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     }
     ChatRequest creq;
     creq.model = req.model.empty() ? "gpt-4o-mini" : req.model;
-    creq.messages = req.messages;
-    creq.tools = req.tools;
+    // The loop speaks the provider-neutral format; the wire shape is decided
+    // here, where the connection (and therefore the API kind) is known. This is
+    // what makes one transcript replayable against any provider.
+    prompt::Adapted adapted = prompt::adapt(conn.kind, req.messages, req.tools);
+    creq.messages = adapted.messages;
+    creq.tools = adapted.tools;
+    // Anthropic keeps the system prompt in its own field.
+    if (!adapted.system.is_null() && conn.kind == ApiKind::kAnthropic) {
+      creq.system = adapted.system.is_string() ? adapted.system.get<std::string>() : "";
+    }
+    if (!req.thinking.empty()) creq.thinking = req.thinking;
     // Streaming whenever the UI will consume deltas. On the desktop the delta
     // callback fires on the caller's thread (in-process), and on the server the
     // SSE bytes arrive on this request's thread - either way the UI can render
     // while the model is still talking instead of waiting for the whole reply.
     creq.stream = static_cast<bool>(on_delta);
     creq.session_id = req.session_id;  // kPlan: x-opencode-session 亲和 id
+    creq.cancel = req.cancel;          // 停止生成 -> abort the SSE transfer
     ProviderRuntime runtime(conn, net, us, clk);
     ChatResponse cresp;
     FsResult r = runtime.call(creq, &cresp, on_delta);
@@ -121,9 +134,13 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     }
     out->text = cresp.text;
     out->tool_calls = cresp.tool_calls;
+    out->in_tokens = cresp.in_tokens;
+    out->out_tokens = cresp.out_tokens;
+    out->cache_tokens = cresp.cache_tokens;
     out->error = "";
     return FsResult::success();
   };
+  call_model_fn_ = deps.call_model;  // for one-shot calls (AI title)
   deps.event = [this](const std::string& e, const Json& p) {
     // 子代理完成 -> 推进工作流（addon2）；同时转发给 UI 订阅者
     if (e == "subagent.done") {
@@ -153,7 +170,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   deps.terminal_kill = [tm](const Json& a, Json* out) -> FsResult {
     return tm->kill(a, out);
   };
-  // 网络回调（network.fetch / network.search 经 NetClient；宿主负责证书/超时/大小）
+  // 网络回调（fetch_url / search_web 经 NetClient；宿主负责证书/超时/大小）
   deps.net_fetch = [net](const Json& a, Json* out) -> FsResult {
     HttpRequest req;
     req.method = jsonutil::get<std::string>(a, "method", "GET");
@@ -185,16 +202,229 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     if (out) *out = o;
     return FsResult::success(o);
   };
+  // ----- Web 搜索（search_web 工具）-----
+  // The search API shapes live in tools/search_backend.cpp; this callback only
+  // supplies the configured endpoint and does the HTTP round trip through the
+  // same NetClient the fetch tool uses (proxy/cert settings apply).
+  FsApi* self_search = this;
+  deps.web_search = [self_search, net](const Json& a, Json* out) -> FsResult {
+    std::string pid = jsonutil::get<std::string>(a, "pid", "");
+    auto setting = [self_search, &pid](const char* key, const Json& def) -> Json {
+      if (!pid.empty()) {
+        std::string path = self_search->path_for(pid);
+        if (!path.empty()) return self_search->store_for(pid).get_value(key, def);
+      }
+      return self_search->settings_->get_value(key, def);
+    };
+    search::Config cfg = search::config_from_settings(
+        setting(kKeySearchProvider, Json("")),
+        setting(kKeySearchEndpoint, Json("")),
+        setting(kKeySearchApiKey, Json("")),
+        setting(kKeySearchMaxResults, Json(5)));
+    std::string query = jsonutil::get<std::string>(a, "query", "");
+    int count = static_cast<int>(jsonutil::get_int(a, "count", cfg.max_results));
+    search::HttpCall call = search::build_request(cfg, query, count);
+    if (!call.ok) {
+      return FsResult::error(ErrCode::kNotSupported, call.error);
+    }
+    HttpRequest req;
+    req.method = call.method;
+    req.url = call.url;
+    req.timeout_ms = 30000;
+    for (auto it = call.headers.begin(); it != call.headers.end(); ++it) {
+      if (it.value().is_string()) req.headers[it.key()] = it.value().get<std::string>();
+    }
+    req.body = call.body;
+    HttpResponse resp;
+    FsResult nr = net->request(req, &resp);
+    if (!nr.ok()) return nr;
+    search::Parsed parsed = search::parse_response(cfg, resp.status, resp.body);
+    if (!parsed.ok) {
+      return FsResult::error(ErrCode::kRemote, parsed.error);
+    }
+    Json hits = Json::array();
+    for (size_t i = 0; i < parsed.hits.size(); ++i) {
+      Json h = Json::object();
+      h["title"] = parsed.hits[i].title;
+      h["url"] = parsed.hits[i].url;
+      h["snippet"] = parsed.hits[i].snippet;
+      hits.push_back(h);
+    }
+    Json o = Json::object();
+    o["provider"] = cfg.provider;
+    o["query"] = query;
+    o["hits"] = hits;
+    o["count"] = static_cast<int64_t>(parsed.hits.size());
+    if (out) *out = o;
+    return FsResult::success(o);
+  };
+  // ----- context sources (AgentContext) -----
+  // Settings: project override > global > built-in default. The context layer
+  // must not know about SettingsStore, so the lookup is injected here.
+  FsApi* self = this;
+  deps.setting = [self](const std::string& pid, const std::string& key,
+                        const Json& def) -> Json {
+    // Project value wins over the global one; an unknown pid falls back to the
+    // global store (that is what `store_for` does for an empty path).
+    if (!pid.empty()) {
+      std::string path = self->path_for(pid);
+      if (!path.empty()) return self->store_for(pid).get_value(key, def);
+    }
+    return self->settings_->get_value(key, def);
+  };
+  // Project instructions: the conventions a repo carries. AGENTS.md is the
+  // cross-tool name; .flashsight/instructions.md is the project-local one.
+  deps.project_instructions = [](const std::string& cwd) -> std::string {
+    if (cwd.empty()) return std::string();
+    const char* names[] = {"AGENTS.md", ".flashsight/instructions.md",
+                           "CLAUDE.md", ".cursorrules"};
+    for (const char* n : names) {
+      ghc::filesystem::path p = ghc::filesystem::path(cwd) / n;
+      std::error_code ec;
+      if (!ghc::filesystem::is_regular_file(p, ec)) continue;
+      std::ifstream ifs(p.string(), std::ios::binary);
+      if (!ifs) continue;
+      std::stringstream ss;
+      ss << ifs.rdbuf();
+      std::string text = ss.str();
+      // Cap it: a 200 KB instructions file would be re-sent every turn and
+      // would dwarf the actual conversation. Cut on a character boundary.
+      text = utf8::truncate(text, 16000, "\n... (truncated)");
+      return text;
+    }
+    return std::string();
+  };
+  deps.instructions_source = [](const std::string& cwd) -> std::string {
+    if (cwd.empty()) return std::string();
+    const char* names[] = {"AGENTS.md", ".flashsight/instructions.md",
+                           "CLAUDE.md", ".cursorrules"};
+    for (const char* n : names) {
+      std::error_code ec;
+      if (ghc::filesystem::is_regular_file(ghc::filesystem::path(cwd) / n, ec)) {
+        return std::string(n);
+      }
+    }
+    return std::string();
+  };
+  // Git summary: branch/dirty/ahead/behind. Cheap enough to refresh per turn
+  // (one `git status`), and it is what makes "commit your work" reliable.
+  deps.git_summary = [](const std::string& cwd) -> Json {
+    if (cwd.empty() || !git::is_repo(cwd)) return Json::object();
+    git::Status st = git::status(cwd);
+    if (!st.ok || !st.is_repo) return Json::object();
+    Json j = Json::object();
+    j["branch"] = st.branch;
+    j["dirty"] = !st.clean;
+    j["ahead"] = st.ahead;
+    j["behind"] = st.behind;
+    if (!st.operation.empty()) j["operation"] = st.operation;
+    return j;
+  };
+  // Context window for the water level: the model table is the only source of
+  // the endpoint-reported context length.
+  ModelTable* mt2 = model_table_.get();
+  ProviderStore* ps2 = providers_.get();
+  deps.context_limit = [mt2, ps2](const std::string& model) -> int64_t {
+    if (model.empty()) return 0;
+    for (auto& c : ps2->list()) {
+      ModelEntry e = mt2->resolve(c.id, model);
+      if (e.id == model && e.caps.context_len > 0) return e.caps.context_len;
+    }
+    return 0;
+  };
+  PlanStore* plans2 = plans_.get();
+  deps.plan_get = [plans2](const std::string& sid) -> Json { return plans2->get(sid); };
+  // Automatic session titles (placeholder first, model summary later). Runs on
+  // the turn's worker thread, after the turn is on disk.
+  FsApi* self_title = this;
+  deps.title_upkeep = [self_title](const std::string& sid) {
+    self_title->maybe_upgrade_title(sid);
+  };
+  // Water level across restarts: the last request's prompt tokens for this
+  // session is a fact already recorded in the usage log.
+  UsageStore* us2 = usage_.get();
+  deps.last_prompt_tokens = [us2](const std::string& sid) -> int64_t {
+    if (sid.empty()) return 0;
+    UsageFilter f;
+    f.sid = sid;
+    UsageSummary sum = us2->query(f);
+    return sum.has_last ? sum.last.in : 0;
+  };
+  deps.plan_update = [plans2](const std::string& sid, const Json& plan) -> FsResult {
+    Json stored = plans2->update(sid, plan);
+    return FsResult::success(stored);
+  };
+  // Crash-safe live snapshot. Stored as runtime.json's `live` field: runtime.json
+  // is explicitly "cache, may be deleted", which is exactly the right lifetime for
+  // an in-flight turn (it is cleared when the turn lands).
+  SessionManager* sm_live = sessions_.get();
+  deps.write_live = [sm_live](const std::string& sid, const Json& live) {
+    sm_live->write_live_snapshot(sid, live);
+  };
+  // A finished subagent's record is written next to the session, not only kept in
+  // memory: the work-log row that spawned it lives in the transcript forever, so
+  // its "打开记录" button has to keep working after a restart.
+  deps.write_subagent = [sm_live](const std::string& sid, const std::string& id,
+                                  const Json& rec) {
+    sm_live->write_subagent_record(sid, id, rec);
+  };
+  WorkflowStore* wf = workflows_.get();
+  deps.workflow_op = [wf, this](const Json& req, Json* out) -> FsResult {
+    std::string op = jsonutil::get<std::string>(req, "op", "");
+    std::string sid = jsonutil::get<std::string>(req, "sid", "");
+    if (op == "list") {
+      Json arr = Json::array();
+      Json defs = wf->list_defs();
+      for (auto& d : defs) arr.push_back(d);
+      for (auto* run : wf->runs_for_sid(sid)) {
+        if (run) arr.push_back(run->to_json());
+      }
+      if (out) *out = Json{{"items", arr}};
+      return FsResult::success(Json{{"items", arr}});
+    }
+    if (op == "start") {
+      std::string name = jsonutil::get<std::string>(req, "name", "");
+      const WorkflowDef* def = wf->find_def(name);
+      if (!def) return FsResult::error(ErrCode::kNotFound, "workflow not found: " + name);
+      WorkflowRun* run = wf->create_run(*def, sid);
+      if (!run) return FsResult::error(ErrCode::kInternal, "create_run failed");
+      emit_event("workflow_started", Json{{"runId", run->id}, {"sid", sid},
+                                          {"name", name}});
+      start_next_pending_step(run);
+      Json j = run->to_json();
+      if (out) *out = j;
+      return FsResult::success(j);
+    }
+    return FsResult::error(ErrCode::kInvalidArg, "unknown workflow op: " + op);
+  };
   agent_host_.reset(new AgentHost(std::move(deps)));
   agent_host_->register_builtin_tools(mcp_registry_.get());
   // addon2：思考语言设置（工具 skill 中英双语）注入宿主
   Json tl = settings_->get_value(kKeyThinkingLang, Json("auto"));
   agent_host_->set_thinking_lang(tl.is_string() ? tl.get<std::string>() : "auto");
-  // MCP/外部工具注册表：从设置恢复（重启后保留）
-  Json mcp = settings_->get_value(kKeyMcpEntries, Json::array());
-  if (mcp.is_array()) mcp_registry_->load(mcp);
   // 用户 skill：从设置恢复（内置 skill 是代码，不在这里）
   agent_host_->skills().load_user(settings_->get_value(kKeySkills, Json::array()));
+  // MCP/外部工具注册表：从设置恢复（重启后保留）
+  Json mcp = settings_->get_value(kKeyMcpEntries, Json::array());
+  if (mcp.is_array()) {
+    // One-time migration: a saved table from before the split can hold SKILL
+    // directories under the MCP page (that is the "gsd appears in MCP" report).
+    // Those are moved to the skill registry here - importing each dir - and the
+    // MCP table is rewritten without them.
+    bool moved = false;
+    for (size_t i = 0; i < mcp.size(); ++i) {
+      if (!McpRegistry::is_skill_dir_entry(mcp[i])) continue;
+      std::string dir = jsonutil::get<std::string>(mcp[i], "dir", "");
+      if (!dir.empty()) agent_host_->skills().import_dir(dir);
+      moved = true;
+    }
+    mcp_registry_->load(mcp);  // drops the skill-dir entries
+    if (moved) {
+      settings_->set_global(kKeySkills, agent_host_->skills().user_json());
+      settings_->set_global(kKeyMcpEntries, mcp_registry_->dump());
+      settings_->save_global();
+    }
+  }
   // 逐模型设置：从设置恢复用户覆盖（启用状态/能力/档位/重试/图标）
   model_table_->load_user_models(settings_->get_value(kKeyProviderModels, Json::object()));
   // 以及上一次从 API 取回的模型列表（上下文长度等事实的唯一来源）
@@ -351,6 +581,54 @@ FsResult FsApi::project_reveal(const std::string& pid) {
   return FsResult::success();
 }
 
+// Open a markdown link from the transcript.
+//
+// A chat link is MODEL OUTPUT, so it is treated as untrusted:
+//   * http(s) goes to the system browser (never into this window - navigating
+//     away would destroy the session view),
+//   * anything else (file://, a custom protocol, javascript:) is refused rather
+//     than handed to the OS handler,
+//   * a project-relative path opens the side-panel preview instead, which is what
+//     a link to a source file should do.
+FsResult FsApi::open_link(const std::string& sid, const std::string& href) {
+  if (href.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty link");
+  if (href.compare(0, 7, "http://") == 0 || href.compare(0, 8, "https://") == 0) {
+    if (!open_url_in_browser(href)) {
+      return FsResult::error(ErrCode::kIo, "cannot open the browser");
+    }
+    return FsResult::success(Json{{"opened", "browser"}, {"href", href}});
+  }
+  if (href.compare(0, 7, "file://") == 0 || href.find("://") != std::string::npos) {
+    return FsResult::error(ErrCode::kInvalidArg,
+                           "only http(s) links and project files can be opened");
+  }
+  // A file inside the project: report the path so the UI can open its preview
+  // panel. The UI owns tabs, so the backend does not open one itself.
+  std::string cwd;
+  if (!sid.empty()) {
+    Json full;
+    if (sessions_->load_full(sid, &full).ok() && full.contains("meta")) {
+      cwd = jsonutil::get<std::string>(full["meta"], "cwd", "");
+    }
+  }
+  std::string rel = href;
+  // "#L12" / "#L12-L20" line anchors are stripped: the preview opens the file,
+  // and a line number is not part of the path.
+  size_t hash = rel.find('#');
+  if (hash != std::string::npos) rel = rel.substr(0, hash);
+  if (rel.compare(0, 2, "./") == 0) rel = rel.substr(2);
+  if (!cwd.empty()) {
+    ghc::filesystem::path base = pathutil::normalize(cwd);
+    ghc::filesystem::path p = pathutil::normalize(base / rel);
+    std::error_code ec;
+    if (pathutil::is_within(p, base) && ghc::filesystem::is_regular_file(p, ec)) {
+      return FsResult::success(
+          Json{{"opened", "file"}, {"path", rel}, {"abs", p.string()}});
+    }
+  }
+  return FsResult::error(ErrCode::kNotFound, "link target not found: " + href);
+}
+
 namespace {
 // resolve a project-relative path, refusing anything that escapes the root
 bool safe_project_path(const std::string& root, const std::string& rel,
@@ -374,6 +652,97 @@ bool safe_project_path(const std::string& root, const std::string& rel,
   return true;
 }
 }  // namespace
+
+// List one directory for the composer's path completion, in either of two modes:
+//
+//   * `abs` relative to the PROJECT ROOT (the normal "/" case: the user typed
+//     "/src/ne"), and
+//   * an ABSOLUTE path ("./" or "/" outside the project) - allowed only when the
+//     session's permission level lets the agent read outside the project, so the
+//     hint list can never reveal directories the agent itself may not touch.
+//
+// Returns {dir, prefix, entries:[{name,isDir}]} where `dir`/`prefix` are the
+// resolved pieces the UI should keep typing against.
+FsResult FsApi::complete_path(const std::string& sid, const std::string& typed) {
+  std::string cwd;
+  std::string perm;
+  {
+    Json full;
+    if (!sid.empty() && sessions_->load_full(sid, &full).ok()) {
+      if (full.contains("meta")) {
+        cwd = jsonutil::get<std::string>(full["meta"], "cwd", "");
+      }
+      Json ss = full.contains("sessionSettings") ? full["sessionSettings"]
+                                                 : Json::object();
+      perm = jsonutil::get<std::string>(ss, "filePerm", "permissive");
+    }
+  }
+  bool outside_ok = (perm == "full" || perm == "permissive");
+  // Split the TYPED text, not the resolved absolute path.
+  //
+  // The old code resolved first and then split the RESULT on its last separator,
+  // which for "./src/ui/" is the one before "ui" - so it listed src/ filtered by
+  // the word "ui" instead of opening ui/. Any path below the first level
+  // therefore never matched ("文件提示依旧不支持子文件夹（无匹配）").
+  //
+  // A trailing separator means "list this directory"; anything after the last
+  // separator is the partial name to filter by. The returned dir/prefix are the
+  // TYPED pieces, so the UI keeps working against what the user sees.
+  size_t sep = typed.find_last_of("/\\");
+  std::string dir_part = sep == std::string::npos ? std::string() : typed.substr(0, sep + 1);
+  std::string frag = sep == std::string::npos ? typed : typed.substr(sep + 1);
+  auto empty_answer = [&](bool blocked) {
+    Json j = Json{{"dir", dir_part}, {"prefix", frag}, {"entries", Json::array()}};
+    if (blocked) j["blocked"] = true;
+    return FsResult::success(j);
+  };
+  if (dir_part.empty()) {
+    if (cwd.empty()) return empty_answer(false);
+  } else if (dir_part.compare(0, 2, "./") == 0 || dir_part.compare(0, 2, ".\\") == 0) {
+    if (!outside_ok) return empty_answer(true);
+  } else if (dir_part[0] == '/' || dir_part[0] == '\\') {
+    if (!outside_ok) return empty_answer(true);
+  } else if (cwd.empty()) {
+    return empty_answer(false);
+  }
+  // Resolve the DIRECTORY the typed text points at.
+  ghc::filesystem::path dir;
+  if (dir_part.empty()) {
+    dir = pathutil::normalize(ghc::filesystem::path(cwd));
+  } else if (dir_part.compare(0, 2, "./") == 0 ||
+             dir_part.compare(0, 2, ".\\") == 0) {
+    // "./x" means "next to the project root" in the user's head.
+    dir = pathutil::normalize(ghc::filesystem::path(cwd) / dir_part.substr(2));
+  } else if (dir_part[0] == '/' || dir_part[0] == '\\') {
+    dir = pathutil::normalize(dir_part);
+  } else {
+    dir = pathutil::normalize(ghc::filesystem::path(cwd) / dir_part);
+  }
+  std::error_code ec;
+  Json arr = Json::array();
+  if (ghc::filesystem::is_directory(dir, ec)) {
+    for (auto& e : ghc::filesystem::directory_iterator(dir, ec)) {
+      std::string name = e.path().filename().string();
+      if (name.empty() || name[0] == '.') continue;  // hidden noise
+      if (name.size() < frag.size()) continue;
+      bool match = true;
+      for (size_t i = 0; i < frag.size(); ++i) {
+        char a = name[i], c = frag[i];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (a != c) { match = false; break; }
+      }
+      if (!match) continue;
+      std::error_code ec2;
+      Json j = Json::object();
+      j["name"] = name;
+      j["isDir"] = ghc::filesystem::is_directory(e.path(), ec2);
+      arr.push_back(j);
+      if (arr.size() >= 60) break;
+    }
+  }
+  return FsResult::success(Json{{"dir", dir_part}, {"prefix", frag}, {"entries", arr}});
+}
 
 FsResult FsApi::project_files(const std::string& pid, const std::string& rel) {
   std::string root = path_for(pid);
@@ -499,6 +868,13 @@ FsResult FsApi::session_fork(const std::string& sid, const std::string& turnId) 
 FsResult FsApi::session_rollback(const std::string& sid, const std::string& turnId) {
   return sessions_->rollback(sid, turnId, nullptr);
 }
+// Drop the turn and everything after it from the transcript, WITHOUT reverting
+// file patches. This is what "编辑并重发最后一条" needs: the user wants a do-over
+// of the message, not to undo the edits that message already produced.
+FsResult FsApi::session_trim_history(const std::string& sid,
+                                     const std::string& turnId) {
+  return sessions_->trim_history(sid, turnId);
+}
 FsResult FsApi::session_forget(const std::string& sid, const std::string& scope) {
   return sessions_->forget(sid, scope);
 }
@@ -520,6 +896,10 @@ FsResult FsApi::session_list(const std::string& pid) {
     // waiting-for-approval, failed and done. Loop state is live; lastError is
     // filled by list_sessions, which already reads each full.json.
     m["loopState"] = agent_host_ ? agent_host_->loop_state(sid) : "idle";
+    // An auto-continue round is background work: the session must show the
+    // purple dot even when no user message triggered it.
+    int auto_round = agent_host_ ? agent_host_->auto_round(sid) : 0;
+    if (auto_round > 0) m["autoRound"] = auto_round;
     // Background activity: a terminal that is still running (and that the user
     // has NOT closed the tab for) means work can still appear in this session
     // even though no turn is in flight. The status dot uses this to show a
@@ -541,7 +921,154 @@ FsResult FsApi::session_delete(const std::string& sid) {
   return sessions_->delete_session(sid);
 }
 FsResult FsApi::session_rename(const std::string& sid, const std::string& title) {
-  return sessions_->rename_session(sid, title);
+  // A rename from the UI is a USER decision: mark it so the automatic title
+  // upkeep never overwrites it.
+  return sessions_->rename_session_by_user(sid, title);
+}
+
+// Ask the model for a short title.
+//
+// The transcript is condensed to the first user messages (a title only needs the
+// gist, and sending a whole session would cost more than the title is worth).
+// The summary-model preference wins; otherwise the session's own model is used.
+FsResult FsApi::session_ai_title(const std::string& sid) {
+  Json full;
+  FsResult r = sessions_->load_full(sid, &full);
+  if (!r.ok()) return r;
+  const Json& turns = full.contains("turns") && full["turns"].is_array()
+                          ? full["turns"] : Json::array();
+  std::string excerpt;
+  int taken = 0;
+  for (size_t i = 0; i < turns.size() && taken < 6; ++i) {
+    if (jsonutil::get<std::string>(turns[i], "role", "") != "user") continue;
+    std::string text = jsonutil::get<std::string>(turns[i], "promptRaw", "");
+    if (text.empty()) continue;
+    excerpt += "- " + utf8::truncate(text, 400) + "\n";
+    ++taken;
+  }
+  if (excerpt.empty()) {
+    return FsResult::error(ErrCode::kInvalidArg, "no user messages to summarise");
+  }
+  Json ss = full.value("sessionSettings", Json::object());
+  std::string model = jsonutil::get<std::string>(ss, "model", "");
+  if (settings_) {
+    // The settings UI stores this as the dotted key "model.pref.summary.model"
+    // (a plain string), while this code read an OBJECT at "model.pref.summary".
+    // The two never met, so "摘要模型" in settings had no effect at all. Accept
+    // both shapes: the flat key the UI writes, and the object form.
+    Json flat = settings_->get_value(kKeyModelPrefSummary, Json::object());
+    std::string m;
+    if (flat.is_string()) {
+      m = flat.get<std::string>();
+    } else if (flat.is_object()) {
+      m = jsonutil::get<std::string>(flat, "model", "");
+    }
+    if (!m.empty()) model = m;
+  }
+  if (model.empty()) {
+    return FsResult::error(ErrCode::kInvalidArg, "no model selected");
+  }
+  ModelCallRequest req;
+  req.model = model;
+  req.messages = Json::array({
+      Json{{"role", "system"},
+           {"content", "You name coding sessions. Reply with ONLY the title: one "
+                       "line, at most 6 words, no quotes, no trailing period, in "
+                       "the language the user writes in."}},
+      Json{{"role", "user"},
+           {"content", "User messages in this session:\n" + excerpt}},
+  });
+  ModelCallResult out;
+  FsResult cr = call_model_fn_
+                    ? call_model_fn_(req, &out, nullptr)
+                    : FsResult::error(ErrCode::kNotSupported, "model not wired");
+  if (!cr.ok() || !out.error.empty()) {
+    return FsResult::error(cr.code == ErrCode::kOk ? ErrCode::kRemote : cr.code,
+                           out.error.empty() ? cr.message : out.error);
+  }
+  // One line, trimmed, bounded: a model that answers with a paragraph must not
+  // become the tab label.
+  std::string title = out.text;
+  size_t nl = title.find_first_of("\r\n");
+  if (nl != std::string::npos) title = title.substr(0, nl);
+  title = utf8::truncate(title, 120);
+  // Strip surrounding quotes the model often adds despite being told not to.
+  while (!title.empty() && (title.front() == '"' || title.front() == '\'' ||
+                            title.front() == '「' || title.front() == ' ')) {
+    title.erase(title.begin());
+  }
+  while (!title.empty() && (title.back() == '"' || title.back() == '\'' ||
+                            title.back() == '」' || title.back() == ' ' ||
+                            title.back() == '。' || title.back() == '.')) {
+    title.pop_back();
+  }
+  if (title.empty()) {
+    return FsResult::error(ErrCode::kParse, "model returned an empty title");
+  }
+  FsResult rr = sessions_->rename_session(sid, title);
+  if (!rr.ok()) return rr;
+  return FsResult::success(Json{{"sid", sid}, {"title", title}});
+}
+
+// Automatic title upkeep.
+//
+// The rule from the design doc: a placeholder first (the first sentence of the
+// user's message, so the tab is never blank), and only once the session has real
+// content (3+ turns, or one turn with many tool calls) ask the model for a
+// proper summary. That keeps the common case free (no extra request) and spends
+// a call only when there is something worth summarising.
+void FsApi::maybe_upgrade_title(const std::string& sid) {
+  if (!sessions_ || sid.empty()) return;
+  Json full;
+  if (!sessions_->load_full(sid, &full).ok()) return;
+  Json meta = full.value("meta", Json::object());
+  // A title the user typed (or accepted from AI rename) is final: overwriting it
+  // would silently undo an explicit action.
+  if (jsonutil::get<bool>(meta, "titleUser", false)) return;
+  const Json& turns = full.contains("turns") && full["turns"].is_array()
+                          ? full["turns"] : Json::array();
+  if (turns.empty()) return;
+
+  std::string first_user;
+  for (auto& t : turns) {
+    if (jsonutil::get<std::string>(t, "role", "") != "user") continue;
+    first_user = jsonutil::get<std::string>(t, "promptRaw", "");
+    if (!first_user.empty()) break;
+  }
+  if (first_user.empty()) return;
+
+  std::string current = jsonutil::get<std::string>(meta, "title", "");
+  bool placeholder = current.empty() || current.compare(0, 6, "会话 ") == 0 ||
+                     current.compare(0, 5, "Chat ") == 0;
+
+  // Stage 1: placeholder = first sentence, truncated. No model call.
+  if (placeholder) {
+    std::string t = first_user;
+    size_t cut = t.find_first_of("\r\n");
+    if (cut != std::string::npos) t = t.substr(0, cut);
+    t = utf8::truncate(t, 40, "…");
+    while (!t.empty() && t.back() == ' ') t.pop_back();
+    if (!t.empty()) sessions_->rename_session(sid, t);
+  }
+
+  // Stage 2: enough content for a real title? 3+ turns, or the first turn made
+  // 10+ tool calls (one long autonomous run says more than its prompt).
+  int64_t tool_calls = 0;
+  for (auto& t : turns) {
+    if (jsonutil::get<std::string>(t, "role", "") != "assistant") continue;
+    if (t.contains("toolCalls") && t["toolCalls"].is_array()) {
+      tool_calls += static_cast<int64_t>(t["toolCalls"].size());
+    }
+  }
+  if (turns.size() < 3 && tool_calls < 10) return;
+  // Only once: mark the summary title so this does not run every turn.
+  if (jsonutil::get<bool>(meta, "titleSummarized", false)) return;
+  FsResult r = session_ai_title(sid);
+  if (r.ok()) {
+    Json patch = Json::object();
+    patch["titleSummarized"] = true;
+    sessions_->set_meta_flag(sid, patch);
+  }
 }
 FsResult FsApi::session_set_model(const std::string& sid, const std::string& model) {
   FsResult r = sessions_->set_model(sid, model);
@@ -661,24 +1188,40 @@ FsResult FsApi::session_turns(const std::string& sid, int before, int limit) {
 }
 
 // ----- P3: send/append/suspend/resume/cancelWake -----
+//
+// session.send BLOCKS for the whole turn (provider round trip, then every tool
+// call, then the next round). That is fine and intentional: the desktop UI runs
+// it on a worker thread (NativeBackend), so the window never blocks, and the
+// HTTP path already runs it on a request thread. Making it fire-and-forget here
+// would move the threading into the core, where it would have to be undone for
+// every test and for the synchronous callers.
+//
+// The lock: this method does NOT take the shared mutex across the turn (that
+// would serialize every other call for minutes). AgentHost::send takes it only
+// around the short setup, and the turn's own callbacks (persist_turn, tool
+// execution) take it individually.
 FsResult FsApi::session_send(const std::string& sid, const std::string& text,
                              const Json& attachments, const std::string& model,
                              const std::string& thinking) {
-  // 会话页上选的模型/档位随消息一起到达：先落盘再发。不这样做的话，用户换了
-  // 模型立刻发送时，请求可能还带着旧模型（setModel 是另一个异步调用）。
-  if (!model.empty()) sessions_->set_model(sid, model);
-  if (!thinking.empty()) sessions_->set_thinking(sid, thinking);
-  Json full;
-  FsResult r = sessions_->load_full(sid, &full);
-  if (!r.ok()) return r;
-  Json ss = full.value("sessionSettings", Json::object());
+  Json ss;
+  {
+    // Short prelude under the lock: persist the composer's model/thinking and
+    // read the session settings. The turn itself runs WITHOUT it (see below).
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    if (!model.empty()) sessions_->set_model(sid, model);
+    if (!thinking.empty()) sessions_->set_thinking(sid, thinking);
+    Json full;
+    FsResult r = sessions_->load_full(sid, &full);
+    if (!r.ok()) return r;
+    ss = full.value("sessionSettings", Json::object());
+  }
   bool auto_mode = jsonutil::get<bool>(ss, "autoMode", false);
   std::string perm = jsonutil::get<std::string>(ss, "filePerm", "permissive");
-  // The session's current model goes to the loop as well: the loop outlives a
-  // turn, so without this a model switch would only take effect in a brand new
-  // session (the loop kept whatever model it was created with).
   std::string sess_model = jsonutil::get<std::string>(ss, "model", "");
-  return agent_host_->send(sid, text, attachments, auto_mode, perm, sess_model);
+  // AgentHost::send takes the lock around its own setup and releases it for the
+  // model call; the turn's callbacks re-take it one at a time.
+  return agent_host_->send(sid, text, attachments, auto_mode, perm, sess_model,
+                           jsonutil::get<std::string>(ss, "thinking", ""));
 }
 
 FsResult FsApi::session_append(const std::string& sid, const std::string& text) {
@@ -743,6 +1286,46 @@ FsResult FsApi::session_approve(const std::string& sid, bool yes) {
   return agent_host_->approve(sid, yes);
 }
 
+// 上下文压缩：用户主动触发（或 UI 在水位提示上点"压缩"）
+FsResult FsApi::session_compress(const std::string& sid) {
+  if (!agent_host_) return FsResult::error(ErrCode::kInternal, "no agent host");
+  FsResult r = agent_host_->request_compress(sid);
+  if (r.ok()) sessions_->append_system_op(sid, "compress", Json{{"by", "user"}});
+  return r;
+}
+
+// 上下文水位：promptTokens / contextLimit / pct / compressAtPct / shouldCompress
+FsResult FsApi::session_context(const std::string& sid) {
+  if (!agent_host_) return FsResult::error(ErrCode::kInternal, "no agent host");
+  return agent_host_->context_status(sid);
+}
+
+// The in-flight turn. The session file only holds finished turns, so a tab
+// reopened while a turn is running had nothing to render - the answer kept
+// streaming into a closed view. This serves the in-memory copy.
+FsResult FsApi::session_live_turn(const std::string& sid) {
+  Json in_mem = Json::object();
+  if (agent_host_) {
+    FsResult r = agent_host_->live_turn(sid);
+    if (r.ok() && r.data.is_object()) in_mem = r.data;
+  }
+  bool running = jsonutil::get<bool>(in_mem, "running", false);
+  if (running) return FsResult::success(in_mem);
+  // Nothing is running in memory. There may still be a CRASHED turn on disk: a
+  // snapshot written while the turn was streaming but never cleared because the
+  // process died. Handing it back lets the reopened session show what was lost
+  // instead of silently dropping it - which is what the user saw after the crash.
+  Json crashed = sessions_->read_live_snapshot(sid);
+  if (crashed.is_object() && !crashed.empty() &&
+      jsonutil::get<bool>(crashed, "running", false)) {
+    Json out = crashed;
+    out["running"] = false;   // the process is gone: it is not running now
+    out["crashed"] = true;    // the UI labels it "interrupted, can continue"
+    return FsResult::success(out);
+  }
+  return FsResult::success(Json{{"running", false}});
+}
+
 // ----- P3: tool.* / ask / subagent / steering -----
 FsResult FsApi::tool_invoke(const std::string& sid, const std::string& name,
                             const Json& args) {
@@ -776,6 +1359,33 @@ FsResult FsApi::subagent_cancel(const std::string& id) {
 
 FsResult FsApi::subagent_list(const std::string& sid) {
   return agent_host_->subagent_list(sid);
+}
+
+FsResult FsApi::subagent_detail(const std::string& id) {
+  return agent_host_->subagent_detail(id);
+}
+
+// `sid` is the session the record belongs to. A record is per-session (ids are
+// per-session counters), so a bare id cannot locate the file after a restart.
+// The UI knows the session - the work-log row it clicked is in that transcript -
+// and passes it here.
+FsResult FsApi::subagent_detail_in(const std::string& sid, const std::string& id) {
+  FsResult r = agent_host_->subagent_detail(id);
+  if (r.ok()) return r;
+  // The in-memory record is gone (the process restarted, or the record was
+  // pruned). A finished subagent's transcript is part of the session's history -
+  // the work-log row that created it is still there - so fall back to the copy
+  // saved next to the session. Without this every "打开记录" button in an older
+  // transcript pointed at nothing.
+  if (!sid.empty()) {
+    Json rec = sessions_->read_subagent_record(sid, id);
+    if (rec.is_object() && !rec.empty()) return FsResult::success(rec);
+  }
+  return r;
+}
+
+FsResult FsApi::subagent_follow_up(const std::string& id, const std::string& text) {
+  return agent_host_->subagent_follow_up(id, text);
 }
 
 // addon2：子代理引导（子代理无轮概念，只需当前引导）
@@ -855,13 +1465,34 @@ FsResult FsApi::skill_remove(const std::string& name) {
   return FsResult::success();
 }
 
-// 浏览器控制 skill 的加载口（addon2：/browser-load 按需加载，不直接提供）
-FsResult FsApi::browser_load() { return skill_load("browser-control"); }
-
 // ----- mcp.*（外部工具/技能包；注册表持久化到设置 mcp.entries）-----
 namespace {
-// 常见外部工具目录（claude code / opencode / 用户配置）
-std::vector<std::string> mcp_probe_dirs() {
+// Where an MCP SERVER is actually configured. MCP is a protocol: a server is a
+// definition (command/url + args), not a directory of markdown. The old probe
+// pointed at `~/.claude/skills` and `~/.claude/commands` - SKILL locations -
+// so "自动探测" imported skill folders as MCP entries. That is exactly the
+// report: something named in Skills also showed up under MCP.
+std::vector<std::string> mcp_probe_files() {
+  std::vector<std::string> files;
+  const char* home = std::getenv("USERPROFILE");
+  if (!home) home = std::getenv("HOME");
+  std::string h = home ? home : "";
+  if (!h.empty()) {
+    // Claude Code / Claude Desktop style server lists.
+    files.push_back(h + "/.claude.json");
+    files.push_back(h + "/.claude/settings.json");
+    files.push_back(h + "/.config/Claude/claude_desktop_config.json");
+    files.push_back(h + "/AppData/Roaming/Claude/claude_desktop_config.json");
+    // opencode / generic MCP config.
+    files.push_back(h + "/.config/opencode/opencode.json");
+    files.push_back(h + "/.config/flashsight/mcp.json");
+    files.push_back(h + "/.flashsight/mcp.json");
+  }
+  return files;
+}
+
+// Directories a SKILL is imported from (SKILL.md / <name>.md per entry).
+std::vector<std::string> skill_probe_dirs() {
   std::vector<std::string> dirs;
   const char* home = std::getenv("USERPROFILE");
   if (!home) home = std::getenv("HOME");
@@ -914,18 +1545,22 @@ FsResult FsApi::mcp_remove(const std::string& name) {
 }
 
 FsResult FsApi::mcp_detect() {
-  // 探测常见目录：存在的导入，并把结果返回（不改已有条目）
+  // MCP detection reads SERVER definitions out of the config files where those
+  // clients keep them (`mcpServers` in a Claude-style config, `mcp.servers` /
+  // `servers` elsewhere). It used to walk `~/.claude/skills` and
+  // `~/.claude/commands` - SKILL directories - and register each subdirectory
+  // as an "MCP entry", which is why a skill named in Skills also appeared under
+  // MCP. Skills have their own detection (skill_detect).
   Json found = Json::array();
-  std::vector<std::string> dirs = mcp_probe_dirs();
-  for (size_t i = 0; i < dirs.size(); ++i) {
+  std::vector<std::string> files = mcp_probe_files();
+  for (size_t i = 0; i < files.size(); ++i) {
     std::error_code ec;
-    if (!ghc::filesystem::exists(dirs[i], ec) ||
-        !ghc::filesystem::is_directory(dirs[i], ec)) {
-      continue;
-    }
-    mcp_registry_->import_dir(dirs[i]);
+    if (!ghc::filesystem::is_regular_file(files[i], ec)) continue;
+    int added = mcp_registry_->import_config_file(files[i]);
+    if (added <= 0) continue;  // present but no server definitions in it
     Json o = Json::object();
-    o["dir"] = dirs[i];
+    o["file"] = files[i];
+    o["added"] = added;
     found.push_back(o);
   }
   if (!found.empty()) {
@@ -933,6 +1568,30 @@ FsResult FsApi::mcp_detect() {
     settings_->save_global();
   }
   return FsResult::success(Json{{"scanned", found}, {"tools", mcp_registry_->list_json()}});
+}
+
+// Skill detection: the counterpart of mcp_detect, on the SKILL side. The Skill
+// page's "自动探测" button used to call mcp_detect, so it could only ever find
+// MCP entries - skills were reachable only through a manual directory import.
+FsResult FsApi::skill_detect() {
+  Json found = Json::array();
+  std::vector<std::string> dirs = skill_probe_dirs();
+  for (size_t i = 0; i < dirs.size(); ++i) {
+    std::error_code ec;
+    if (!ghc::filesystem::is_directory(dirs[i], ec)) continue;
+    int added = agent_host_->skills().import_dir(dirs[i]);
+    Json o = Json::object();
+    o["dir"] = dirs[i];
+    o["added"] = added;
+    found.push_back(o);
+  }
+  if (!found.empty()) {
+    settings_->set_global(kKeySkills, agent_host_->skills().user_json());
+    settings_->save_global();
+  }
+  return FsResult::success(Json{{"scanned", found},
+                                {"skills", agent_host_->skills().list_json(
+                                    parse_think_lang(agent_host_->thinking_lang()))}});
 }
 
 FsResult FsApi::set_thinking_lang(const std::string& lang) {
@@ -1288,6 +1947,10 @@ FsResult FsApi::usage_query(const Json& filter) {
     out["lastOut"] = sum.last.out;
     out["lastModel"] = sum.last.model;
     out["lastProvider"] = sum.last.provider;
+    out["lastCache"] = sum.last.cache;
+    out["lastCost"] = sum.last.cost;
+    out["lastCostKind"] = sum.last.cost_kind;
+    out["lastTs"] = sum.last.ts;
     int64_t window = 0;
     if (!sum.last.provider.empty() && !sum.last.model.empty()) {
       ModelEntry me = model_table_->resolve(sum.last.provider, sum.last.model);
@@ -1295,6 +1958,35 @@ FsResult FsApi::usage_query(const Json& filter) {
     }
     out["contextWindow"] = window;
   }
+  // Cache efficiency. `cacheHit` is -1 when no row ever reported a cache field:
+  // showing "0%" would claim the provider bills every prompt token, which is a
+  // different (and wrong) statement.
+  out["cacheHit"] = sum.cache_reported ? sum.cache_hit_ratio : -1.0;
+  out["cacheReported"] = sum.cache_reported;
+  // Cost per provider kind: one session can span a money provider and a quota
+  // one, so the UI needs to know which numbers it may add up.
+  Json ck = Json::object();
+  for (auto& kv : sum.cost_kind_by_provider) ck[kv.first] = kv.second;
+  out["costKindByProvider"] = ck;
+  // The recent tail: the panel lists the last calls (this turn's cost is the
+  // sum of the rows after the last user message, which the UI knows about).
+  Json recent = Json::array();
+  for (auto& r : sum.recent) {
+    Json e = Json::object();
+    e["ts"] = r.ts;
+    e["provider"] = r.provider;
+    e["model"] = r.model;
+    e["in"] = r.in;
+    e["out"] = r.out;
+    e["cache"] = r.cache;
+    e["cost"] = r.cost;
+    e["costKind"] = r.cost_kind;
+    e["latency"] = r.latency_ms;
+    e["toolCalls"] = r.tool_calls;
+    if (!r.error.empty()) e["error"] = r.error;
+    recent.push_back(e);
+  }
+  out["recent"] = recent;
   return FsResult::success(out);
 }
 FsResult FsApi::usage_export_csv(const Json& filter, const std::string& path) {
@@ -1462,7 +2154,7 @@ FsResult FsApi::workflow_start(const std::string& sid, const std::string& name) 
   if (!def) return FsResult::error(ErrCode::kNotFound, "workflow not found: " + name);
   WorkflowRun* run = workflows_->create_run(*def, sid);
   if (!run) return FsResult::error(ErrCode::kInternal, "create_run failed");
-  emit_event("workflow.started", Json{{"runId", run->id}, {"sid", sid},
+  emit_event("workflow_started", Json{{"runId", run->id}, {"sid", sid},
                                       {"name", name}});
   start_next_pending_step(run);
   return FsResult::success(run->to_json());

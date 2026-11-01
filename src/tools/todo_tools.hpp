@@ -7,7 +7,7 @@
 
 namespace fs {
 
-// 注册 todo.* 工具（todo.add/list/check/uncheck/clear）
+// 注册 todo.* 工具（todo_add/list/check/uncheck/clear）
 void register_todo_tools(ToolRegistry* registry);
 
 }  // namespace fs

@@ -4,6 +4,9 @@
 #include <string>
 #include <vector>
 
+#include "provider/prompt_adapter.hpp"
+#include "fs_utf8.hpp"
+
 namespace fs {
 
 int64_t HistoryBuilder::estimate_tokens(const std::string& s) {
@@ -12,77 +15,344 @@ int64_t HistoryBuilder::estimate_tokens(const std::string& s) {
     if (c >= 0x80) ++cjk;
     else ++ascii;
   }
-  // 英文约 4 字符/token，CJK 约 1.5 字符/token
-  return ascii / 4 + cjk * 2 / 3 + 1;
+  // 英文约 4 字符/token，CJK 约 1 字符/token（保守：宁可高估）
+  return ascii / 4 + cjk + 1;
 }
 
 int64_t HistoryBuilder::estimate_tokens(const Json& j) {
   return estimate_tokens(j.dump());
 }
 
-std::string HistoryBuilder::fallback_summary(const std::string& text) {
-  // 首句截断（P3 摘要模型升级留接口）
-  size_t end = text.find_first_of("。\n");
-  if (end == std::string::npos) end = text.size();
-  std::string s = text.substr(0, end);
-  if (s.size() > 200) s = s.substr(0, 200);
+// One stored turn becomes one or more neutral messages.
+//
+// A persisted assistant turn carries what the model SAID and what the tools
+// RETURNED (executed_calls_). Both have to come back, otherwise the model sees
+// its own request with no answer on the next turn and repeats it. Tool results
+// are emitted as role:"tool" messages - the neutral form - and prompt::adapt()
+// renders them as tool messages (OpenAI) or tool_result blocks (Anthropic).
+void HistoryBuilder::turn_to_neutral(const Json& turn, Json* out) {
+  std::string role = jsonutil::get<std::string>(turn, "role", "user");
+  if (role == "user") {
+    std::string text = jsonutil::get<std::string>(turn, "promptRaw", "");
+    if (text.empty()) text = jsonutil::get<std::string>(turn, "streamSummary", "");
+    if (text.empty()) return;  // a pure tool-result turn adds nothing on its own
+    out->push_back(Json{{"role", "user"}, {"content", text}});
+    // Anthropic-era turns stored tool results on the user turn; replay them.
+    Json results = turn.contains("toolResults") && turn["toolResults"].is_array()
+                       ? turn["toolResults"] : Json::array();
+    for (auto& r : results) {
+      if (!r.is_object()) continue;
+      Json msg = Json::object();
+      msg["role"] = "tool";
+      msg["toolCallId"] = jsonutil::get<std::string>(r, "toolUseId", "");
+      msg["content"] = r.contains("result")
+                           ? (r["result"].is_string() ? r["result"].get<std::string>()
+                                                      : r["result"].dump())
+                           : "";
+      if (msg["toolCallId"].get<std::string>().empty()) continue;
+      out->push_back(msg);
+    }
+    return;
+  }
+  if (role != "assistant") return;
+
+  std::string text = jsonutil::get<std::string>(turn, "streamSummary", "");
+  Json calls = Json::array();
+  Json tool_msgs = Json::array();
+  Json stored = turn.contains("toolCalls") && turn["toolCalls"].is_array()
+                    ? turn["toolCalls"] : Json::array();
+  int seq = 0;
+  for (auto& c : stored) {
+    if (!c.is_object()) continue;
+    std::string name = jsonutil::get<std::string>(c, "name", "");
+    if (name.empty()) continue;
+    Json n = prompt::normalize_tool_call(c, "call_" + std::to_string(seq++));
+    calls.push_back(n);
+    // The result is the payload the tool produced. A stored turn may carry it as
+    // `result` (structured, older turns) or `detail` (the display text the panel
+    // shows). The display text is pretty-printed and can be 4000 characters of
+    // before/after diff; replaying it verbatim every turn is what filled up a
+    // long session's window. `project_tool_result` keeps the fields that let the
+    // model continue and samples the payload.
+    std::string name_for_proj = name;
+    Json structured = c.contains("result") && c["result"].is_object() ? c["result"]
+                                                                     : Json::object();
+    std::string detail;
+    if (c.contains("detail") && c["detail"].is_string()) {
+      detail = c["detail"].get<std::string>();
+    }
+    std::string body;
+    if (!structured.empty()) {
+      body = HistoryBuilder::project_tool_result(name_for_proj, structured, detail);
+    } else if (!detail.empty()) {
+      body = HistoryBuilder::project_tool_result(name_for_proj, Json::object(), detail);
+    } else if (c.contains("summary") && c["summary"].is_string()) {
+      body = c["summary"].get<std::string>();
+    }
+    if (body.empty()) body = "{}";
+    // A backstop for unknown tools that echoed a big blob: the projection bounds
+    // known shapes, this bounds the rest.
+    body = utf8::truncate(body, 4000, "\n... (truncated when replayed)");
+    Json msg = Json::object();
+    msg["role"] = "tool";
+    msg["toolCallId"] = jsonutil::get<std::string>(n, "id", "");
+    msg["name"] = name;
+    msg["content"] = body;
+    if (jsonutil::get<bool>(c, "ok", true) == false) msg["isError"] = true;
+    tool_msgs.push_back(msg);
+  }
+  if (text.empty() && calls.empty()) {
+    // A failed turn with only an error string: keep the error visible.
+    std::string err = jsonutil::get<std::string>(turn, "error", "");
+    if (err.empty()) return;
+    text = "[" + err + "]";
+  }
+  Json msg = Json::object();
+  msg["role"] = "assistant";
+  msg["content"] = text;
+  if (!calls.empty()) msg["toolCalls"] = calls;
+  // The assistant message must come BEFORE its tool results.
+  out->push_back(msg);
+  for (auto& tm : tool_msgs) out->push_back(tm);
+}
+
+std::string HistoryBuilder::fold_summary(const Json& turns, size_t from, size_t to,
+                                         int max_points) {
+  return make_fold(turns, from, to, "", max_points);
+}
+
+namespace {
+
+// A JSON value cut down to something that can be replayed on every turn: long
+// strings truncated on a character boundary, long arrays sampled.
+Json compact_value(const Json& v, int depth) {
+  if (depth > 4) return Json("…");
+  if (v.is_string()) {
+    const std::string& s = v.get<std::string>();
+    return Json(utf8::truncate(s, 400, "…"));
+  }
+  if (v.is_array()) {
+    Json out = Json::array();
+    size_t n = v.size() > 12 ? 12 : v.size();
+    for (size_t i = 0; i < n; ++i) out.push_back(compact_value(v[i], depth + 1));
+    if (v.size() > n) out.push_back(Json("… +" + std::to_string(v.size() - n) + " more"));
+    return out;
+  }
+  if (v.is_object()) {
+    Json out = Json::object();
+    for (auto it = v.begin(); it != v.end(); ++it) {
+      out[it.key()] = compact_value(it.value(), depth + 1);
+    }
+    return out;
+  }
+  return v;
+}
+
+int array_size(const Json& j, const char* key) {
+  if (!j.is_object() || !j.contains(key) || !j[key].is_array()) return -1;
+  return static_cast<int>(j[key].size());
+}
+
+// The tail of a text blob: for terminal output and build logs the END carries
+// the signal (the error is at the bottom); the beginning is boilerplate.
+std::string tail_of(const std::string& s, size_t max_bytes) {
+  if (s.size() <= max_bytes) return s;
+  size_t cut = s.size() - max_bytes;
+  while (cut < s.size() && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) ++cut;
+  return "…" + s.substr(cut);
+}
+
+}  // namespace
+
+std::string HistoryBuilder::project_tool_result(const std::string& name,
+                                                const Json& result,
+                                                const std::string& detail) {
+  Json r = result.is_object() ? result : Json::object();
+  bool parsed_detail = false;
+  if (r.empty() && !detail.empty()) {
+    // Older turns only stored the display text. It is pretty-printed JSON in
+    // practice, so try to recover the structure.
+    try {
+      Json parsed = Json::parse(detail);
+      if (parsed.is_object()) {
+        r = parsed;
+        parsed_detail = true;
+      }
+    } catch (...) {
+    }
+  }
+  Json out = Json::object();
+  out["ok"] = jsonutil::get<bool>(r, "ok", true);
+  if (r.empty() && !detail.empty()) {
+    // Neither a structure nor JSON: keep a bounded copy of the text. Dropping it
+    // entirely would erase the result from the model's view of the turn.
+    out["output"] = utf8::truncate(detail, 900, "\n… (truncated when replayed)");
+    return out.dump();
+  }
+  (void)parsed_detail;
+  auto copy = [&](const char* k) {
+    if (r.contains(k)) out[k] = compact_value(r[k], 1);
+  };
+
+  if (name == "read_file") {
+    copy("path"); copy("startLine"); copy("endLine"); copy("totalLines");
+    copy("hash"); copy("eol"); copy("truncated");
+    std::string content = jsonutil::get<std::string>(r, "content", "");
+    if (!content.empty()) {
+      // Enough to recognise the file. `hash` is what makes a stale re-use fail
+      // loudly instead of corrupting the file, so the model can re-read safely.
+      out["content"] = utf8::truncate(
+          content, 900, "\n… (rest omitted when replayed; call read_file again)");
+    }
+  } else if (name == "edit_file" || name == "write_file") {
+    copy("path"); copy("totalLines"); copy("hash"); copy("beforeHash");
+    copy("summary"); copy("bytes");
+    int n = array_size(r, "changes");
+    if (n >= 0) {
+      // before/after text is the bulk of an edit result and only useful while
+      // reading the diff; the line ranges are what "continue" needs.
+      Json ranges = Json::array();
+      const Json& ch = r["changes"];
+      for (size_t i = 0; i < ch.size() && i < 20; ++i) {
+        if (!ch[i].is_object()) continue;
+        ranges.push_back(Json{{"start", ch[i].value("start", Json(0))},
+                              {"end", ch[i].value("end", Json(0))}});
+      }
+      out["changes"] = Json{{"count", n}, {"ranges", ranges}};
+    }
+  } else if (name == "list_dir" || name == "find_files") {
+    copy("path"); copy("truncated"); copy("detail");
+    int n = array_size(r, "entries");
+    if (n >= 0) {
+      out["entries"] = n;
+      std::string names;
+      const Json& arr = r["entries"];
+      for (size_t i = 0; i < arr.size() && i < 60; ++i) {
+        std::string nm = jsonutil::get<std::string>(arr[i], "name", "");
+        if (nm.empty()) continue;
+        if (!names.empty()) names += "\n";
+        names += nm;
+      }
+      if (!names.empty()) out["names"] = utf8::truncate(names, 1200, "\n…");
+    }
+    n = array_size(r, "results");
+    if (n >= 0) {
+      out["results"] = n;
+      Json sample = Json::array();
+      const Json& arr = r["results"];
+      for (size_t i = 0; i < arr.size() && i < 25; ++i) {
+        sample.push_back(compact_value(arr[i], 1));
+      }
+      out["sample"] = sample;
+    }
+    if (r.contains("names") && r["names"].is_string() && !out.contains("names")) {
+      out["names"] = utf8::truncate(r["names"].get<std::string>(), 1200, "\n…");
+    }
+  } else if (name == "terminal" || name == "terminal_run" || name == "exec" ||
+             name == "run_command" || name == "shell") {
+    copy("exitCode"); copy("tid"); copy("status"); copy("timedOut");
+    std::string text = jsonutil::get<std::string>(r, "output", "");
+    if (text.empty()) text = jsonutil::get<std::string>(r, "text", "");
+    if (text.empty()) text = jsonutil::get<std::string>(r, "stdout", "");
+    if (!text.empty()) out["output"] = tail_of(text, 1200);
+    std::string err = jsonutil::get<std::string>(r, "stderr", "");
+    if (!err.empty()) out["stderr"] = tail_of(err, 600);
+  } else if (name == "screenshot" || name == "read_image") {
+    copy("width"); copy("height"); copy("format"); copy("path"); copy("backend");
+    copy("bytes");
+    // The image travels as a content block when it is fresh; replaying a data
+    // URI into every later request would be pure cost.
+  } else if (name == "search_web") {
+    copy("provider"); copy("query");
+    int n = array_size(r, "hits");
+    if (n >= 0) {
+      out["hits"] = n;
+      Json sample = Json::array();
+      const Json& arr = r["hits"];
+      for (size_t i = 0; i < arr.size() && i < 6; ++i) {
+        if (!arr[i].is_object()) continue;
+        sample.push_back(Json{{"title", jsonutil::get<std::string>(arr[i], "title", "")},
+                              {"url", jsonutil::get<std::string>(arr[i], "url", "")}});
+      }
+      out["sample"] = sample;
+    }
+  } else if (name == "fetch_url") {
+    copy("status"); copy("url"); copy("contentType");
+    std::string body = jsonutil::get<std::string>(r, "text", "");
+    if (!body.empty()) out["text"] = utf8::truncate(body, 1200, "\n… (truncated)");
+  } else if (name == "ask") {
+    copy("question"); copy("answer");
+  } else if (name.rfind("todo_", 0) == 0) {
+    copy("id"); copy("pending");
+    int n = array_size(r, "items");
+    if (n >= 0) {
+      Json items = Json::array();
+      const Json& arr = r["items"];
+      for (size_t i = 0; i < arr.size() && i < 20; ++i) {
+        if (!arr[i].is_object()) continue;
+        items.push_back(Json{
+            {"id", arr[i].value("id", Json(0))},
+            {"task", utf8::truncate(jsonutil::get<std::string>(arr[i], "task", ""), 120,
+                                    "…")},
+            {"done", arr[i].value("done", Json(false))}});
+      }
+      out["items"] = items;
+    }
+  } else if (name == "plan_update" || name == "plan_get") {
+    copy("goal");
+    int n = array_size(r, "steps");
+    if (n >= 0) out["steps"] = n;
+  } else if (name.rfind("subagent_", 0) == 0) {
+    copy("id"); copy("kind"); copy("status"); copy("step");
+  } else {
+    // Unknown (MCP / plugin) tool: keep its structure, bounded.
+    Json c = compact_value(r, 0);
+    if (c.is_object()) {
+      for (auto it = c.begin(); it != c.end(); ++it) out[it.key()] = it.value();
+    }
+  }
+  if (jsonutil::get<bool>(r, "ok", true) == false) {
+    // A failure's reason IS the useful part; never drop it.
+    copy("error"); copy("errCode"); copy("howToProceed"); copy("denial");
+  }
+  std::string s = out.dump();
+  if (s.size() > 2400) s = utf8::truncate(s, 2400, "\n… (result summary truncated)");
   return s;
 }
 
-Json HistoryBuilder::turn_to_message(const Json& turn) {
-  // user / assistant 消息；tool_calls 组装
-  Json msg = Json::object();
-  std::string role = jsonutil::get<std::string>(turn, "role", "user");
-  if (role == "user") {
-    msg["role"] = "user";
-    std::string text = jsonutil::get<std::string>(turn, "promptRaw", "");
-    if (text.empty()) text = jsonutil::get<std::string>(turn, "streamSummary", "");
-    msg["content"] = text.empty() ? "..." : text;
-  } else {
-    msg["role"] = "assistant";
-    std::string text = jsonutil::get<std::string>(turn, "streamSummary", "");
-    // 有 toolCalls 则带上（tool 结果由 P3 Loop 回填为 tool 消息）
-    Json tc = turn.contains("toolCalls") && turn["toolCalls"].is_array()
-                  ? turn["toolCalls"] : Json::array();
-    if (!tc.empty()) {
-      Json calls = Json::array();
-      for (auto& c : tc) {
-        if (!c.is_object()) continue;
-        Json call = Json::object();
-        call["id"] = jsonutil::get<std::string>(c, "id", "");
-        call["type"] = "function";
-        Json fn = Json::object();
-        fn["name"] = jsonutil::get<std::string>(c, "name", "");
-        Json args = c.contains("args") ? c["args"] : Json::object();
-        fn["arguments"] = args.is_string() ? args.get<std::string>() : args.dump();
-        call["function"] = fn;
-        calls.push_back(call);
-      }
-      msg["tool_calls"] = calls;
-      msg["content"] = text.empty() ? Json() : Json(text);
-    } else {
-      msg["content"] = text;
+std::string HistoryBuilder::make_fold(const Json& turns, size_t from, size_t to,
+                                      const std::string& prior, int max_points) {
+  std::string points;
+  int collected = 0;
+  for (size_t i = from; i < to && i < turns.size(); ++i) {
+    const Json& t = turns[i];
+    if (!t.is_object()) continue;
+    if (!t.contains("keyPoints") || !t["keyPoints"].is_array()) continue;
+    for (auto& kp : t["keyPoints"]) {
+      if (!kp.is_string() || collected >= max_points) continue;
+      points += "- " + kp.get<std::string>() + "\n";
+      ++collected;
     }
   }
-  return msg;
+  std::string out = "[Earlier conversation was compacted]\n";
+  if (!prior.empty()) out += prior + "\n";
+  if (!points.empty()) out += "[Key points]\n" + points;
+  return out;
 }
 
 Json HistoryBuilder::build_system() const {
   Json sys = Json::object();
   sys["role"] = "system";
   std::string text = opts_.system_prefix;
-  // 环境
   if (opts_.env.is_object() && !opts_.env.empty()) {
     text += "\n\n[环境]\n" + opts_.env.dump();
   }
-  // 工具定义（含被禁用的系统工具说明 + skills/MCP）
   if (opts_.tools.is_array() && !opts_.tools.empty()) {
     text += "\n\n[工具定义]\n" + opts_.tools.dump();
   }
   if (opts_.mcp.is_object() && !opts_.mcp.empty()) {
     text += "\n\n[Skills 与 MCP]\n" + opts_.mcp.dump();
   }
-  // 配置：只写被禁用的系统工具 + 运行期变化的自定义工具
   if (opts_.disabled_system_tools.is_array() && !opts_.disabled_system_tools.empty()) {
     text += "\n\n[禁用的系统工具]\n" + opts_.disabled_system_tools.dump();
   }
@@ -90,203 +360,150 @@ Json HistoryBuilder::build_system() const {
   return sys;
 }
 
-HistoryResult HistoryBuilder::build(const Json& full) const {
+// Should we compact this turn?
+//
+// The water level is the ONLY automatic trigger: "how full is the model's window
+// right now" is a fact the provider reported, and compacting earlier than that
+// throws away history the model could have used.
+//
+// There is deliberately NO token budget here. A token cap is a second, invisible
+// threshold the user cannot reason about (it fires on a long session regardless of
+// how full the window is), and providers handle a long context themselves. The
+// only other trigger is an explicit "compact now".
+HistoryBuilder::CompressDecision HistoryBuilder::should_compress(
+    const Options& opts, int64_t turns_tokens) {
+  (void)turns_tokens;
+  CompressDecision d;
+  d.prompt_tokens = opts.last_prompt_tokens;
+  d.context_limit = opts.context_limit;
+  if (opts.context_limit > 0 && opts.last_prompt_tokens > 0) {
+    d.pct = static_cast<int>(opts.last_prompt_tokens * 100 / opts.context_limit);
+  }
+  if (opts.force_compress) {
+    d.compress = true;
+    d.reason = "forced";
+    return d;
+  }
+  if (opts.compress_at_pct > 0 && opts.context_limit > 0 &&
+      opts.last_prompt_tokens > 0) {
+    // Threshold on the LAST request: if the previous call already used 80% of
+    // the window, this call must compact before it goes out - not after it
+    // fails.
+    if (d.pct >= opts.compress_at_pct) {
+      d.compress = true;
+      d.reason = "water-level";
+      return d;
+    }
+  }
+  return d;
+}
+
+HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   HistoryResult out;
   Json messages = Json::array();
   messages.push_back(build_system());
+  // Seed messages: an earlier conversation this run CONTINUES (a subagent
+  // follow-up). They sit between the system prompt and everything from `full`,
+  // so the model reads them as its own prior turns.
+  if (opts_.seed_messages.is_array()) {
+    for (size_t i = 0; i < opts_.seed_messages.size(); ++i) {
+      const Json& m = opts_.seed_messages[i];
+      if (!m.is_object()) continue;
+      std::string role = jsonutil::get<std::string>(m, "role", "");
+      if (role.empty() || role == "system") continue;  // the prefix is ours
+      messages.push_back(m);
+    }
+  }
   if (!full.contains("turns") || !full["turns"].is_array()) {
     out.messages = messages;
     return out;
   }
   const Json& turns = full["turns"];
-  // 短视图：最近 N 轮全量
-  size_t n = static_cast<size_t>(opts_.recent_turns);
-  size_t start = turns.size() > n ? turns.size() - n : 0;
-  // 从 start 开始构建；跳过 forgotten
-  Json msgs = Json::array();
-  int64_t budget_used = 0;
-  int64_t budget = opts_.token_budget;
-  for (size_t i = start; i < turns.size(); ++i) {
+  size_t total = turns.size();
+  // NO recent-turns window.
+  //
+  // `recent_turns` used to cut everything older than N turns and fold it, which
+  // meant a session longer than N compacted on EVERY turn (the "每轮对话似乎都会
+  // 压缩" report) no matter what the water level said. All turns are read now, and
+  // the ONLY trigger is the compaction decision below - which is the water level
+  // (or an explicit "compact now"). The API/provider deals with a long context;
+  // we do not pre-emptively drop history.
+
+  // The compaction DECISION (water level / forced) is made by should_compress.
+  int64_t raw_tokens = estimate_tokens(turns);
+  CompressDecision dec = should_compress(opts_, raw_tokens);
+  bool must_fold = dec.compress;
+  if (must_fold) {
+    // Keep the newest `keep_turns` turns and fold everything older. That is the
+    // only way a forced/water-level compaction is guaranteed to change anything.
+    size_t keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 1;
+    if (keep >= total) keep = total > 1 ? total - 1 : total;
+    size_t fold_to = total > keep ? total - keep : 0;
+    // Fold from the start, but never fold turns the caller asked to forget
+    // anyway (they are dropped, not summarised).
+    if (fold_to > 0) {
+      std::string fold = make_fold(turns, 0, fold_to, opts_.prior_summary,
+                                   opts_.max_fold_points);
+      Json summary = Json::object();
+      summary["role"] = "user";
+      summary["content"] = fold;
+      Json with_fold = Json::array();
+      with_fold.push_back(messages[0]);
+      with_fold.push_back(summary);
+      int64_t used = 0;
+      for (size_t i = fold_to; i < total; ++i) {
+        const Json& t = turns[i];
+        if (!t.is_object()) continue;
+        if (jsonutil::get<bool>(t, "forgotten", false)) continue;
+        Json group = Json::array();
+        turn_to_neutral(t, &group);
+        used += estimate_tokens(group);
+        for (auto& m : group) with_fold.push_back(m);
+      }
+      out.messages = with_fold;
+      out.est_tokens = used;
+      out.compressed = true;
+      out.compressed_from = 0;
+      out.compressed_to = static_cast<int64_t>(fold_to);
+      out.dropped_turns = static_cast<int64_t>(fold_to);
+      return out;
+    }
+  }
+  // No compaction: replay EVERY turn, in order. This is the normal path now - the
+  // window/budget used to fold older turns unconditionally, which compacted a long
+  // session on every single turn regardless of the water level.
+  int64_t used = 0;
+  for (size_t i = 0; i < total; ++i) {
     const Json& t = turns[i];
     if (!t.is_object()) continue;
-    if (jsonutil::get<bool>(t, "forgotten", false)) continue;  // 遗忘剔除
-    Json m = turn_to_message(t);
-    msgs.push_back(m);
-    budget_used += estimate_tokens(m);
-    if (budget_used > budget) {
-      // 超预算：截断（保留已加的前缀 + 最新的部分）
-      // v1：超预算时把最旧的 msg 折叠为 summary（P3 摘要模型升级留接口）
-      break;
-    }
+    if (jsonutil::get<bool>(t, "forgotten", false)) continue;
+    Json group = Json::array();
+    turn_to_neutral(t, &group);
+    used += estimate_tokens(group);
+    for (size_t k = 0; k < group.size(); ++k) messages.push_back(group[k]);
   }
-  // 若超预算压缩：折叠最旧的消息（保留 system + 折叠条 + 最新 1 条）
-  // 折叠条附加被压缩 turns 的 keyPoints（单会话持久记忆）
-  if (budget_used > budget && msgs.size() > 1) {
-    out.compressed = true;
-    out.compressed_from = 0;
-    out.compressed_to = static_cast<int64_t>(msgs.size() - 2);
-    // 收集被裁掉 turns 的要点（按顺序，最多 20 条；裁掉 msgs[0..size-2]）
-    std::string points;
-    int collected = 0;
-    for (size_t i = start; i + 1 < start + msgs.size() && i < turns.size(); ++i) {
-      const Json& t = turns[i];
-      if (!t.is_object() || !t.contains("keyPoints") || !t["keyPoints"].is_array()) continue;
-      for (auto& kp : t["keyPoints"]) {
-        if (!kp.is_string() || collected >= 20) continue;
-        if (!points.empty()) points += "\n";
-        points += "- " + kp.get<std::string>();
-        ++collected;
-      }
-    }
-    std::string fold = "[早期对话已压缩] " +
-                       fallback_summary(jsonutil::get<std::string>(
-                           msgs[msgs.size() - 2], "content", ""));
-    if (!points.empty()) fold += "\n[历史要点]\n" + points;
-    // 用折叠 summary 替代被裁掉的消息
-    Json summarized = Json::object();
-    summarized["role"] = "user";
-    summarized["content"] = fold;
-    Json kept = Json::array();
-    kept.push_back(messages[0]);  // system
-    kept.push_back(summarized);
-    for (size_t i = msgs.size() - 1; i < msgs.size(); ++i) {
-      kept.push_back(msgs[i]);
-    }
-    out.messages = kept;
-    return out;
-  }
-  for (auto& m : msgs) messages.push_back(m);
+  out.est_tokens = used;
   out.messages = messages;
   return out;
 }
 
-// Anthropic content blocks：text / tool_use / tool_result
-Json HistoryBuilder::turn_to_anthropic(const Json& turn) {
-  Json msg = Json::object();
-  std::string role = jsonutil::get<std::string>(turn, "role", "user");
-  Json blocks = Json::array();
-  if (role == "user") {
-    msg["role"] = "user";
-    std::string text = jsonutil::get<std::string>(turn, "promptRaw", "");
-    if (text.empty()) text = jsonutil::get<std::string>(turn, "streamSummary", "");
-    Json b = Json::object();
-    b["type"] = "text";
-    b["text"] = text.empty() ? "..." : text;
-    blocks.push_back(b);
-    // tool 结果回填为 tool_result 块（P3 Loop 回填格式：{toolUseId, result}）
-    Json results = turn.contains("toolResults") && turn["toolResults"].is_array()
-                       ? turn["toolResults"] : Json::array();
-    for (auto& r : results) {
-      if (!r.is_object()) continue;
-      Json b2 = Json::object();
-      b2["type"] = "tool_result";
-      b2["tool_use_id"] = jsonutil::get<std::string>(r, "toolUseId", "");
-      Json content = r.contains("result") ? r["result"] : Json::object();
-      b2["content"] = content.is_string() ? content.get<std::string>() : content.dump();
-      blocks.push_back(b2);
-    }
-  } else {
-    msg["role"] = "assistant";
-    std::string text = jsonutil::get<std::string>(turn, "streamSummary", "");
-    if (!text.empty()) {
-      Json b = Json::object();
-      b["type"] = "text";
-      b["text"] = text;
-      blocks.push_back(b);
-    }
-    Json tc = turn.contains("toolCalls") && turn["toolCalls"].is_array()
-                  ? turn["toolCalls"] : Json::array();
-    for (auto& c : tc) {
-      if (!c.is_object()) continue;
-      // 兼容扁平 {id,name,args} 与 OpenAI 原生 {id,function:{name,arguments}}
-      std::string id = jsonutil::get<std::string>(c, "id", "");
-      std::string name = jsonutil::get<std::string>(c, "name", "");
-      Json args = c.contains("args") ? c["args"] : Json::object();
-      if (name.empty() && c.contains("function") && c["function"].is_object()) {
-        const Json& fn = c["function"];
-        name = jsonutil::get<std::string>(fn, "name", "");
-        if (fn.contains("arguments")) {
-          const Json& a = fn["arguments"];
-          if (a.is_string()) {
-            try { args = Json::parse(a.get<std::string>()); } catch (...) {}
-          } else if (a.is_object()) {
-            args = a;
-          }
-        }
-      }
-      if (name.empty()) continue;
-      Json b = Json::object();
-      b["type"] = "tool_use";
-      b["id"] = id;
-      b["name"] = name;
-      b["input"] = args.is_object() ? args : Json::object();
-      blocks.push_back(b);
-    }
-  }
-  msg["content"] = blocks;
-  return msg;
+HistoryResult HistoryBuilder::build(const Json& full) const {
+  HistoryResult r = build_neutral(full);
+  r.messages = prompt::adapt(ApiKind::kOpenAIChat, r.messages, Json::array()).messages;
+  return r;
 }
 
 HistoryResult HistoryBuilder::build_anthropic(const Json& full) const {
-  HistoryResult out;
-  // system 单独字段（Anthropic 要求顶层 system，不在 messages 里）
-  Json result = Json::object();
-  result["system"] = build_system()["content"];
-  Json messages = Json::array();
-  if (!full.contains("turns") || !full["turns"].is_array()) {
-    result["messages"] = messages;
-    out.messages = result;
-    return out;
-  }
-  const Json& turns = full["turns"];
-  size_t n = static_cast<size_t>(opts_.recent_turns);
-  size_t start = turns.size() > n ? turns.size() - n : 0;
-  int64_t budget_used = 0;
-  int64_t budget = opts_.token_budget;
-  for (size_t i = start; i < turns.size(); ++i) {
-    const Json& t = turns[i];
-    if (!t.is_object()) continue;
-    if (jsonutil::get<bool>(t, "forgotten", false)) continue;
-    Json m = turn_to_anthropic(t);
-    messages.push_back(m);
-    budget_used += estimate_tokens(m);
-    if (budget_used > budget) break;
-  }
-  if (budget_used > budget && messages.size() > 1) {
-    out.compressed = true;
-    out.compressed_from = 0;
-    out.compressed_to = static_cast<int64_t>(messages.size() - 2);
-    // 收集被裁掉 turns 的要点（单会话持久记忆；裁掉 messages[0..size-2]）
-    std::string points;
-    int collected = 0;
-    for (size_t i = start; i + 1 < start + messages.size() && i < turns.size(); ++i) {
-      const Json& t = turns[i];
-      if (!t.is_object() || !t.contains("keyPoints") || !t["keyPoints"].is_array()) continue;
-      for (auto& kp : t["keyPoints"]) {
-        if (!kp.is_string() || collected >= 20) continue;
-        if (!points.empty()) points += "\n";
-        points += "- " + kp.get<std::string>();
-        ++collected;
-      }
-    }
-    std::string fold = "[早期对话已压缩]";
-    if (!points.empty()) fold += "\n[历史要点]\n" + points;
-    Json kept = Json::array();
-    Json summarized = Json::object();
-    summarized["role"] = "user";
-    Json b = Json::object();
-    b["type"] = "text";
-    b["text"] = fold;
-    summarized["content"] = Json::array({b});
-    kept.push_back(summarized);
-    kept.push_back(messages[messages.size() - 1]);
-    result["messages"] = kept;
-    out.messages = result;
-    return out;
-  }
-  result["messages"] = messages;
-  out.messages = result;
-  return out;
+  HistoryResult r = build_neutral(full);
+  prompt::Adapted a = prompt::adapt(ApiKind::kAnthropic, r.messages, Json::array());
+  // Legacy shape: {system, messages} in one object. The system text comes from
+  // the adapter (it is the message the adapter consumed), not from re-reading
+  // the neutral array.
+  Json out = Json::object();
+  out["system"] = a.system.is_string() ? a.system.get<std::string>() : std::string();
+  out["messages"] = a.messages;
+  r.messages = out;
+  return r;
 }
 
 }  // namespace fs

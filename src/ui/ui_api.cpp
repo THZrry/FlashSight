@@ -21,7 +21,7 @@ bool b(const Json& j, const char* k, bool def = false) {
 
 }  // namespace
 
-UiApi::UiApi(FsApi* api) {
+UiApi::UiApi(FsApi* api) : api_(api) {
   // ---- project.* ----
   reg("project.list", [api](const Json&) { return api->project_list(); });
   reg("project.open", [api](const Json& a) { return api->project_open(s(a, "path")); });
@@ -40,9 +40,18 @@ UiApi::UiApi(FsApi* api) {
   });
   // open the project folder in the OS file manager
   reg("project.reveal", [api](const Json& a) { return api->project_reveal(s(a, "pid")); });
+  // A markdown link in the transcript: the UI reports the click, the backend
+  // decides where it goes (browser / preview panel / refused).
+  reg("link.open", [api](const Json& a) {
+    return api->open_link(s(a, "sid"), s(a, "href"));
+  });
   // side-panel file tree: list a dir / read a file inside the project
   reg("project.files", [api](const Json& a) {
     return api->project_files(s(a, "pid"), s(a, "path"));
+  });
+  // Composer path completion ("/" and "./" fragments).
+  reg("complete.path", [api](const Json& a) {
+    return api->complete_path(s(a, "sid"), s(a, "typed"));
   });
   reg("project.readFile", [api](const Json& a) {
     return api->project_read_file(s(a, "pid"), s(a, "path"));
@@ -60,6 +69,9 @@ UiApi::UiApi(FsApi* api) {
   });
   reg("session.rename", [api](const Json& a) {
     return api->session_rename(s(a, "sid"), s(a, "title"));
+  });
+  reg("session.aiTitle", [api](const Json& a) {
+    return api->session_ai_title(s(a, "sid"));
   });
   reg("session.get", [api](const Json& a) { return api->session_get(s(a, "sid")); });
   reg("session.info", [api](const Json& a) { return api->session_info(s(a, "sid")); });
@@ -100,11 +112,24 @@ UiApi::UiApi(FsApi* api) {
   reg("session.loopState", [api](const Json& a) {
     return api->session_loop_state(s(a, "sid"));
   });
+  // 编辑并重发最后一条：只截断转录，不回退文件改动
+  reg("session.trimHistory", [api](const Json& a) {
+    return api->session_trim_history(s(a, "sid"), s(a, "turnId"));
+  });
   reg("session.continue", [api](const Json& a) {
     return api->session_continue(s(a, "sid"), s(a, "guidance"));
   });
   reg("session.approve", [api](const Json& a) {
     return api->session_approve(s(a, "sid"), b(a, "yes", true));
+  });
+  reg("session.compress", [api](const Json& a) {
+    return api->session_compress(s(a, "sid"));
+  });
+  reg("session.context", [api](const Json& a) {
+    return api->session_context(s(a, "sid"));
+  });
+  reg("session.liveTurn", [api](const Json& a) {
+    return api->session_live_turn(s(a, "sid"));
   });
   reg("session.setModel", [api](const Json& a) {
     return api->session_set_model(s(a, "sid"), s(a, "model"));
@@ -299,6 +324,13 @@ UiApi::UiApi(FsApi* api) {
   });
   reg("subagent.cancel", [api](const Json& a) { return api->subagent_cancel(s(a, "id")); });
   reg("subagent.list", [api](const Json& a) { return api->subagent_list(s(a, "sid")); });
+  // One agent's full transcript: the detail tab fetches it on open, so the list
+  // itself stays small (a transcript repeats the whole system prompt per message).
+  // `sid` lets the backend recover a record from disk when the in-memory one is
+  // gone (restart / prune) - without it an older transcript's row opened nothing.
+  reg("subagent.detail", [api](const Json& a) {
+    return api->subagent_detail_in(s(a, "sid"), s(a, "id"));
+  });
   reg("subagent.steer", [api](const Json& a) {
     return api->subagent_steer(s(a, "id"), s(a, "text"));
   });
@@ -306,6 +338,10 @@ UiApi::UiApi(FsApi* api) {
     return api->steering_push(s(a, "sid"), s(a, "kind"), s(a, "text"));
   });
   reg("steering.list", [api](const Json& a) { return api->steering_list(s(a, "sid")); });
+  // Continue a FINISHED subagent with more work (same id, same context).
+  reg("subagent.followUp", [api](const Json& a) {
+    return api->subagent_follow_up(s(a, "id"), s(a, "text"));
+  });
 
   // ---- provider.* ----
   reg("provider.listProviders", [api](const Json&) { return api->provider_list_providers(); });
@@ -368,7 +404,9 @@ UiApi::UiApi(FsApi* api) {
     return api->skill_set_enabled(s(a, "name"), b(a, "enabled", true));
   });
   reg("skill.remove", [api](const Json& a) { return api->skill_remove(s(a, "name")); });
-  reg("browser.load", [api](const Json&) { return api->browser_load(); });
+  // Skill detection is its own route: sharing mcp.detect meant the Skill page
+  // could only ever find MCP entries.
+  reg("skill.detect", [api](const Json&) { return api->skill_detect(); });
   reg("thinking.setLang", [api](const Json& a) {
     return api->set_thinking_lang(s(a, "lang", "auto"));
   });
@@ -414,6 +452,26 @@ FsResult UiApi::call(const std::string& method, const Json& args) {
   if (it == methods_.end()) {
     return FsResult::error(ErrCode::kNotFound, "unknown method: " + method);
   }
+  // ONE lock for the whole UI->backend boundary.
+  //
+  // The desktop build runs calls on worker threads while a turn runs on its own,
+  // so two calls can be inside FsApi at the same time; FsApi holds maps and is
+  // not thread-safe. Guarding here (rather than in 130 methods) means every
+  // route is covered by construction, including ones added later.
+  //
+  // The lock is recursive because routes call each other.
+  //
+  // Two routes are EXCLUDED because they BLOCK for a long time:
+  //   * session.send  - the whole turn (provider round trip + every tool call).
+  //     It takes the lock itself around its short prelude only.
+  //   * tool.invoke   - arbitrary tool code (a terminal command can take a
+  //     minute) and must not hold the backend lock while it runs.
+  // Holding the lock for either would stall every other call for minutes, which
+  // is the freeze this design exists to prevent.
+  if (!api_ || method == "session.send" || method == "tool.invoke") {
+    return it->second(args);
+  }
+  std::lock_guard<std::recursive_mutex> lk(api_->mutex());
   return it->second(args);
 }
 

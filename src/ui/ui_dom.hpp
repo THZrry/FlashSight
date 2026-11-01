@@ -188,7 +188,12 @@ class IDom {
   // --- global key (document-level) ---
   // Escape etc. must work regardless of focus, so this listens on the document
   // rather than a node (a keydown on <body> never reaches the app's root div).
-  // The callback receives the key name ("Escape", "ArrowDown", ...).
+  //
+  // The callback receives the key name AND its modifiers, encoded as
+  // "Ctrl+Shift+Key" - the plain key name was not enough: the shortcut table
+  // promises Ctrl+W / Ctrl+T, and an adapter that reported only "w" made those
+  // bindings unimplementable (the settings page saved them and nothing read
+  // them back). Modifiers are part of the event, so they travel with it.
   virtual void bind_global_key(std::function<void(const std::string&)> cb) {
     (void)cb;
   }

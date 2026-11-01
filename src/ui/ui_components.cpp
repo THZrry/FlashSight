@@ -39,8 +39,26 @@ std::string trim(const std::string& s) {
   return s.substr(a, b - a);
 }
 
-// inline markdown: `code`, **bold**, *italic* -> spans
-void inline_md(H& host, const std::string& text) {
+namespace {
+
+// A table's separator row: | --- | :---: | ---: |
+bool is_table_separator(const std::string& line) {
+  std::string t = trim(line);
+  if (t.empty() || t[0] != '|') return false;
+  bool saw_dash = false;
+  for (char c : t) {
+    if (c == '-') saw_dash = true;
+    else if (c != '|' && c != ':' && c != ' ' && c != '\t') return false;
+  }
+  return saw_dash;
+}
+
+// inline markdown: `code`, **bold**, *italic*, [text](url) -> spans / anchors
+//
+// `on_link` is bound on each ANCHOR (not delegated from the message): binding a
+// click on the whole message made every click look like a link, so any click in
+// an answer tried to open something.
+void inline_md(H& host, const std::string& text, EventFn on_link) {
   size_t i = 0;
   std::string plain;
   while (i < text.size()) {
@@ -55,6 +73,40 @@ void inline_md(H& host, const std::string& text) {
         host.add(el("code", "inline").text(text.substr(i + 1, e - i - 1)));
         i = e + 1;
         continue;
+      }
+    } else if (c == '[') {
+      // [label](target). The anchor carries the target as a data attribute and
+      // NO href: the UI intercepts the click (a file path opens the side panel
+      // preview, an http URL goes to the browser). A real href would make the
+      // engine navigate away from the app.
+      size_t rb = text.find(']', i + 1);
+      if (rb != std::string::npos && rb + 1 < text.size() && text[rb + 1] == '(') {
+        size_t rp = text.find(')', rb + 2);
+        if (rp != std::string::npos) {
+          if (!plain.empty()) {
+            host.add(txt(plain));
+            plain.clear();
+          }
+          std::string label = text.substr(i + 1, rb - i - 1);
+          std::string target = text.substr(rb + 2, rp - rb - 2);
+          H a = el("a", "md-link");
+          a.attr("data-href", target);
+          a.attr("title", target);
+          // Bound HERE, on the anchor. Delegating the click from the message
+          // wrapper made every click in the answer look like a link, so a plain
+          // click tried to open whatever text happened to be under the pointer.
+          if (on_link) {
+            std::string t = target;
+            EventFn fn = on_link;
+            a.on(EventKind::kClick, [fn, t](const std::string&) { fn(t); });
+          }
+          // The label itself may carry `code` / **bold**; recurse so a link
+          // around inline code still renders correctly.
+          inline_md(a, label, on_link);
+          host.add(a);
+          i = rp + 1;
+          continue;
+        }
       }
     } else if (c == '*' && i + 1 < text.size() && text[i + 1] == '*') {
       size_t e = text.find("**", i + 2);
@@ -85,6 +137,7 @@ void inline_md(H& host, const std::string& text) {
   if (!plain.empty()) host.add(txt(plain));
 }
 
+}  // namespace
 }  // namespace
 
 // ---------- buttons ----------
@@ -159,6 +212,19 @@ H tab_strip(const std::vector<TabSpec>& tabs, const std::string& active_key,
             EventFn on_select, EventFn on_close, EventFn on_add,
             EventFn on_context) {
   H bar = el("div", "tabs");
+  // The strip is split in two: a PINNED slot for 主页 and the "+", and a
+  // scrolling slot for the session tabs between them.
+  //
+  // One flat scroll container (the previous shape) meant opening a dozen
+  // sessions pushed 主页 off the left edge and there was no way back to it
+  // except scrolling - the user cannot reach the home page any more. Pinning it
+  // (and the + that creates a tab) keeps the two navigation anchors always
+  // visible while only the session tabs scroll.
+  H pinned = el("div", "tabs-fixed");
+  pinned.key("tabs-fixed");
+  H scroll = el("div", "tabs-scroll");
+  scroll.key("tabs-scroll");
+  bool seen_scroll = false;
   for (size_t i = 0; i < tabs.size(); ++i) {
     const TabSpec& t = tabs[i];
     H tab = el("div", t.key == active_key ? "tab active" : "tab");
@@ -184,14 +250,24 @@ H tab_strip(const std::vector<TabSpec>& tabs, const std::string& active_key,
       x.on(EventKind::kClick, [on_close, k](const std::string&) { on_close(k); });
       tab.add(x);
     }
-    bar.add(tab);
+    // A tab the app marks non-closable IS the home tab: keep it (and everything
+    // up to and including it) outside the scrolling area.
+    if (t.closable && !seen_scroll) {
+      seen_scroll = true;
+    }
+    if (seen_scroll) scroll.add(tab);
+    else pinned.add(tab);
   }
   H add = el("div", "tab add");
   add.key("tab-add");  // never inherit a closed tab's slot
   add.attr("title", "新建标签页");
   add.on(EventKind::kClick, on_add);
   add.text("+");
-  bar.add(add);
+  // "+" sits at the right end of the scrolling area, so adding a tab never
+  // requires scrolling to find the button.
+  scroll.add(add);
+  bar.add(pinned);
+  bar.add(scroll);
   return bar;
 }
 
@@ -263,11 +339,14 @@ H text_input(const std::string& value, const std::string& placeholder,
 }
 
 H textarea(const std::string& value, const std::string& placeholder,
-           EventFn on_input, EventFn on_enter) {
+           EventFn on_input, EventFn on_enter, EventFn on_keydown) {
   H t = el("textarea", "text-area");
   if (!placeholder.empty()) t.attr("placeholder", placeholder);
   t.on(EventKind::kInput, on_input);
   t.on(EventKind::kKeyEnter, on_enter);
+  // Raw key names (ArrowUp / Tab / Escape) for the inline completion menu. The
+  // adapter's keyenter binding only reports Enter; this one reports every key.
+  if (on_keydown) t.on(EventKind::kKeyDown, on_keydown);
   // value via the `value` attribute (glue.js maps it to the live property).
   // A text child would only set the defaultValue, so clearing after send
   // would not clear what the user sees.
@@ -560,8 +639,11 @@ std::string chat_message_key(const std::string& sid, int64_t uid) {
 
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
                EventFn on_think_toggle, EventFn on_turn_action,
-               EventFn on_context) {
+               EventFn on_context, EventFn on_link, EventFn on_open_subagent,
+               bool can_edit) {
   H wrap = el("div", "msg " + m.role);
+  // NO click handler on the wrapper: a link binds its own handler (see
+  // inline_md). Delegating here made every click in an answer look like a link.
   // Right-click belongs to the MESSAGE, not to the browser: the shell opens its
   // own menu with copy / branch / rollback / forget. Bound on the wrapper so it
   // fires anywhere inside the bubble, the answer or the tool blocks.
@@ -569,7 +651,13 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     wrap.on(EventKind::kContextMenu, on_context);
   }
   if (m.role == "system") {
-    wrap.add(el("div", "sys").text(m.text));
+    // A system line is a MARKER, not content: the auto-continue divider lives
+    // here, and it must read as a divider rather than as another chat turn.
+    H sys = el("div", "sys");
+    sys.add(el("span", "sys-rule"));
+    sys.add(el("span", "sys-text").text(m.text));
+    sys.add(el("span", "sys-rule"));
+    wrap.add(sys);
     return wrap;
   }
   if (m.role == "user") {
@@ -577,6 +665,20 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     wrap.add(el("div", "bubble").text(m.text));
     H meta = el("div", "meta");
     if (!m.time.empty()) meta.add(el("span", "time").text(m.time));
+    // 编辑并重发. A user turn is where a do-over starts, so the action belongs on
+    // the bubble - and only on the LAST one, because rewriting an older question
+    // would orphan every answer after it (that is what 回滚 is for).
+    if (can_edit && on_turn_action) {
+      H acts = el("div", "msg-actions");
+      H b = el("button", "mini-btn");
+      b.attr("type", "button");
+      b.text(tr("编辑"));
+      b.on(EventKind::kClick, [on_turn_action](const std::string&) {
+        on_turn_action("edit");
+      });
+      acts.add(b);
+      meta.add(acts);
+    }
     wrap.add(meta);
     return wrap;
   }
@@ -584,7 +686,11 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   // The answer comes first in reading order: you look at what the model said,
   // then open the process if you want to know how it got there. A turn with a
   // dozen tool blocks used to be a wall of rows that buried the answer.
-  bool has_work = !m.thinking.empty() || !m.tools.empty();
+  // `interim` counts: a turn whose ONLY visible process is the narration between
+  // tool calls still has a work log. Without it the fold was not rendered at all,
+  // so "过程说明" had nowhere to appear - which is why the narration looked like it
+  // had been dropped again.
+  bool has_work = !m.thinking.empty() || !m.tools.empty() || !m.interim.empty();
   if (has_work) {
     int nfail = 0;
     for (size_t i = 0; i < m.tools.size(); ++i) if (!m.tools[i].ok) ++nfail;
@@ -603,6 +709,9 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       std::string label = tr("工作过程");
       if (!m.tools.empty()) {
         label += " · " + itos(static_cast<int>(m.tools.size())) + tr(" 步");
+      }
+      if (!m.interim.empty()) {
+        label += " · " + itos(static_cast<int>(m.interim.size())) + tr(" 段过程说明");
       }
       if (nfail > 0) label += tr("（") + itos(nfail) + tr(" 次失败）");
       whead.add(el("span").text(label));
@@ -627,6 +736,16 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         inner.add(el("div", "work-label").text(tr("思考")));
         inner.add(el("pre", "think-body").text(m.thinking));
       }
+      // The model's narration BETWEEN tool calls ("let me check the config
+      // first"). It is not the answer, so it lives here; it used to be invisible
+      // both live (glued onto the answer bubble) and after a reload (dropped).
+      if (!m.interim.empty()) {
+        inner.add(el("div", "work-label").text(tr("过程说明")));
+        for (size_t i = 0; i < m.interim.size(); ++i) {
+          if (m.interim[i].empty()) continue;
+          inner.add(el("div", "work-note").text(m.interim[i]));
+        }
+      }
       if (!m.tools.empty()) {
         inner.add(el("div", "work-label").text(tr("工具调用")));
         for (size_t i = 0; i < m.tools.size(); ++i) {
@@ -636,7 +755,11 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
             std::string idx = itos(static_cast<int>(i));
             toggle = [base, idx](const std::string& v) { base(idx + "\t" + v); };
           }
-          inner.add(tool_block(m.tools[i], toggle));
+          // Give each block a key the shell can address (uid + index): the
+          // expanded body is scrolled to its end, which needs a stable handle.
+          comp::ToolBlock tb = m.tools[i];
+          if (tb.key.empty()) tb.key = std::to_string(m.uid) + ":" + itos(static_cast<int>(i));
+          inner.add(tool_block(tb, toggle, on_open_subagent));
         }
       }
       work.add(inner);
@@ -645,7 +768,7 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   }
   // assistant: article-like, no bubble, no name
   H body = el("div", "article");
-  std::vector<H> blocks = markdown_blocks(m.text, on_copy);
+  std::vector<H> blocks = markdown_blocks(m.text, on_copy, on_link);
   for (size_t i = 0; i < blocks.size(); ++i) body.add(blocks[i]);
   if (m.streaming) body.add(el("span", "caret"));
   wrap.add(body);
@@ -691,13 +814,17 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     act("分叉", "fork");
     act("回滚到这里", "rollback");
     act("忘记", "forget");
+    // 编辑并重发: a do-over of the LAST question. It lives on the message (not in
+    // the composer) because it edits a specific turn, and it is offered only for
+    // the newest user message - an older one would orphan every answer after it.
+    if (can_edit && m.role == "user") act("编辑", "edit");
     meta.add(acts);
   }
   wrap.add(meta);
   return wrap;
 }
 
-H tool_block(const ToolBlock& b, EventFn on_toggle) {
+H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
   std::string cls = "tool-block";
   if (b.expanded) cls += " open";
   if (b.running) cls += " running";
@@ -716,11 +843,36 @@ H tool_block(const ToolBlock& b, EventFn on_toggle) {
   }
   head.add(el("span", "tb-name").text(b.name));
   head.add(el("span", "tb-sum").text(b.summary));
+  // A subagent call gets an explicit "open record" affordance. The transcript is
+  // NOT in this block (it lives in the subagent panel), and without a link here
+  // the work log showed that a subagent ran but gave no way to see what it did -
+  // so once it finished the history was unreachable.
+  if (!b.subagent_id.empty() && on_open_subagent) {
+    EventFn open = on_open_subagent;
+    std::string sid = b.subagent_id;
+    H btn = el("span", "tb-open");
+    btn.text(tr("打开记录"));
+    btn.attr("title", tr("在新标签页打开这个子代理的完整记录"));
+    btn.on(EventKind::kClick, [open, sid](const std::string&) { open(sid); });
+    head.add(btn);
+  }
   head.add(el("span", "tb-caret").text(b.expanded ? "\u25be" : "\u25b8"));
   d.add(head);
   if (b.expanded && !b.detail.empty()) {
+    // The detail is JSON in practice (tool args + results), so it gets the same
+    // highlighter the code blocks use. A wall of one-colour JSON is unreadable
+    // when what you want is "which field says what".
     H pre = el("pre", "tb-body");
-    pre.text(b.detail);
+    // Keyed so the shell can scroll it to the bottom after opening: the useful
+    // end of a tool result is its last lines.
+    pre.key("tb-body:" + b.key);
+    const highlight::LangSpec* spec = highlight::find_lang("json");
+    if (spec && std::strcmp(spec->id, "plain") != 0 &&
+        !b.detail.empty() && (b.detail[0] == '{' || b.detail[0] == '[')) {
+      pre.html(highlight::to_html_cached(b.detail, "json"));
+    } else {
+      pre.text(b.detail);
+    }
     d.add(pre);
   }
   return d;
@@ -736,7 +888,8 @@ H turn_summary(const std::string& text) {
 
 // ---------- markdown-ish ----------
 
-std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
+std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
+                               EventFn on_link) {
   std::vector<H> out;
   std::vector<std::string> lines;
   {
@@ -826,7 +979,7 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
       if (n <= 6 && n < ln.size() && ln[n] == ' ') {
         std::string lvl = "h" + itos(static_cast<int>(n));
         H h = el(lvl, "md-h");
-        inline_md(h, trim(ln.substr(n + 1)));
+        inline_md(h, trim(ln.substr(n + 1)), on_link);
         out.push_back(h);
         ++i;
         continue;
@@ -838,7 +991,7 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
       while (i < lines.size() && lines[i].size() >= 2 &&
              (lines[i].compare(0, 2, "- ") == 0 || lines[i].compare(0, 2, "* ") == 0)) {
         H li = el("li");
-        inline_md(li, trim(lines[i].substr(2)));
+        inline_md(li, trim(lines[i].substr(2)), on_link);
         ul.add(li);
         ++i;
       }
@@ -851,11 +1004,126 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
       while (i < lines.size() && lines[i].size() >= 3 && lines[i][0] >= '0' &&
              lines[i][0] <= '9' && lines[i][1] == '.') {
         H li = el("li");
-        inline_md(li, trim(lines[i].substr(2)));
+        inline_md(li, trim(lines[i].substr(2)), on_link);
         ol.add(li);
         ++i;
       }
       out.push_back(ol);
+      continue;
+    }
+    // blockquote / callout. A leading "[!TIP]" / "[!WARNING]" / "[!NOTE]" /
+    // "[!IMPORTANT]" / "[!CAUTION]" makes it a labelled callout with an icon;
+    // anything else is a plain quote. Nested quotes flatten to one level.
+    if (!ln.empty() && ln[0] == '>') {
+      std::vector<std::string> body;
+      while (i < lines.size() && !lines[i].empty() && lines[i][0] == '>') {
+        std::string b = lines[i].substr(1);
+        if (!b.empty() && b[0] == ' ') b.erase(0, 1);
+        body.push_back(b);
+        ++i;
+      }
+      // Callout kind from the first line.
+      std::string kind, label, icon;
+      if (!body.empty() && body[0].size() > 3 && body[0][0] == '[') {
+        size_t close = body[0].find(']');
+        if (close != std::string::npos) {
+          std::string tag = body[0].substr(1, close - 1);
+          std::string up;
+          for (char ch : tag) up += static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+          if (up == "TIP") { kind = "tip"; label = tr("提示"); icon = "lightbulb"; }
+          else if (up == "WARNING") { kind = "warn"; label = tr("警告"); icon = "triangle-exclamation"; }
+          else if (up == "NOTE") { kind = "note"; label = tr("注意"); icon = "circle-info"; }
+          else if (up == "IMPORTANT") { kind = "important"; label = tr("重要"); icon = "circle-exclamation"; }
+          else if (up == "CAUTION") { kind = "caution"; label = tr("小心"); icon = "ban"; }
+          if (!kind.empty()) {
+            std::string rest = body[0].substr(close + 1);
+            body[0] = trim(rest);
+            if (body[0].empty()) body.erase(body.begin());
+          }
+        }
+      }
+      std::string cls = "md-quote";
+      if (!kind.empty()) cls += " callout callout-" + kind;
+      H q = el("blockquote", cls);
+      if (!kind.empty()) {
+        // The header line (icon + label) is what makes a TIP look different from
+        // a quote; the body stays muted either way.
+        H head = el("div", "callout-head");
+        head.add(el("i", "fa fa-" + icon));
+        head.add(el("span", "callout-label").text(label));
+        q.add(head);
+      }
+      for (size_t k = 0; k < body.size(); ++k) {
+        H p = el("p", "md-p");
+        inline_md(p, body[k], on_link);
+        q.add(p);
+      }
+      out.push_back(q);
+      continue;
+    }
+    // horizontal rule
+    {
+      std::string t = trim(ln);
+      bool rule = t.size() >= 3;
+      if (rule) {
+        char c0 = t[0];
+        if (c0 != '-' && c0 != '*' && c0 != '_') rule = false;
+        for (char ch : t) {
+          if (ch != c0) { rule = false; break; }
+        }
+      }
+      if (rule) {
+        out.push_back(el("hr", "md-hr"));
+        ++i;
+        continue;
+      }
+    }
+    // table: a header row followed by a |---|---| separator
+    if (!ln.empty() && ln[0] == '|' && i + 1 < lines.size() &&
+        is_table_separator(lines[i + 1])) {
+      auto split_row = [](const std::string& row) {
+        std::vector<std::string> cells;
+        std::string cur;
+        std::string r = trim(row);
+        if (!r.empty() && r[0] == '|') r.erase(0, 1);
+        if (!r.empty() && r[r.size() - 1] == '|') r.erase(r.size() - 1);
+        for (size_t k = 0; k < r.size(); ++k) {
+          if (r[k] == '|' && (k == 0 || r[k - 1] != '\\')) {
+            cells.push_back(trim(cur));
+            cur.clear();
+          } else {
+            cur += r[k];
+          }
+        }
+        cells.push_back(trim(cur));
+        return cells;
+      };
+      std::vector<std::string> header = split_row(ln);
+      i += 2;  // header + separator
+      H table = el("table", "md-table");
+      H thead = el("thead");
+      H hrow = el("tr");
+      for (size_t k = 0; k < header.size(); ++k) {
+        H th = el("th");
+        inline_md(th, header[k], on_link);
+        hrow.add(th);
+      }
+      thead.add(hrow);
+      table.add(thead);
+      H tbody = el("tbody");
+      while (i < lines.size() && !lines[i].empty() && lines[i][0] == '|') {
+        std::vector<std::string> cells = split_row(lines[i]);
+        H tr = el("tr");
+        for (size_t k = 0; k < header.size(); ++k) {
+          H td = el("td");
+          inline_md(td, k < cells.size() ? cells[k] : std::string(), on_link);
+          tr.add(td);
+        }
+        tbody.add(tr);
+        ++i;
+      }
+      table.add(tbody);
+      out.push_back(table);
       continue;
     }
     // blank
@@ -876,7 +1144,7 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
       ++i;
     }
     H p = el("p", "md-p");
-    inline_md(p, para);
+    inline_md(p, para, on_link);
     out.push_back(p);
   }
   return out;
@@ -887,9 +1155,22 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code) {
 H modal(const std::string& title, const std::vector<H>& body,
         const std::string& ok_label, EventFn on_ok, EventFn on_close) {
   H back = el("div", "modal-back");
+  // Keyed + an explicit exit intent: the framework only animates a node OUT if
+  // it can identify it across renders, and a modal that vanishes instantly
+  // (while everything else fades) reads as a glitch.
+  back.key("modal:" + title);
+  back.anim(anim::kPop);
+  back.exit(anim::kExitFade);
+  // Losing focus dismisses: a press anywhere outside the box closes it. This is
+  // the BACKDROP handler, and it is why the box must swallow clicks - a click on
+  // the box bubbles up to here otherwise and closes the dialog the user is
+  // filling in. The shell ALSO binds bind_outside_click on this node (see
+  // UiApp::render): the backdrop only covers the viewport of the element that
+  // rendered it, while a dialog opened from a tag page must still close when the
+  // press lands on the tag strip above it.
   back.on(EventKind::kClick, [on_close](const std::string&) { on_close("backdrop"); });
   H box = el("div", "modal-box");
-  box.on(EventKind::kClick, [](const std::string&) {});  // swallow
+  box.on(EventKind::kClick, [](const std::string&) { /* swallow inside clicks */ });
   box.add(el("div", "modal-title").text(title));
   H content = el("div", "modal-body");
   for (size_t i = 0; i < body.size(); ++i) content.add(body[i]);

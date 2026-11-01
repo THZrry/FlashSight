@@ -61,6 +61,7 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
   uint64_t bad = 0;
   read_jsonl(calls_file_.string(), &lines, &bad);
   sum.bad_lines = bad;
+  int64_t cache_reported_in = 0;  // prompt tokens for rows that reported cache
   for (auto& j : lines) {
     UsageRow r = usage_row_from_json(j);
     if (!filter.provider.empty() && r.provider != filter.provider) continue;
@@ -77,8 +78,18 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
     sum.total_out += r.out;
     sum.total_cache += r.cache;
     sum.total_cost += r.cost;
+    // Cache hit rate. A row that never reported `cache` (older provider, no
+    // prompt caching) must not be counted as a miss: only rows with a cache
+    // value contribute to the denominator.
+    if (j.contains("cache") && !j["cache"].is_null()) {
+      sum.cache_reported = true;
+      cache_reported_in += r.in;
+    }
     if (sum.cost_kind.empty()) sum.cost_kind = r.cost_kind;
     else if (r.cost_kind == "money") sum.cost_kind = "money";  // money 优先
+    if (!r.provider.empty() && !r.cost_kind.empty()) {
+      sum.cost_kind_by_provider[r.provider] = r.cost_kind;
+    }
     std::string key = r.provider + "::" + r.model;
     UsageRow& e = sum.by_provider_model[key];
     e.ts = std::max(e.ts, r.ts);
@@ -95,6 +106,18 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
     d.calls += 1;
     if (d.cost_kind.empty()) d.cost_kind = r.cost_kind;
     d.ts = r.ts;
+    sum.recent.push_back(r);
+  }
+  if (sum.cache_reported && cache_reported_in > 0) {
+    sum.cache_hit_ratio = static_cast<double>(sum.total_cache) /
+                          static_cast<double>(cache_reported_in);
+    if (sum.cache_hit_ratio > 1.0) sum.cache_hit_ratio = 1.0;
+  }
+  // Keep only the newest 50 rows: the panel shows a short tail, and a session
+  // with thousands of calls must not be copied wholesale into every response.
+  const size_t kRecentMax = 50;
+  if (sum.recent.size() > kRecentMax) {
+    sum.recent.erase(sum.recent.begin(), sum.recent.end() - kRecentMax);
   }
   return sum;
 }

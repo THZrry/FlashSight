@@ -191,6 +191,20 @@ def main():
             (qjs / "cutils.c").unlink()
             log("removed stale cutils.c (quickjs-ng inlines DynBuf)")
 
+    # --- stb (image decode / resize / PNG encode; vision tools) ---
+    # Three single-header public-domain files. Fetched individually because the
+    # repo has no release tarball; stb_image_resize2 lives under deprecated/ in
+    # the repo layout even though it is the current resize API.
+    stb = TP / "stb"
+    stb.mkdir(parents=True, exist_ok=True)
+    for name, path in [
+        ("stb_image.h", "stb_image.h"),
+        ("stb_image_write.h", "stb_image_write.h"),
+        ("stb_image_resize2.h", "deprecated/stb_image_resize2.h"),
+    ]:
+        shutil.copy2(download("https://raw.githubusercontent.com/nothings/stb/master/" + path,
+                              TMP / name), stb / name)
+
     # --- reproc (subprocess management; rules/user.md) ---
     # Only sources + headers: xmake.lua picks the platform files per OS.
     reproc_zip = fetch_archive(

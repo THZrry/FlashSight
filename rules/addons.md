@@ -139,12 +139,12 @@ wake 来源：用户输入 / 后台终端退出 / 模型定时唤醒（用户可
 
 | 工具 | 语义 |
 |---|---|
-| file.read | 部分读 offset/limit；二进制守卫（超阈值/非文本拒绝并提示） |
-| file.write / diffWrite | 全写与 diff 写；diff 上下文对不上直接失败不猜；全量 diff 进 patches/ |
-| file.ls/rm/find | ls、find/grep（大小写/忽略目录）；**rm = 直接删除**，确认由批准权限门承担，不进回收站、不二次弹窗 |
-| terminal.exec/spawn | 前台（timeout）/后台；输出流式 poll；退出码落库；前台超 5min 自动转后台并通知 |
-| network.fetch/search | fetch（method/headers/timeout/sizeCap/证书开关）；search 先调研开源实现，有就直接用，没有则接可配 HTTP 搜索 API（URL+key，预置 1~2 家） |
-| vision.screenshot/readImage | 截图（屏/窗口/区域，权限门）/读本地图（压缩：最大边+质量，可设） |
+| read_file | 部分读 offset/limit；二进制守卫（超阈值/非文本拒绝并提示）；返回整文件 hash 供编辑校验；>1MB 需显式分页、>32MB 直接拒绝 |
+| write_file / edit_file | write = 整文件写（新建用）；**edit = 行号替换 + hash + expect 双校验**（用户 2026-10-23 明确要求 edit_file 形态，不是文本块替换）；对不上直接失败不猜；全量 diff 进 patches/ |
+| list_dir/rm/find | ls、find/grep（大小写/忽略目录）；**rm = 直接删除**，确认由批准权限门承担，不进回收站、不二次弹窗 |
+| terminal_exec/spawn | 前台（timeout）/后台；输出流式 poll；退出码落库；前台超 5min 自动转后台并通知 |
+| fetch_url/search | fetch（method/headers/timeout/sizeCap/证书开关）；search 先调研开源实现，有就直接用，没有则接可配 HTTP 搜索 API（URL+key，预置 1~2 家） |
+| screenshot/readImage | 截图（屏/窗口/区域，权限门）/读本地图（压缩：最大边+质量，可设） |
 | ask | 见 §3（含 recommended）；自动模式不下发此工具 |
 | subagent | 见 §3（单会话上限 4，深度 3） |
 
@@ -223,7 +223,7 @@ wake 来源：用户输入 / 后台终端退出 / 模型定时唤醒（用户可
   预留外部翻译渠道；主题多套配色、每套深浅色（WhaleUI `@media` 查询）。
 - 快捷键：v1 先做键位基础设施（可配表），默认键位以后再排（有人用不上，不阻塞）。
 - 后端→UI 事件：`stream.delta、turn.done、tool.update、permission.prompt、
-  ask.prompt、plan.update、git.update、terminal.output/exit、lock.change、
+  ask.prompt、plan_update、git.update、terminal.output/exit、lock.change、
   wake.fired、usage.update、config.refreshed、truncate.hint、subagent.done`。
   （注意 `truncate.hint` 只是提示，不是截断命令。）
 

@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -167,22 +168,55 @@ int run_webview_ui(FsApi* api) {
     // Backend events + the terminal poller. webview has no timer of its own, so
     // a C++ thread drives them and hops onto the UI thread through
     // webview_dispatch (the only thread-safe way to touch the DOM here).
+    //
+    // *** THE ALIVE FLAG IS THE POINT. *** A dispatched callback sits on the
+    // webview's message loop and may run AFTER this scope ends: `webview_run`
+    // returns when the window closes, but a task posted moments earlier can still
+    // be queued. It used to capture `&ui` directly, so it could run against a
+    // destroyed UiApp and during window teardown - the "Failed to unregister class
+    // Chrome_WidgetWin_0" crash the user hit. Every dispatched task now checks a
+    // shared flag first.
+    struct PumpCtx {
+      UiApp* app = nullptr;
+      // Captured BY VALUE by the dispatch lambda below: reading through a pointer
+      // to a stack object would be the same use-after-free we are fixing.
+      std::shared_ptr<std::atomic<bool> > alive;
+    };
+    std::shared_ptr<std::atomic<bool> > alive =
+        std::make_shared<std::atomic<bool> >(true);
+    PumpCtx ctx;
+    ctx.app = &ui;
+    ctx.alive = alive;
     std::atomic<bool> running(true);
     std::thread ticker([&]() {
       while (running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!alive->load()) return;
         webview_dispatch(w, [](webview_t wv, void* ud) {
-          UiApp* app = static_cast<UiApp*>(ud);
-          app->pump();
-          app->tick_terminal();
-        }, &ui);
+          (void)wv;
+          PumpCtx* c = static_cast<PumpCtx*>(ud);
+          // A stale task must not touch the app OR the flag object: if the
+          // dispatch runs after this function returned, even `c` is suspect - so
+          // the flag is read through the pointer the ctx itself carries and the
+          // shutdown path clears it before the ctx goes away (see below).
+          if (!c || !c->app) return;
+          if (c->alive && !c->alive->load()) return;
+          c->app->pump();
+          c->app->tick_terminal();
+        }, &ctx);
       }
     });
 
     rc = webview_run(w);  // blocks until the window closes
 
+    // Order matters. The ticker stops first so it posts nothing new; the flag is
+    // cleared next so tasks ALREADY queued become no-ops; only then does the ctx
+    // go out of scope. Tasks that drain during webview_destroy below therefore see
+    // a null app and return.
     running.store(false);
     ticker.join();
+    alive->store(false);
+    ctx.app = nullptr;
   }
 
   delete dom;

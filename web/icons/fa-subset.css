@@ -56,15 +56,12 @@
 .fa-server:before{content:"\f233"}
 .fa-wand-magic-sparkles:before{content:"\e2ca"}
 .fa-shield-halved:before{content:"\f3ed"}
-/* icons used by the model capability badges / card actions / settings choices.
-   The shipped WOFF2 is the full solid font, so any of its glyphs can be named
-   here without regenerating the font. */
 .fa-eye:before{content:"\f06e"}
 .fa-volume-high:before{content:"\f028"}
 .fa-video:before{content:"\f03d"}
 .fa-file-pdf:before{content:"\f1c1"}
 .fa-brackets-curly:before{content:"\f7ea"}
-.fa-brain:before{content:"\f19c"}
+.fa-brain:before{content:"\f5dc"}
 .fa-hand:before{content:"\f256"}
 .fa-folder-tree:before{content:"\f802"}
 .fa-list:before{content:"\f03a"}
@@ -77,5 +74,12 @@
 .fa-house:before{content:"\f015"}
 .fa-grip-vertical:before{content:"\f58e"}
 .fa-folder-plus:before{content:"\f65e"}
-.fa-magnifying-glass:before{content:"\f002"}
+.fa-power-off:before{content:"\f011"}
+.fa-feather:before{content:"\f52d"}
+.fa-gauge:before{content:"\f624"}
+.fa-gauge-high:before{content:"\f625"}
+.fa-fire:before{content:"\f06d"}
+.fa-infinity:before{content:"\f534"}
+.fa-lightbulb:before{content:"\f0eb"}
+.fa-bell-slash:before{content:"\f1e6"}
 .fa,.fas,.fa-solid{font-weight:900}

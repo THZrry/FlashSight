@@ -50,7 +50,7 @@ std::string read_file_bin(const ghc::filesystem::path& p) {
 
 }  // namespace
 
-// ---------- file.ls：基础（仅文件名）/ 详细（CSV）----------
+// ---------- list_dir：基础（仅文件名）/ 详细（CSV）----------
 FS_TEST(addon2_ls_basic_and_detail) {
   fstest::TempDir td("a2ls");
   ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
@@ -65,7 +65,7 @@ FS_TEST(addon2_ls_basic_and_detail) {
   ctx.cwd = proj.string();
 
   // 基础模式（默认）：只给文件名
-  FsResult base = reg.invoke(ctx, "file.ls", Json::object());
+  FsResult base = reg.invoke(ctx, "list_dir", Json::object());
   ASSERT_TRUE(base.ok());
   EXPECT_FALSE(base.data["detail"].get<bool>());
   std::string names = base.data["names"].get<std::string>();
@@ -77,7 +77,7 @@ FS_TEST(addon2_ls_basic_and_detail) {
   // 详细模式：CSV 每行 name,type,date,size
   Json dargs = Json::object();
   dargs["detail"] = true;
-  FsResult det = reg.invoke(ctx, "file.ls", dargs);
+  FsResult det = reg.invoke(ctx, "list_dir", dargs);
   ASSERT_TRUE(det.ok());
   EXPECT_TRUE(det.data["detail"].get<bool>());
   std::string csv = det.data["entriesCsv"].get<std::string>();
@@ -85,7 +85,7 @@ FS_TEST(addon2_ls_basic_and_detail) {
   EXPECT_TRUE(csv.find("sub,dir,") != std::string::npos);
 }
 
-// ---------- dir.check：子代理筛目录（复用 ls，带 requirement）----------
+// ---------- check_dir：子代理筛目录（复用 ls，带 requirement）----------
 FS_TEST(addon2_check_dir) {
   fstest::TempDir td("a2cd");
   ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
@@ -100,18 +100,18 @@ FS_TEST(addon2_check_dir) {
   ctx.cwd = proj.string();
 
   // requirement 必填
-  EXPECT_FALSE(reg.invoke(ctx, "dir.check", Json::object()).ok());
+  EXPECT_FALSE(reg.invoke(ctx, "check_dir", Json::object()).ok());
 
   Json args = Json::object();
   args["requirement"] = "找所有 .hpp 头文件";
-  FsResult r = reg.invoke(ctx, "dir.check", args);
+  FsResult r = reg.invoke(ctx, "check_dir", args);
   ASSERT_TRUE(r.ok());
   EXPECT_EQ(r.data["requirement"].get<std::string>(), std::string("找所有 .hpp 头文件"));
   EXPECT_TRUE(r.data.contains("entries"));
   EXPECT_TRUE(r.data.contains("hint"));
 }
 
-// ---------- file.regex：多文件替换 + $1 分组 + 无匹配不动 ----------
+// ---------- file_regex：多文件替换 + $1 分组 + 无匹配不动 ----------
 FS_TEST(addon2_regex_replace) {
   fstest::TempDir td("a2rx");
   ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
@@ -129,7 +129,7 @@ FS_TEST(addon2_regex_replace) {
   args["pattern"] = "(\\w+)=(\\d+)";
   args["replacement"] = "$1 -> $2";
   args["flags"] = "g";
-  FsResult r = reg.invoke(ctx, "file.regex", args);
+  FsResult r = reg.invoke(ctx, "file_regex", args);
   ASSERT_TRUE(r.ok());
   EXPECT_EQ((int)r.data["totalReplacements"].get<int64_t>(), 2);
   std::string after = read_file_bin(proj / "one.txt");
@@ -142,7 +142,7 @@ FS_TEST(addon2_regex_replace) {
   bad["files"] = Json::array({"../escape.txt"});
   bad["pattern"] = "a";
   bad["replacement"] = "b";
-  FsResult rb = reg.invoke(ctx, "file.regex", bad);
+  FsResult rb = reg.invoke(ctx, "file_regex", bad);
   ASSERT_TRUE(rb.ok());  // 结果里带 per-file 错误
   EXPECT_FALSE(rb.data["results"][0]["ok"].get<bool>());
 }
@@ -178,12 +178,12 @@ FS_TEST(addon2_write_permission_gate) {
   Json wargs = Json::object();
   wargs["path"] = outside.string();
   wargs["content"] = "x";
-  FsResult r = reg.invoke(ctx, "file.write", wargs);
+  FsResult r = reg.invoke(ctx, "write_file", wargs);
   EXPECT_FALSE(r.ok());
 
   // full 权限：允许项目外（逃逸检查仍在，绝对路径可用）
   ctx.permission = "full";
-  FsResult r2 = reg.invoke(ctx, "file.write", wargs);
+  FsResult r2 = reg.invoke(ctx, "write_file", wargs);
   EXPECT_TRUE(r2.ok());
   EXPECT_EQ(read_file_bin(outside), std::string("x"));
 }
@@ -357,18 +357,20 @@ FS_TEST(addon2_workflow_backend) {
 // ---------- 双语 skill：zh/en 切换 ----------
 FS_TEST(addon2_skill_bilingual) {
   SkillRegistry sk;
-  EXPECT_TRUE(sk.has("browser-control"));
+  // 浏览器控制 was removed: it was documentation for a driver that never
+  // existed (see skill_registry.cpp). LSP is the remaining built-in.
+  EXPECT_FALSE(sk.has("browser-control"));
   EXPECT_TRUE(sk.has("lsp"));
 
-  FsResult zh = sk.load("browser-control", ThinkLang::kZh);
+  FsResult zh = sk.load("lsp", ThinkLang::kZh);
   ASSERT_TRUE(zh.ok());
   EXPECT_EQ(zh.data["lang"].get<std::string>(), std::string("zh"));
-  EXPECT_TRUE(zh.data["body"].get<std::string>().find("浏览器") != std::string::npos);
+  EXPECT_TRUE(zh.data["body"].get<std::string>().find("语言") != std::string::npos);
 
-  FsResult en = sk.load("browser-control", ThinkLang::kEn);
+  FsResult en = sk.load("lsp", ThinkLang::kEn);
   ASSERT_TRUE(en.ok());
   EXPECT_EQ(en.data["lang"].get<std::string>(), std::string("en"));
-  EXPECT_TRUE(en.data["body"].get<std::string>().find("Browser") != std::string::npos);
+  EXPECT_TRUE(en.data["body"].get<std::string>().find("LSP") != std::string::npos);
 
   // 未知 skill
   EXPECT_FALSE(sk.load("nope", ThinkLang::kZh).ok());
@@ -376,17 +378,17 @@ FS_TEST(addon2_skill_bilingual) {
   // 列表
   Json list = sk.list_json(ThinkLang::kEn);
   ASSERT_TRUE(list.is_array());
-  EXPECT_TRUE(list.size() >= 2);
+  EXPECT_TRUE(list.size() >= 1);
 
   // 工具层：skill 工具走 ctx.thinking_lang
   ToolRegistry reg;
   register_skill_tools(&reg, &sk);
   ToolContext ctx;
   ctx.thinking_lang = "en";
-  FsResult lr = reg.invoke(ctx, "tool.skill.load", Json{{"name", "lsp"}});
+  FsResult lr = reg.invoke(ctx, "load_skill", Json{{"name", "lsp"}});
   ASSERT_TRUE(lr.ok());
   EXPECT_EQ(lr.data["lang"].get<std::string>(), std::string("en"));
-  FsResult ll = reg.invoke(ctx, "tool.skill.list", Json::object());
+  FsResult ll = reg.invoke(ctx, "list_skills", Json::object());
   ASSERT_TRUE(ll.ok());
   EXPECT_TRUE(ll.data.is_array());
 }
@@ -406,15 +408,15 @@ FS_TEST(addon2_todo_tool_layer) {
     if (r.ok() && out) *out = r.data;
     return r;
   };
-  FsResult add = host.tools().invoke(ctx, "todo.add", Json{{"task", "write tests"}});
+  FsResult add = host.tools().invoke(ctx, "todo_add", Json{{"task", "write tests"}});
   ASSERT_TRUE(add.ok());
   EXPECT_EQ((int)add.data["items"].size(), 1);
-  FsResult lst = host.tools().invoke(ctx, "todo.list", Json::object());
+  FsResult lst = host.tools().invoke(ctx, "todo_list", Json::object());
   ASSERT_TRUE(lst.ok());
   EXPECT_EQ((int)lst.data["items"].size(), 1);
-  FsResult clr = host.tools().invoke(ctx, "todo.clear", Json::object());
+  FsResult clr = host.tools().invoke(ctx, "todo_clear", Json::object());
   ASSERT_TRUE(clr.ok());
-  EXPECT_EQ((int)host.tools().invoke(ctx, "todo.list", Json::object()).data["items"].size(), 0);
+  EXPECT_EQ((int)host.tools().invoke(ctx, "todo_list", Json::object()).data["items"].size(), 0);
 }
 
 // ---------- FsApi 层：skill.* / thinkingLang / browser-load ----------
@@ -428,17 +430,16 @@ FS_TEST(addon2_fsapi_skill_and_lang) {
   FsResult sl = api.skill_list();
   ASSERT_TRUE(sl.ok());
   EXPECT_TRUE(sl.data.is_array());
-  EXPECT_TRUE(sl.data.size() >= 2);
+  EXPECT_TRUE(sl.data.size() >= 1);
 
   FsResult ld = api.skill_load("lsp");
   ASSERT_TRUE(ld.ok());
   EXPECT_EQ(ld.data["lang"].get<std::string>(), std::string("en"));
   EXPECT_TRUE(ld.data["body"].get<std::string>().find("LSP") != std::string::npos);
 
-  // browser-load 加载口（addon2：按需加载，不直接提供）
-  FsResult bl = api.browser_load();
-  ASSERT_TRUE(bl.ok());
-  EXPECT_EQ(bl.data["name"].get<std::string>(), std::string("browser-control"));
+  // 浏览器控制 has no loader any more: both the skill and its `browser.load`
+  // route are gone, because no browser driver was ever implemented.
+  EXPECT_FALSE(api.skill_load("browser-control").ok());
 
   // 未知 skill
   EXPECT_FALSE(api.skill_load("nope").ok());

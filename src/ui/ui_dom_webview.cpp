@@ -135,6 +135,16 @@ const char* kGlueJs = R"JS(
     if (name === 'contextmenu') {
       return String(evt.clientX | 0) + '\t' + String(evt.clientY | 0);
     }
+    // A markdown link reports its TARGET, not its label. The anchor carries
+    // data-href and no real href (a real one would navigate the window away from
+    // the session), so the click value has to come from the attribute.
+    if (name === 'click' && evt && evt.target && evt.target.closest) {
+      var a = evt.target.closest('[data-href]');
+      if (a) {
+        evt.preventDefault();
+        return a.getAttribute('data-href') || '';
+      }
+    }
     var t = el.tagName;
     if (t === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
       return el.checked ? '1' : '0';
@@ -164,6 +174,17 @@ const char* kGlueJs = R"JS(
           evt.preventDefault();
         } else {
           if (evt.shiftKey || ctrl) return;
+          evt.preventDefault();
+        }
+      }
+      if (name === 'keydown') {
+        // While the composer's completion menu is open, the app owns Tab and
+        // the arrow keys. Otherwise the engine moves focus / scrolls before
+        // the app can accept the highlighted suggestion.
+        var k = evt.key == null ? '' : String(evt.key);
+        var cap = el.getAttribute && el.getAttribute('data-keys-capture');
+        if (cap && (k === 'Tab' || k === 'ArrowUp' || k === 'ArrowDown' ||
+                    k === 'Escape')) {
           evt.preventDefault();
         }
       }
@@ -293,30 +314,71 @@ const char* kGlueJs = R"JS(
         return;
       }
       case 'focus': if (el) { try { el.focus(); } catch (e) {} } return;
-      case 'scrollTop':    if (el) el.scrollTop = parseInt(a, 10) || 0; return;
-      case 'scrollBottom': if (el) el.scrollTop = el.scrollHeight; return;
+      // Apply the offset now AND once more in the frame's pre-paint callback.
+      //
+      // Unlike the browser build (EM_JS, one synchronous task), every call here
+      // is a separate ExecuteScript round trip: the transcript patch and this
+      // scroll are two different tasks, and the engine may paint the freshly
+      // built page at scrollTop 0 in between - the "先到顶、再蹦到位置" report.
+      // requestAnimationFrame runs after the patch but BEFORE that frame paints,
+      // so the first painted frame is already at the remembered offset. It fires
+      // even when the window is hidden; the immediate assignment stays as the
+      // fallback for engines that skip rAF while minimized.
+      case 'scrollTop': {
+        if (!el) return;
+        var t = parseInt(a, 10) || 0;
+        el.style.scrollBehavior = 'auto';
+        el.scrollTop = t;
+        el.style.scrollBehavior = '';
+        requestAnimationFrame(function () {
+          el.style.scrollBehavior = 'auto';
+          el.scrollTop = t;
+          el.style.scrollBehavior = '';
+        });
+        return;
+      }
+      case 'scrollBottom': {
+        if (!el) return;
+        el.style.scrollBehavior = 'auto';
+        el.scrollTop = el.scrollHeight;
+        el.style.scrollBehavior = '';
+        requestAnimationFrame(function () {
+          el.style.scrollBehavior = 'auto';
+          el.scrollTop = el.scrollHeight;
+          el.style.scrollBehavior = '';
+        });
+        return;
+      }
       case 'scrollPin':
         if (!el) return;
-        el.__fsPinCb = parseInt(a, 10);
+        // `a` is an ENABLE flag ("1"), not a callback id: the host keeps one
+        // pin callback. Treating it as an id left it at 0 and the listener
+        // bailed out on its own guard.
+        el.__fsPinCb = 1;
         if (el.__fsPinInit) return;
         el.__fsPinInit = 1;
         el.addEventListener('scroll', function () {
-          if (!el.__fsPinCb) return;
           var atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
-          post('fs_ui_scroll_pin', [el.__fsPinCb, atBottom ? 1 : 0]);
+          post('fs_ui_scroll_pin', [0, atBottom ? 1 : 0]);
         }, { passive: true });
         return;
       case 'scrollEdges':
         if (!el) return;
-        el.__fsEdgeCb = parseInt(a, 10);
+        el.__fsEdgeCb = 1;
         if (el.__fsEdgeInit) return;
         el.__fsEdgeInit = 1;
         el.addEventListener('scroll', function () {
-          if (!el.__fsEdgeCb) return;
-          var top = el.scrollTop <= 1;
+          // 24 px, the same margin the wasm adapter uses: the older page starts
+          // loading just before the very top, not only on the exact pixel row.
+          var top = el.scrollTop <= 24;
           var bot = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
-          post('fs_ui_scroll_edges', [el.__fsEdgeCb, top ? 1 : 0, bot ? 1 : 0]);
-          push('scroll', el.__fsEdgeCb, el.scrollTop + '\u001f' + el.scrollHeight + '\u001f' + el.clientHeight);
+          post('fs_ui_scroll_edges', [0, top ? 1 : 0, bot ? 1 : 0]);
+          // The mirror is keyed by NODE index: on_push() writes slots_[id] and
+          // scroll_top(node) reads it back. Passing the CALLBACK id here wrote
+          // the offset into an unrelated slot, so the host's copy of the scroll
+          // position stayed at 0 - which made every tab switch save 0 and
+          // restore 0 ("切回会话就跑到最上面").
+          push('scroll', i, el.scrollTop + '\u001f' + el.scrollHeight + '\u001f' + el.clientHeight);
         }, { passive: true });
         return;
       case 'animation':
@@ -336,15 +398,23 @@ const char* kGlueJs = R"JS(
         el.__fsOutCb = parseInt(a, 10);
         if (el.__fsOutInit) return;
         el.__fsOutInit = 1;
-        document.addEventListener('mousedown', function (ev) {
+        el.__fsOutHandler = function (ev) {
+          // The node may have been removed from the DOM while this document
+          // listener stayed installed. Firing then would dismiss whatever popup
+          // is open NOW because of a dead one - so a detached popup is inert.
+          if (!el.isConnected) return;
           if (!el.__fsOutCb) return;
           var t = ev.target;
           if (el.contains(t)) return;
-          var host = el.parentElement;
-          if (host && host.contains(t)) return;
-          if (t && t.closest && t.closest('.model-field, .model-btn-wrap')) return;
+          // Only the ANCHOR is exempt (the button that toggles this popup).
+          // Exempting the whole parent container also swallowed presses on
+          // siblings, which made the popup look undismissable.
+          if (t && t.closest && t.closest('.model-field, .model-btn-wrap, [data-keep-popup]')) {
+            return;
+          }
           post('fs_ui_outside', [el.__fsOutCb]);
-        }, true);
+        };
+        document.addEventListener('mousedown', el.__fsOutHandler, true);
         return;
       case 'placePopup': {
         if (!el || !el2) return;
@@ -568,7 +638,15 @@ const char* kGlueJs = R"JS(
         if (globalThis.__fsGlobalKey) return;
         globalThis.__fsGlobalKey = 1;
         document.addEventListener('keydown', function (ev) {
-          post('fs_ui_key', [ev.key]);
+          // Modifiers are part of the key: "Ctrl+W" is a different command from
+          // "w", and the shortcut table defines its bindings with them.
+          var k = ev.key || '';
+          var mods = '';
+          if (ev.ctrlKey) mods += 'Ctrl+';
+          if (ev.metaKey) mods += 'Meta+';
+          if (ev.altKey) mods += 'Alt+';
+          if (ev.shiftKey) mods += 'Shift+';
+          post('fs_ui_key', [mods + k]);
         });
         return;
       case 'copy':
@@ -759,8 +837,17 @@ class WebViewDom : public IDom {
     call("placePopup", idx(popup), idx(anchor), "", "");
   }
   void bind_outside_click(Node popup, std::function<void()> cb) override {
-    outside_cb_ = cb;
-    call("outside", idx(popup), 0, "", "");
+    // ONE callback per popup, keyed by the popup node. A single slot meant the
+    // last binding won: with a model picker open and a context menu opened on
+    // top, the picker's dismissal callback was overwritten by the menu's - and
+    // the document listeners that earlier popups installed kept firing the
+    // NEWEST callback, so a press outside closed the wrong thing (or nothing).
+    int id = ++outside_seq_;
+    if (cb) {
+      outside_cbs_[id] = std::move(cb);
+    }
+    outside_by_node_[popup.id] = id;
+    call("outside", idx(popup), 0, std::to_string(id), "");
   }
 
   // ---- drop zone ---------------------------------------------------------
@@ -792,7 +879,11 @@ class WebViewDom : public IDom {
   }
   void bind_scroll_pin(Node node, std::function<void(bool)> cb) override {
     scroll_pin_cb_ = cb;
-    call("scrollPin", idx(node), 0, "", "");
+    // "1" is an ENABLE flag, not an id: this adapter keeps ONE callback per kind.
+    // Passing "" made the glue's `parseInt(a)||0` produce 0, and the listener
+    // bailed out on `if (!el.__fsPinCb) return` - so a terminal never reported
+    // "at the end" in the desktop build.
+    call("scrollPin", idx(node), 0, "1", "");
   }
   void scroll_to_bottom(Node node) override {
     call("scrollBottom", idx(node), 0, "", "");
@@ -800,13 +891,23 @@ class WebViewDom : public IDom {
   void bind_scroll_edges(Node node,
                          std::function<void(bool, bool)> cb) override {
     scroll_edges_cb_ = cb;
-    call("scrollEdges", idx(node), 0, "", "");
+    // Same flag contract as scrollPin. Without it the scroll listener returned
+    // immediately: no edges, no mirrored offset, so 回到顶部/加载更早 and the
+    // remember-the-position-on-tab-switch path were all dead in webview.
+    call("scrollEdges", idx(node), 0, "1", "");
   }
   int scroll_top(Node node) override {
     return node.id < slots_.size() ? slots_[node.id].scroll_top : 0;
   }
   void set_scroll_top(Node node, int top) override {
     call("scrollTop", idx(node), 0, std::to_string(top), "");
+    // Mirror the write HERE, synchronously. This adapter cannot read the live
+    // offset back (the push is async), so without this the mirror stayed at the
+    // previous value until the next scroll event arrived - and a tab switch
+    // saves the offset by reading exactly this. Switching away right after a
+    // restore therefore persisted the OLD position, which is the "滚动状态没保存"
+    // report. The wasm adapter reads el.scrollTop directly and never had this.
+    if (node.id < slots_.size()) slots_[node.id].scroll_top = top;
   }
   int scroll_height(Node node) override {
     return node.id < slots_.size() ? slots_[node.id].scroll_height : 0;
@@ -952,8 +1053,15 @@ class WebViewDom : public IDom {
   void on_tab_drag(const std::string& pair) {
     if (tab_drag_cb_) tab_drag_cb_(pair);
   }
-  void on_outside() {
-    if (outside_cb_) outside_cb_();
+  void on_outside(int cb_id) {
+    std::map<int, std::function<void()> >::iterator it = outside_cbs_.find(cb_id);
+    if (it == outside_cbs_.end() || !it->second) return;
+    std::function<void()> fn = it->second;
+    // Erase BEFORE calling: the callback tears the popup down, and a second
+    // press arriving (or the same press reaching another listener) must not run
+    // it twice.
+    outside_cbs_.erase(it);
+    fn();
   }
   void on_file_pick(const std::string& json) {
     if (file_pick_cb_) file_pick_cb_(json);
@@ -1059,7 +1167,10 @@ class WebViewDom : public IDom {
   std::function<void(bool)> scroll_pin_cb_;
   std::function<void(bool, bool)> scroll_edges_cb_;
   std::function<void(const std::string&)> tab_drag_cb_;
-  std::function<void()> outside_cb_;
+  // Outside-click dismissal, one entry per live popup (see bind_outside_click).
+  std::map<int, std::function<void()> > outside_cbs_;
+  std::map<uint64_t, int> outside_by_node_;  // popup node id -> callback id
+  int outside_seq_ = 0;
   std::function<void(const std::string&)> file_pick_cb_;
 };
 
@@ -1208,9 +1319,13 @@ void cb_tab_drag(const char* /*id*/, const char* req, void* /*arg*/) {
 }
 
 void cb_outside(const char* /*id*/, const char* req, void* /*arg*/) {
-  (void)req;
   WebViewDom* d = WebViewDom::g_dom;
-  if (d) d->on_outside();
+  if (!d) return;
+  try {
+    Json j = Json::parse(req ? req : "[]");
+    d->on_outside(arg_int(j, 0));
+  } catch (...) {
+  }
 }
 
 void cb_file_pick(const char* /*id*/, const char* req, void* /*arg*/) {

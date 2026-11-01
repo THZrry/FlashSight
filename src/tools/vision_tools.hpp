@@ -1,4 +1,4 @@
-// vision_tools.hpp - vision.screenshot/readImage（回调式；截图由宿主/浏览器驱动提供）
+// vision_tools.hpp - screenshot/readImage（回调式；截图由宿主/浏览器驱动提供）
 #pragma once
 
 #include <string>

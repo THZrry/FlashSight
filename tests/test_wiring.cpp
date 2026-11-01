@@ -228,3 +228,207 @@ FS_TEST(wiring_usage_export_defaults_to_data_root) {
   EXPECT_TRUE(ghc::filesystem::exists(path));
   EXPECT_TRUE(path.find("exports") != std::string::npos);
 }
+
+// Session history is SHARDED: turns live in turns/NNN.json and full.json keeps
+// only the small head. Without this every append re-wrote the whole history
+// (O(n) per turn, one file growing without bound - a real session reached 90 KB
+// in six turns because tool results are stored in full).
+// The crash-safe live snapshot survives a restart.
+//
+// A turn is only appended when it finishes, so a crashed process used to lose the
+// whole answer. The snapshot lives next to the session (runtime.json's `live`),
+// which means a NEW FsApi over the same directory must find it.
+FS_TEST(wiring_live_snapshot_survives_restart) {
+  fstest::TempDir dir("wire_live");
+  WClock clock(1000);
+  WRandom rng(7);
+  std::string sid;
+  ghc::filesystem::path proj = ghc::filesystem::path(dir.path()) / "p";
+  {
+    fs::FsApi api(ghc::filesystem::path(dir.path()), &clock, &rng);
+    ghc::filesystem::create_directories(proj);
+    std::string pid = api.project_create(proj.string()).data["pid"].get<std::string>();
+    sid = api.session_new(pid, proj.string()).data["sid"].get<std::string>();
+    // While a turn runs the host writes a snapshot every couple of seconds.
+    api.sessions().write_live_snapshot(
+        sid, Json{{"running", true}, {"text", "half an answer"},
+                  {"userText", "the question"}, {"startedAt", 500}});
+  }
+  // New process (same data dir): the in-memory loop is gone, but the snapshot is
+  // on disk - and that is what the UI must be handed.
+  {
+    fs::FsApi api2(ghc::filesystem::path(dir.path()), &clock, &rng);
+    fs::FsResult r = api2.session_live_turn(sid);
+    ASSERT_TRUE(r.ok());
+    bool running = get<bool>(r.data, "running", true);
+    bool crashed = get<bool>(r.data, "crashed", false);
+    EXPECT_FALSE(running);   // not running now
+    EXPECT_TRUE(crashed);    // recovered crash
+    EXPECT_EQ(get<std::string>(r.data, "text", ""), std::string("half an answer"));
+    EXPECT_EQ(get<std::string>(r.data, "userText", ""), std::string("the question"));
+  }
+}
+
+FS_TEST(wiring_history_is_sharded_and_readable) {
+  Session s("wire_shard", 0);
+  // Enough turns to cross a shard boundary (16 per shard).
+  for (int i = 0; i < 20; ++i) {
+    Json t = Json::object();
+    t["role"] = "user";
+    t["text"] = "turn " + std::to_string(i);
+    s.api.session_append_turn(s.sid, t);
+  }
+  fs::FsResult r = s.api.session_get(s.sid);
+  ASSERT_TRUE(r.ok());
+  // Every turn still reads back, in order, through the same API as before.
+  ASSERT_TRUE(r.data["turns"].is_array());
+  EXPECT_EQ(r.data["turns"].size(), size_t(20));
+  EXPECT_EQ(get<std::string>(r.data["turns"][0], "text", ""), std::string("turn 0"));
+  EXPECT_EQ(get<std::string>(r.data["turns"][19], "text", ""), std::string("turn 19"));
+
+  // The layout on disk: shards 000 and 001 exist, and the head file itself no
+  // longer carries the turns.
+  ghc::filesystem::path sdir = ghc::filesystem::path(s.dir.path()) / "p" /
+                              ".flashsight" / "sessions" / s.sid;
+  EXPECT_TRUE(ghc::filesystem::exists(sdir / "turns" / "000.json"));
+  EXPECT_TRUE(ghc::filesystem::exists(sdir / "turns" / "001.json"));
+  {
+    std::ifstream ifs((sdir / "full.json").string(), std::ios::binary);
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    Json head = Json::parse(ss.str());
+    EXPECT_FALSE(head.contains("turns"));  // sharded away
+    EXPECT_TRUE(head.contains("meta"));
+  }
+  // A shard holds at most 16 turns.
+  {
+    std::ifstream ifs((sdir / "turns" / "000.json").string(), std::ios::binary);
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    Json part = Json::parse(ss.str());
+    EXPECT_EQ(part.size(), size_t(16));
+  }
+
+  // Rollback shortens the history: the stale second shard must be gone, or the
+  // dropped turns would come back on the next read.
+  std::string tid = get<std::string>(r.data["turns"][4], "turnId", "");
+  ASSERT_TRUE(!tid.empty());
+  EXPECT_TRUE(s.api.session_rollback(s.sid, tid).ok());
+  fs::FsResult after = s.api.session_get(s.sid);
+  EXPECT_EQ(after.data["turns"].size(), size_t(4));
+  EXPECT_FALSE(ghc::filesystem::exists(sdir / "turns" / "001.json"));
+}
+
+// A subagent's record must survive a restart.
+//
+// The record used to live ONLY in the in-memory SubagentManager, so after the
+// process restarted every "打开记录" button in an old transcript pointed at
+// nothing ("子代理还是无法在历史记录里打开（也有可能是旧的历史记录没存）").
+FS_TEST(wiring_subagent_record_survives_restart) {
+  fstest::TempDir dir("wire_sub");
+  WClock clock(1000);
+  WRandom rng(7);
+  ghc::filesystem::path proj = ghc::filesystem::path(dir.path()) / "p";
+  std::string sid;
+  {
+    fs::FsApi api(ghc::filesystem::path(dir.path()), &clock, &rng);
+    ghc::filesystem::create_directories(proj);
+    std::string pid = api.project_create(proj.string()).data["pid"].get<std::string>();
+    sid = api.session_new(pid, proj.string()).data["sid"].get<std::string>();
+    Json rec = Json::object();
+    rec["id"] = "sub_1";
+    rec["kind"] = "research";
+    rec["status"] = "done";
+    rec["task"] = "look at the parser";
+    rec["summary"] = "it parses";
+    rec["full"] = Json{{"transcript", Json::array({Json{{"role", "assistant"},
+                                                        {"content", "done"}}})}};
+    api.sessions().write_subagent_record(sid, "sub_1", rec);
+  }
+  // New process: nothing in memory, but the record is on disk next to the session.
+  {
+    fs::FsApi api2(ghc::filesystem::path(dir.path()), &clock, &rng);
+    fs::FsResult r = api2.subagent_detail_in(sid, "sub_1");
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(get<std::string>(r.data, "task", ""), std::string("look at the parser"));
+    EXPECT_EQ(get<std::string>(r.data, "summary", ""), std::string("it parses"));
+    ASSERT_TRUE(r.data.contains("full"));
+    EXPECT_EQ(r.data["full"]["transcript"].size(), size_t(1));
+    // The file lives where a reader expects it, one per record.
+    ghc::filesystem::path rec = proj / ".flashsight" / "sessions" / sid /
+                                "subagents" / "sub_1.json";
+    EXPECT_TRUE(ghc::filesystem::exists(rec));
+  }
+}
+
+// A path separator in the id must not escape the session directory (the id is
+// generated internally, but it is still treated as untrusted).
+FS_TEST(wiring_subagent_record_id_is_sanitised) {
+  fstest::TempDir dir("wire_sub2");
+  WClock clock(1000);
+  WRandom rng(7);
+  fs::FsApi api(ghc::filesystem::path(dir.path()), &clock, &rng);
+  ghc::filesystem::path proj = ghc::filesystem::path(dir.path()) / "p";
+  ghc::filesystem::create_directories(proj);
+  std::string pid = api.project_create(proj.string()).data["pid"].get<std::string>();
+  std::string sid = api.session_new(pid, proj.string()).data["sid"].get<std::string>();
+  Json rec = Json::object();
+  rec["id"] = "../evil";
+  rec["task"] = "x";
+  api.sessions().write_subagent_record(sid, "../evil", rec);
+  ghc::filesystem::path sdir = proj / ".flashsight" / "sessions" / sid;
+  EXPECT_FALSE(ghc::filesystem::exists(proj / ".flashsight" / "sessions" / "evil.json"));
+  EXPECT_FALSE(ghc::filesystem::exists(proj / ".flashsight" / "evil.json"));
+  // ".", ".", "/" each map to "_", so the record lands as ___evil.json INSIDE the
+  // session's own subagents/ directory rather than escaping it.
+  EXPECT_TRUE(ghc::filesystem::exists(sdir / "subagents" / "___evil.json"));
+}
+
+// A session written by an OLDER build (turns inline in full.json, no turns/
+// directory) must keep working: same read API, and the next write migrates it to
+// the sharded layout without losing a turn.
+FS_TEST(wiring_legacy_full_json_still_reads) {
+  fstest::TempDir dir("wire_legacy");
+  WClock clock(1000);
+  WRandom rng(7);
+  fs::FsApi api(ghc::filesystem::path(dir.path()), &clock, &rng);
+  ghc::filesystem::path proj = ghc::filesystem::path(dir.path()) / "p";
+  ghc::filesystem::create_directories(proj);
+  std::string pid = api.project_create(proj.string()).data["pid"].get<std::string>();
+  std::string sid = api.session_new(pid, proj.string()).data["sid"].get<std::string>();
+
+  // Hand-write the OLD format: turns inline, no turns/ dir.
+  ghc::filesystem::path sdir = proj / ".flashsight" / "sessions" / sid;
+  Json old = Json::object();
+  old["meta"] = Json{{"pid", pid}, {"cwd", proj.string()}, {"title", "legacy"}};
+  old["sessionSettings"] = fs::default_session_settings(Json::object());
+  old["snapshots"] = Json::array();
+  old["systemOps"] = Json::array();
+  Json turns = Json::array();
+  for (int i = 0; i < 5; ++i) {
+    turns.push_back(Json{{"role", "user"}, {"text", "old " + std::to_string(i)},
+                         {"turnId", "t_old" + std::to_string(i)}, {"ts", 500 + i}});
+  }
+  old["turns"] = turns;
+  {
+    std::ofstream ofs((sdir / "full.json").string(), std::ios::binary | std::ios::trunc);
+    ofs << old.dump();
+  }
+
+  // Reads back unchanged, through the normal API.
+  fs::FsResult r = api.session_get(sid);
+  ASSERT_TRUE(r.ok());
+  ASSERT_TRUE(r.data["turns"].is_array());
+  EXPECT_EQ(r.data["turns"].size(), size_t(5));
+  EXPECT_EQ(get<std::string>(r.data["turns"][4], "text", ""), std::string("old 4"));
+
+  // Append: the migration hands the old turns to shards and keeps order.
+  clock.advance(1000);
+  api.session_append_turn(sid, Json{{"role", "assistant"}, {"text", "new one"}});
+  fs::FsResult after = api.session_get(sid);
+  ASSERT_TRUE(after.ok());
+  EXPECT_EQ(after.data["turns"].size(), size_t(6));
+  EXPECT_EQ(get<std::string>(after.data["turns"][0], "text", ""), std::string("old 0"));
+  EXPECT_EQ(get<std::string>(after.data["turns"][5], "text", ""), std::string("new one"));
+}
+

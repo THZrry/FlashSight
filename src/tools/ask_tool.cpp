@@ -1,4 +1,11 @@
 // ask_tool.cpp - ask 工具实现
+//
+// The tool does NOT answer itself. It reports "waiting for the user" and the
+// LOOP parks the turn on it, exactly like the permission gate. The first version
+// emitted `ask.prompt` and returned success, so the model was told "asked:true"
+// as if the user had already replied: the question appeared in the UI but the
+// answer never reached the model, the turn carried on regardless, and the model
+// often asked again (which is also what drove turns into the tool-round cap).
 #include "ask_tool.hpp"
 
 namespace fs {
@@ -6,7 +13,11 @@ namespace fs {
 void register_ask_tool(ToolRegistry* registry) {
   ToolDef def;
   def.name = "ask";
-  def.description = "向用户提问（手动模式弹窗等选；自动模式不可用）";
+  def.description =
+      "向用户提问并等待回答（手动模式；自动模式不可用）. Ask the user and WAIT. "
+      "The turn pauses until they choose; their choice is returned to you as this "
+      "tool's result. Provide question + options, and mark the option you "
+      "recommend with `recommended`.";
   Json params = Json::object();
   params["type"] = "object";
   Json props = Json::object();
@@ -27,17 +38,10 @@ void register_ask_tool(ToolRegistry* registry) {
         // 自动模式：ask 已从工具列表移除；若模型硬调则拒绝
         return FsResult::error(ErrCode::kBusy, "ask not available in auto mode");
       }
-      // 发 ask.prompt 事件（UI 弹窗；选择由 Loop.answer_ask 回填）
-      if (ctx.emit) {
-        Json payload = Json::object();
-        payload["question"] = question;
-        payload["options"] = args.contains("options") ? args["options"] : Json::array();
-        payload["recommended"] = jsonutil::get_int(args, "recommended", 0);
-        payload["allowCustom"] = jsonutil::get<bool>(args, "allowCustom", true);
-        ctx.emit("ask.prompt", payload);
-      }
       Json data = Json::object();
-      data["asked"] = true;
+      // `awaiting_user` is the signal the loop parks on. The real result is
+      // filled in by AgentLoop::answer_ask when the user picks an option.
+      data["awaiting_user"] = true;
       data["question"] = question;
       return FsResult::success(data);
     });

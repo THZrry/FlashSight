@@ -399,9 +399,10 @@ std::vector<ModelEntry> builtin_models_preset() {
   add("gpt-4.1", true, false, true, 1000000);
   add("gpt-4.1-mini", true, false, true, 1000000);
   add("o4-mini", true, true, true, 200000);
-  add("", true, true, true, 200000);
-  add("", true, false, true, 200000);
-  add("", true, false, true, 200000);
+  add("deepseek-chat", false, false, true, 128000);
+  add("deepseek-reasoner", false, true, true, 128000);
+  add("gemini-2.5-pro", true, true, true, 1048576);
+  add("gemini-2.5-flash", true, true, true, 1048576);
   return v;
 }
 

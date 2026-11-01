@@ -60,6 +60,9 @@ struct ProjectCard {
     // terminal can still produce output while no turn is in flight, so it gets
     // the "background" dot rather than "idle".
     int terminal_count = 0;
+    // Auto-continue round in progress (0 = none). A session in an auto round is
+    // doing background work even though no user message started it.
+    int auto_round = 0;
     bool renaming = false;   // inline rename in progress
     std::string rename_text; // draft while renaming
   };
@@ -85,6 +88,11 @@ struct SideTab {
   bool loaded = false;
   std::string preview_path;
   std::string preview;
+  // subagents detail panel: which subagent's transcript this panel shows
+  // ("" = the list of all subagents). A transcript is long, so it gets its own
+  // SIDE PANEL rather than a full-window tab: the sidebar is where subagent
+  // history belongs, and a page could not be closed back to the conversation.
+  std::string subagent_id;
 
   // ---- git panel (one per panel: two git panels can show two repos) ----
   struct GitChange {
@@ -200,6 +208,11 @@ struct AppState {
 
   // ---- session (active one) ----
   std::string session_input;
+  // 编辑并重发 armed on a turn: its text is back in the composer and the next
+  // send REPLACES that turn (and everything after it) instead of appending. The
+  // trim happens at send time, not on the click - pressing 编辑 and then changing
+  // your mind must not destroy the answer.
+  std::string edit_turn_id;
   // Attached files/images shown as chips ABOVE the input (a path is not text:
   // mixing it into the message made it impossible to tell what was attached).
   std::vector<std::string> attachments;
@@ -240,11 +253,30 @@ struct AppState {
   bool model_available = true;
   // Checked against model.allEnabled; empty = not asked yet.
   std::vector<std::string> available_model_ids;
+  // Thinking levels the CURRENT model was configured with (model table), plus its
+  // provider's display name. Both come from model.allEnabled: guessing levels from
+  // the model NAME (thinking_levels_for) missed every custom/new model, so the
+  // 思考强度 control silently never rendered.
+  std::vector<std::string> model_thinking_levels;
+  // The model's OWN configured default level (model table `thinking.default`).
+  // The composer pre-selects this instead of inventing a "默认" row: the row the
+  // user configured in the model settings is the one that should be shown, and a
+  // literal "默认" option next to concrete levels is meaningless (what does
+  // "default" mean when the model already named a default?). Empty = inherit.
+  std::string model_thinking_default;
+  std::string model_provider_label;
   std::string model_check_sid;
   std::string permission = "permissive";
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
+  // A suspend/resume request is in flight. The button is disabled meanwhile: the
+  // backend decides when the loop actually parks (it finishes the current tool
+  // first), so a second click before the reply sent the OPPOSITE request.
+  bool suspend_pending = false;
+  // A turn is running for this session. The composer's primary button is 发送
+  // while false and 中止 while true.
+  bool turn_running = false;
   // The loop was interrupted (model failed / user stopped it). Shows a bar with
   // a "继续" action: the backend can resume from the saved point, and a toast
   // alone left the user with nothing to press.
@@ -267,6 +299,20 @@ struct AppState {
   // -1 / "" mean "not loaded yet": the panel shows a placeholder rather than a
   // made-up number (it used to display a hard-coded 42% and ¥0.21).
   int context_pct = -1;
+  // Absolute water level: the numbers behind the percentage. A percentage alone
+  // cannot answer "is there room for one more file read" - 42% of a 1M window
+  // and 42% of a 32k window are different situations.
+  int64_t context_tokens = -1;   // last request's prompt tokens
+  int64_t context_window = 0;    // model context window (0 = unknown)
+  // Cache: `cache_hit_pct` is -1 when the provider never reported cache fields
+  // (that is not the same as a 0% hit rate).
+  int cache_hit_pct = -1;
+  int64_t session_cache_tokens = 0;
+  bool cache_reported = false;
+  // Cost kind for the session: money | quota | unknown. A quota provider
+  // reports cost 0 inside the plan, so "¥0.00" would be a lie.
+  std::string session_cost_kind = "unknown";
+  int64_t usage_calls = 0;       // recorded model calls in this session
   // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
   // （粗匹配 + 用户在模型设置里的覆盖），不是全局固定枚举。
   std::string thinking;
@@ -274,6 +320,11 @@ struct AppState {
   int64_t session_tokens_in = -1;
   int64_t session_tokens_out = 0;
   bool session_usage_loaded = false;
+  // This turn's usage (rows since the last user message). -1 = unknown.
+  int64_t turn_cost_micros = -1;  // money in micro-units (avoids float compare)
+  int64_t turn_in = -1;
+  int64_t turn_out = -1;
+  std::string turn_cost_kind;
 
   // ---- side panel ----
   std::vector<SideTab> side_tabs;
@@ -307,6 +358,9 @@ struct AppState {
   std::vector<CallRow> session_calls;     // toolCalls flattened from turns
   // ---- composer / skill picker ----
   bool skill_menu_open = false;
+  // The 思考档位 list opened by the composer's thinking button. It is the ONLY
+  // thinking control (the old select + dead icon button pair read as two).
+  bool thinking_menu_open = false;
   // The command menu's contents come from command.list (backend), so the UI has
   // no hard-coded list to keep in sync.
   struct CommandRow {
@@ -317,6 +371,19 @@ struct AppState {
     std::string group;   // "builtin" | "skill"
   };
   std::vector<CommandRow> command_menu;
+  // ---- composer inline completion ----
+  // Typing "/" at the very START of the input opens the command (skill) list;
+  // typing "/" or "./" LATER opens file/directory candidates for the fragment
+  // under the caret. Both are "hints": nothing is inserted until the user picks.
+  enum class CompleteKind { kNone, kCommand, kPath };
+  CompleteKind complete_kind = CompleteKind::kNone;
+  std::string complete_query;   // what was typed after the trigger
+  int complete_index = 0;       // keyboard selection (↑/↓)
+  // Path completion context: the directory being listed ("" = project root) and
+  // the partial name being filtered.
+  std::string complete_dir;
+  std::string complete_prefix;
+  std::vector<std::pair<std::string, bool> > complete_items;  // (name, isDir)
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
@@ -373,8 +440,23 @@ struct AppState {
     // actually do" has no answer.
     Json transcript = Json::array();
     bool open = false;      // transcript expanded in the sidebar
+    // What the subagent is doing right now (its streamed text so far). Filled
+    // from the tagged stream.delta events, so the panel can show live work
+    // instead of just "running".
+    std::string live_text;
+    // The steer box's draft. Steering is a typed instruction, not a fixed
+    // "继续" - the button that sent a constant read as doing nothing.
+    std::string steer_draft;
   };
   std::vector<SubagentRow> subagents;
+  // Loaded transcripts for subagent TABS, keyed by subagent id. Kept separate
+  // from the list rows: the list omits transcripts (they are huge), and a tab
+  // fetches its own on open.
+  struct SubagentDetail {
+    bool loaded = false;
+    SubagentRow row;
+  };
+  std::map<std::string, SubagentDetail> subagent_details;
 
   // ---- workflows (long-task pipelines) ----
   struct WorkflowDefRow {
@@ -505,6 +587,11 @@ struct AppState {
   std::string model_picker_target;
   std::string model_picker_provider;
   std::string model_picker_query;
+  // The model the picker should OPEN ON. The left column is a provider list, so
+  // opening on whatever provider was last browsed in settings showed an empty
+  // right pane for a session whose model lives elsewhere ("不会自动放到选择的
+  // 那一页"). Resolved once per open, when the model list arrives.
+  std::string model_picker_focus;
   std::vector<ModelRow> model_picker_models;   // 选中 provider 的启用模型
   bool model_picker_loaded = false;
   std::string model_picker_status;
@@ -517,8 +604,14 @@ struct AppState {
   };
   std::vector<ShellRow> shell_rows;  // settings.detectShells result
   int shell_index = 0;
-  std::string history_recent = "20";
-  std::string history_budget = "8000";
+  // Water level at which the agent compacts (% of the model's window).
+  // (There is no "recent turns window" or "token budget" field: neither is a
+  // setting any more - they folded history on every turn regardless of the water
+  // level, which is exactly the "每轮都压缩" bug.)
+  std::string history_compress_at = "80";
+  // The keep-turns count has NO UI field on purpose: it is an internal constant
+  // (the settings page used to expose it, and a knob nobody can observe reads as
+  // a fake control). The backend still honours the key for old configs.
   // section payloads (settings.get replies, cached per section)
   Json settings_values = Json::object();   // key -> {value, source}
   bool settings_dump_loaded = false;
@@ -556,8 +649,13 @@ struct AppState {
   // ---- settings / MCP 与外部工具 ----
   struct McpRow {
     std::string name;
-    std::string dir;
+    std::string dir;          // 旧的"目录导入"来源（kind=dir）
     std::string description;  // 卡片上的简介
+    // A real MCP server definition (kind=server): what to run / where to connect.
+    std::string kind;         // "server" | "dir"
+    std::string server_command;
+    std::string server_url;
+    std::vector<std::string> server_args;
     bool enabled = true;
   };
   std::vector<McpRow> mcp_tools;
@@ -594,9 +692,36 @@ struct AppState {
   std::string server_password_draft;
 
   // ---- overlays ----
+  // One overlay serves two different questions, and they must not be confused:
+  //   ask_id == 0  -> a PERMISSION prompt ("allow this tool?"), answered with
+  //                   session.approve(yes/no).
+  //   ask_id  > 0  -> an ASK question (options + optional custom input),
+  //                   answered with tool.askAnswer(selection).
   bool ask_modal = false;
-  std::string ask_text;
-  int ask_id = 0;           // ask tool id (0 = permission prompt, not ask tool)
+  std::string ask_text;                 // the question / the prompt line
+  int ask_id = 0;                       // ask tool id (0 = permission prompt)
+  // One ASK prompt can contain several questions (the model asks 2-3 things at
+  // once). They are answered in order with a "1/3" counter, and the composer
+  // area shows them instead of the input box - a floating dialog covered the
+  // thing being discussed and its options read as plain text.
+  struct AskItem {
+    int ask_id = 0;
+    std::string question;
+    std::vector<std::string> options;
+    int recommended = 0;
+    bool allow_custom = true;
+    std::string custom_draft;
+    std::string answer;   // empty = not answered yet
+  };
+  std::vector<AskItem> asks;
+  int ask_index = 0;                    // which question is showing (1/x in the UI)
+  std::vector<std::string> ask_options; // legacy single-question view
+  int ask_recommended = 0;
+  bool ask_allow_custom = true;
+  std::string ask_custom_draft;         // legacy single-question view
+  // Auto-continue round counter for the active session (0 = not in an auto round).
+  // Drives the "auto round" divider in the transcript and the purple dot.
+  int auto_round = 0;
   // Generic confirm modal. Deleting a session is destructive, so it must not
   // fire straight from a click; `kind` says what to do on OK.
   std::string confirm_kind;   // "session" | "rollback" | "forget" | ""
@@ -614,12 +739,21 @@ struct AppState {
   std::string ctx_id;         // turnId / tab id / session id
   std::string ctx_label;      // what the menu header shows
   bool plan_open = false;
-  std::vector<std::string> plan_steps;
+  // The plan is model-authored state with a STATUS per step, mirroring the
+  // backend's plan tree ({title,status,note?}). A flat vector<string> could not
+  // show progress, and progress is the whole point of the panel - it is also
+  // what the loop reads to decide whether auto mode continues.
+  struct PlanStep {
+    std::string title;
+    std::string status = "pending";  // pending|running|done|skipped|blocked
+    std::string note;
+  };
+  std::vector<PlanStep> plan_steps;
+  std::string plan_goal;
   // Inline plan editing: -1 = no step being edited. The plan is user-editable,
   // not just model output, so the panel needs an edit path.
   int plan_editing = -1;
   std::string plan_edit_text;
-  std::string plan_new_text;
   std::string plan_review_text;
   std::string toast;
   int64_t toast_deadline_ms = 0;  // pump() clears the toast after this
@@ -649,6 +783,7 @@ struct SessionView {
   int hist_scroll = -1;  // chat scroll offset (see AppState::hist_scroll)
   bool hist_follow = true;  // pinned to the end (see AppState::hist_follow)
   std::string session_input;
+  std::string edit_turn_id;  // see AppState::edit_turn_id
   std::vector<std::string> attachments;
   // 空 = 还没选模型。凭空给一个 gpt-4o-mini 会让人以为它已经配好且能用，而
   // 实际供应商可能一个模型都没连；按钮显示"选择模型"，或在设置里配了会话
@@ -659,11 +794,18 @@ struct SessionView {
   // composer shows an empty model box and the send button is disabled.
   bool model_available = true;
   std::vector<std::string> available_model_ids;
+  // See AppState: levels configured for the current model, and its provider label.
+  std::vector<std::string> model_thinking_levels;
+  std::string model_thinking_default;
+  std::string model_provider_label;
   std::string model_check_sid;
   std::string permission = "permissive";
   int perm_index = 1;
   bool auto_mode = true;
   bool suspended = false;
+  // See AppState: a pending suspend/resume request, and whether a turn is running.
+  bool suspend_pending = false;
+  bool turn_running = false;
   bool interrupted = false;
   // Why the loop stopped (provider error / HTTP status). Shown in the interrupt
   // bar: "interrupted" without a reason reads like a UI bug.
@@ -673,6 +815,13 @@ struct SessionView {
   std::string schedule_text;
   std::string enter_send = "enter";
   int context_pct = -1;
+  int64_t context_tokens = -1;
+  int64_t context_window = 0;
+  int cache_hit_pct = -1;
+  int64_t session_cache_tokens = 0;
+  bool cache_reported = false;
+  std::string session_cost_kind = "unknown";
+  int64_t usage_calls = 0;
   // 思考档位（会话级）：空 = 用模型默认。可选值来自当前模型自己的档位表
   // （粗匹配 + 用户在模型设置里的覆盖），不是全局固定枚举。
   std::string thinking;
@@ -680,6 +829,10 @@ struct SessionView {
   int64_t session_tokens_in = -1;
   int64_t session_tokens_out = 0;
   bool session_usage_loaded = false;
+  int64_t turn_cost_micros = -1;
+  int64_t turn_in = -1;
+  int64_t turn_out = -1;
+  std::string turn_cost_kind;
 
   std::vector<SideTab> side_tabs;
   std::string active_side = "usage";
@@ -694,7 +847,15 @@ struct SessionView {
   std::vector<AppState::CallRow> session_calls;
 
   bool skill_menu_open = false;
+  bool thinking_menu_open = false;
   std::vector<AppState::CommandRow> command_menu;
+  // Mirrors AppState's inline completion (see there).
+  AppState::CompleteKind complete_kind = AppState::CompleteKind::kNone;
+  std::string complete_query;
+  int complete_index = 0;
+  std::string complete_dir;
+  std::string complete_prefix;
+  std::vector<std::pair<std::string, bool> > complete_items;
 
   std::vector<AppState::WorkflowDefRow> workflow_defs;
   bool workflow_defs_loaded = false;
@@ -727,12 +888,14 @@ struct SessionView {
   std::vector<AppState::SubagentRow> subagents;
 
   bool plan_open = false;
-  std::vector<std::string> plan_steps;
+  // Same shape as AppState::plan_steps (see the note there): status is what the
+  // panel displays and what the loop reads.
+  std::vector<AppState::PlanStep> plan_steps;
+  std::string plan_goal;
   // Inline plan editing: -1 = no step being edited. The plan is user-editable,
   // not just model output, so the panel needs an edit path.
   int plan_editing = -1;
   std::string plan_edit_text;
-  std::string plan_new_text;
   std::string plan_review_text;
 };
 
@@ -775,11 +938,17 @@ class UiApp {
   void load_usage();
   // Load per-session usage for the side panel (context level, cost, tokens).
   void load_session_usage(const std::string& sid);
+  // Pull the in-flight turn from the backend and append it as a streaming
+  // message. The disk transcript only has finished turns, so without this a
+  // reopened tab showed nothing while an answer was still being written.
+  void attach_live_turn(const std::string& sid);
   // Load provider list + detected shells into settings.
   void load_providers();
   void load_shells();
   // Load subagents for a session.
   void load_subagents(const std::string& sid);
+  // Send the typed guidance to one subagent (the sidebar's steer box).
+  void send_subagent_steer(size_t index);
   // Workflows: definitions (what can be started) and runs (what is happening).
   void load_workflows(const std::string& sid);
   // Load a file panel's directory (the panel keeps its own path/entries).
@@ -787,6 +956,20 @@ class UiApp {
                   const std::string& rel);
   // Read one file for a preview panel.
   void preview_file(const std::string& tab_id, const std::string& rel);
+  // Open (or focus) a subagent's transcript in the SIDEBAR (a "subagent" panel).
+  void open_subagent_tab(const std::string& subagent_id, const std::string& title);
+  // Load one subagent's full record into its tab (transcript included).
+  void load_subagent_detail(const std::string& subagent_id);
+
+  // ---- composer inline completion ("/" commands, "/" and "./" paths) ----
+  // Recompute the hint from the CURRENT input text (called on every edit).
+  void update_complete_from_input(const std::string& text);
+  // Insert the highlighted candidate (Tab / click / Enter).
+  void accept_complete();
+  // Rows the menu currently shows (commands, or path candidates).
+  int complete_row_count() const;
+  // The floating menu above the textarea.
+  VNodePtr build_complete_menu();
   // ---- git panel ----
   // Refresh status for one git panel (branch / ahead-behind / changed files).
   void load_git(const std::string& tab_id);
@@ -845,6 +1028,11 @@ class UiApp {
 
   // actions (public: also callable from tests and future menu bindings)
   void toast(const std::string& text);
+  // The core of a send once the text is decided: optimistic echo, then
+  // session.send. Split out because 编辑并重发 has to trim the old turn FIRST and
+  // only then send, so its callback needs to run exactly this.
+  void dispatch_message(const std::string& sid, const std::string& text,
+                        const std::string& shown, const Json& attachments);
   void send_message();
   void open_new_session();
   // native folder dialog -> register as project (opened project list refresh)
@@ -954,6 +1142,13 @@ class UiApp {
   void toggle_mcp(const std::string& name, bool enabled);
   // ---- settings / Skill actions ----
   void add_skill();
+  // Skill directories (SKILL.md / <name>.md), separate from MCP server config.
+  void detect_skills();
+  // Does `key` ("Ctrl+W") match the binding configured for `action`? Reads the
+  // Settings > 快捷键 value, falling back to `def`. The shortcut table's values
+  // were never consulted before, which made the whole page decorative.
+  bool shortcut_matches(const std::string& key, const std::string& action,
+                        const std::string& def);
   // ---- settings / 环境（CLI 工具探测）----
   void detect_cli_tools();
   // 选文件并把结果写进某个设置键（驱动路径 / CLI 工具路径）
@@ -972,6 +1167,15 @@ class UiApp {
   // test hook: the current VNode tree. Keys are framework-level identities and
   // deliberately do not reach the DOM, so list-keying can only be asserted here.
   const VNodePtr& tree_for_test() const { return tree_; }
+  // test hook: rebuild one stored turn exactly as the loader does.
+  comp::ChatMsg turn_to_message_for_test(const Json& t, int64_t abs_index) {
+    return turn_to_message(t, abs_index);
+  }
+  // test hook: what the composer's input handler does on every edit.
+  void on_input_for_test(const std::string& text) {
+    st_.session_input = text;
+    update_complete_from_input(text);
+  }
   // diagnostics
   int event_count() const { return event_count_; }
   int render_count() const { return render_count_; }
@@ -998,6 +1202,20 @@ class UiApp {
   // Stream text arrived since the last paint, and when that paint happened. See
   // pump(): deltas are coalesced instead of rendering once per token.
   bool stream_dirty_ = false;
+  // A programmatic scroll restore is in flight. The scroll handler must not write
+  // the reported offset back while this is set: a restore against a container that
+  // is still short gets clamped, and saving that clamped value is what made a
+  // return visit land at the top of the transcript.
+  bool restoring_scroll_ = false;
+  // A restore is owed to the next render: the remembered offset, and whether the
+  // view was pinned to the end. Applied right after the patch, before paint.
+  bool pending_scroll_apply_ = false;
+  int pending_scroll_target_ = -1;
+  bool pending_scroll_follow_ = false;
+  // A subagent's live preview changed. Painted from pump(), never per delta:
+  // a subagent emits hundreds of deltas per second and repainting each one
+  // froze the app seconds after it started.
+  bool subagent_stream_dirty_ = false;
   int64_t last_stream_paint_ms_ = 0;
   int event_count_ = 0;
   int render_count_ = 0;
@@ -1039,10 +1257,8 @@ class UiApp {
   // on AppState are the live copy of whichever scope is active.
   KeyedStore<SessionView> views_;
   std::string last_session_key_;  // sid whose view the flat fields currently hold
-  // The live context menu's DOM node. Rendering has to bind "click outside
-  // closes it" to THIS node; using a full-screen backdrop would swallow the next
-  // right-click instead of letting it open that target's menu.
-  Node ctx_menu_node_;
+  // (The context menu's node is looked up by key in render(): a cached Node went
+  // stale the moment the menu was rebuilt for another target.)
   // Rendered message nodes, keyed by "msg:<sid>:<index>". A session can hold
   // hundreds of turns; without this every render re-parsed every markdown block
   // and rebuilt every node, and the diff then compared all of them against
@@ -1095,6 +1311,12 @@ class UiApp {
   void switch_tab(const std::string& id, int dir = 0);
   // pull a session's info + its NEWEST page of history into its view
   void load_session(const std::string& sid);
+  // Ask the NEXT render to position the transcript at the remembered offset in
+  // the same frame it patches the content (see the definition for why a deferred
+  // restore is wrong).
+  void request_history_scroll_restore();
+  // Apply a pending restore; called at the end of render(), after the patch.
+  void apply_pending_history_scroll();
   // prepend the previous page of history (called when the user scrolls to the top)
   void load_older_history();
   // keep a pinned view at the end after content was appended (call AFTER render)

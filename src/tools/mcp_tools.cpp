@@ -1,9 +1,42 @@
 // mcp_tools.cpp - McpRegistry + mcp.* 工具
 #include "mcp_tools.hpp"
 
+#include <fstream>
+#include <sstream>
+
 #include <ghc/filesystem.hpp>
 
 namespace fs {
+
+namespace {
+
+std::string read_file_text(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return "";
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+// The server map lives under one of several keys depending on the client:
+// Claude uses `mcpServers`, opencode uses `mcp.servers`, some tools use
+// `servers` at the top level. Pick whichever is present.
+const Json* find_server_map(const Json& root) {
+  if (!root.is_object()) return nullptr;
+  if (root.contains("mcpServers") && root["mcpServers"].is_object()) {
+    return &root["mcpServers"];
+  }
+  if (root.contains("mcp") && root["mcp"].is_object() &&
+      root["mcp"].contains("servers") && root["mcp"]["servers"].is_object()) {
+    return &root["mcp"]["servers"];
+  }
+  if (root.contains("servers") && root["servers"].is_object()) {
+    return &root["servers"];
+  }
+  return nullptr;
+}
+
+}  // namespace
 
 FsResult McpRegistry::import_dir(const std::string& dir) {
   std::error_code ec;
@@ -22,9 +55,46 @@ FsResult McpRegistry::import_dir(const std::string& dir) {
         break;
       }
     }
-    if (!found) entries_.push_back(Entry{name, e.path().string(), true});
+    if (!found) {
+      Entry en;
+      en.name = name;
+      en.dir = e.path().string();
+      en.kind = "dir";
+      entries_.push_back(en);
+    }
   }
   return FsResult::success();
+}
+
+int McpRegistry::import_config_file(const std::string& path) {
+  std::error_code ec;
+  if (!ghc::filesystem::is_regular_file(path, ec)) return 0;
+  std::string text = read_file_text(path);
+  if (text.empty()) return 0;
+  Json root;
+  try {
+    root = Json::parse(text);
+  } catch (...) {
+    return 0;  // not JSON (or a JSONC file we cannot parse): not a server list
+  }
+  const Json* servers = find_server_map(root);
+  if (!servers) return 0;
+  int added = 0;
+  for (auto it = servers->begin(); it != servers->end(); ++it) {
+    if (!it.value().is_object()) continue;
+    std::string name = it.key();
+    if (name.empty()) continue;
+    bool exists = false;
+    for (auto& en : entries_) {
+      if (en.name == name) {
+        exists = true;
+        break;
+      }
+    }
+    upsert_server(name, it.value());
+    if (!exists) ++added;
+  }
+  return added;
 }
 
 void McpRegistry::upsert(const std::string& name, const std::string& dir, bool enabled) {
@@ -32,11 +102,33 @@ void McpRegistry::upsert(const std::string& name, const std::string& dir, bool e
   for (auto& en : entries_) {
     if (en.name == name) {
       en.dir = dir;
+      en.kind = "dir";
       en.enabled = enabled;
       return;
     }
   }
-  entries_.push_back(Entry{name, dir, enabled});
+  Entry en;
+  en.name = name;
+  en.dir = dir;
+  en.kind = "dir";
+  en.enabled = enabled;
+  entries_.push_back(en);
+}
+
+void McpRegistry::upsert_server(const std::string& name, const Json& server) {
+  if (name.empty()) return;
+  for (auto& en : entries_) {
+    if (en.name == name) {
+      en.kind = "server";
+      en.server = server;
+      return;
+    }
+  }
+  Entry en;
+  en.name = name;
+  en.kind = "server";
+  en.server = server;
+  entries_.push_back(en);
 }
 
 bool McpRegistry::enable(const std::string& name) { return set_enabled(name, true); }
@@ -74,6 +166,8 @@ Json McpRegistry::list_json() const {
     Json j = Json::object();
     j["name"] = en.name;
     j["dir"] = en.dir;
+    j["kind"] = en.kind;
+    if (!en.server.empty()) j["server"] = en.server;
     j["enabled"] = en.enabled;
     arr.push_back(j);
   }
@@ -82,14 +176,39 @@ Json McpRegistry::list_json() const {
 
 Json McpRegistry::dump() const { return list_json(); }
 
+// An entry whose `dir` points inside a skills/commands folder is a skill that was
+// imported here by the old "探测" button, not an MCP server.
+bool McpRegistry::is_skill_dir_entry(const Json& entry) {
+  if (!entry.is_object()) return false;
+  std::string kind = jsonutil::get<std::string>(entry, "kind", "");
+  if (kind == "server") return false;
+  std::string dir = jsonutil::get<std::string>(entry, "dir", "");
+  if (dir.empty()) return false;
+  // Normalise backslashes so the match works on Windows paths too.
+  std::string d = dir;
+  for (size_t i = 0; i < d.size(); ++i) {
+    if (d[i] == '\\') d[i] = '/';
+  }
+  static const char* kSkillSegs[] = {"/.claude/skills", "/.claude/commands",
+                                     "/opencode/skills", "/flashsight/skills",
+                                     "/.opencode/skills"};
+  for (const char* seg : kSkillSegs) {
+    if (d.find(seg) != std::string::npos) return true;
+  }
+  return false;
+}
+
 void McpRegistry::load(const Json& arr) {
   if (!arr.is_array()) return;
   entries_.clear();
   for (size_t i = 0; i < arr.size(); ++i) {
     const Json& e = arr[i];
+    if (is_skill_dir_entry(e)) continue;  // belongs to the skill registry
     Entry en;
     en.name = jsonutil::get<std::string>(e, "name", "");
     en.dir = jsonutil::get<std::string>(e, "dir", "");
+    en.kind = jsonutil::get<std::string>(e, "kind", en.dir.empty() ? "server" : "dir");
+    if (e.contains("server") && e["server"].is_object()) en.server = e["server"];
     en.enabled = jsonutil::get<bool>(e, "enabled", true);
     if (!en.name.empty()) entries_.push_back(en);
   }
@@ -109,10 +228,10 @@ std::vector<std::string> McpRegistry::changed_since(const Json& snapshot) const 
 }
 
 void register_mcp_tools(ToolRegistry* registry, McpRegistry* mcp) {
-  // mcp.import
+  // mcp_import
   {
     ToolDef def;
-    def.name = "mcp.import";
+    def.name = "mcp_import";
     def.description = "从外部文件夹导入 MCP/Skill 工具";
     Json params = Json::object();
     params["type"] = "object";
@@ -121,17 +240,17 @@ void register_mcp_tools(ToolRegistry* registry, McpRegistry* mcp) {
     params["properties"] = props;
     params["required"] = Json::array({"path"});
     def.parameters = params;
-    registry->register_tool("mcp.import", def,
+    registry->register_tool("mcp_import", def,
       [mcp](const ToolContext& ctx, const Json& args) -> FsResult {
         (void)ctx;
         if (!mcp) return FsResult::error(ErrCode::kInternal, "mcp registry missing");
         return mcp->import_dir(jsonutil::get<std::string>(args, "path", ""));
       });
   }
-  // mcp.enable / mcp.disable / mcp.list
+  // mcp_enable / mcp_disable / mcp_list
   {
     ToolDef def;
-    def.name = "mcp.enable";
+    def.name = "mcp_enable";
     def.description = "启用 MCP/Skill 工具";
     Json params = Json::object();
     params["type"] = "object";
@@ -140,7 +259,7 @@ void register_mcp_tools(ToolRegistry* registry, McpRegistry* mcp) {
     params["properties"] = props;
     params["required"] = Json::array({"name"});
     def.parameters = params;
-    registry->register_tool("mcp.enable", def,
+    registry->register_tool("mcp_enable", def,
       [mcp](const ToolContext& ctx, const Json& args) -> FsResult {
         (void)ctx;
         if (!mcp) return FsResult::error(ErrCode::kInternal, "mcp registry missing");
@@ -151,7 +270,7 @@ void register_mcp_tools(ToolRegistry* registry, McpRegistry* mcp) {
   }
   {
     ToolDef def;
-    def.name = "mcp.disable";
+    def.name = "mcp_disable";
     def.description = "禁用 MCP/Skill 工具";
     Json params = Json::object();
     params["type"] = "object";
@@ -160,7 +279,7 @@ void register_mcp_tools(ToolRegistry* registry, McpRegistry* mcp) {
     params["properties"] = props;
     params["required"] = Json::array({"name"});
     def.parameters = params;
-    registry->register_tool("mcp.disable", def,
+    registry->register_tool("mcp_disable", def,
       [mcp](const ToolContext& ctx, const Json& args) -> FsResult {
         (void)ctx;
         if (!mcp) return FsResult::error(ErrCode::kInternal, "mcp registry missing");
@@ -171,12 +290,12 @@ void register_mcp_tools(ToolRegistry* registry, McpRegistry* mcp) {
   }
   {
     ToolDef def;
-    def.name = "mcp.list";
+    def.name = "mcp_list";
     def.description = "列出 MCP/Skill 工具";
     Json params = Json::object();
     params["type"] = "object";
     def.parameters = params;
-    registry->register_tool("mcp.list", def,
+    registry->register_tool("mcp_list", def,
       [mcp](const ToolContext& ctx, const Json& args) -> FsResult {
         (void)ctx;
         (void)args;

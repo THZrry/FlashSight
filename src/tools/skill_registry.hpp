@@ -71,7 +71,7 @@ class SkillRegistry {
   std::vector<Skill> skills_;
 };
 
-// 注册 skill 工具（tool.skill.load / tool.skill.list）
+// 注册 skill 工具（load_skill / list_skills）
 void register_skill_tools(ToolRegistry* registry, SkillRegistry* skills);
 
 }  // namespace fs

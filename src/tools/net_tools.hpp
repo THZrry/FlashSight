@@ -1,4 +1,4 @@
-// net_tools.hpp - network.fetch/search（回调式；search 先接可配 HTTP API）
+// net_tools.hpp - fetch_url/search（回调式；search 先接可配 HTTP API）
 #pragma once
 
 #include <string>

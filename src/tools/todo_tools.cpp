@@ -25,20 +25,20 @@ Json base_params() {
 }  // namespace
 
 void register_todo_tools(ToolRegistry* registry) {
-  // todo.add
+  // todo_add
   {
     ToolDef def;
-    def.name = "todo.add";
+    def.name = "todo_add";
     def.description =
         "新增进程任务. Add a task to the current process list. "
-        "列出本轮任务，完成一项用 todo.check 打勾.";
+        "列出本轮任务，完成一项用 todo_check 打勾.";
     Json params = base_params();
     Json props = Json::object();
     props["task"] = Json{{"type", "string"}, {"description", "任务描述"}};
     params["properties"] = props;
     params["required"] = Json::array({"task"});
     def.parameters = params;
-    registry->register_tool("todo.add", def,
+    registry->register_tool("todo_add", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         Json a = args;
         a["op"] = "add";
@@ -46,25 +46,25 @@ void register_todo_tools(ToolRegistry* registry) {
       });
   }
 
-  // todo.list
+  // todo_list
   {
     ToolDef def;
-    def.name = "todo.list";
+    def.name = "todo_list";
     def.description =
         "查看进程任务列表. List the current process tasks (with done flags).";
     Json params = base_params();
     params["properties"] = Json::object();
     def.parameters = params;
-    registry->register_tool("todo.list", def,
+    registry->register_tool("todo_list", def,
       [](const ToolContext& ctx, const Json&) -> FsResult {
         return forward(ctx, Json{{"op", "list"}});
       });
   }
 
-  // todo.check / todo.uncheck
+  // todo_check / todo.uncheck
   {
     ToolDef def;
-    def.name = "todo.check";
+    def.name = "todo_check";
     def.description =
         "勾选/取消勾选进程任务. Mark a process task done (done=true) or not (done=false).";
     Json params = base_params();
@@ -74,7 +74,7 @@ void register_todo_tools(ToolRegistry* registry) {
     params["properties"] = props;
     params["required"] = Json::array({"id"});
     def.parameters = params;
-    registry->register_tool("todo.check", def,
+    registry->register_tool("todo_check", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         Json a = args;
         a["op"] = "check";
@@ -82,15 +82,15 @@ void register_todo_tools(ToolRegistry* registry) {
       });
   }
 
-  // todo.clear
+  // todo_clear
   {
     ToolDef def;
-    def.name = "todo.clear";
+    def.name = "todo_clear";
     def.description = "清空进程任务. Clear the current process task list.";
     Json params = base_params();
     params["properties"] = Json::object();
     def.parameters = params;
-    registry->register_tool("todo.clear", def,
+    registry->register_tool("todo_clear", def,
       [](const ToolContext& ctx, const Json&) -> FsResult {
         return forward(ctx, Json{{"op", "clear"}});
       });

@@ -113,11 +113,17 @@ SettingValue SettingsStore::get(const std::string& key) const {
   else if (key == kKeyComputerScreenshot) sv.value = true;
   else if (key == kKeyUsageRetainDays) sv.value = 90;
   else if (key == kKeyHistoryRecentTurns) sv.value = 20;
-  else if (key == kKeyHistoryTokenBudget) sv.value = 8000;
+  else if (key == kKeyHistoryTokenBudget) sv.value = 32000;
+  else if (key == kKeyHistoryCompressAtPct) sv.value = 80;
+  else if (key == kKeyHistoryKeepTurns) sv.value = 8;
   else if (key == kKeyOverfitEnabled) sv.value = false;
   else if (key == kKeySubagentMaxParallel) sv.value = 4;
   else if (key == kKeySubagentMaxDepth) sv.value = 3;
   else if (key == kKeyThinkingLang) sv.value = "auto";
+  else if (key == kKeySearchProvider) sv.value = "";
+  else if (key == kKeySearchEndpoint) sv.value = "";
+  else if (key == kKeySearchApiKey) sv.value = "";
+  else if (key == kKeySearchMaxResults) sv.value = 5;
   else if (key == kKeyLspServers) sv.value = nlohmann::json::object();
   else sv.value = nlohmann::json();
   return sv;

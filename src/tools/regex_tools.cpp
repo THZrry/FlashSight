@@ -1,4 +1,4 @@
-// regex_tools.cpp - file.regex 工具（addon2.md：regex 通配替换）
+// regex_tools.cpp - file_regex 工具（addon2.md：regex 通配替换）
 // 正则引擎移植自 QuickJS（WhaleJS src/libregexp.c），MIT 许可，Fabrice Bellard。
 // 三个宿主回调（libregexp.c 在非 TEST 编译下需外部提供）在此实现。
 #include "regex_tools.hpp"
@@ -215,9 +215,9 @@ FsResult regex_file(const ghc::filesystem::path& p, const std::string& pattern,
 }  // namespace
 
 void register_regex_tools(ToolRegistry* registry) {
-  // file.regex：单/多文件 regex 通配替换（JS 风格；替换前留 before/after 可回滚）
+  // file_regex：单/多文件 regex 通配替换（JS 风格；替换前留 before/after 可回滚）
   ToolDef def;
-  def.name = "file.regex";
+  def.name = "file_regex";
   def.description =
       "regex 通配替换. Regex search-and-replace across files (JS syntax). "
       "替换模板用 $&(全匹配)/$1..$9(分组)/$$(字面$). "
@@ -234,7 +234,7 @@ void register_regex_tools(ToolRegistry* registry) {
   params["properties"] = props;
   params["required"] = Json::array({"files", "pattern", "replacement"});
   def.parameters = params;
-  registry->register_tool("file.regex", def,
+  registry->register_tool("file_regex", def,
     [](const ToolContext& ctx, const Json& args) -> FsResult {
       Json files = args.value("files", Json::array());
       if (!files.is_array() || files.empty()) {

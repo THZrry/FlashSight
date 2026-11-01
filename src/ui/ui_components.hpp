@@ -57,7 +57,7 @@ H text_input(const std::string& value, const std::string& placeholder,
              EventFn on_input, EventFn on_enter = nullptr,
              EventFn on_blur = nullptr);
 H textarea(const std::string& value, const std::string& placeholder,
-           EventFn on_input, EventFn on_enter);
+           EventFn on_input, EventFn on_enter, EventFn on_keydown = nullptr);
 H select(const std::vector<std::string>& options, int selected, EventFn on_change);
 H checkbox(const std::string& label, bool checked, EventFn on_change);
 H toggle(bool on, const std::string& label, EventFn on_change);
@@ -113,8 +113,15 @@ struct ToolBlock {
   // when the matching tool.update arrives (a tool that takes seconds otherwise
   // looks like it never started).
   bool running = false;
+  // Stable id used to address the expanded body (scrolling it to the bottom).
+  std::string key;
+  // For a subagent tool call (subagent_spawn / follow_up), the agent it produced.
+  // The row then offers "打开记录": the transcript must stay reachable after the
+  // agent finishes, and the work log is where the user sees the call happened.
+  std::string subagent_id;
 };
-H tool_block(const ToolBlock& b, EventFn on_toggle);
+H tool_block(const ToolBlock& b, EventFn on_toggle,
+             EventFn on_open_subagent = nullptr);
 
 struct ChatMsg {
   std::string role;      // "user" | "assistant" | "system"
@@ -127,6 +134,10 @@ struct ChatMsg {
   std::string thinking;
   bool thinking_open = false;
   std::vector<ToolBlock> tools;  // flow blocks rendered after the text
+  // Between-tools narration of the turn, in order. It is NOT the answer - it is
+  // the model thinking out loud while it works - so it belongs in the work log and
+  // used to be dropped entirely (only the final round's text was kept).
+  std::vector<std::string> interim;
   // 工作过程: reasoning + tool calls folded into ONE group above the answer.
   // A turn with a dozen tool blocks used to be a wall of rows; the answer is
   // what you read, the process is what you open when curious.
@@ -161,9 +172,16 @@ struct ChatMsg {
 // how a message becomes a navigation point ("branch from here").
 // `on_context` receives "<x>\t<y>" on right-click; the shell uses it to open its
 // own context menu (the browser's is suppressed by the DOM adapters).
+// `on_link` receives the href of a clicked markdown link. The anchor has no
+// real href (the engine would navigate the app window away); the shell decides
+// what to do - open the browser, or a project file in the side panel.
 H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
                EventFn on_think_toggle = nullptr, EventFn on_turn_action = nullptr,
-               EventFn on_context = nullptr);
+               EventFn on_context = nullptr, EventFn on_link = nullptr,
+               EventFn on_open_subagent = nullptr,
+               // Offer 编辑并重发 on this message (the caller passes true only for
+               // the newest user turn).
+               bool can_edit = false);
 
 // Stable identity for one rendered message: a keyed VNode is what lets the
 // framework match (and therefore skip) a subtree across renders. `uid` must be
@@ -174,11 +192,15 @@ std::string chat_message_key(const std::string& sid, int64_t uid);
 // Turn summary: NOT folded, no border (per user feedback).
 H turn_summary(const std::string& text);
 
-// Simple markdown-ish article rendering: fenced code, headings, lists,
-// paragraphs, inline `code` / **bold** / *italic*. `on_copy_code` (optional)
-// receives a code block's text when its copy button is pressed.
+// Simple markdown-ish article rendering: fenced code, headings, lists, tables,
+// blockquotes, rules, paragraphs, inline `code` / **bold** / *italic* / links.
+// `on_copy_code` (optional) receives a code block's text when its copy button is
+// pressed. `on_link` (optional) receives a link's TARGET when that anchor is
+// clicked - bound per anchor, so a click anywhere else in the message can never
+// be mistaken for a link.
 std::vector<H> markdown_blocks(const std::string& text,
-                               EventFn on_copy_code = nullptr);
+                               EventFn on_copy_code = nullptr,
+                               EventFn on_link = nullptr);
 
 // ---------- overlays ----------
 H modal(const std::string& title, const std::vector<H>& body,

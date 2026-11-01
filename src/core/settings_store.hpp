@@ -79,7 +79,13 @@ constexpr char kKeyShortcuts[] = "shortcuts";                     // {action: ke
 constexpr char kKeyUsageRetainDays[] = "usage.retainDays";
 // HistoryBuilder 阈值（session-history.md 3；N 与 token 预算进设置）
 constexpr char kKeyHistoryRecentTurns[] = "history.recentTurns";  // 默认 20
-constexpr char kKeyHistoryTokenBudget[] = "history.tokenBudget";  // 默认 8000
+constexpr char kKeyHistoryTokenBudget[] = "history.tokenBudget";  // 默认 32000
+// 压缩阈值：上下文水位（上一次请求的 prompt tokens / 模型窗口）达到该百分比
+// 就压缩。这是**主触发条件**——token 预算是硬上限，水位是"该动手了"的信号。
+// 默认 80：留 20% 给本轮输出与工具结果。
+constexpr char kKeyHistoryCompressAtPct[] = "history.compressAtPct";  // 默认 80
+// 压缩后保留的最近轮数（短视图下限）。压缩不是清空，最近几轮必须全量保留。
+constexpr char kKeyHistoryKeepTurns[] = "history.keepTurns";  // 默认 8
 // 防过拟合开关（agent-loop.md 5；默认关）
 constexpr char kKeyOverfitEnabled[] = "session.overfitEnabled";
 // 子代理上限（agent-loop.md 6；默认并行 4/深度 3）
@@ -97,6 +103,17 @@ constexpr char kKeySkills[] = "skills.entries";
 // 网络代理（httplib 不读系统代理；在此显式设置）
 constexpr char kKeyNetworkProxyHost[] = "permissions.network.proxyHost";
 constexpr char kKeyNetworkProxyPort[] = "permissions.network.proxyPort";
+// Web 搜索后端（search_web 工具）。搜索没有通用协议，各家 API 不同，所以做成
+// "可配置的 HTTP 搜索 API"：
+//   search.provider  "tavily" | "brave" | "searxng" | "custom" | ""（关闭）
+//   search.endpoint  完整 URL（custom 必填；其余留空用预置地址）
+//   search.apiKey    Bearer / X-API-Key（searxng 不需要）
+//   search.maxResults 默认条数
+// 未配置时 search_web 返回明确错误并提示去哪里配置，而不是假装成功。
+constexpr char kKeySearchProvider[] = "search.provider";
+constexpr char kKeySearchEndpoint[] = "search.endpoint";
+constexpr char kKeySearchApiKey[] = "search.apiKey";
+constexpr char kKeySearchMaxResults[] = "search.maxResults";
 
 // 返回时带来源标注
 struct SettingValue {

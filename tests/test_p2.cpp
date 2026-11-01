@@ -84,7 +84,7 @@ FS_TEST(provider_client_openai_chat) {
   HttpResponse ok;
   ok.status = 200;
   ok.body = R"({"choices":[{"message":{"role":"assistant","content":"hello world","tool_calls":[
-    {"id":"call_1","type":"function","function":{"name":"file.read","arguments":"{\"path\":\"a.txt\"}"}}
+    {"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}
   ]}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_cached":3}})";
   net.responses.push_back(ok);
   ProviderConn conn = make_conn("p1", ApiKind::kOpenAIChat, "https://api.test/v1");
@@ -157,6 +157,89 @@ FS_TEST(provider_client_anthropic) {
   EXPECT_EQ((int)out.cache_tokens, 4);
   EXPECT_EQ(net.requests[0].url, std::string("https://api.anthropic.com/v1/messages"));
   EXPECT_NE(net.requests[0].headers.count("x-api-key"), 0ul);
+}
+
+FS_TEST(provider_thinking_effort_normalised) {
+  // The composer's fallback ladder for a model with no configured levels is
+  // disable/enable, but no endpoint accepts those words. wire_thinking() must
+  // translate them at the boundary: disable/off -> omit, enable -> medium.
+  FakeNet net;
+  HttpResponse ok;
+  ok.status = 200;
+  ok.body = R"({"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}})";
+  net.responses.push_back(ok);
+  net.responses.push_back(ok);
+  net.responses.push_back(ok);
+  ProviderConn conn = make_conn("p1", ApiKind::kOpenAIChat, "https://api.test/v1");
+  ProviderClient client(conn, &net);
+  Json m = Json::object();
+  m["role"] = "user";
+  m["content"] = "hi";
+  Json msgs = Json::array({m});
+  ChatResponse out;
+  // enable -> medium on an OpenAI chat endpoint
+  {
+    ChatRequest req;
+    req.model = "gpt-4o-mini";
+    req.messages = msgs;
+    req.thinking = "enable";
+    client.chat(req, &out, nullptr);
+    Json b = Json::parse(net.requests.back().body);
+    EXPECT_EQ(b["reasoning_effort"], std::string("medium"));
+  }
+  // disable -> the field is omitted entirely
+  {
+    ChatRequest req;
+    req.model = "gpt-4o-mini";
+    req.messages = msgs;
+    req.thinking = "disable";
+    client.chat(req, &out, nullptr);
+    Json b = Json::parse(net.requests.back().body);
+    EXPECT_FALSE(b.contains("reasoning_effort"));
+  }
+  // a real named level passes through untouched
+  {
+    ChatRequest req;
+    req.model = "gpt-4o-mini";
+    req.messages = msgs;
+    req.thinking = "high";
+    client.chat(req, &out, nullptr);
+    Json b = Json::parse(net.requests.back().body);
+    EXPECT_EQ(b["reasoning_effort"], std::string("high"));
+  }
+}
+
+FS_TEST(provider_thinking_anthropic_budget) {
+  // Anthropic has no named levels: enable maps to a middling budget, disable
+  // to no thinking block at all.
+  FakeNet net;
+  HttpResponse ok;
+  ok.status = 200;
+  ok.body = R"({"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}})";
+  net.responses.push_back(ok);
+  net.responses.push_back(ok);
+  ProviderConn conn = make_conn("p3", ApiKind::kAnthropic, "https://api.anthropic.com/v1");
+  ProviderClient client(conn, &net);
+  Json m = Json::object();
+  m["role"] = "user";
+  m["content"] = "hi";
+  Json msgs = Json::array({m});
+  ChatResponse out;
+  ChatRequest req;
+  req.model = "claude-3-5-sonnet-20241022";
+  req.messages = msgs;
+  req.max_tokens = 100000;
+  req.thinking = "enable";
+  client.chat(req, &out, nullptr);
+  Json b = Json::parse(net.requests.back().body);
+  ASSERT_TRUE(b.contains("thinking"));
+  EXPECT_EQ(b["thinking"]["type"], std::string("enabled"));
+  EXPECT_EQ((int)b["thinking"]["budget_tokens"], 4096);
+  // disable -> no thinking block
+  req.thinking = "disable";
+  client.chat(req, &out, nullptr);
+  Json b2 = Json::parse(net.requests.back().body);
+  EXPECT_FALSE(b2.contains("thinking"));
 }
 
 FS_TEST(provider_client_remote_error_passthrough) {

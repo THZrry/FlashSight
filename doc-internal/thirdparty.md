@@ -7,12 +7,13 @@
 |---|---|---|---|---|
 | `filesystem-1.5.14/` | gulrak/filesystem (ghc) | v1.5.14 | MIT | C++14 的 std::filesystem 兼容层 |
 | `json/` | nlohmann/json | v3.11.3 | MIT | JSON 读写（`Json` 类型） |
-| `dtl-1.20/` | cubicdaiya/dtl | v1.20 | BSD-2 | diff（diffWrite 上下文匹配、diff 展示） |
+| `dtl-1.20/` | cubicdaiya/dtl | v1.20 | BSD-2 | diff（diff 展示；文件编辑走 edit_file 的行号替换） |
 | `md4c-master/` | mity/md4c | master | MIT | Markdown 解析（UI 高亮/渲染） |
 | `httplib/` | yhirose/cpp-httplib | master | MIT | HTTP(S) 客户端（NetClient） |
 | `mbedtls-3.6.4/` | Mbed-TLS/mbedtls | v3.6.4 LTS | Apache-2.0 | TLS（httplib 的 mbedTLS 后端） |
-| `qjs-regex/` | QuickJS regex engine | 2026-06-04 | MIT | `file.regex` 工具的正则引擎 |
-| `reproc/` | DaanDeMeyer/reproc | v14.2.5 | MIT | 子进程管理（terminal.spawn/exec，rules/user.md） |
+| `qjs-regex/` | QuickJS regex engine | 2026-06-04 | MIT | `file_regex` 工具的正则引擎 |
+| `stb/` | nothings/stb | master（三个单头） | MIT / 公有领域 | 图片解码 `stb_image`、高质量缩放 `stb_image_resize2`、PNG 编码 `stb_image_write`（vision 工具） |
+| `reproc/` | DaanDeMeyer/reproc | v14.2.5 | MIT | 子进程管理（terminal_spawn/exec，rules/user.md） |
 | `webview/` | webview/webview | 0.12.0（stable tag） | MIT | 备用 UI 宿主：原生窗口 + 系统 web 引擎（Windows = WebView2） |
 | `mswebview2/` | Microsoft.Web.WebView2 SDK | latest nuget | Microsoft（随 SDK 分发） | webview 的 Windows 后端头文件（`WebView2.h`） |
 | `whaleui/` | THZrry/WhaleUI | include/ 副本 | 见上游 | 主 UI 后端（`--whaleui=y`） |

@@ -1,4 +1,4 @@
-// term_tools.hpp - terminal.exec/spawn/kill/poll（回调式，reproc 在宿主层）
+// term_tools.hpp - terminal_exec/spawn/kill/poll（回调式，reproc 在宿主层）
 #pragma once
 
 #include <string>

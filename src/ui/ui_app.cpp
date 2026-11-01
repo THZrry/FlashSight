@@ -37,8 +37,21 @@ using comp::TabSpec;
 
 namespace {
 
-// i18n: 源码写中文，tr() 按当前语言查表（中文时原样返回）
+// i18n: 源码写中文，) 按当前语言查表（中文时原样返回）
 std::string tr(const std::string& zh) { return i18n::tr(zh); }
+
+// Normalise a shortcut string for comparison: trim, drop spaces around "+",
+// lowercase the key name. "Ctrl+W", "ctrl+w" and "Ctrl + W" are the same binding.
+std::string normalize_shortcut(const std::string& s) {
+  std::string out;
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i];
+    if (c == ' ') continue;
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    out += c;
+  }
+  return out;
+}
 
 std::string itos(int v) {
   char buf[32];
@@ -140,6 +153,10 @@ struct SideKind {
 const SideKind kSideKinds[] = {
     {"usage", "用量", "上下文水位与本会话成本", false},
     {"subagents", "子代理", "子代理运行状态与引导", false},
+    // One subagent's full transcript. A `multi` kind: you may want several open
+    // (two running agents side by side). Not listed in the "+" picker (it needs
+    // an agent id) - it is opened from a card or a tool row.
+    {"subagent", "子代理记录", "单个子代理的完整记录", true},
     {"files", "文件", "项目文件树（可多开）", true},
     // A preview is its OWN tab, not an inline block under the tree: reading a
     // file and browsing the tree are two things you want to see at once, and an
@@ -161,7 +178,10 @@ const SideKind* side_kind(const std::string& kind) {
 
 std::string side_title(const std::string& kind) {
   const SideKind* k = side_kind(kind);
-  return k ? k->title : kind;
+  // ) the label: the panel TITLE (top of the side tab) is user-visible text
+  // exactly like the picker card's label, and it used to stay Chinese in the
+  // English UI while the card it was opened from was translated.
+  return k ? std::string(tr(k->title)) : kind;
 }
 
 // Template id -> Lobe Icons brand key. The backend's template ids are endpoint
@@ -340,18 +360,43 @@ Json split_lines(const std::string& text) {
 }
 
 // 思考档位标签：协议值 → 界面中文。这些是**预置翻译**，未知档位原样显示，
-// 所以模型可以有自己的档位名而不被这里限制住。
+// 所以模型可以有自己的档位名而不被这里限制住。已知档位走 tr()：中文是键，
+// 英文界面靠 kEnTable 查表，否则英文 UI 里这里会一直蹦中文。
 std::string thinking_label(const std::string& v) {
-  if (v == "off" || v == "disable" || v == "disabled") return "关";
-  if (v == "on" || v == "enable" || v == "enabled") return "开";
-  if (v == "minimal") return "最低";
-  if (v == "low") return "低";
-  if (v == "medium") return "中";
-  if (v == "high") return "高";
-  if (v == "xhigh" || v == "extra-high" || v == "extra_high") return "超高";
-  if (v == "max") return "最大";
-  if (v == "auto") return "自动";
+  if (v == "off" || v == "disable" || v == "disabled") return tr("关");
+  if (v == "on" || v == "enable" || v == "enabled") return tr("开");
+  if (v == "minimal") return tr("最低");
+  if (v == "low") return tr("低");
+  if (v == "medium") return tr("中");
+  if (v == "high") return tr("高");
+  if (v == "xhigh" || v == "extra-high" || v == "extra_high") return tr("超高");
+  if (v == "max") return tr("最大");
+  if (v == "auto") return tr("自动");
   return v;
+}
+
+// FontAwesome icon for a thinking level: ONE distinct glyph per level.
+//
+// Every name must exist in the subset (web/icons/fa-subset.css). The first
+// version returned `brain` for every level except "off", so 低/中/高 all looked
+// identical - "图标也只有关闭和其他". Each level now gets its own image, and an
+// unknown level name gets a generic bulb: we know it IS a level, just not one we
+// have a picture for ("未知的选项就用个通用的灯泡或大脑吧").
+const char* thinking_icon(const std::string& v) {
+  if (v == "off" || v == "disable" || v == "disabled" || v == "none") {
+    return "power-off";
+  }
+  if (v == "minimal") return "feather";
+  if (v == "low") return "gauge";
+  if (v == "medium") return "brain";
+  if (v == "high") return "fire";
+  if (v == "xhigh" || v == "extra-high" || v == "extra_high") {
+    return "gauge-high";
+  }
+  if (v == "max") return "infinity";
+  if (v == "auto") return "wand-magic-sparkles";
+  if (v == "on" || v == "enable" || v == "enabled") return "brain";
+  return "lightbulb";  // unknown level: generic, never blank
 }
 
 // 相对时间（"3 分钟前"）。列表里给一个大致时间就够了，绝对时间戳反而要花力气
@@ -489,6 +534,13 @@ void UiApp::pump() {
     stream_dirty_ = false;
     render();
     follow_history_if_pinned();
+  }
+  // A subagent's live preview is painted here, not per delta (see
+  // apply_session_event): hundreds of deltas per second would each trigger a
+  // full re-render and freeze the app.
+  if (subagent_stream_dirty_) {
+    subagent_stream_dirty_ = false;
+    render();
   }
   // Drive the backend's non-blocking terminal poller. On desktop FsApi runs it
   // on a thread already, so only the browser needs this tick; any output still
@@ -678,15 +730,20 @@ void UiApp::save_session_view(const std::string& sid) {
   v.history_has_more = st_.history_has_more;
   v.history_loading_older = false;  // an in-flight page belongs to the old view
   v.session_input = st_.session_input;
+  v.edit_turn_id = st_.edit_turn_id;
   v.model = st_.model;
   v.model_index = st_.model_index;
   v.model_available = st_.model_available;
+  v.model_thinking_levels = st_.model_thinking_levels;
+  v.model_thinking_default = st_.model_thinking_default;
+  v.model_provider_label = st_.model_provider_label;
   v.permission = st_.permission;
   v.perm_index = st_.perm_index;
   v.auto_mode = st_.auto_mode;
   v.thinking = st_.thinking;
   v.attachments = st_.attachments;
   v.suspended = st_.suspended;
+  v.turn_running = st_.turn_running;
   v.interrupted = st_.interrupted;
   v.interrupt_reason = st_.interrupt_reason;
   v.pending_wakes = st_.pending_wakes;
@@ -694,10 +751,21 @@ void UiApp::save_session_view(const std::string& sid) {
   v.schedule_text = st_.schedule_text;
   v.enter_send = st_.enter_send;
   v.context_pct = st_.context_pct;
+  v.context_tokens = st_.context_tokens;
+  v.context_window = st_.context_window;
+  v.cache_hit_pct = st_.cache_hit_pct;
+  v.session_cache_tokens = st_.session_cache_tokens;
+  v.cache_reported = st_.cache_reported;
+  v.session_cost_kind = st_.session_cost_kind;
+  v.usage_calls = st_.usage_calls;
   v.session_cost = st_.session_cost;
   v.session_tokens_in = st_.session_tokens_in;
   v.session_tokens_out = st_.session_tokens_out;
   v.session_usage_loaded = st_.session_usage_loaded;
+  v.turn_cost_micros = st_.turn_cost_micros;
+  v.turn_in = st_.turn_in;
+  v.turn_out = st_.turn_out;
+  v.turn_cost_kind = st_.turn_cost_kind;
   v.side_tabs = st_.side_tabs;
   v.active_side = st_.active_side;
   v.side_seq = st_.side_seq;
@@ -725,6 +793,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.subagents = st_.subagents;
   v.plan_open = st_.plan_open;
   v.plan_steps = st_.plan_steps;
+  v.plan_goal = st_.plan_goal;
   v.plan_editing = -1;  // a transient edit does not survive a tab switch
 }
 
@@ -740,6 +809,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.history_has_more = v.history_has_more;
   st_.history_loading_older = false;
   st_.session_input = v.session_input;
+  st_.edit_turn_id = v.edit_turn_id;
   st_.model = v.model;
   // 会话自己还没选过模型时，用设置里的会话默认模型（如果配了）。仍然为空就
   // 保持为空，按钮显示"选择模型"——不再凭空塞一个 gpt-4o-mini。
@@ -753,12 +823,17 @@ void UiApp::load_session_view(const std::string& sid) {
   }
   st_.model_index = v.model_index;
   st_.model_available = v.model_available;
+  st_.model_thinking_levels = v.model_thinking_levels;
+  st_.model_thinking_default = v.model_thinking_default;
+  st_.model_provider_label = v.model_provider_label;
   st_.permission = v.permission;
   st_.perm_index = v.perm_index;
   st_.auto_mode = v.auto_mode;
   st_.thinking = v.thinking;
   st_.attachments = v.attachments;
   st_.suspended = v.suspended;
+  st_.turn_running = v.turn_running;
+  st_.suspend_pending = false;  // a request in flight does not survive a switch
   st_.interrupted = v.interrupted;
   st_.interrupt_reason = v.interrupt_reason;
   st_.pending_wakes = v.pending_wakes;
@@ -766,10 +841,21 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.schedule_text = v.schedule_text;
   st_.enter_send = v.enter_send;
   st_.context_pct = v.context_pct;
+  st_.context_tokens = v.context_tokens;
+  st_.context_window = v.context_window;
+  st_.cache_hit_pct = v.cache_hit_pct;
+  st_.session_cache_tokens = v.session_cache_tokens;
+  st_.cache_reported = v.cache_reported;
+  st_.session_cost_kind = v.session_cost_kind;
+  st_.usage_calls = v.usage_calls;
   st_.session_cost = v.session_cost;
   st_.session_tokens_in = v.session_tokens_in;
   st_.session_tokens_out = v.session_tokens_out;
   st_.session_usage_loaded = v.session_usage_loaded;
+  st_.turn_cost_micros = v.turn_cost_micros;
+  st_.turn_in = v.turn_in;
+  st_.turn_out = v.turn_out;
+  st_.turn_cost_kind = v.turn_cost_kind;
   st_.side_tabs = v.side_tabs;
   st_.active_side = v.active_side;
   st_.side_seq = v.side_seq;
@@ -779,6 +865,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.session_ops = v.session_ops;
   st_.session_calls = v.session_calls;
   st_.skill_menu_open = false;
+  st_.thinking_menu_open = false;
   st_.command_menu = v.command_menu;
   st_.terminals = v.terminals;
   st_.active_term = v.active_term;
@@ -797,6 +884,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.subagents = v.subagents;
   st_.plan_open = v.plan_open;
   st_.plan_steps = v.plan_steps;
+  st_.plan_goal = v.plan_goal;
   st_.plan_editing = -1;
 }
 
@@ -812,6 +900,11 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   if (id == st_.active_tab && last_session_key_ == leaving && leaving == id) return;
   // Save the chat scroll offset BEFORE stashing the view: the payload is what
   // restore() puts back, so reading it later would store the default.
+  //
+  // This is a DELIBERATE read, at a moment the user chose to leave the tab, so it
+  // is not guarded by restoring_scroll_: that guard exists for the scroll EDGE
+  // handler, whose events also fire while a restore is driving the DOM. Guarding
+  // here would instead drop the position the user actually scrolled to.
   {
     VNodePtr h = find_by_key(tree_, "chat-history");
     if (h && h->dom.valid()) st_.hist_scroll = dom_.scroll_top(h->dom);
@@ -821,6 +914,7 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   // the model picker "stayed glued" across a tab switch.
   st_.model_picker_open = false;
   st_.skill_menu_open = false;
+  st_.thinking_menu_open = false;
   st_.side_menu_open = false;
   // A context menu belongs to what was right-clicked; navigating away leaves
   // nothing for it to act on.
@@ -855,16 +949,20 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   bool had_view = views_.has(sid);
   load_session_view(sid);
   last_session_key_ = sid;
+  // A returning visit already HAS its transcript in the view, so the render below
+  // can position it in the same frame it paints - no flash of the top of the chat
+  // while the refresh is in flight. (The refresh then lands and does the same
+  // again with the final content; that is idempotent.)
+  request_history_scroll_restore();
   render();
-  // Scroll: a first visit starts at the BOTTOM (you came for the latest turn);
-  // a return visit goes back to where you were. Done after the patch, because
-  // the node has to exist before it can be scrolled.
-  {
-    VNodePtr h = find_by_key(tree_, "chat-history");
-    if (h && h->dom.valid()) {
-      if (st_.hist_scroll >= 0) dom_.set_scroll_top(h->dom, st_.hist_scroll);
-      else dom_.scroll_to_bottom(h->dom);
-    }
+  // Scroll restore is NOT done here. The transcript has not been fetched yet, so
+  // the container is empty: a programmatic scroll to the saved offset is clamped
+  // to 0, and the scroll handler then wrote that 0 back over the saved position -
+  // so the SECOND visit to a session landed at the top ("重新点进来却变成顶上").
+  // load_session() applies the offset once the messages exist.
+  if (st_.messages.empty() && st_.hist_scroll < 0) {
+    // First visit of a never-loaded session: start at the bottom.
+    st_.hist_follow = true;
   }
   // "Has a stashed view" is NOT the same as "its history was fetched": leaving
   // a tab always stashes a default view, so this used to skip the fetch on the
@@ -911,6 +1009,21 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   m.uid = abs_index;
   m.turn_id = jsonutil::get<std::string>(t, "turnId", "");
   m.role = jsonutil::get<std::string>(t, "role", "");
+  // An auto-continue round is stored as a user turn whose promptRaw is the
+  // system's "Continue." nudge. Rendering that as a user bubble put words in the
+  // user's mouth and glued the auto round onto the previous exchange - the
+  // "把自动轮的历史和上一轮放到一起" report. Marked rounds render as a system
+  // marker instead (divider + round number).
+  int auto_round = static_cast<int>(jsonutil::get_int(t, "autoRound", 0));
+  bool is_system_turn = jsonutil::get<bool>(t, "system", false);
+  if (auto_round > 0 && m.role == "user") {
+    m.role = "system";
+    m.text = tr("自动继续 · 第 ") + itos(auto_round) + tr(" 轮");
+    m.started_at = jsonutil::get_int(t, "ts", 0);
+    m.rev = next_msg_rev_++;
+    return m;
+  }
+  if (is_system_turn && m.role == "user") m.role = "system";
   // A stored turn uses a different field per role: a user turn keeps the prompt
   // in `promptRaw`, an assistant turn keeps the reply in `streamSummary`. Reading
   // only `text`/`streamSummary` made every reloaded USER message empty - the
@@ -939,6 +1052,22 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
       tb.detail = detail;
       tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
+      // A subagent tool call must keep its id across a reload, or the "打开记录"
+      // button disappears the moment the session is reopened - which is exactly
+      // "子代理还是无法在历史记录里打开". The live path reads the id from the tool
+      // RESULT; the stored turn keeps that same result in `detail`, so recover it
+      // the same way (the id is also written as a first-class field for turns
+      // saved after this change).
+      if (tb.name == "subagent_spawn" || tb.name == "subagent_follow_up") {
+        tb.subagent_id = jsonutil::get<std::string>(tc[k], "subagentId", "");
+        if (tb.subagent_id.empty()) {
+          try {
+            Json d = Json::parse(detail);
+            tb.subagent_id = jsonutil::get<std::string>(d, "id", "");
+          } catch (...) {
+          }
+        }
+      }
       if (!tb.name.empty()) m.tools.push_back(tb);
     }
   }
@@ -946,6 +1075,15 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
     for (size_t k = 0; k < t["keyPoints"].size(); ++k) {
       if (!m.summary.empty()) m.summary += "\n";
       if (t["keyPoints"][k].is_string()) m.summary += t["keyPoints"][k].get<std::string>();
+    }
+  }
+  // The model's between-tools narration (see ChatMsg::interim): stored with the
+  // turn, rendered in the work log.
+  if (m.role == "assistant" && t.contains("interim") && t["interim"].is_array()) {
+    for (size_t k = 0; k < t["interim"].size(); ++k) {
+      if (t["interim"][k].is_string()) {
+        m.interim.push_back(t["interim"][k].get<std::string>());
+      }
     }
   }
   return m;
@@ -958,6 +1096,15 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
 // then behave exactly like the first page - frozen, cached, never re-parsed.
 void UiApp::load_session(const std::string& sid) {
   if (sid.empty()) return;
+  // Without a backend there is nothing to fetch (UI tests, the demo shell). The
+  // transcript is whatever the view already holds, so the scroll restore still has
+  // to be applied - otherwise the "remembered position" path is exercised only in
+  // production and the tests cannot cover it.
+  if (!backend_) {
+    request_history_scroll_restore();
+    render();
+    return;
+  }
   // Two independent requests: the info (small, needed for the composer) and the
   // last page of turns. They land in either order.
   call_async("session.info", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
@@ -1023,7 +1170,11 @@ void UiApp::load_session(const std::string& sid) {
     int start = static_cast<int>(jsonutil::get_int(r.data, "start", 0));
     for (size_t i = 0; i < turns.size(); ++i) {
       comp::ChatMsg m = turn_to_message(turns[i], start + static_cast<int64_t>(i));
-      if (m.role == "user" || m.role == "assistant") msgs.push_back(m);
+      // `system` markers (auto-continue round dividers) are kept: dropping them
+      // merged the auto round into the previous exchange on reload.
+      if (m.role == "user" || m.role == "assistant" || m.role == "system") {
+        msgs.push_back(m);
+      }
     }
     int total = static_cast<int>(jsonutil::get_int(r.data, "total", msgs.size()));
     bool has_more = jsonutil::get<bool>(r.data, "hasMore", false);
@@ -1046,20 +1197,80 @@ void UiApp::load_session(const std::string& sid) {
       // there is actually something to look at (a slow load used to play the
       // animation over an empty page, so it was over before content arrived)
       st_.session_loaded = true;
-      render();
+      // A turn may still be streaming in the backend: the disk transcript ends
+      // at the last FINISHED turn, so a tab closed mid-turn and reopened here
+      // would show nothing of the answer that is being written right now.
+      attach_live_turn(sid);
       // The history just arrived, so whatever we scrolled to before was either
       // an empty page or the previous content's height. Opening a session must
       // land on the latest message, and a return visit must land on the saved
-      // offset - both are only meaningful once the messages exist.
-      {
-        VNodePtr h = find_by_key(tree_, "chat-history");
-        if (h && h->dom.valid()) {
-          if (st_.hist_scroll >= 0) dom_.set_scroll_top(h->dom, st_.hist_scroll);
-          else dom_.scroll_to_bottom(h->dom);
-        }
-      }
+      // offset. The restore is applied by THIS render, not a later tick: the
+      // content is already in the tree when it patches, so waiting would show
+      // the top of the transcript first and jump afterwards.
+      //
+      // ONE render, not two: the messages and the restore land in the same paint
+      // instead of painting the transcript at the top and then repositioning it.
+      request_history_scroll_restore();
+      render();
     }
     load_terminals(sid);
+  });
+}
+
+// Ask the NEXT render to position the transcript at the remembered offset before
+// the browser paints it.
+//
+// Two earlier attempts both failed the same way: they set scrollTop in a LATER
+// tick. By then the new page had already been painted at scrollTop 0, so a return
+// visit showed the TOP of the transcript and jumped afterwards - and if the
+// content had not been laid out yet the assignment was clamped to 0 and the
+// resulting scroll event wrote that back over the saved value.
+//
+// The page is built from the view's own messages, so the content is IN THE TREE
+// by the time render() has patched it. Reading the container's geometry forces
+// layout right there, which means setting scrollTop in the same task is exact -
+// the first paint is already at the right place. That is what "提前把布局完成"
+// has to mean in practice: not a deferral, the same frame.
+void UiApp::request_history_scroll_restore() {
+  pending_scroll_apply_ = true;
+  pending_scroll_target_ = st_.hist_scroll;
+  pending_scroll_follow_ = st_.hist_follow;
+  restoring_scroll_ = true;
+}
+
+void UiApp::apply_pending_history_scroll() {
+  if (!pending_scroll_apply_) return;
+  pending_scroll_apply_ = false;
+  VNodePtr h = find_by_key(tree_, "chat-history");
+  if (h && h->dom.valid()) {
+    // Force layout: the browser has not necessarily computed the height of the
+    // content that was just inserted, and scrollTop is clamped against whatever
+    // height it currently believes in. Reading the geometry is what makes the
+    // assignment below exact instead of "the old, shorter page".
+    //
+    // NOTE (webview): those reads come from the MIRROR here, which is a frame
+    // behind - the adapter sends the assignment as a separate script. See
+    // request_history_scroll_restore() for why this is still applied in the same
+    // task on the browser build and re-applied there for the native one.
+    int sh = dom_.scroll_height(h->dom);
+    int ch = dom_.client_height(h->dom);
+    if (std::getenv("FS_UI_WEBVIEW_DEBUG")) {
+      std::fprintf(stderr,
+                   "[scroll] restore target=%d follow=%d height=%d client=%d\n",
+                   pending_scroll_target_, static_cast<int>(pending_scroll_follow_),
+                   sh, ch);
+    }
+    if (pending_scroll_target_ >= 0) {
+      dom_.set_scroll_top(h->dom, pending_scroll_target_);
+    } else {
+      dom_.scroll_to_bottom(h->dom);
+      if (pending_scroll_follow_) st_.hist_follow = true;
+    }
+  }
+  // The scroll event this causes is delivered asynchronously; ignore it for a
+  // couple of ticks so it cannot overwrite the offset we just restored.
+  dom_.schedule(0, [this]() {
+    dom_.schedule(0, [this]() { restoring_scroll_ = false; });
   });
 }
 
@@ -1097,7 +1308,9 @@ void UiApp::load_older_history() {
     int start = static_cast<int>(jsonutil::get_int(r.data, "start", 0));
     for (size_t i = 0; i < turns.size(); ++i) {
       comp::ChatMsg m = turn_to_message(turns[i], start + static_cast<int64_t>(i));
-      if (m.role == "user" || m.role == "assistant") older.push_back(m);
+      if (m.role == "user" || m.role == "assistant" || m.role == "system") {
+        older.push_back(m);
+      }
     }
     bool has_more = jsonutil::get<bool>(r.data, "hasMore", false);
     SessionView& v = views_.get_or_create(sid);
@@ -1152,6 +1365,8 @@ void UiApp::load_sessions(size_t project_index) {
       row.loop_state = jsonutil::get<std::string>(s, "loopState", "");
       row.last_error = jsonutil::get<std::string>(s, "lastError", "");
       row.terminal_count = static_cast<int>(jsonutil::get_int(s, "terminalCount", 0));
+      row.auto_round = static_cast<int>(jsonutil::get_int(s, "autoRound", 0));
+      if (row.auto_round > 0) row.running = true;  // background work → purple dot
       if (!row.sid.empty()) rows.push_back(row);
     }
     // Most recently touched first: the list is a history, and the thing you want
@@ -1212,12 +1427,14 @@ void UiApp::load_usage() {
   });
 }
 
-// Per-session usage: the side panel's "context level / this session's cost /
-// this session's tokens". Every number is a FACT the provider reported:
+// Per-session usage: the side panel's "context level / cache / this turn's cost
+// / this session's cost". Every number is a FACT the provider reported:
 //   * context level = the LAST request's prompt tokens / the model's context
 //     window (from /models, or the model settings when the API does not say).
 //     No estimate from the model name - a made-up denominator is worse than
 //     showing nothing.
+//   * cache hit = cached prompt tokens / prompt tokens, over the rows that
+//     actually reported a cache field. -1 (not 0) when nobody reported one.
 //   * cost / tokens = the usage rows recorded for this session.
 void UiApp::load_session_usage(const std::string& sid) {
   if (sid.empty()) return;
@@ -1225,11 +1442,14 @@ void UiApp::load_session_usage(const std::string& sid) {
     if (!r.ok) return;
     int64_t in = jsonutil::get_int(r.data, "totalIn", 0);
     int64_t out = jsonutil::get_int(r.data, "totalOut", 0);
+    int64_t cache = jsonutil::get_int(r.data, "totalCache", 0);
     double cost = jsonutil::get_number(r.data, "totalCost", 0.0);
     std::string kind = jsonutil::get<std::string>(r.data, "costKind", "unknown");
     int64_t calls = jsonutil::get_int(r.data, "calls", 0);
     int64_t last_in = jsonutil::get_int(r.data, "lastIn", 0);
     int64_t window = jsonutil::get_int(r.data, "contextWindow", 0);
+    double cache_hit = jsonutil::get_number(r.data, "cacheHit", -1.0);
+    bool cache_reported = jsonutil::get<bool>(r.data, "cacheReported", false);
     int pct = -1;
     if (window > 0 && last_in > 0) {
       pct = static_cast<int>((last_in * 100) / window);
@@ -1238,34 +1458,166 @@ void UiApp::load_session_usage(const std::string& sid) {
       if (pct <= 0) pct = 1;
       if (pct > 100) pct = 100;
     }
+    int cache_pct = -1;
+    if (cache_reported && cache_hit >= 0.0) {
+      cache_pct = static_cast<int>(cache_hit * 100.0 + 0.5);
+      if (cache_pct < 0) cache_pct = 0;
+      if (cache_pct > 100) cache_pct = 100;
+    }
     std::string cost_text;
     if (kind == "money") {
       char buf[32];
       std::snprintf(buf, sizeof(buf), "¥%.2f", cost);
       cost_text = buf;
+    } else if (kind == "quota") {
+      // Quota providers report cost 0 inside the plan: "¥0.00" would claim the
+      // session was free.
+      cost_text = tr("套餐内") + " · " + itos(static_cast<int>(calls)) + tr(" 次");
     } else if (calls > 0) {
-      cost_text = itos(static_cast<int>(calls)) + tr(" 次调用");
+      // The provider reports tokens but no money. Showing a number computed from
+      // list prices would look like a bill and be wrong (discounts, cache rates,
+      // price changes), so this stays "unknown" and the token counts are shown
+      // separately for anyone who wants to do the arithmetic.
+      cost_text = tr("未知") + " · " + itos(static_cast<int>(calls)) + tr(" 次");
     }
+
+    // This turn: the rows recorded since the current turn started. The panel
+    // already knows the start time of the live turn, so the split is computed
+    // from the recent tail instead of costing another backend round trip.
+    int64_t turn_started = 0;
+    {
+      const SessionView& v = views_.get_or_create(sid);
+      if (!v.messages.empty()) {
+        turn_started = v.messages.back().started_at;
+        if (turn_started <= 0) turn_started = v.messages.back().ended_at;
+      }
+    }
+    int64_t t_in = 0, t_out = 0;
+    double t_cost = 0.0;
+    std::string t_kind;
+    bool has_turn = false;
+    if (r.data.contains("recent") && r.data["recent"].is_array()) {
+      for (auto& row : r.data["recent"]) {
+        int64_t ts = jsonutil::get_int(row, "ts", 0);
+        if (turn_started > 0 && ts < turn_started) continue;
+        has_turn = true;
+        t_in += jsonutil::get_int(row, "in", 0);
+        t_out += jsonutil::get_int(row, "out", 0);
+        t_cost += jsonutil::get_number(row, "cost", 0.0);
+        std::string k = jsonutil::get<std::string>(row, "costKind", "unknown");
+        if (t_kind.empty()) t_kind = k;
+        else if (k == "money") t_kind = "money";
+      }
+    }
+    int64_t turn_micros = has_turn ? static_cast<int64_t>(t_cost * 1000000.0) : -1;
+    bool turn_known = has_turn;
+
     update([&](AppState& s) {
       // The reply belongs to `sid`; do not paint it onto a different session
       // that the user switched to while the request was in flight.
+      SessionView& v = views_.get_or_create(sid);
       if (s.active_tab != sid) {
-        SessionView& v = views_.get_or_create(sid);
         v.context_pct = pct;
+        v.context_tokens = last_in;
+        v.context_window = window;
+        v.cache_hit_pct = cache_pct;
+        v.session_cache_tokens = cache;
+        v.cache_reported = cache_reported;
+        v.session_cost_kind = kind;
+        v.usage_calls = calls;
         v.session_cost = cost_text;
         v.session_tokens_in = in;
         v.session_tokens_out = out;
         v.session_usage_loaded = true;
+        v.turn_cost_micros = turn_micros;
+        v.turn_in = turn_known ? t_in : -1;
+        v.turn_out = turn_known ? t_out : -1;
+        v.turn_cost_kind = t_kind;
         return;
       }
       s.context_pct = pct;
+      s.context_tokens = last_in;
+      s.context_window = window;
+      s.cache_hit_pct = cache_pct;
+      s.session_cache_tokens = cache;
+      s.cache_reported = cache_reported;
+      s.session_cost_kind = kind;
+      s.usage_calls = calls;
       s.session_cost = cost_text;
       s.session_tokens_in = in;
       s.session_tokens_out = out;
       s.session_usage_loaded = true;
+      s.turn_cost_micros = turn_micros;
+      s.turn_in = turn_known ? t_in : -1;
+      s.turn_out = turn_known ? t_out : -1;
+      s.turn_cost_kind = t_kind;
     });
   });
 }
+void UiApp::attach_live_turn(const std::string& sid) {
+  if (sid.empty()) return;
+  call_async("session.liveTurn", Json{{"sid", sid}},
+             [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    bool running = jsonutil::get<bool>(r.data, "running", false);
+    bool crashed = jsonutil::get<bool>(r.data, "crashed", false);
+    std::string text = jsonutil::get<std::string>(r.data, "text", "");
+    std::string user_text = jsonutil::get<std::string>(r.data, "userText", "");
+    int64_t started = jsonutil::get_int(r.data, "startedAt", 0);
+    // A crashed turn is shown as a FINISHED message (nobody is writing it any
+    // more) plus the user's question when the transcript does not have it. The
+    // process died mid-turn, so the answer exists only in this snapshot.
+    if (!running && !crashed) return;
+    if (st_.active_tab != sid) return;
+    update([&](AppState& s) {
+      // The question itself may be missing: a crashed turn's user message was
+      // written at turn start, but a crash BEFORE that (or a cleared snapshot)
+      // leaves nothing. Do not duplicate it when it is already there.
+      bool have_user = false;
+      if (!user_text.empty()) {
+        for (size_t i = 0; i < s.messages.size(); ++i) {
+          if (s.messages[i].role == "user" && s.messages[i].text == user_text) {
+            have_user = true;
+            break;
+          }
+        }
+        if (!have_user) {
+          comp::ChatMsg u;
+          u.role = "user";
+          u.text = user_text;
+          u.rev = next_msg_rev_++;
+          u.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+          s.messages.push_back(u);
+        }
+      }
+      // Only append if the transcript does not already end with this streaming
+      // message (a turn.done may have landed between the request and the reply).
+      if (!s.messages.empty() && s.messages.back().role == "assistant" &&
+          s.messages.back().streaming) {
+        if (s.messages.back().text.size() < text.size()) {
+          s.messages.back().text = text;
+          s.messages.back().rev = next_msg_rev_++;
+        }
+        return;
+      }
+      comp::ChatMsg a;
+      a.role = "assistant";
+      a.text = text;
+      a.streaming = running;  // a crashed turn is not still being written
+      a.started_at = started > 0 ? started : now_ms();
+      if (!running) a.ended_at = a.started_at;  // no live counter for a dead turn
+      a.rev = next_msg_rev_++;
+      a.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+      s.messages.push_back(a);
+    });
+    if (crashed) {
+      toast(tr("检测到上次运行中断的回合，已恢复已产生的内容"));
+    }
+    render();
+    follow_history_if_pinned();
+  });
+}
+
 void UiApp::load_providers() {
   call_async("provider.listProviders", Json::object(), [this](const BackendResult& r) {
     std::vector<AppState::ProviderRow> rows;
@@ -1359,7 +1711,20 @@ void UiApp::load_mcp_tools() {
         row.name = jsonutil::get<std::string>(t, "name", "");
         row.dir = jsonutil::get<std::string>(t, "dir", "");
         row.description = jsonutil::get<std::string>(t, "description", "");
+        row.kind = jsonutil::get<std::string>(t, "kind", "");
         row.enabled = jsonutil::get<bool>(t, "enabled", true);
+        if (t.contains("server") && t["server"].is_object()) {
+          const Json& sv = t["server"];
+          row.server_command = jsonutil::get<std::string>(sv, "command", "");
+          row.server_url = jsonutil::get<std::string>(sv, "url", "");
+          if (sv.contains("args") && sv["args"].is_array()) {
+            for (size_t k = 0; k < sv["args"].size(); ++k) {
+              if (sv["args"][k].is_string()) {
+                row.server_args.push_back(sv["args"][k].get<std::string>());
+              }
+            }
+          }
+        }
         rows.push_back(row);
       }
     }
@@ -1448,6 +1813,45 @@ void UiApp::load_shells() {
   });
 }
 
+// Turn a plan tree (the shape PlanStore holds and `plan.update`/`plan.get`
+// carry) into the panel's steps. Accepts both the object form
+// {goal, steps:[{title,status,note}]} and a bare array of steps, so a plan
+// written by an older build still renders.
+std::vector<AppState::PlanStep> parse_plan_steps(const Json& tree,
+                                                 std::string* goal) {
+  std::vector<AppState::PlanStep> out;
+  const Json* arr = &tree;
+  if (tree.is_object()) {
+    if (goal) *goal = jsonutil::get<std::string>(tree, "goal", "");
+    if (tree.contains("steps") && tree["steps"].is_array()) arr = &tree["steps"];
+    else return out;
+  }
+  if (!arr->is_array()) return out;
+  for (size_t i = 0; i < arr->size(); ++i) {
+    const Json& e = (*arr)[i];
+    AppState::PlanStep s;
+    if (e.is_string()) {
+      s.title = e.get<std::string>();
+    } else {
+      s.title = jsonutil::get<std::string>(e, "title", "");
+      s.status = jsonutil::get<std::string>(e, "status", "pending");
+      s.note = jsonutil::get<std::string>(e, "note", "");
+      // A step that only carries the legacy `done` boolean still shows right.
+      if (s.status == "pending" && jsonutil::get<bool>(e, "done", false)) {
+        s.status = "done";
+      }
+    }
+    // Normalise: an unknown status must not produce a CSS class the stylesheet
+    // does not have (the row then renders with no marker colour).
+    if (s.status != "pending" && s.status != "running" && s.status != "done" &&
+        s.status != "skipped" && s.status != "blocked") {
+      s.status = "pending";
+    }
+    if (!s.title.empty()) out.push_back(s);
+  }
+  return out;
+}
+
 void UiApp::load_subagents(const std::string& sid) {
   if (sid.empty()) return;
   call_async("subagent.list", Json{{"sid", sid}}, [this](const BackendResult& r) {
@@ -1465,14 +1869,271 @@ void UiApp::load_subagents(const std::string& sid) {
       row.started_at = jsonutil::get_int(a, "startedAt", 0);
       row.ended_at = jsonutil::get_int(a, "endedAt", 0);
       row.transcript = a.contains("full") ? a["full"] : Json::array();
-      // Keep an expanded transcript open across a refresh (the panel polls while
-      // a subagent runs; collapsing under the cursor is worse than a stale row).
+      // Preserve the user's own row state across the poll-driven refresh: the
+      // open fold, the typed steer draft, and the live text (which comes from
+      // events, not from this listing).
       for (size_t k = 0; k < st_.subagents.size(); ++k) {
-        if (st_.subagents[k].id == row.id) row.open = st_.subagents[k].open;
+        if (st_.subagents[k].id == row.id) {
+          row.open = st_.subagents[k].open;
+          row.steer_draft = st_.subagents[k].steer_draft;
+          row.live_text = st_.subagents[k].live_text;
+        }
       }
       rows.push_back(row);
     }
     update([&](AppState& s) { s.subagents = rows; });
+  });
+}
+
+// Steering is a typed instruction. The old button sent a hardcoded "继续", which
+// is why it looked like it did nothing: the user had no way to say WHAT to
+// change, and the toast confirmed a message they never wrote.
+//
+// A RUNNING subagent is steered (the text reaches it between tool calls); a
+// FINISHED one is followed up - the same id runs again with the earlier
+// transcript, which is how "keep guiding it after it reported back" works.
+// ---------------------------------------------------------------------------
+// Composer inline completion ("/" commands, "/" and "./" paths)
+// ---------------------------------------------------------------------------
+//
+// Rules the user asked for:
+//   * a "/" at the VERY START of the input opens the command (skill) list;
+//   * a "/" or "./" ANYWHERE ELSE opens file/directory candidates for the
+//     fragment, relative to the project ("./" or a "/" that names a project
+//     folder) or, in permissive mode, to the filesystem.
+// Both are HINTS: nothing is inserted until the user picks (Enter/click) or
+// presses Tab.
+int UiApp::complete_row_count() const {
+  if (st_.complete_kind == AppState::CompleteKind::kCommand) {
+    return static_cast<int>(st_.command_menu.size());
+  }
+  if (st_.complete_kind == AppState::CompleteKind::kPath) {
+    return static_cast<int>(st_.complete_items.size());
+  }
+  return 0;
+}
+
+void UiApp::update_complete_from_input(const std::string& text) {
+  // A "/" as the FIRST character: the command list. Keep the current one open
+  // while the user narrows it ("/br" still lists commands).
+  auto is_cmd = [](const std::string& t) { return t.size() > 0 && t[0] == '/'; };
+  bool command_mode = is_cmd(text) && text.find(' ') == std::string::npos &&
+                      text.find('\n') == std::string::npos;
+  if (command_mode) {
+    std::string q = text.substr(1);
+    bool was = st_.complete_kind == AppState::CompleteKind::kCommand;
+    if (!was || st_.complete_query != q) {
+      // Load the command list once; it is backend-owned.
+      if (st_.command_menu.empty()) {
+        call_async("command.list", Json{{"sid", active_sid()}},
+                   [this](const BackendResult& r) {
+          if (!r.ok) return;
+          std::vector<AppState::CommandRow> rows;
+          const Json& arr = r.data.contains("commands") ? r.data["commands"] : r.data;
+          if (arr.is_array()) {
+            for (size_t i = 0; i < arr.size(); ++i) {
+              AppState::CommandRow row;
+              row.name = jsonutil::get<std::string>(arr[i], "name", "");
+              row.title = jsonutil::get<std::string>(arr[i], "title", row.name);
+              row.description = jsonutil::get<std::string>(arr[i], "description", "");
+              row.action = jsonutil::get<std::string>(arr[i], "action", "");
+              row.group = jsonutil::get<std::string>(arr[i], "group", "");
+              if (!row.name.empty()) rows.push_back(row);
+            }
+          }
+          update([&](AppState& s) { s.command_menu = rows; });
+          update_complete_from_input(st_.session_input);
+        });
+      }
+      update([&](AppState& s) {
+        s.complete_kind = AppState::CompleteKind::kCommand;
+        s.complete_query = q;
+        s.complete_index = 0;
+      });
+    }
+    return;
+  }
+
+  // Path mode: find the LAST "/" (or "./") and take the fragment after it.
+  size_t slash = text.find_last_of('/');
+  if (slash == std::string::npos || slash == 0) {
+    // No separator (or the leading one, which is command mode): nothing to hint.
+    if (st_.complete_kind != AppState::CompleteKind::kNone) {
+      update([&](AppState& s) { s.complete_kind = AppState::CompleteKind::kNone; });
+    }
+    return;
+  }
+  // Only hint when the fragment looks like a path being typed: no spaces after
+  // the slash (it is a word, not prose).
+  std::string frag = text.substr(slash + 1);
+  if (frag.find(' ') != std::string::npos || frag.find('\n') != std::string::npos) {
+    if (st_.complete_kind != AppState::CompleteKind::kNone) {
+      update([&](AppState& s) { s.complete_kind = AppState::CompleteKind::kNone; });
+    }
+    return;
+  }
+  // The path starts at the separator's word start: "./a/b" -> "./a/b"; "see a/b"
+  // -> "a/b" (the hint is about the path only).
+  size_t word = slash;
+  while (word > 0 && text[word - 1] != ' ' && text[word - 1] != '\n') --word;
+  std::string typed = text.substr(word, text.size() - word);
+  bool was = st_.complete_kind == AppState::CompleteKind::kPath;
+  if (was && st_.complete_prefix == typed) return;  // nothing changed
+  std::string sid = active_sid();
+  call_async("complete.path", Json{{"sid", sid}, {"typed", typed}},
+             [this, typed](const BackendResult& r) {
+    if (!r.ok) return;
+    std::vector<std::pair<std::string, bool> > items;
+    const Json& arr = r.data.contains("entries") ? r.data["entries"] : Json::array();
+    if (arr.is_array()) {
+      for (size_t i = 0; i < arr.size(); ++i) {
+        std::string nm = jsonutil::get<std::string>(arr[i], "name", "");
+        if (nm.empty()) continue;
+        items.push_back(std::make_pair(
+            nm, jsonutil::get<bool>(arr[i], "isDir", false)));
+      }
+    }
+    update([&](AppState& s) {
+      s.complete_kind = AppState::CompleteKind::kPath;
+      s.complete_prefix = typed;
+      s.complete_dir = jsonutil::get<std::string>(r.data, "dir", "");
+      s.complete_items = items;
+      s.complete_index = 0;
+    });
+  });
+}
+
+void UiApp::accept_complete() {
+  if (st_.complete_kind == AppState::CompleteKind::kNone) return;
+  int idx = st_.complete_index;
+  std::string insert;
+  bool is_dir = false;
+  if (st_.complete_kind == AppState::CompleteKind::kCommand) {
+    if (idx < 0 || idx >= static_cast<int>(st_.command_menu.size())) return;
+    insert = "/" + st_.command_menu[static_cast<size_t>(idx)].name + " ";
+  } else {
+    if (idx < 0 || idx >= static_cast<int>(st_.complete_items.size())) return;
+    insert = st_.complete_items[static_cast<size_t>(idx)].first;
+    is_dir = st_.complete_items[static_cast<size_t>(idx)].second;
+  }
+  std::string text = st_.session_input;
+  if (st_.complete_kind == AppState::CompleteKind::kCommand) {
+    text = insert;  // the command replaces the whole line
+  } else {
+    // Replace the fragment after the last separator, keeping what came before.
+    size_t slash = text.find_last_of('/');
+    if (slash == std::string::npos) return;
+    size_t word = slash;
+    while (word > 0 && text[word - 1] != ' ' && text[word - 1] != '\n') --word;
+    text = text.substr(0, word) + text.substr(word, slash + 1 - word) + insert;
+    if (is_dir) text += "/";
+  }
+  AppState::CompleteKind kind = st_.complete_kind;
+  update([&](AppState& s) {
+    s.session_input = text;
+    s.complete_kind = AppState::CompleteKind::kNone;
+    s.complete_index = 0;
+  });
+  // The accepted text has to be written THROUGH to the DOM. The framework
+  // deliberately never overwrites a focused textarea's value (that would move
+  // the caret on every keystroke), so a state-only update left the box showing
+  // the old draft - typing "/" then Tab kept the literal "/" while the menu
+  // closed, which is exactly "Tab 没反应". Same fix as send_message's clear.
+  {
+    VNodePtr ta = find_by_key(tree_, "session-input");
+    if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", text);
+  }
+  // Focus + values live in the DOM mirror: the select is patched by the
+  // framework, and the textarea's value follows `session_input`.
+  if (kind == AppState::CompleteKind::kPath && is_dir) {
+    // A directory was accepted: immediately list its contents.
+    update_complete_from_input(text);
+  }
+}
+
+VNodePtr UiApp::build_complete_menu() {
+  H box = el("div", "complete-menu");
+  box.key("complete-menu");
+  box.anim(anim::kPop);
+  int idx = st_.complete_index;
+  if (st_.complete_kind == AppState::CompleteKind::kCommand) {
+    if (st_.command_menu.empty()) {
+      box.add(el("div", "complete-item dim").text(tr("（暂无命令）")));
+      return box.get();
+    }
+    for (size_t i = 0; i < st_.command_menu.size(); ++i) {
+      const AppState::CommandRow& c = st_.command_menu[i];
+      if (!st_.complete_query.empty()) {
+        std::string q = lower_ascii(st_.complete_query);
+        if (lower_ascii(c.name).find(q) == std::string::npos &&
+            lower_ascii(c.title).find(q) == std::string::npos) {
+          continue;
+        }
+      }
+      H it = el("div", static_cast<int>(i) == idx ? "complete-item sel" : "complete-item");
+      it.add(el("span", "complete-name").text("/" + c.name));
+      if (!c.title.empty() && c.title != c.name) {
+        it.add(el("span", "complete-title").text(c.title));
+      }
+      if (!c.description.empty()) {
+        it.add(el("span", "complete-desc dim").text(c.description));
+      }
+      size_t n = i;
+      it.on(EventKind::kClick, [this, n](const std::string&) {
+        update([&](AppState& s) { s.complete_index = static_cast<int>(n); });
+        accept_complete();
+      });
+      box.add(it);
+    }
+  } else {
+    if (st_.complete_items.empty()) {
+      box.add(el("div", "complete-item dim").text(tr("（没有匹配的文件）")));
+      return box.get();
+    }
+    for (size_t i = 0; i < st_.complete_items.size(); ++i) {
+      bool is_dir2 = st_.complete_items[i].second;
+      H it = el("div", static_cast<int>(i) == idx ? "complete-item sel" : "complete-item");
+      it.add(el("i", is_dir2 ? "fa fa-folder" : "fa fa-file"));
+      it.add(el("span", "complete-name").text(st_.complete_items[i].first +
+                                              (is_dir2 ? "/" : "")));
+      size_t n = i;
+      it.on(EventKind::kClick, [this, n](const std::string&) {
+        update([&](AppState& s) { s.complete_index = static_cast<int>(n); });
+        accept_complete();
+      });
+      box.add(it);
+    }
+  }
+  return box.get();
+}
+
+// Steering is a typed instruction. The old button sent a hardcoded "继续", which
+// is why it looked like it did nothing: the user had no way to say WHAT to
+// change, and the toast confirmed a message they never wrote.
+void UiApp::send_subagent_steer(size_t index) {
+  if (index >= st_.subagents.size()) return;
+  std::string id = st_.subagents[index].id;
+  std::string text = st_.subagents[index].steer_draft;
+  bool running = st_.subagents[index].status == "running";
+  if (text.empty()) {
+    toast(tr("请先输入要发送的引导"));
+    return;
+  }
+  std::string method = running ? "subagent.steer" : "subagent.followUp";
+  call_async(method, Json{{"id", id}, {"text", text}},
+             [this, index, running](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("引导失败：") + r.message);
+      return;
+    }
+    toast(running ? tr("已发送引导") : tr("已追加任务，子代理正在继续"));
+    // Clear the box: the message is queued, and leaving it there would send it
+    // twice on the next press.
+    update([&](AppState& s) {
+      if (index < s.subagents.size()) s.subagents[index].steer_draft.clear();
+    });
+    // A follow-up produced a new summary; refresh the row from the backend.
+    if (!running) load_subagents(active_sid());
   });
 }
 
@@ -1796,8 +2457,85 @@ void UiApp::preview_file(const std::string& tab_id, const std::string& rel) {
 // Open a file's contents in its OWN side tab. Reading a file and browsing the
 // tree are two things you want visible at once, which an inline block under the
 // tree cannot do.
-void UiApp::open_file_preview(const std::string& rel) {
-  if (rel.empty()) return;
+// Open a subagent's transcript in the SIDEBAR.
+//
+// It used to open a full-window tab. That was wrong for two reasons the user
+// called out: a subagent's history belongs next to the conversation you are
+// watching (the sidebar is where "what is the agent doing" already lives), and a
+// page could not be closed back to the session without hunting for the tab.
+//
+// The panel is a real side tab of kind "subagents" carrying `subagent_id`, so it
+// coexists with the summary panel and can be closed like any other.
+void UiApp::open_subagent_tab(const std::string& subagent_id,
+                              const std::string& title) {
+  if (subagent_id.empty()) return;
+  // Already open for this agent? Focus it.
+  for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
+    if (st_.side_tabs[i].kind == "subagent" &&
+        st_.side_tabs[i].subagent_id == subagent_id) {
+      std::string id = st_.side_tabs[i].id;
+      update([&](AppState& s) {
+        s.side_collapsed = false;
+        if (!s.active_side.empty() && s.active_side != id) {
+          s.side_history.push_back(s.active_side);
+        }
+        s.active_side = id;
+      });
+      load_subagent_detail(subagent_id);
+      return;
+    }
+  }
+  std::string id;
+  update([&](AppState& s) {
+    s.side_collapsed = false;  // asking to see it implies it must be visible
+    s.side_seq++;
+    SideTab t;
+    t.id = "sb" + itos(s.side_seq);
+    t.kind = "subagent";
+    t.subagent_id = subagent_id;
+    t.title = title.empty() ? (tr("子代理 ") + subagent_id) : title;
+    s.side_tabs.push_back(t);
+    if (!s.active_side.empty() && s.active_side != t.id) {
+      s.side_history.push_back(s.active_side);
+    }
+    s.active_side = t.id;
+    id = t.id;
+  });
+  load_subagent_detail(subagent_id);
+}
+
+void UiApp::load_subagent_detail(const std::string& subagent_id) {
+  if (subagent_id.empty()) return;
+  // Pass the session too: when the in-memory record is gone (the process
+  // restarted, or the record was pruned) the backend reads the copy saved next to
+  // this session. A bare id cannot name a session - ids restart at sub_1 in every
+  // session.
+  call_async("subagent.detail",
+             Json{{"id", subagent_id}, {"sid", active_sid()}},
+             [this, subagent_id](const BackendResult& r) {
+    if (!r.ok) return;
+    const Json& a = r.data;
+    AppState::SubagentRow row;
+    row.id = jsonutil::get<std::string>(a, "id", subagent_id);
+    row.kind = jsonutil::get<std::string>(a, "kind", "");
+    row.status = jsonutil::get<std::string>(a, "status", "");
+    row.task = jsonutil::get<std::string>(a, "task", "");
+    row.model = jsonutil::get<std::string>(a, "model", "");
+    row.summary = jsonutil::get<std::string>(a, "summary", "");
+    row.started_at = jsonutil::get_int(a, "startedAt", 0);
+    row.ended_at = jsonutil::get_int(a, "endedAt", 0);
+    row.transcript = a.contains("full") && a["full"].is_object()
+                         ? a["full"].value("transcript", Json::array())
+                         : Json::array();
+    update([&](AppState& s) {
+      AppState::SubagentDetail& d = s.subagent_details[subagent_id];
+      d.row = row;
+      d.loaded = true;
+    });
+  });
+}
+
+void UiApp::open_file_preview(const std::string& rel) {  if (rel.empty()) return;
   // Already open for this file? Focus it instead of stacking duplicates.
   for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
     if (st_.side_tabs[i].kind == "preview" && st_.side_tabs[i].path == rel) {
@@ -1869,20 +2607,104 @@ void UiApp::follow_history_if_pinned() {
 // Backend events are per-session (payload.sid). They must land in that
 // session's view, not blindly on whatever tab happens to be active - a
 // background session can stream while the user is elsewhere.
+// Make sure the transcript ends with the assistant message of the CURRENT turn.
+//
+// WHY: a model often replies with ONLY tool calls and no text (very common for
+// the first round of a turn). No text means no `stream.delta`, so no assistant
+// message was ever created - and `tool.start` / `tool.update` required
+// `m.back().role == "assistant"`. They therefore dropped the block entirely:
+//   * the work log was missing ("工作过程依旧没看到"),
+//   * and the live timer never appeared, because the timer renders on that
+//     message and it did not exist ("有时候不显示计时").
+// Creating it here fixes both at the source.
+static comp::ChatMsg& ensure_turn_message(std::vector<comp::ChatMsg>& m,
+                                          int& total, uint64_t* next_rev,
+                                          int64_t now) {
+  if (!m.empty() && m.back().role == "assistant" && m.back().streaming) {
+    return m.back();
+  }
+  comp::ChatMsg a;
+  a.role = "assistant";
+  a.streaming = true;
+  a.rev = (*next_rev)++;
+  a.started_at = now;
+  a.uid = total + static_cast<int64_t>(m.size());
+  m.push_back(a);
+  ++total;
+  return m.back();
+}
+
 void UiApp::apply_session_event(const std::string& sid, const std::string& event,
                                 const Json& payload) {
   bool is_active = sid.empty() || sid == st_.active_tab;
+  // A SUBAGENT's events are tagged (sid=parent, subagentId, subagentKind). Only
+  // a complete-step belongs INLINE in the conversation: it is the current task
+  // advancing, and the user should see it happen. Research / explore / check-files
+  // are side work - showing their stream and tool rows in the main transcript
+  // buried the actual answer, so those stay in the 子代理 sidebar (which is fed
+  // by subagent.list / subagent.started / subagent.done separately).
+  if (jsonutil::get<bool>(payload, "fromSubagent", false)) {
+    std::string sub_id = jsonutil::get<std::string>(payload, "subagentId", "");
+    // Feed the SIDEBAR's live view before deciding anything about the main chat:
+    // a running subagent's panel row shows what it is doing right now, and that
+    // is the only place its work is visible when it is not a complete-step.
+    //
+    // NO render() here. A subagent generating text emits hundreds of deltas per
+    // second, and painting per delta starves the event loop - the SAME bug the
+    // main chat hit, and it freezes the whole app seconds after a subagent starts
+    // talking ("生成子代理后几秒内卡死"). The data is already recorded above; the
+    // paint is deferred to the same 25 ms floor the main transcript uses, and
+    // turn.done / the panel's own refresh paints the final state.
+    if (!sub_id.empty() && (event == "stream.delta" || event == "tool.start")) {
+      std::vector<AppState::SubagentRow>& rows =
+          is_active ? st_.subagents : views_.get_or_create(sid).subagents;
+      for (size_t k = 0; k < rows.size(); ++k) {
+        if (rows[k].id != sub_id) continue;
+        if (event == "stream.delta") {
+          rows[k].live_text += jsonutil::get<std::string>(payload, "text", "");
+          // Keep the tail: a long answer would otherwise grow the row without
+          // bound and the panel only shows the latest part anyway.
+          if (rows[k].live_text.size() > 2000) {
+            rows[k].live_text.erase(0, rows[k].live_text.size() - 2000);
+          }
+        } else {
+          std::string nm = jsonutil::get<std::string>(payload, "name", "");
+          if (!nm.empty()) rows[k].live_text += "\n[" + tr("调用") + " " + nm + "]";
+        }
+        break;
+      }
+      // Mark dirty. pump() drains this at a human cadence (it runs on the
+      // browser's 250 ms timer and from the desktop event loop), which is all a
+      // "what is it doing now" preview needs.
+      subagent_stream_dirty_ = true;
+    }
+    std::string skind = jsonutil::get<std::string>(payload, "subagentKind", "");
+    if (skind != "complete-step") return;
+  }
   // A fast stream delivers hundreds of deltas in one poll burst. Rendering once
   // per delta starves the browser's event loop: the next poll never runs, and
   // the transcript appears frozen until the burst ends - which is exactly the
   // "it is not really streaming" feeling. Deltas only append text, so they are
-  // coalesced: mark dirty, let pump() paint at most every ~50 ms.
-  bool coalesced = false;
+  // coalesced: mark dirty, let pump() paint at most every ~50 ms. (The `coalesced`
+  // flag itself lives in on_backend_event, which owns the outer paint decision;
+  // this function paints its own case inline below.)
   // only touch views_ for a background session; a fresh one gets the default
   // panels seeded so opening it later does not look empty
   SessionView* vp = nullptr;
   if (!is_active) vp = &views_.get_or_create(sid);
-  if (event == "stream.delta") {
+  if (event == "turn.started") {
+    // The turn is in flight now: the composer's primary button becomes 中止, and
+    // any parked state is stale (a new turn is running).
+    if (is_active) {
+      update([&](AppState& s) {
+        s.turn_running = true;
+        s.suspended = false;
+      });
+    } else {
+      vp->turn_running = true;
+      vp->suspended = false;
+    }
+  } else if (event == "stream.delta") {
     std::string text = jsonutil::get<std::string>(payload, "text", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     int& total = is_active ? st_.history_total : vp->history_total;
@@ -1915,10 +2737,6 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // The 25 ms floor is self-clocking rather than a timer: while deltas keep
     // arriving, the next one past the floor does the paint; when they stop,
     // turn.done paints the final state. Nothing depends on setInterval.
-    //
-    // `coalesced` means "this event already handled its own paint" - the shell
-    // must not render a second time for the same delta.
-    coalesced = true;
     int64_t now = now_ms();
     // Stamp the live counter on the same clock that paints it: pump() may be
     // throttled to 1 Hz in an occluded tab, and the elapsed time must still move
@@ -1935,6 +2753,13 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   } else if (event == "turn.done") {
     // The final paint of the turn: flush any delta held back by the 25 ms floor.
     stream_dirty_ = false;
+    // The turn is over: the primary button goes back to 发送. Derived from the
+    // event, not from a click, so it cannot drift from the backend.
+    if (is_active) {
+      update([&](AppState& s) { s.turn_running = false; });
+    } else {
+      vp->turn_running = false;
+    }
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     if (!m.empty() && m.back().role == "assistant") {
       m.back().streaming = false;
@@ -1959,20 +2784,42 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       }
       load_session_usage(usage_sid);
     }
+  } else if (event == "assistant.interim") {
+    // A round of the turn finished with narration (the model talking to itself
+    // between tool calls). File it under the CURRENT assistant message's work log
+    // instead of appending it to the answer: it is process, not the answer, and
+    // gluing it on made the reply look like it repeated itself.
+    std::string text = jsonutil::get<std::string>(payload, "text", "");
+    std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
+    int& total = is_active ? st_.history_total : vp->history_total;
+    if (!text.empty()) {
+      comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
+      msg.interim.push_back(text);
+      msg.rev = next_msg_rev_++;
+      render();
+    }
   } else if (event == "tool.start") {
     // A tool was invoked. Show it IMMEDIATELY with its arguments: a slow tool
     // (build, fetch) otherwise leaves the transcript looking frozen, and once it
     // finishes the block already exists so `tool.update` just fills it in.
+    //
+    // The assistant message is CREATED here when it does not exist yet. A model
+    // that opens a turn with a pure tool call (no text) emits no stream.delta, so
+    // there was no assistant message - and the old `m.back().role == "assistant"`
+    // test then dropped the block entirely. That is why the work log was missing
+    // and why the live timer never appeared for those turns.
     std::string name = jsonutil::get<std::string>(payload, "name", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
-    if (!name.empty() && !m.empty() && m.back().role == "assistant") {
+    int& total = is_active ? st_.history_total : vp->history_total;
+    if (!name.empty()) {
+      comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
       comp::ToolBlock tb;
       tb.name = name;
       tb.summary = tr("运行中…");
       tb.running = true;
       if (payload.contains("args")) tb.detail = payload["args"].dump(2);
-      m.back().tools.push_back(tb);
-      m.back().rev = next_msg_rev_++;
+      msg.tools.push_back(tb);
+      msg.rev = next_msg_rev_++;
       render();
     }
   } else if (event == "tool.update") {
@@ -1980,29 +2827,45 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     bool ok = jsonutil::get<bool>(payload, "ok", true);
     std::string summary = jsonutil::get<std::string>(payload, "summary", "");
     std::string detail = jsonutil::get<std::string>(payload, "detail", "");
+    // A subagent tool's result carries the id it created, so the work-log row can
+    // offer "打开记录". Without it the row only proved a subagent had run.
+    std::string subagent_id;
+    if (name == "subagent_spawn" || name == "subagent_follow_up") {
+      try {
+        Json d = Json::parse(detail);
+        subagent_id = jsonutil::get<std::string>(d, "id", "");
+      } catch (...) {
+      }
+    }
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
-    if (!m.empty() && m.back().role == "assistant") {
+    {
+      int& total = is_active ? st_.history_total : vp->history_total;
+      // Same rule as tool.start: a tool.update can arrive for a turn whose
+      // assistant message was never created (pure tool-call round), and the block
+      // must still be recorded.
+      comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
       // Complete the block `tool.start` created for this call. Matching by name
       // is enough: the loop runs one tool at a time, so the newest unfinished
       // block with that name IS this call. Creating a second block here (the old
       // behaviour) doubled every row: "running" plus "ok".
       comp::ToolBlock* slot = nullptr;
-      for (size_t i = m.back().tools.size(); i-- > 0;) {
-        if (m.back().tools[i].running && m.back().tools[i].name == name) {
-          slot = &m.back().tools[i];
+      for (size_t i = msg.tools.size(); i-- > 0;) {
+        if (msg.tools[i].running && msg.tools[i].name == name) {
+          slot = &msg.tools[i];
           break;
         }
       }
       if (!slot) {
-        m.back().tools.push_back(comp::ToolBlock());
-        slot = &m.back().tools.back();
+        msg.tools.push_back(comp::ToolBlock());
+        slot = &msg.tools.back();
       }
       slot->name = name;
       slot->ok = ok;
       slot->running = false;
       slot->summary = !summary.empty() ? summary : (ok ? "ok" : "failed");
       if (!detail.empty()) slot->detail = detail;
-      m.back().rev = next_msg_rev_++;
+      if (!subagent_id.empty()) slot->subagent_id = subagent_id;
+      msg.rev = next_msg_rev_++;
       render();
     }
   } else if (event == "subagent.done") {
@@ -2010,6 +2873,13 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     std::vector<AppState::SubagentRow>& subs = is_active ? st_.subagents : vp->subagents;
     for (size_t i = 0; i < subs.size(); ++i) {
       if (subs[i].id == id) subs[i].status = "done";
+    }
+    // A transcript tab for this agent should show the final state too (it was
+    // opened while the agent was still running, which is the common case).
+    std::map<std::string, AppState::SubagentDetail>::iterator d =
+        st_.subagent_details.find(id);
+    if (d != st_.subagent_details.end() && d->second.loaded) {
+      load_subagent_detail(id);
     }
   } else if (event == "terminal.exit") {
     std::string tid = jsonutil::get<std::string>(payload, "tid", "");
@@ -2074,19 +2944,118 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     if (!coalesced) render();
     return;
   }
-  if (event == "stream.delta" || event == "turn.done" || event == "tool.start" ||
-      event == "tool.update" || event == "subagent.done" ||
+  if (event == "stream.delta" || event == "turn.done" || event == "turn.started" ||
+      event == "tool.start" ||
+      event == "tool.update" || event == "assistant.interim" ||
+      event == "subagent.done" ||
       event == "terminal.exit" || event == "terminal.output") {
     apply_session_event(sid, event, payload);
   } else if (event == "permission.prompt") {
     st_.ask_modal = true;
+    st_.ask_id = 0;  // permission gate, not an ask question
+    st_.ask_options.clear();
     st_.ask_text = "允许执行 " + jsonutil::get<std::string>(payload, "tool", "") + "？";
+  } else if (event == "ask.prompt") {
+    // The model is ASKING and the turn is parked until answered. A reply can
+    // carry SEVERAL questions; they are shown in the composer area as "1/3" and
+    // answered one at a time (see build_composer), not as a floating dialog that
+    // covers the conversation and renders options as plain text.
+    st_.asks.clear();
+    if (payload.contains("asks") && payload["asks"].is_array()) {
+      for (auto& a : payload["asks"]) {
+        if (!a.is_object()) continue;
+        AppState::AskItem item;
+        item.ask_id = static_cast<int>(jsonutil::get_int(a, "askId", 0));
+        item.question = jsonutil::get<std::string>(a, "question", "");
+        if (a.contains("options") && a["options"].is_array()) {
+          for (auto& o : a["options"]) {
+            if (o.is_string()) item.options.push_back(o.get<std::string>());
+          }
+        }
+        item.recommended = static_cast<int>(jsonutil::get_int(a, "recommended", 0));
+        item.allow_custom = jsonutil::get<bool>(a, "allowCustom", true);
+        st_.asks.push_back(item);
+      }
+    }
+    if (st_.asks.empty()) {
+      // Older backend: single-question fields.
+      AppState::AskItem item;
+      item.ask_id = static_cast<int>(jsonutil::get_int(payload, "askId", 0));
+      item.question = jsonutil::get<std::string>(payload, "question", "");
+      if (payload.contains("options") && payload["options"].is_array()) {
+        for (auto& o : payload["options"]) {
+          if (o.is_string()) item.options.push_back(o.get<std::string>());
+        }
+      }
+      item.recommended = static_cast<int>(jsonutil::get_int(payload, "recommended", 0));
+      item.allow_custom = jsonutil::get<bool>(payload, "allowCustom", true);
+      st_.asks.push_back(item);
+    }
+    st_.ask_index = 0;
+    st_.ask_modal = true;
+    st_.interrupted = false;  // this is a question, not a failure
+    st_.interrupt_reason.clear();
+  } else if (event == "auto.next") {
+    // An automatic round is starting. Say so: otherwise the next answer simply
+    // appeared under the previous one and the session looked stuck.
+    int round = static_cast<int>(jsonutil::get_int(payload, "round", 1));
+    st_.auto_round = round;
+    std::string reason = jsonutil::get<std::string>(payload, "reason", "");
+    st_.toast = "自动继续（第 " + itos(round) + " 轮）" +
+                (reason.empty() ? "" : "：" + reason);
+    st_.toast_deadline_ms = now_ms() + kToastMs;
+    // The purple dot means "running in the background": set it on the session
+    // row too, so the home/project lists show it without opening the tab.
+    // (SessionTab is a tab, not a session row - the rows live on the project
+    // cards, so they are refreshed from the backend instead.)
+    if (!sid.empty()) {
+      for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
+    }
+  } else if (event == "auto.halted") {
+    st_.auto_round = 0;
+    st_.toast = "自动继续已停止（达到轮数上限）";
+    st_.toast_deadline_ms = now_ms() + kToastMs;
+  } else if (event == "context.compressed") {
+    int dropped = static_cast<int>(jsonutil::get_int(payload, "droppedTurns", 0));
+    st_.toast = "上下文已压缩" + (dropped > 0 ? "（折叠 " + itos(dropped) + " 条）" : "");
+    st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "subagent.steered") {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "todo.updated") {
+    // Todo is the MAIN AGENT's own checklist (todo_add/todo_check, one owner per
+    // session). It is a different thing from the plan tree below: the plan is
+    // the model's step plan with statuses, and it is what the loop reads to
+    // decide whether auto mode continues. Both are shown, separately.
     st_.toast = "任务清单已更新";
     st_.toast_deadline_ms = now_ms() + kToastMs;
+  } else if (event == "plan.update") {
+    // The model wrote a plan. The panel used to update ONLY when the user clicked
+    // the 规划 button, so a plan produced mid-turn was invisible until the panel
+    // was toggled - the "面板没有显示规划" report. The event carries the tree, so
+    // the panel can track the model as it works.
+    //
+    // A plan for a BACKGROUND session lands in that session's stashed view (the
+    // same rule every other session-scoped event follows).
+    const Json& tree = payload.contains("plan") ? payload["plan"] : payload;
+    std::string goal;
+    std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
+    // `sid` is empty or the active session for events this handler sees (a
+    // background session's events were routed into its view by the caller).
+    if (sid.empty() || sid == st_.active_tab) {
+      st_.plan_steps = steps;
+      st_.plan_goal = goal;
+    } else {
+      SessionView& v = views_.get_or_create(sid);
+      v.plan_steps = steps;
+      v.plan_goal = goal;
+    }
+  } else if (event == "loop.paused") {
+    // A guard tripped (tool-call limit / repeated call). The turn still produced
+    // output, so this is a notice, not the "interrupted, continue?" bar: that bar
+    // made a safety limit look like a crash.
+    st_.toast = jsonutil::get<std::string>(payload, "note", "本轮已暂停");
+    st_.toast_deadline_ms = now_ms() + kToastMs * 2;
   } else if (event == "loop.interrupted") {
     // A bare toast is a dead end: the task stopped and the only useful next
     // action ("continue from here") had no button. The flag shows a persistent
@@ -2095,6 +3064,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // The REASON matters: "任务已中断" alone looks like a UI glitch when the real
     // cause is a rejected API key or a 429. The backend puts it in `error`.
     st_.interrupted = true;
+    st_.turn_running = false;  // nothing is running after an interrupt
     st_.interrupt_reason = jsonutil::get<std::string>(payload, "error", "");
     st_.toast = st_.interrupt_reason.empty()
                     ? "已中断（可继续）"
@@ -2105,6 +3075,31 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     if (state == "resumed" || state == "turnDone" || state == "idle") {
       st_.interrupted = false;
       st_.interrupt_reason.clear();
+    }
+    // PARKED = the turn stopped on purpose. It ends mid-stream, so no turn.done
+    // follows - without this the last assistant message kept its "streaming"
+    // flag and the transcript showed a spinner and a running timer for a task
+    // that had already stopped ("停止生成/挂起做不完整"). This branch only sees
+    // the ACTIVE session (a background one returns earlier), and switching to it
+    // reloads the transcript from disk, where streaming is always false.
+    if (state == "suspended") {
+      st_.turn_running = false;
+      std::vector<comp::ChatMsg>& m = st_.messages;
+      if (!m.empty() && m.back().role == "assistant" && m.back().streaming) {
+        // A park before the first token leaves an empty bubble behind; drop it
+        // instead of showing a blank answer. Text that DID arrive stays - it is
+        // the part the user is keeping by stopping here.
+        if (m.back().text.empty() && m.back().tools.empty() &&
+            m.back().interim.empty() && m.back().thinking.empty()) {
+          m.pop_back();
+        } else {
+          m.back().streaming = false;
+          m.back().now_ms = 0;
+          m.back().ended_at = now_ms();
+          if (m.back().started_at <= 0) m.back().started_at = m.back().ended_at;
+          m.back().rev = next_msg_rev_++;
+        }
+      }
     }
     if (!sid.empty()) {
       refresh_loop_state(sid);
@@ -2168,6 +3163,11 @@ void UiApp::render() {
     patch(dom_, tree_, neu, root_);
     tree_ = neu;
     last_rendered_tab_ = st_.active_tab;
+    // The transcript (if this render created one) is in the DOM now, so a
+    // pending restore can be applied against the REAL height in this same task -
+    // before the browser paints. Doing it in a later tick is what made a return
+    // visit show the top of the transcript and jump afterwards.
+    apply_pending_history_scroll();
     // drop handlers from the previous generation (ids are monotonic, so no
     // collision with the still-bound listeners of the current tree)
     std::vector<int> live;
@@ -2195,6 +3195,13 @@ void UiApp::render() {
         dom_.bind_scroll_edges(hist->dom, [this](bool at_top, bool at_bottom) {
           if (at_bottom) st_.hist_follow = true;
           else st_.hist_follow = false;
+          // Keep the remembered offset CURRENT on every scroll, but NOT while a
+          // restore is in flight: the restore's own scroll event reports the
+          // clamped position and would overwrite the offset we are restoring to.
+          if (!restoring_scroll_) {
+            VNodePtr h = find_by_key(tree_, "chat-history");
+            if (h && h->dom.valid()) st_.hist_scroll = dom_.scroll_top(h->dom);
+          }
           if (at_top && st_.history_has_more && !st_.history_loading_older) {
             load_older_history();
           }
@@ -2268,10 +3275,55 @@ void UiApp::render() {
     // Context menu: closes on a press outside, WITHOUT swallowing that press -
     // so right-clicking another row closes this menu and immediately opens the
     // menu for what was just clicked.
-    if (st_.ctx_open && ctx_menu_node_.valid()) {
-      dom_.bind_outside_click(ctx_menu_node_, [this]() {
-        update([&](AppState& s) { s.ctx_open = false; });
-      });
+    //
+    // Looked up by KEY, not through the cached `ctx_menu_node_`: that pointer was
+    // captured when the menu was first built, and after the menu was rebuilt
+    // (another right-click) it referred to a node that is no longer in the tree -
+    // so the binding went to a detached element and the visible menu never
+    // closed. The key survives the rebuild.
+    if (st_.ctx_open) {
+      VNodePtr menu = find_by_key(tree_, "ctx-menu");
+      if (menu && menu->dom.valid()) {
+        dom_.bind_outside_click(menu->dom, [this]() {
+          update([&](AppState& s) { s.ctx_open = false; });
+        });
+      }
+    }
+    // Modals: losing focus dismisses them, with the exit animation. The node
+    // carries the same callbacks the inline backdrop click uses, so Esc, a press
+    // on the backdrop and a press anywhere else all take the SAME path (clearing
+    // the state) and the framework plays exit_anim because the node is keyed.
+    //
+    // The backdrop click alone was not enough: the backdrop only covers the
+    // viewport of the element that rendered it, so a dialog opened over a tag
+    // page did not react to a press on the tag strip above it.
+    if (st_.ask_modal) {
+      VNodePtr m = find_by_key_prefix(tree_, "modal:");
+      if (m && m->dom.valid()) {
+        dom_.bind_outside_click(m->dom, [this]() {
+          std::string sid = active_sid();
+          bool permission_gate = st_.asks.empty();
+          update([&](AppState& s) { s.ask_modal = false; });
+          if (!permission_gate || sid.empty()) return;
+          // A dismissed PERMISSION gate is a refusal, not a no-op: the loop is
+          // parked waiting for an answer, and leaving it parked forever would
+          // hang the turn. Deny explicitly, exactly like the 取消 button.
+          call_async("session.approve", Json{{"sid", sid}, {"yes", false}});
+        });
+      }
+    }
+    if (!st_.confirm_kind.empty()) {
+      VNodePtr m = find_by_key_prefix(tree_, "modal:");
+      if (m && m->dom.valid()) {
+        dom_.bind_outside_click(m->dom, [this]() {
+          update([&](AppState& s) {
+            s.confirm_kind.clear();
+            s.confirm_id.clear();
+            s.confirm_arg.clear();
+            s.confirm_text.clear();
+          });
+        });
+      }
     }
     // Side panel tabs: same drag-to-reorder as the top strip.
     VNodePtr sidetabs = find_by_key(tree_, "side-tabs");
@@ -2293,16 +3345,61 @@ void UiApp::render() {
     } else if (navbar && navbar->dom.valid()) {
       dom_.bind_nav_splitter(navbar->dom, Node{0}, nullptr);
     }
-    // document-level keys (Escape dismisses transient overlays)
+    // document-level keys: app shortcuts + dismissing transient overlays.
+    //
+    // The shortcut table (Settings > 快捷键) used to save values that NOTHING
+    // read back - four text fields and no consumer, so every binding in it was
+    // decoration. They are matched here, against the same settings keys the page
+    // writes, with modifiers included in the reported key.
     dom_.bind_global_key([this](const std::string& key) {
+      if (shortcut_matches(key, "关闭标签页", "Ctrl+W")) {
+        if (st_.active_tab != "home" && !st_.active_tab.empty()) {
+          close_tab(st_.active_tab);
+        }
+        return;
+      }
+      if (shortcut_matches(key, "新建标签页", "Ctrl+T")) {
+        open_new_tab();
+        return;
+      }
       if (key != "Escape") return;
+      // Order matters: the topmost transient thing closes first, and a modal
+      // (which covers the page) outranks the menus underneath it.
+      if (st_.ask_modal) {
+        // A permission gate is a park: dismissing it must DENY, or the turn
+        // waits for an answer nobody will give.
+        std::string sid = active_sid();
+        bool permission_gate = st_.asks.empty();
+        update([&](AppState& s) { s.ask_modal = false; });
+        if (permission_gate && !sid.empty()) {
+          call_async("session.approve", Json{{"sid", sid}, {"yes", false}});
+        }
+        return;
+      }
+      if (!st_.confirm_kind.empty()) {
+        update([&](AppState& s) {
+          s.confirm_kind.clear();
+          s.confirm_id.clear();
+          s.confirm_arg.clear();
+          s.confirm_text.clear();
+        });
+        return;
+      }
+      if (st_.model_picker_open) {
+        update([&](AppState& s) {
+          s.model_picker_open = false;
+          s.model_picker_owner.clear();
+        });
+        return;
+      }
       if (st_.ctx_open) {
         update([&](AppState& s) { s.ctx_open = false; });
         return;
       }
-      if (st_.skill_menu_open || st_.side_menu_open) {
+      if (st_.skill_menu_open || st_.thinking_menu_open || st_.side_menu_open) {
         update([&](AppState& s) {
           s.skill_menu_open = false;
+          s.thinking_menu_open = false;
           s.side_menu_open = false;
         });
       }
@@ -2594,7 +3691,7 @@ VNodePtr UiApp::build_page_slot() {
 // 颜色是"这一格现在怎么样"的唯一提示，所以放在标题前面而不是 hover 里。
 H session_dot_with(const std::string& base, const std::string& loop_state,
                    const std::string& last_error, bool running,
-                   int terminal_count = 0) {
+                   int terminal_count = 0, int auto_round = 0) {
   std::string cls = base;
   std::string title = tr("空闲");
   if (loop_state == "waiting") {
@@ -2606,12 +3703,18 @@ H session_dot_with(const std::string& base, const std::string& loop_state,
   } else if (!last_error.empty()) {
     cls += " failed";
     title = tr("上次运行出错");
-  } else if (terminal_count > 0) {
-    // Purple: background work. A live terminal can still print, and an
-    // auto-mode task can outlive the turn - neither is "idle", neither is a
-    // turn in flight.
+  } else if (auto_round > 0 || terminal_count > 0) {
+    // Purple: background work. An auto-continue round is exactly this - the
+    // session is doing work nobody typed - and a live terminal can still print.
+    // Without the auto_round term the dot read "idle" while the agent was
+    // actually running the next round, which is the "没有紫色小圆点" report.
     cls += " background";
-    title = tr("后台运行中（终端 ") + itos(terminal_count) + tr(" 个）");
+    if (auto_round > 0) {
+      title = tr("自动继续中（第 ") + itos(auto_round) + tr(" 轮）");
+      if (terminal_count > 0) title += tr("，终端 ") + itos(terminal_count) + tr(" 个");
+    } else {
+      title = tr("后台运行中（终端 ") + itos(terminal_count) + tr(" 个）");
+    }
   } else if (!loop_state.empty() && loop_state != "idle") {
     cls += " done";
     title = tr("已完成");
@@ -2621,8 +3724,9 @@ H session_dot_with(const std::string& base, const std::string& loop_state,
   return d;
 }
 H session_dot(const std::string& loop_state, const std::string& last_error,
-              bool running, int terminal_count = 0) {
-  return session_dot_with("ps-dot", loop_state, last_error, running, terminal_count);
+              bool running, int terminal_count = 0, int auto_round = 0) {
+  return session_dot_with("ps-dot", loop_state, last_error, running, terminal_count,
+                          auto_round);
 }
 
 VNodePtr UiApp::build_nav_rail() {
@@ -2695,7 +3799,9 @@ VNodePtr UiApp::build_nav_rail() {
     } else if (st_.session_sort == "status") {
       auto rank = [](const ProjectCard::SessionRow& r) {
         if (r.loop_state == "waiting") return 0;
-        if (r.running) return 1;
+        // An auto round is "running" for the user even though no user message
+        // started it, so it sorts with the busy sessions.
+        if (r.running || r.auto_round > 0) return 1;
         if (!r.last_error.empty()) return 2;
         return 3;
       };
@@ -2740,7 +3846,7 @@ VNodePtr UiApp::build_nav_rail() {
           s2.ctx_id = sid;
         });
       });
-      H nd = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count);
+      H nd = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round);
       nd.cls("nav-dot");  // same colour rules, rail-sized
       row.add(nd);
       row.add(el("span", "nav-session-title").text(s.title));
@@ -3087,7 +4193,7 @@ VNodePtr UiApp::build_home_search() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      row.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count));
+      row.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round));
       H txt = el("div", "search-row-text");
       txt.add(el("div", "search-row-title").text(s.title));
       txt.add(el("div", "search-row-sub dim").text(p.name + "  ·  " + p.path));
@@ -3209,7 +4315,7 @@ VNodePtr UiApp::build_home_projects() {
         // Inline rename: the row turns into an input. Enter commits, blur also
         // commits (clicking away is the normal way to finish), Esc cancels.
         H rrow = el("div", "proj-session renaming");
-        rrow.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count));
+        rrow.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round));
         H inp = comp::text_input(s.rename_text, tr("会话名称"),
                                  [this, sid](const std::string& v) {
           update([&](AppState& st2) {
@@ -3255,7 +4361,7 @@ VNodePtr UiApp::build_home_projects() {
           s2.ctx_id = sid;
         });
       });
-      H dot = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count);
+      H dot = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round);
       row.add(dot);
       row.add(el("span", "ps-title").text(s.title));
       row.add(el("span", "grow"));
@@ -3387,8 +4493,14 @@ VNodePtr UiApp::build_home_usage() {
     std::string kind = jsonutil::get<std::string>(st_.usage, "costKind", "");
     double c = jsonutil::get_number(st_.usage, "totalCost", 0.0);
     char buf[64];
-    std::snprintf(buf, sizeof(buf), kind == "money" ? "%.4f" : "%.0f", c);
-    cost = std::string(buf) + (kind == "quota" ? " (额度)" : "");
+    if (kind == "money") {
+      std::snprintf(buf, sizeof(buf), "¥%.4f", c);
+      cost = buf;
+    } else if (kind == "quota") {
+      cost = tr("套餐内");
+    } else {
+      cost = tr("未知");
+    }
   }
   head.add(comp::key_value(tr("调用次数"), calls));
   head.add(comp::key_value(tr("输入 tokens"), in_tok));
@@ -3622,6 +4734,13 @@ VNodePtr UiApp::build_session() {
   // one map lookup.
   const std::string msg_sid = st_.active_tab == "home" ? std::string() : st_.active_tab;
   std::set<std::string> live_keys;
+  // The LAST user message can be edited and re-sent (a do-over of what you asked).
+  // Only the last one: editing an older question would orphan every answer after
+  // it, which is what 回滚 is for.
+  int last_user_index = -1;
+  for (size_t i = 0; i < st_.messages.size(); ++i) {
+    if (st_.messages[i].role == "user") last_user_index = static_cast<int>(i);
+  }
   for (size_t i = 0; i < st_.messages.size(); ++i) {
     const comp::ChatMsg& m = st_.messages[i];
     // Identity: the message's own uid when it has one (loaded turns), else a
@@ -3630,7 +4749,10 @@ VNodePtr UiApp::build_session() {
     int64_t uid = m.uid != 0 ? m.uid : (1000000000LL + static_cast<int64_t>(i));
     std::string key = comp::chat_message_key(msg_sid, uid);
     live_keys.insert(key);
-    uint64_t sig = message_sig(m);
+    const bool can_edit = static_cast<int>(i) == last_user_index;
+    // The flag is part of the signature: when a newer message arrives, the one
+    // that WAS last must lose its 编辑 action, and a cached node would not.
+    uint64_t sig = message_sig(m) ^ (can_edit ? 0x51ed2701ULL : 0ULL);
     std::map<std::string, MsgNode>::iterator hit = msg_nodes_.find(key);
     if (hit != msg_nodes_.end() && hit->second.rev == m.rev && hit->second.sig == sig) {
       hist_inner.add(hit->second.node);
@@ -3659,9 +4781,20 @@ VNodePtr UiApp::build_session() {
       update([&](AppState& s) {
         if (i < static_cast<int>(s.messages.size()) && block >= 0 &&
             block < static_cast<int>(s.messages[i].tools.size())) {
-          s.messages[i].tools[block].expanded = !s.messages[i].tools[block].expanded;
+          bool open = !s.messages[i].tools[block].expanded;
+          s.messages[i].tools[block].expanded = open;
           s.messages[i].rev = next_msg_rev_++;  // only this message is rebuilt
-        }
+          // Opening a tool's JSON is almost always to read its END (a result, an
+          // error). Scroll the body to the bottom on the next frame, once the
+          // node exists: doing it now would scroll the previous layout.
+          if (open) {
+            std::string sel = "tb-body:" + std::to_string(uid) + ":" +
+                              std::to_string(block);
+            dom_.schedule(0, [this, sel]() {
+              VNodePtr n = find_by_key(tree_, sel);
+              if (n && n->dom.valid()) dom_.scroll_to_bottom(n->dom);
+            });
+          }        }
       });
     },
                                [this, uid](const std::string& v) {
@@ -3710,7 +4843,31 @@ VNodePtr UiApp::build_session() {
         s.ctx_id = m.turn_id;
         s.ctx_label = m.text;
       });
-    });
+    },
+                               [this](const std::string& href) {
+      // A markdown link. The backend decides where it goes: http(s) opens the
+      // browser, a project-relative path opens the side-panel preview (which is
+      // what a link to a source file should do), anything else is refused.
+      if (href.empty()) return;
+      call_async("link.open", Json{{"sid", active_sid()}, {"href", href}},
+                 [this, href](const BackendResult& r) {
+        if (!r.ok) {
+          toast(tr("无法打开链接：") + r.message);
+          return;
+        }
+        std::string opened = jsonutil::get<std::string>(r.data, "opened", "");
+        if (opened == "file") {
+          open_file_preview(jsonutil::get<std::string>(r.data, "path", ""));
+        }
+      });
+    },
+                               // A subagent tool row's "打开记录": open the
+                               // transcript as its own tab.
+                               [this](const std::string& subagent_id) {
+      open_subagent_tab(subagent_id, tr("子代理 ") + subagent_id);
+    },
+                               // 编辑并重发 applies to the last user message only.
+                               can_edit && m.role == "user");
     node.key(key);
     MsgNode mn;
     mn.node = node.get();
@@ -3754,105 +4911,48 @@ VNodePtr UiApp::build_session() {
     H phead = el("div", "plan-head");
     phead.add(el("span", "plan-title").text(tr("任务规划")));
     phead.add(el("span", "grow"));
+    // Manual step add/edit was removed: the plan is the MODEL's working state
+    // (the loop reads its statuses to decide whether to continue), so editing it
+    // by hand wrote a tree the model never agreed to - and the panel is for
+    // SEEING progress, not authoring it.
     phead.add(comp::icon_button("\u2715", tr("收起"), [this](const std::string&) {
       update([&](AppState& s) { s.plan_open = false; });
     }));
     plan.add(phead);
+    if (!st_.plan_goal.empty()) {
+      plan.add(el("div", "plan-goal").text(st_.plan_goal));
+    }
     if (st_.plan_steps.empty()) {
       plan.add(el("div", "plan-empty dim").text(tr("暂无规划步骤")));
     }
+    int done = 0;
     for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
-      H step = el("div", "plan-step");
-      step.add(el("span", "plan-no").text(itos(static_cast<int>(i + 1))));
-      if (st_.plan_editing == static_cast<int>(i)) {
-        // Inline edit: the plan is the user's too, not just the model's. Editing
-        // writes the whole tree back (plan.update replaces it), so the step list
-        // stays the single source of truth.
-        H input = comp::text_input(st_.plan_edit_text, tr("步骤内容"),
-                                   [this](const std::string& v) {
-          st_.plan_edit_text = v;
-        });
-        input.key("plan-edit-input");
-        step.add(input);
-        step.add(comp::icon_button("\u2713", tr("保存"), [this](const std::string&) {
-          std::string sid = active_sid();
-          std::vector<std::string> steps = st_.plan_steps;
-          int idx = st_.plan_editing;
-          if (idx >= 0 && idx < static_cast<int>(steps.size())) {
-            steps[idx] = st_.plan_edit_text;
-          }
-          Json tree = Json::array();
-          for (size_t k = 0; k < steps.size(); ++k) {
-            tree.push_back(Json{{"title", steps[k]}, {"done", false}});
-          }
-          update([&](AppState& s) {
-            s.plan_steps = steps;
-            s.plan_editing = -1;
-          });
-          if (!sid.empty()) {
-            call_async("plan.update", Json{{"sid", sid}, {"plan", tree}},
-                       [this](const BackendResult& r) {
-              if (!r.ok) toast(tr("保存失败：") + r.message);
-            });
-          }
-        }));
-        step.add(comp::icon_button("\u2715", tr("取消"), [this](const std::string&) {
-          update([&](AppState& s) { s.plan_editing = -1; });
-        }));
-      } else {
-        step.add(el("span", "plan-text").text(st_.plan_steps[i]));
-        int idx = static_cast<int>(i);
-        H acts = el("div", "plan-step-acts");
-        acts.add(comp::icon_button("pen", tr("编辑"), [this, idx](const std::string&) {
-          update([&](AppState& s) {
-            s.plan_editing = idx;
-            s.plan_edit_text = idx >= 0 && idx < static_cast<int>(s.plan_steps.size())
-                                   ? s.plan_steps[idx] : std::string();
-          });
-        }));
-        acts.add(comp::icon_button("trash", tr("删除"), [this, idx](const std::string&) {
-          std::string sid = active_sid();
-          std::vector<std::string> steps = st_.plan_steps;
-          if (idx < 0 || idx >= static_cast<int>(steps.size())) return;
-          steps.erase(steps.begin() + idx);
-          Json tree = Json::array();
-          for (size_t k = 0; k < steps.size(); ++k) {
-            tree.push_back(Json{{"title", steps[k]}, {"done", false}});
-          }
-          update([&](AppState& s) { s.plan_steps = steps; });
-          if (!sid.empty()) {
-            call_async("plan.update", Json{{"sid", sid}, {"plan", tree}});
-          }
-        }));
-        step.add(acts);
+      if (st_.plan_steps[i].status == "done" || st_.plan_steps[i].status == "skipped") {
+        ++done;
+      }
+    }
+    if (!st_.plan_steps.empty()) {
+      // The progress line is the reason this panel exists: it is the same
+      // condition auto mode uses to decide whether to keep going.
+      plan.add(el("div", "plan-progress dim").text(
+          itos(done) + " / " + itos(static_cast<int>(st_.plan_steps.size())) +
+          tr(" 已完成")));
+    }
+    for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
+      const AppState::PlanStep& s = st_.plan_steps[i];
+      std::string st_cls = "plan-step st-" + (s.status.empty() ? "pending" : s.status);
+      H step = el("div", st_cls);
+      const char* mark = "--";
+      if (s.status == "done") mark = "\u2713";
+      else if (s.status == "running") mark = "\u25b6";
+      else if (s.status == "skipped") mark = "\u2013";
+      else if (s.status == "blocked") mark = "!";
+      step.add(el("span", "plan-status").text(mark));
+      step.add(el("span", "plan-text").text(s.title));
+      if (!s.note.empty()) {
+        step.add(el("span", "plan-note dim").attr("title", s.note).text(s.note));
       }
       plan.add(step);
-    }
-    // Add a step: the plan is often drafted in the chat and then corrected here.
-    {
-      H add = el("div", "plan-add");
-      H input = comp::text_input(st_.plan_new_text, tr("添加步骤…"),
-                                 [this](const std::string& v) { st_.plan_new_text = v; });
-      input.key("plan-new-input");
-      add.add(input);
-      add.add(comp::icon_button("plus", tr("添加"), [this](const std::string&) {
-        if (st_.plan_new_text.empty()) return;
-        std::string sid = active_sid();
-        std::vector<std::string> steps = st_.plan_steps;
-        steps.push_back(st_.plan_new_text);
-        Json tree = Json::array();
-        for (size_t k = 0; k < steps.size(); ++k) {
-          tree.push_back(Json{{"title", steps[k]}, {"done", false}});
-        }
-        update([&](AppState& s) {
-          s.plan_steps = steps;
-          s.plan_new_text.clear();
-        });
-        if (!sid.empty()) {
-          call_async("plan.update", Json{{"sid", sid}, {"plan", tree}});
-        }
-      }));
-      plan.add(add);
     }
     // Review: approve / reject / revise. "revise" feeds the comment back to the
     // model as guidance, which is the whole point of reviewing a plan.
@@ -3911,6 +5011,19 @@ VNodePtr UiApp::build_session() {
       s.ctx_label.clear();
     });
   });
+  // 编辑并重发 armed: the next send rewrites the transcript, so say it and offer
+  // a way out. Without the bar the message would just vanish on send.
+  if (!st_.edit_turn_id.empty()) {
+    H bar = el("div", "interrupt-bar edit-bar");
+    bar.add(el("i", "fa fa-pen"));
+    bar.add(el("span", "ib-text").text(tr("正在编辑上一条消息")));
+    bar.add(el("span", "ib-reason dim").text(tr("发送后将替换它和之后的回答")));
+    bar.add(el("span", "grow"));
+    bar.add(comp::button(tr("取消编辑"), [this](const std::string&) {
+      update([&](AppState& s) { s.edit_turn_id.clear(); });
+    }, "ghost"));
+    comp_box.add(bar);
+  }
   // Scheduled wake-ups: the same bar slot as the interrupt notice, because both
   // answer the same question - "is this task parked, and what will happen next?"
   // A timer the user set is a promise the UI has to show; a countdown that only
@@ -4008,22 +5121,232 @@ VNodePtr UiApp::build_session() {
     comp_box.add(att);
   }
 
+  // ---- ask: the model is WAITING for an answer ----
+  //
+  // This takes over the composer area instead of floating over the transcript.
+  // Two reasons: (1) a dialog covered the conversation the question is about,
+  // (2) the answer is composed here (pick an option, or type one), so it belongs
+  // where input normally happens. The user must click 发送 explicitly - an
+  // option click only SELECTS it, so a misclick cannot answer the model.
+  if (st_.ask_modal && !st_.asks.empty()) {
+    if (st_.ask_index < 0) st_.ask_index = 0;
+    if (st_.ask_index >= static_cast<int>(st_.asks.size())) {
+      st_.ask_index = static_cast<int>(st_.asks.size()) - 1;
+    }
+    const AppState::AskItem& cur = st_.asks[static_cast<size_t>(st_.ask_index)];
+    H panel = el("div", "ask-panel");
+    H head = el("div", "ask-head");
+    head.add(el("i", "fa fa-circle-question"));
+    head.add(el("span", "ask-title").text(tr("模型提问")));
+    if (st_.asks.size() > 1) {
+      // "1/3" so a multi-question prompt is obviously a sequence, not one long
+      // question with a strange title.
+      head.add(el("span", "ask-counter").text(
+          itos(st_.ask_index + 1) + " / " + itos(static_cast<int>(st_.asks.size()))));
+    }
+    head.add(el("span", "grow"));
+    head.add(comp::icon_button("\u2715", tr("忽略这个问题"), [this](const std::string&) {
+      // Dismissing must still ANSWER it: leaving the turn parked forever is
+      // worse than an explicit "no answer".
+      std::string sid = active_sid();
+      int ask_id = st_.asks.empty() ? 0 : st_.asks[0].ask_id;
+      update([&](AppState& s) {
+        s.ask_modal = false;
+        s.asks.clear();
+        s.ask_index = 0;
+      });
+      if (sid.empty() || ask_id <= 0) return;
+      call_async("tool.askAnswer",
+                 Json{{"sid", sid}, {"askId", ask_id}, {"selection", "(dismissed)"}});
+    }));
+    panel.add(head);
+    panel.add(el("div", "ask-question").text(cur.question));
+
+    // Options are ROWS with a radio mark, not a paragraph of text: the whole
+    // complaint was "分辨不出哪些是选项".
+    //
+    // The custom answer is a PEER OPTION, not a separate field below the list:
+    // "pick one of these, or write your own" is one choice, and putting the text
+    // box outside the list made it read as a comment box for the question.
+    H opts = el("div", "ask-options");
+    auto is_custom = [&cur](const std::string& v) {
+      if (v.empty()) return false;
+      for (auto& o : cur.options) {
+        if (o == v) return false;
+      }
+      return true;
+    };
+    bool custom_picked = is_custom(cur.answer);
+    for (size_t k = 0; k < cur.options.size(); ++k) {
+      bool selected = !custom_picked && cur.answer == cur.options[k];
+      bool rec = static_cast<int>(k) == cur.recommended;
+      H row = el("div", selected ? "ask-option selected" : "ask-option");
+      row.add(el("span", "ask-radio").text(selected ? "\u25cf" : "\u25cb"));
+      row.add(el("span", "ask-option-text").text(cur.options[k]));
+      if (rec) row.add(el("span", "ask-option-tag").text(tr("推荐")));
+      size_t idx = k;
+      row.on(EventKind::kClick, [this, idx](const std::string&) {
+        update([&](AppState& s) {
+          if (s.ask_index < static_cast<int>(s.asks.size())) {
+            AppState::AskItem& it = s.asks[static_cast<size_t>(s.ask_index)];
+            if (idx < it.options.size()) {
+              it.answer = it.options[idx];
+              it.custom_draft.clear();
+            }
+          }
+        });
+      });
+      opts.add(row);
+    }
+    if (cur.options.empty() && !cur.allow_custom) {
+      opts.add(el("div", "ask-option-empty").text(tr("（没有可选答案）")));
+    }
+    if (cur.allow_custom) {
+      // The "write your own" row: same shape as the others, and picking it
+      // reveals the text field right under it (inside the list).
+      H row = el("div", custom_picked ? "ask-option selected custom" : "ask-option custom");
+      row.add(el("span", "ask-radio").text(custom_picked ? "\u25cf" : "\u25cb"));
+      row.add(el("span", "ask-option-text").text(tr("自定义回答")));
+      row.on(EventKind::kClick, [this](const std::string&) {
+        update([&](AppState& s) {
+          if (s.ask_index >= static_cast<int>(s.asks.size())) return;
+          AppState::AskItem& it = s.asks[static_cast<size_t>(s.ask_index)];
+          // Selecting the row is what "custom" means; with no text yet the
+          // answer stays empty, so 发送 stays disabled until something is typed.
+          it.answer = it.custom_draft;
+        });
+      });
+      opts.add(row);
+      if (custom_picked || (!cur.custom_draft.empty())) {
+        H wrap = el("div", "ask-custom-wrap");
+        wrap.add(comp::text_input(
+            cur.custom_draft, tr("输入你的回答…"),
+            [this](const std::string& v) {
+          update([&](AppState& s) {
+            if (s.ask_index < static_cast<int>(s.asks.size())) {
+              AppState::AskItem& it = s.asks[static_cast<size_t>(s.ask_index)];
+              it.custom_draft = v;
+              it.answer = v;  // typing IS the answer; an empty box un-answers it
+            }
+          });
+        }));
+        opts.add(wrap);
+      }
+    }
+    panel.add(opts);
+
+    H acts = el("div", "ask-actions");
+    acts.add(el("span", "grow"));
+    if (st_.asks.size() > 1 && st_.ask_index + 1 < static_cast<int>(st_.asks.size())) {
+      acts.add(comp::button(tr("下一个"), [this](const std::string&) {
+        update([&](AppState& s) { s.ask_index++; });
+      }, "ghost"));
+    }
+    bool ready = !cur.answer.empty();
+    H send = comp::button(tr("发送回答"), [this](const std::string&) {
+      std::string sid = active_sid();
+      if (sid.empty()) return;
+      // Send EVERY answered question; unanswered ones stay parked in the panel.
+      // The backend resumes only when the whole group has answers.
+      std::vector<std::pair<int, std::string>> to_send;
+      int next_unanswered = -1;
+      for (size_t k = 0; k < st_.asks.size(); ++k) {
+        if (st_.asks[k].answer.empty()) {
+          if (next_unanswered < 0) next_unanswered = static_cast<int>(k);
+          continue;
+        }
+        to_send.push_back(std::make_pair(st_.asks[k].ask_id, st_.asks[k].answer));
+      }
+      for (size_t k = 0; k < to_send.size(); ++k) {
+        call_async("tool.askAnswer",
+                   Json{{"sid", sid}, {"askId", to_send[k].first},
+                        {"selection", to_send[k].second}});
+      }
+      update([&](AppState& s) {
+        if (next_unanswered >= 0) {
+          s.ask_index = next_unanswered;  // move to the next open question
+        } else {
+          s.ask_modal = false;
+          s.asks.clear();
+          s.ask_index = 0;
+        }
+      });
+    }, "primary");
+    if (!ready) send.cls("disabled");
+    acts.add(send);
+    panel.add(acts);
+    comp_box.add(panel);
+  } else {
   // The placeholder has to match the CURRENT Enter setting: it used to say
   // "Enter sends" even with Ctrl+Enter selected, which is exactly the kind of
   // hard-coded text that makes a working setting look broken.
-  const char* hint_key = st_.enter_send == "ctrlEnter"
+  //
+  // The Enter behaviour also honours the 快捷键 page: if the user rebinds
+  // "发送消息" to something containing Ctrl, plain Enter becomes a newline. That
+  // page used to be four fields nothing read, which is why the user called the
+  // Enter shortcuts 摆设.
+  std::string enter_mode = st_.enter_send;
+  {
+    // A binding that includes a modifier means "plain Enter must NOT send".
+    // Left at the default ("Enter") the session setting decides - rebinding
+    // "发送消息" back to plain Enter must not silently override a session that
+    // was explicitly configured for Ctrl+Enter.
+    std::string send_key = normalize_shortcut(
+        sv_str(st_.settings_values, "shortcuts.发送消息", "Enter"));
+    if (send_key.find("ctrl+") != std::string::npos ||
+        send_key.find("meta+") != std::string::npos) {
+      enter_mode = "ctrlEnter";
+    }
+  }
+  const char* hint_key = enter_mode == "ctrlEnter"
                              ? "输入消息…（Ctrl+Enter 发送，Enter 换行）"
                              : "输入消息…（Enter 发送，Shift+Enter 换行）";
   H ta = comp::textarea(st_.session_input, tr(hint_key),
                         [this](const std::string& v) {
     st_.session_input = v;  // no re-render while typing (avoid caret jumps)
+    // Inline completion trigger. NO re-render here (that would move the caret),
+    // so the menu is (re)built only when the TRIGGER STATE actually changes.
+    update_complete_from_input(v);
   },
                         [this](const std::string&) { send_message(); });
   ta.key("session-input");  // send_message() clears it directly after sending
   // The adapter reads this to decide whether plain Enter sends (see the
   // keyenter handler): the setting has to reach the DOM or it does nothing.
-  ta.attr("data-enter-send", st_.enter_send);
+  ta.attr("data-enter-send", enter_mode);
+  // While a completion menu is open, the adapter must preventDefault on Tab and
+  // the arrow keys. Otherwise the browser moves focus / scrolls BEFORE the key
+  // reaches the app, and the highlighted suggestion can never be accepted.
+  if (st_.complete_kind != AppState::CompleteKind::kNone) {
+    ta.attr("data-keys-capture", "1");
+  }
+  // Arrow keys / Tab drive the completion menu. These are node-scoped (the
+  // textarea has focus), not document-wide: ↑/↓ must move the selection only
+  // while a menu is open, and Tab must insert rather than move focus.
+  ta.on(EventKind::kKeyDown, [this](const std::string& key) {
+    if (st_.complete_kind == AppState::CompleteKind::kNone) return;
+    if (key == "ArrowDown" || key == "ArrowUp") {
+      int n = static_cast<int>(complete_row_count());
+      if (n <= 0) return;
+      int idx = st_.complete_index + (key == "ArrowDown" ? 1 : -1);
+      if (idx < 0) idx = n - 1;
+      if (idx >= n) idx = 0;
+      update([&](AppState& s) { s.complete_index = idx; });
+      return;
+    }
+    if (key == "Escape") {
+      update([&](AppState& s) { s.complete_kind = AppState::CompleteKind::kNone; });
+      return;
+    }
+    if (key == "Tab") {
+      accept_complete();
+    }
+  });
   comp_box.add(ta);
+  // The completion menu floats ABOVE the textarea (same slot the "/" menu uses),
+  // so it never pushes the input around while the user types.
+  if (st_.complete_kind != AppState::CompleteKind::kNone) {
+    comp_box.add(build_complete_menu());
+  }
 
   H tools = el("div", "composer-tools");
   // LEFT: what this message does (attach / command / plan / auto / permission).
@@ -4069,16 +5392,13 @@ VNodePtr UiApp::build_session() {
     if (open && !sid.empty()) {
       call_async("plan.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
         if (!r.ok) return;
-        std::vector<std::string> steps;
         const Json& tree = r.data.contains("plan") ? r.data["plan"] : r.data;
-        if (tree.is_array()) {
-          for (size_t i = 0; i < tree.size(); ++i) {
-            std::string t = jsonutil::get<std::string>(tree[i], "title", "");
-            if (t.empty() && tree[i].is_string()) t = tree[i].get<std::string>();
-            if (!t.empty()) steps.push_back(t);
-          }
-        }
-        update([&](AppState& s) { s.plan_steps = steps; });
+        std::string goal;
+        std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
+        update([&](AppState& s) {
+          s.plan_steps = steps;
+          s.plan_goal = goal;
+        });
       });
     }
   }, "ghost"));
@@ -4101,65 +5421,12 @@ VNodePtr UiApp::build_session() {
     auto_btn.attr("title", st_.auto_mode ? tr("自动模式（点击切到手动）")
                                         : tr("手动模式（点击切到自动）"));
     left_tools.add(auto_btn);
-    // 定时任务：自动模式下"过 N 分钟自己再跑一轮"。这是模型自设唤醒的用户
-    // 入口（后端 session.schedule 早就有调度器，缺的正是这个按钮）。手动模式
-    // 下不显示：没有自动续跑，定了也不会有人跑。
-    if (st_.auto_mode) {
-      H sched_btn = comp::icon_text_button("clock", tr("定时"),
-                                           [this](const std::string&) {
-        bool open = !st_.schedule_open;
-        update([&](AppState& s) {
-          s.schedule_open = open;
-          if (!open) s.schedule_text.clear();
-        });
-      }, st_.schedule_open ? "ghost on" : "ghost");
-      sched_btn.key("schedule-btn");
-      sched_btn.attr("title", tr("定时唤醒：过一会儿自动再跑一轮"));
-      left_tools.add(sched_btn);
-    }
+    // No manual "定时/自动唤醒" button: scheduling a wake is the MODEL's action
+    // (it calls session.schedule when it decides to retry later). A user-facing
+    // button duplicated that, and its only real use - cancelling a pending wake -
+    // belongs next to 挂起 and appears only while one is actually pending.
   }
-  // Inline schedule input: a small popover-style row under the toolbar. It only
-  // appears after the button above, so it never competes with the composer for
-  // attention during normal typing.
-  if (st_.schedule_open && st_.auto_mode) {
-    H row = el("div", "composer-schedule");
-    row.add(el("i", "fa fa-clock"));
-    row.add(comp::text_input(st_.schedule_text, tr("分钟数，如 5"),
-                             [this](const std::string& v) {
-      st_.schedule_text = v;  // no re-render while typing
-    }));
-    row.add(comp::button(tr("设定"), [this](const std::string&) {
-      int mins = std::atoi(st_.schedule_text.c_str());
-      if (mins <= 0) {
-        toast(tr("请填一个大于 0 的分钟数"));
-        return;
-      }
-      std::string sid = active_sid();
-      if (sid.empty()) return;
-      call_async("session.schedule",
-                 Json{{"sid", sid}, {"delayMs", (int64_t)mins * 60 * 1000},
-                      {"note", ""}},
-                 [this](const BackendResult& r) {
-        if (!r.ok) {
-          toast(tr("设定失败：") + r.message);
-          return;
-        }
-        toast(tr("已设定定时唤醒"));
-        update([&](AppState& s) {
-          s.schedule_open = false;
-          s.schedule_text.clear();
-        });
-        refresh_pending_wakes();
-      });
-    }, "primary"));
-    row.add(comp::button(tr("取消"), [this](const std::string&) {
-      update([&](AppState& s) {
-        s.schedule_open = false;
-        s.schedule_text.clear();
-      });
-    }, "ghost"));
-    comp_box.add(row);
-  }
+  // (The inline "schedule a wake in N minutes" form is gone with the button.)
   // 权限: a compact select, but with the three levels spelled out (the values
   // alone - approve/permissive/full - mean nothing). The wording states what
   // each level actually gates: 宽松 = 项目内放行、项目外/系统操作要问。
@@ -4217,7 +5484,39 @@ VNodePtr UiApp::build_session() {
     open_model_picker("composer", "");
   });
   model_btn.add(comp::model_icon("", st_.model));
-  model_btn.add(el("span", "mpb-name").text(st_.model.empty() ? tr("选择模型") : st_.model));
+  // The label carries the PROVIDER too. "deepseek-chat" alone is ambiguous once
+  // two providers offer a model with the same id (or the user has several
+  // endpoints of one vendor) - and the provider is what actually routes the
+  // request. Show it dimmed next to the model name.
+  if (st_.model.empty()) {
+    model_btn.add(el("span", "mpb-name").text(tr("选择模型")));
+  } else {
+    // The provider comes from model.allEnabled (the authoritative owner of this
+    // model id). Fall back to scanning the picker's list so the label still shows
+    // before the availability check has replied.
+    std::string prov_label = st_.model_provider_label;
+    if (prov_label.empty()) {
+      for (size_t i = 0; i < st_.models.size(); ++i) {
+        if (st_.models[i].id != st_.model) continue;
+        std::string pid = st_.models[i].provider;
+        for (size_t k = 0; k < st_.providers.size(); ++k) {
+          if (st_.providers[k].id != pid) continue;
+          prov_label = st_.providers[k].name.empty() ? st_.providers[k].id
+                                                     : st_.providers[k].name;
+          break;
+        }
+        if (prov_label.empty()) prov_label = pid;
+        break;
+      }
+    }
+    if (!prov_label.empty()) {
+      // Provider is shown only when there is room (CSS hides it in compact mode,
+      // under .composer crowded / narrow width). It is context, not the model's
+      // identity, so it must not push the model name out of the button.
+      model_btn.add(el("span", "mpb-prov").text(prov_label));
+    }
+    model_btn.add(el("span", "mpb-name").text(st_.model));
+  }
   model_btn.add(el("span", "mpb-caret").text("\u25be"));
   if (!st_.model_available) {
     // The remembered model is gone. The box is already empty (refresh cleared
@@ -4256,94 +5555,186 @@ VNodePtr UiApp::build_session() {
     }
     right_tools.add(mb);
   }
-  // 思考档位: only shown when the current model actually has levels - a control
-  // with no options is worse than no control.
-  {
-    std::vector<std::string> levels = thinking_levels_for(st_.model);
-    if (!levels.empty()) {
-      std::vector<std::string> opts;
-      opts.push_back(tr("默认"));
-      int sel = 0;
-      for (size_t i = 0; i < levels.size(); ++i) {
-        opts.push_back(thinking_label(levels[i]));
-        if (levels[i] == st_.thinking) sel = static_cast<int>(i) + 1;
-      }
-      H th = el("div", "bar-group");
-      H thsel = comp::select(opts, sel, [this, levels](const std::string& v) {
-        int idx = std::atoi(v.c_str());
-        std::string val = (idx <= 0 || idx > static_cast<int>(levels.size()))
-                              ? std::string() : levels[idx - 1];
-        std::string sid = active_sid();
-        update([&](AppState& s) { s.thinking = val; });
-        if (!sid.empty()) {
-          call_async("session.setThinking", Json{{"sid", sid}, {"thinking", val}});
-        }
-      });
-      thsel.attr("title", tr("思考档位"));
-      th.add(thsel);
-      right_tools.add(th);
+  // 思考档位: ONE control. It used to be an icon button that did nothing plus a
+  // native <select> showing the same value next to it, which read as two
+  // controls - the first one dead ("思考档位，思考档位（重复！这个按钮按下没反应）).
+  // Now the icon IS the control: it opens a list of the model's real levels, and
+  // each row carries that level's own icon, so 关/低/中/高 are distinguishable
+  // at a glance instead of all sharing one `brain`.
+  //
+  // The options are EXACTLY what the model's table configures, and the model's
+  // own `thinking.default` is pre-selected. There is deliberately no synthetic
+  // "默认" row: the levels shown are the real choices the API accepts. The
+  // disable/enable ladder is only a FALLBACK for a model whose table carries no
+  // levels at all.
+  std::vector<std::string> levels = st_.model_thinking_levels;
+  if (levels.empty() && !st_.model.empty()) {
+    levels.push_back("disable");
+    levels.push_back("enable");
+  }
+  if (!levels.empty()) {
+    // Selection: the session's own choice if it is a valid level, otherwise the
+    // model's configured default, otherwise the first level. Never "nothing
+    // selected", because an empty value means "send no hint" and the control
+    // would then misrepresent that as one of the listed options.
+    int sel = 0;
+    std::string want = st_.thinking.empty() ? st_.model_thinking_default
+                                            : st_.thinking;
+    for (size_t i = 0; i < levels.size(); ++i) {
+      if (levels[i] == want) { sel = static_cast<int>(i); break; }
     }
+    const std::string cur = levels[static_cast<size_t>(sel)];
+    // The button AND its list live in one wrapper, so the list opens right above
+    // the BUTTON. Rendering it as a child of the composer anchored to the
+    // composer's edge put it over the input box, a column away from the control
+    // that opened it.
+    H thwrap = el("div", "think-wrap");
+    thwrap.key("think-wrap");
+    H th = comp::icon_text_button(thinking_icon(cur), thinking_label(cur),
+                                  [this](const std::string&) {
+      update([&](AppState& s) { s.thinking_menu_open = !s.thinking_menu_open; });
+    }, "ghost");
+    th.key("thinking-btn");
+    th.cls("thinking-btn");
+    th.attr("title", tr("思考档位：") + thinking_label(cur));
+    thwrap.add(th);
+    if (st_.thinking_menu_open) {
+      H dismiss = el("div", "skill-menu-backdrop");
+      dismiss.on(EventKind::kClick, [this](const std::string&) {
+        update([&](AppState& s) { s.thinking_menu_open = false; });
+      });
+      thwrap.add(dismiss);
+      H pop = el("div", "think-menu");
+      pop.key("think-menu");
+      for (size_t i = 0; i < levels.size(); ++i) {
+        std::string lv = levels[i];
+        const bool on = static_cast<int>(i) == sel;
+        H it = el("div", on ? "think-menu-item active" : "think-menu-item");
+        it.on(EventKind::kClick, [this, lv](const std::string&) {
+          std::string sid = active_sid();
+          update([&](AppState& s) {
+            s.thinking = lv;
+            s.thinking_menu_open = false;
+          });
+          if (!sid.empty()) {
+            call_async("session.setThinking", Json{{"sid", sid}, {"thinking", lv}});
+          }
+        });
+        it.add(el("i", std::string("fa fa-") + thinking_icon(lv)));
+        it.add(el("span", "think-menu-label").text(thinking_label(lv)));
+        if (on) it.add(el("i", "fa fa-check"));
+        pop.add(it);
+      }
+      thwrap.add(pop);
+    }
+    right_tools.add(thwrap);
   }
   // 挂起 sits right next to 发送. Both read as a WORD when there is room and as
   // an icon when there is not. Their height never changes, so crossing the
   // threshold cannot reflow the row.
   //
-  // NOTE: 挂起 no longer flips optimistically. The backend owns the state (the
-  // loop may already be parked), so the button waits for its reply and only then
-  // changes label - a button that says "paused" before anything paused is a lie.
-  H suspend = comp::icon_text_button(
-      st_.suspended ? "play" : "pause", st_.suspended ? tr("恢复") : tr("挂起"),
-      [this](const std::string&) {
-    bool next = !st_.suspended;
-    std::string sid = active_sid();
-    if (sid.empty()) {
-      update([&](AppState& s) { s.suspended = next; });
-      return;
-    }
-    call_async(next ? "session.suspend" : "session.resume", Json{{"sid", sid}},
-               [this, next, sid](const BackendResult& r) {
-      if (!r.ok) {
-        toast(tr("操作失败：") + r.message);
-        return;
+  // The button only EXISTS while it can do something: a turn is in flight, or a
+  // turn is parked. An always-visible 挂起 on an idle session was the "功能疑似
+  // 没做全" - pressing it set a flag no running loop would ever read, and the
+  // button then sat there claiming the task was suspended.
+  //
+  // 挂起 must NOT flip on click. The backend owns the state: the loop may be
+  // mid-tool and only park when the current call returns, so an optimistic flip
+  // showed "恢复" while the turn was still running - and a second click then
+  // "resumed" something that had never stopped. The label is derived from the
+  // backend's reported loop state; the click only SENDS the request.
+  {
+    bool is_suspended = st_.suspended;
+    if (st_.turn_running || is_suspended) {
+      H suspend = comp::icon_text_button(
+          is_suspended ? "play" : "pause",
+          is_suspended ? tr("恢复") : tr("挂起"),
+          [this](const std::string&) {
+        std::string sid = active_sid();
+        if (sid.empty()) return;
+        bool want_suspend = !st_.suspended;
+        // Disable while the request is in flight: a double click otherwise sent
+        // suspend+resume and left the UI out of step with the loop.
+        update([&](AppState& s) { s.suspend_pending = true; });
+        call_async(want_suspend ? "session.suspend" : "session.resume",
+                   Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+          update([&](AppState& s) { s.suspend_pending = false; });
+          if (!r.ok) {
+            toast(tr("操作失败：") + r.message);
+            return;
+          }
+          // State comes from the backend, never from the click.
+          refresh_loop_state(sid);
+        });
+      }, "ghost");
+      suspend.key("suspend-btn").cls("text-wide");
+      if (st_.suspend_pending) {
+        suspend.cls("disabled");
+        suspend.attr("title", tr("正在等待后端确认…"));
+      } else if (is_suspended) {
+        suspend.attr("title", tr("当前已挂起；点击恢复（从停下那一步继续）"));
+      } else {
+        suspend.attr("title", tr("挂起：当前工具返回后停下，之后可以继续"));
       }
-      update([&](AppState& s) { s.suspended = next; });
-      // Re-read the loop state: suspend is a REQUEST, so the authoritative
-      // answer ("suspended" vs still winding down) comes from the backend.
-      refresh_loop_state(sid);
-    });
-  }, "ghost");
-  suspend.key("suspend-btn").cls("text-wide");
-  // Wake cancellation: a scheduled wake (a retry after a failure) would otherwise
-  // fire while the user is looking at a parked task. Only meaningful while the
-  // task is suspended, so it appears in that state only.
-  if (st_.suspended) {
-    H cancel_wake = comp::icon_text_button(
-        "bell-slash", tr("取消唤醒"), [this](const std::string&) {
+      // Wake cancellation: a scheduled wake (a retry after a failure) would
+      // otherwise fire while the user is looking at a parked task. It appears only
+      // while a wake is actually pending - not as a manual "schedule a wake" button,
+      // which is the model's job (session.schedule), not a user action.
+      if (is_suspended && !st_.pending_wakes.empty()) {
+        H cancel_wake = comp::icon_text_button(
+            "bell-slash", tr("取消唤醒"), [this](const std::string&) {
+          std::string sid = active_sid();
+          if (sid.empty()) return;
+          call_async("session.cancelWake", Json{{"sid", sid}},
+                     [this](const BackendResult& r) {
+            toast(r.ok ? tr("已取消唤醒") : (tr("取消失败：") + r.message));
+          });
+        }, "ghost");
+        cancel_wake.key("cancel-wake-btn");
+        right_tools.add(cancel_wake);
+      }
+      right_tools.add(suspend);
+    }
+  }
+  // 发送 / 中止: the same button. While the turn runs it stops it, which is what
+  // the user expects from the primary action - a "send" button that does nothing
+  // during a turn hides the only way out of a runaway one.
+  //
+  // Stopping uses session.suspend: the loop parks when the CURRENT tool returns
+  // (it cannot cancel a tool mid-flight) and keeps the transcript, so the turn is
+  // resumable. That is exactly "中止本轮" - there is no separate hard-kill that
+  // would be any faster.
+  if (st_.turn_running) {
+    H stop = comp::icon_text_button("stop", tr("中止"), [this](const std::string&) {
       std::string sid = active_sid();
       if (sid.empty()) return;
-      call_async("session.cancelWake", Json{{"sid", sid}},
-                 [this](const BackendResult& r) {
-        toast(r.ok ? tr("已取消唤醒") : (tr("取消失败：") + r.message));
+      update([&](AppState& s) { s.suspend_pending = true; });
+      call_async("session.suspend", Json{{"sid", sid}},
+                 [this, sid](const BackendResult& r) {
+        update([&](AppState& s) { s.suspend_pending = false; });
+        if (!r.ok) toast(tr("取消失败：") + r.message);
+        refresh_loop_state(sid);
       });
-    }, "ghost");
-    cancel_wake.key("cancel-wake-btn");
-    right_tools.add(cancel_wake);
+    }, "danger");
+    stop.key("stop-btn").cls("text-wide");
+    stop.attr("title", tr("中止本轮（已产生的输出会保留，可继续）"));
+    right_tools.add(stop);
+  } else {
+    // Sending needs a usable model: a session whose remembered model was disabled
+    // (or whose provider was deleted) cannot send, and a click that only produces
+    // a backend error is worse than a visibly disabled button.
+    bool can_send = !backend_ || (!st_.model.empty() && st_.model_available);
+    H send = comp::icon_text_button("paper-plane", tr("发送"),
+                                    [this](const std::string&) { send_message(); },
+                                    "primary");
+    send.key("send-btn").cls("text-wide");
+    if (!can_send) {
+      send.cls("disabled");
+      send.attr("title", st_.model.empty() ? tr("请先选择模型")
+                                           : tr("该模型已不可用，请重新选择"));
+    }
+    right_tools.add(send);
   }
-  right_tools.add(suspend);
-  // Sending needs a usable model: a session whose remembered model was disabled
-  // (or whose provider was deleted) cannot send, and a click that only produces
-  // a backend error is worse than a visibly disabled button.
-  bool can_send = !backend_ || (!st_.model.empty() && st_.model_available);
-  H send = comp::icon_text_button("paper-plane", tr("发送"),
-                                  [this](const std::string&) { send_message(); },
-                                  "primary");
-  send.key("send-btn").cls("text-wide");
-  if (!can_send) {
-    send.cls("disabled");
-    send.attr("title", st_.model.empty() ? tr("请先选择模型")
-                                         : tr("该模型已不可用，请重新选择"));
-  }
-  right_tools.add(send);
   tools.add(right_tools);
   comp_box.add(tools);
 
@@ -4405,6 +5796,7 @@ VNodePtr UiApp::build_session() {
     comp_box.add(back);
     comp_box.add(build_model_picker("composer", st_.model));
   }
+  }  // end: not showing an ask panel
   center.add(comp_box);
 
   mid.add(center);
@@ -4595,11 +5987,49 @@ VNodePtr UiApp::build_side_panel() {
         st_.active_tab != "home") {
       load_session_usage(st_.active_tab);
     }
+    // Context: percentage AND absolute numbers. "42%" of a 1M window and 42% of
+    // a 32k window are different situations, and only the absolute numbers
+    // answer "is there room for one more file read".
     if (st_.context_pct < 0) {
       body.add(comp::key_value(tr("上下文水位"), "—"));
     } else {
-      body.add(comp::key_value(tr("上下文水位"), itos(st_.context_pct) + "%"));
+      std::string level = itos(st_.context_pct) + "%";
+      if (st_.context_window > 0) {
+        level += "  (" + fmt_tokens(st_.context_tokens) + " / " +
+                 fmt_tokens(st_.context_window) + ")";
+      }
+      body.add(comp::key_value(tr("上下文水位"), level));
       body.add(comp::progress(st_.context_pct));
+      // No "压缩上下文" button: it only armed a flag that the NEXT turn consumed,
+      // so pressing it at 90% changed nothing on screen and looked broken. The
+      // water-level threshold in settings does the same thing automatically.
+    }
+    // Cache: the single biggest lever on cost. -1 means the provider never
+    // reported it, which is not the same as "no caching".
+    if (!st_.cache_reported) {
+      body.add(comp::key_value(tr("缓存命中"), "—"));
+    } else {
+      std::string hit = itos(st_.cache_hit_pct) + "%";
+      if (st_.session_cache_tokens > 0) {
+        hit += "  (" + fmt_tokens(st_.session_cache_tokens) + tr(" 命中") + ")";
+      }
+      body.add(comp::key_value(tr("缓存命中"), hit));
+    }
+    // This turn vs this session: two different questions ("what did that answer
+    // cost" vs "what has this conversation cost").
+    if (st_.turn_in >= 0) {
+      std::string t = fmt_tokens(st_.turn_in) + " / " + fmt_tokens(st_.turn_out);
+      if (st_.turn_cost_kind == "money" && st_.turn_cost_micros >= 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "  ¥%.4f",
+                      static_cast<double>(st_.turn_cost_micros) / 1000000.0);
+        t += buf;
+      } else if (st_.turn_cost_kind == "quota") {
+        t += "  " + tr("套餐内");
+      } else if (!st_.turn_cost_kind.empty() && st_.turn_cost_kind != "unknown") {
+        t += "  " + tr("未知");
+      }
+      body.add(comp::key_value(tr("本轮"), t));
     }
     body.add(comp::key_value(tr("本会话成本"),
                              st_.session_cost.empty() ? tr("—") : st_.session_cost));
@@ -4609,6 +6039,81 @@ VNodePtr UiApp::build_side_panel() {
                                    fmt_tokens(st_.session_tokens_out)));
     } else {
       body.add(comp::key_value(tr("累计 tokens"), "—"));
+    }
+    if (st_.usage_calls > 0) {
+      body.add(comp::key_value(tr("调用次数"), itos(static_cast<int>(st_.usage_calls))));
+    }
+  } else if (kind == "subagent") {
+    // One subagent's full transcript, in the SIDEBAR (see open_subagent_tab).
+    // The id comes from THIS panel, so two agents can be open side by side.
+    std::string sub_id = panel ? panel->subagent_id : std::string();
+    AppState::SubagentDetail* det = nullptr;
+    {
+      std::map<std::string, AppState::SubagentDetail>::iterator it =
+          st_.subagent_details.find(sub_id);
+      if (it != st_.subagent_details.end()) det = &it->second;
+    }
+    if (!det || !det->loaded) {
+      body.add(comp::empty_state(tr("读取子代理记录…"), "", nullptr));
+    } else {
+      const AppState::SubagentRow& row = det->row;
+      H hd = el("div", "sap-head");
+      hd.add(el("span", row.status == "running" ? "sa-status running" : "sa-status done")
+                 .text(row.status == "running" ? "●" : "✓"));
+      hd.add(el("span", "sa-kind").text(row.kind));
+      if (!row.model.empty()) hd.add(comp::badge(row.model));
+      hd.add(el("span", "grow"));
+      if (row.started_at > 0 && row.ended_at > 0) {
+        hd.add(el("span", "dim").text(session_duration(row.started_at, row.ended_at)));
+      }
+      hd.add(comp::icon_button("rotate", tr("刷新"), [this, sub_id](const std::string&) {
+        load_subagent_detail(sub_id);
+      }));
+      body.add(hd);
+      if (!row.task.empty()) {
+        H t = el("div", "sap-task");
+        t.add(el("span", "sap-label").text(tr("任务")));
+        t.add(el("div", "sap-task-text").text(row.task));
+        body.add(t);
+      }
+      if (!row.summary.empty()) {
+        H sm = el("div", "sap-summary");
+        sm.add(el("span", "sap-label").text(tr("摘要")));
+        sm.add(el("div", "sap-summary-text").text(row.summary));
+        body.add(sm);
+      }
+      if (row.transcript.is_array() && row.transcript.size() > 0) {
+        body.add(el("div", "sap-label").text(
+            tr("对话记录") + " · " + itos(static_cast<int>(row.transcript.size()))));
+        for (size_t k = 0; k < row.transcript.size(); ++k) {
+          const Json& e = row.transcript[k];
+          std::string role = jsonutil::get<std::string>(e, "role", "");
+          std::string text = jsonutil::get<std::string>(e, "content",
+                              jsonutil::get<std::string>(e, "text", ""));
+          // The transcript is shown WHOLE here: this panel exists precisely
+          // because the card could not show it.
+          if (text.empty() && e.contains("toolCalls") && e["toolCalls"].is_array()) {
+            std::string names;
+            for (size_t c = 0; c < e["toolCalls"].size(); ++c) {
+              std::string nm = jsonutil::get<std::string>(e["toolCalls"][c], "name", "");
+              if (nm.empty()) continue;
+              if (!names.empty()) names += ", ";
+              names += nm;
+            }
+            if (!names.empty()) {
+              text = tr("工具调用") + ": " + names;
+              if (role.empty()) role = "tool";
+            }
+          }
+          if (text.empty()) continue;
+          H row_h = el("div", "sap-msg " + (role.empty() ? std::string("note") : role));
+          row_h.add(el("div", "sap-role").text(role));
+          row_h.add(el("pre", "sap-body").text(text));
+          body.add(row_h);
+        }
+      } else {
+        body.add(comp::empty_state(tr("这个子代理还没有对话记录。"), "", nullptr));
+      }
     }
   } else if (kind == "subagents") {
     if (st_.subagents.empty()) {
@@ -4636,53 +6141,103 @@ VNodePtr UiApp::build_side_panel() {
             rel_time(a.ended_at)));
       }
       card.add(head);
+      // The card is CLICKABLE and opens the transcript as its own tab. The old
+      // design only folded a few lines inside the sidebar, so a finished
+      // subagent's history was effectively unreachable - and a transcript is far
+      // too long for a card anyway.
+      {
+        std::string id = a.id;
+        std::string title = a.kind.empty() ? a.id : (a.kind + " · " + a.id);
+        card.on(EventKind::kClick, [this, id, title](const std::string&) {
+          open_subagent_tab(id, title);
+        });
+        card.attr("title", tr("点击打开完整记录"));
+        card.cls("clickable");
+      }
       card.add(el("div", "sa-task").text(a.task));
+      // Live progress: what the subagent is doing RIGHT NOW. A running subagent
+      // used to show only "running" plus a duration, so the panel answered
+      // "something is happening" but not "what" - the report was "只能在侧边栏
+      // 看到在运行，不能看跑的具体内容".
+      if (a.status == "running" && !a.live_text.empty()) {
+        H live = el("div", "sa-live");
+        live.add(el("span", "sa-live-label").text(tr("正在做")));
+        live.add(el("div", "sa-live-text").text(a.live_text));
+        card.add(live);
+      }
       // Transcript: the subagent's own conversation, folded. It is kept out of
       // the main chat on purpose, but the user must be able to read it.
-      if (!a.transcript.is_array() || a.transcript.is_array()) {
-        if (a.transcript.is_array() && a.transcript.size() > 0) {
-          H trow = el("div", "sa-history-toggle");
-          std::string id = a.id;
-          trow.on(EventKind::kClick, [this, id](const std::string&) {
-            update([&](AppState& s) {
-              for (size_t k = 0; k < s.subagents.size(); ++k) {
-                if (s.subagents[k].id == id) s.subagents[k].open = !s.subagents[k].open;
-              }
-            });
-          });
-          trow.add(el("span", "sa-caret").text(a.open ? "\u25be" : "\u25b8"));
-          trow.add(el("span").text(tr("对话记录") + " · " +
-                                   itos(static_cast<int>(a.transcript.size()))));
-          card.add(trow);
-          if (a.open) {
-            H log = el("div", "sa-history");
-            for (size_t k = 0; k < a.transcript.size(); ++k) {
-              const Json& e = a.transcript[k];
-              std::string role = jsonutil::get<std::string>(e, "role", "");
-              std::string text = jsonutil::get<std::string>(e, "content",
-                                 jsonutil::get<std::string>(e, "text", ""));
-              if (text.empty()) {
-                text = jsonutil::get<std::string>(e, "summary", "");
-              }
-              if (role.empty() && text.empty()) continue;
-              H line = el("div", "sa-hline " + (role.empty() ? std::string("note") : role));
-              line.add(el("span", "sa-hrole").text(role));
-              line.add(el("span", "sa-hbody").text(text));
-              log.add(line);
+      if (a.transcript.is_array() && a.transcript.size() > 0) {
+        H trow = el("div", "sa-history-toggle");
+        std::string id = a.id;
+        trow.on(EventKind::kClick, [this, id](const std::string&) {
+          update([&](AppState& s) {
+            for (size_t k = 0; k < s.subagents.size(); ++k) {
+              if (s.subagents[k].id == id) s.subagents[k].open = !s.subagents[k].open;
             }
-            card.add(log);
+          });
+        });
+        trow.add(el("span", "sa-caret").text(a.open ? "\u25be" : "\u25b8"));
+        trow.add(el("span").text(
+            tr("对话记录") + " · " + itos(static_cast<int>(a.transcript.size()))));
+        card.add(trow);
+        if (a.open) {
+          H log = el("div", "sa-history");
+          for (size_t k = 0; k < a.transcript.size(); ++k) {
+            const Json& e = a.transcript[k];
+            std::string role = jsonutil::get<std::string>(e, "role", "");
+            std::string text = jsonutil::get<std::string>(e, "content",
+                                jsonutil::get<std::string>(e, "text", ""));
+            if (text.empty()) {
+              text = jsonutil::get<std::string>(e, "summary", "");
+            }
+            // A tool call inside the transcript: show WHAT was called. Without
+            // this the log skipped every tool row and read like a conversation
+            // with the actual work removed.
+            if (text.empty() && e.contains("toolCalls") && e["toolCalls"].is_array()) {
+              std::string names;
+              for (size_t c = 0; c < e["toolCalls"].size(); ++c) {
+                std::string nm = jsonutil::get<std::string>(e["toolCalls"][c], "name", "");
+                if (nm.empty()) continue;
+                if (!names.empty()) names += ", ";
+                names += nm;
+              }
+              if (!names.empty()) {
+                text = tr("工具调用") + ": " + names;
+                if (role.empty()) role = "tool";
+              }
+            }
+            if (role.empty() && text.empty()) continue;
+            H line = el("div", "sa-hline " + (role.empty() ? std::string("note") : role));
+            line.add(el("span", "sa-hrole").text(role));
+            line.add(el("span", "sa-hbody").text(text));
+            log.add(line);
           }
-        } else if (!a.summary.empty()) {
-          card.add(el("div", "sa-summary").text(a.summary));
+          card.add(log);
         }
+      } else if (!a.summary.empty()) {
+        card.add(el("div", "sa-summary").text(a.summary));
+      }
+      // Steer: a real text field, not a button that sends "继续". The button
+      // looked like it opened something and then silently sent a fixed message -
+      // "引导按钮也不知道在干什么". Typing the guidance is the whole point.
+      {
+        H steer = el("div", "sa-steer");
+        H input = comp::text_input(
+            a.steer_draft, tr("给这个子代理的引导…"),
+            [this, i](const std::string& v) {
+          if (i < st_.subagents.size()) st_.subagents[i].steer_draft = v;
+        },
+            [this, i](const std::string&) { send_subagent_steer(i); });
+        input.key("sa-steer-input:" + a.id);
+        steer.add(input);
+        steer.add(comp::icon_button("paper-plane", tr("发送引导"),
+                                    [this, i](const std::string&) {
+          send_subagent_steer(i);
+        }));
+        card.add(steer);
       }
       H acts = el("div", "sa-actions");
-      acts.add(comp::button(tr("引导"), [this, i](const std::string&) {
-        if (i >= st_.subagents.size()) return;
-        std::string id = st_.subagents[i].id;
-        call_async("subagent.steer", Json{{"id", id}, {"text", "继续"}},
-                   [this](const BackendResult&) { toast(tr("已发送引导")); });
-      }, "ghost"));
       acts.add(comp::button(tr("取消"), [this, i](const std::string&) {
         if (i >= st_.subagents.size()) return;
         std::string id = st_.subagents[i].id;
@@ -4875,7 +6430,6 @@ VNodePtr UiApp::build_side_panel() {
         body.add(views);
       }
 
-      const bool view_changes = panel->git_view != "log" && panel->git_view != "branches";
       if (panel->git_view == "log") {
         if (!panel->git_log_loaded) {
           body.add(comp::empty_state(tr("读取提交历史…"), "", nullptr));
@@ -5586,8 +7140,9 @@ struct SettingsItem {
 const SettingsItem kSettingsNav[] = {
     {"通用", "general", "常规"},
     {"通用", "appearance", "外观"},
-    {"通用", "browser", "浏览器控制"},
-    {"通用", "computer", "电脑控制"},
+    // 浏览器控制: removed. Nothing drives a browser yet (no driver, no tools that
+    // use one), so every switch on that page was inert.
+    {"通用", "computer", "截图"},
     {"模型", "providers", "供应商"},
     {"模型", "session_defaults", "会话默认"},
     {"模型", "model_prefs", "模型偏好"},
@@ -5704,10 +7259,10 @@ void UiApp::apply_settings(const Json& values) {
       i18n::set_lang(i18n::lang_from_setting(ui_lang));
     }
   }
-  st_.history_recent =
-      std::to_string(sv_int(st_.settings_values, "history.recentTurns", 20));
-  st_.history_budget =
-      std::to_string(sv_int(st_.settings_values, "history.tokenBudget", 8000));
+  // Compaction: only the water-level threshold is a knob (the keep-turns count
+  // and the token budget were misleading controls - see the settings page).
+  st_.history_compress_at =
+      std::to_string(sv_int(st_.settings_values, "history.compressAtPct", 80));
   // file black/white lists: stored as arrays; join for the textarea draft
   st_.file_blacklist_text = join_lines(st_.settings_values, "permissions.files.blacklist");
   st_.file_whitelist_text = join_lines(st_.settings_values, "permissions.files.whitelist");
@@ -5838,15 +7393,13 @@ void UiApp::run_command(const AppState::CommandRow& cmd) {
       if (open && !sid.empty()) {
         call_async("plan.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
           if (!r.ok) return;
-          std::vector<std::string> steps;
           const Json& tree = r.data.contains("plan") ? r.data["plan"] : r.data;
-          if (tree.is_array()) {
-            for (size_t i = 0; i < tree.size(); ++i) {
-              std::string t = jsonutil::get<std::string>(tree[i], "title", "");
-              if (!t.empty()) steps.push_back(t);
-            }
-          }
-          update([&](AppState& s) { s.plan_steps = steps; });
+          std::string goal;
+          std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
+          update([&](AppState& s) {
+            s.plan_steps = steps;
+            s.plan_goal = goal;
+          });
         });
       }
       return;
@@ -5899,6 +7452,33 @@ void UiApp::turn_action(size_t message_index, const std::string& action) {
   const std::string turn_id = st_.messages[message_index].turn_id;
   const std::string sid = st_.active_tab;
   if (sid.empty() || sid == "home") return;
+  if (action == "edit") {
+    // 编辑并重发 the last user message: put its text back in the composer and
+    // ARM the turn. Nothing is trimmed here - the transcript changes only when
+    // the edited text is actually sent, so clicking 编辑 and then changing your
+    // mind leaves the conversation intact. The answer after it goes too (a
+    // question without its answer is not a turn), but the FILE edits it made
+    // stay: "let me rephrase" is not "undo my work".
+    if (st_.turn_running || st_.suspended) {
+      toast(tr("本轮还在进行，等它结束再编辑"));
+      return;
+    }
+    const std::string text = st_.messages[message_index].text;
+    update([&](AppState& s) {
+      s.session_input = text;
+      s.edit_turn_id = turn_id;
+    });
+    // The textarea's value only follows state when it is NOT focused (that rule is
+    // what keeps the caret still while typing), so write it through directly.
+    {
+      VNodePtr ta = find_by_key(tree_, "session-input");
+      if (ta && ta->dom.valid()) {
+        dom_.set_attr(ta->dom, "value", text);
+        dom_.focus(ta->dom);
+      }
+    }
+    return;
+  }
   if (turn_id.empty()) {
     toast(tr("这一轮没有可用的轮次 id"));
     return;
@@ -5971,11 +7551,22 @@ void UiApp::refresh_loop_state(const std::string& sid) {
     if (!r.ok) return;
     std::string state = jsonutil::get<std::string>(r.data, "state", "idle");
     bool suspended = state == "suspended";
+    // A turn is "in flight" for anything except idle/turnDone - and NOT for
+    // "suspended": a parked turn is not running, so the primary button has to be
+    // 发送 again (sending it continues the parked task). Counting it as running
+    // showed 中止 for a task that had already stopped, next to a 恢复 that did
+    // nothing - "挂起功能疑似没做全".
+    bool running = state != "idle" && state != "turnDone" && !suspended;
     if (st_.active_tab != sid) {
-      views_.get_or_create(sid).suspended = suspended;
+      SessionView& v = views_.get_or_create(sid);
+      v.suspended = suspended;
+      v.turn_running = running;
       return;
     }
-    update([&](AppState& s) { s.suspended = suspended; });
+    update([&](AppState& s) {
+      s.suspended = suspended;
+      s.turn_running = running;
+    });
   });
 }
 
@@ -5993,11 +7584,38 @@ void UiApp::refresh_model_availability() {
              [this, sid](const BackendResult& r) {
     if (!r.ok) return;   // a failed check must not block sending
     std::vector<std::string> ids;
+    // The composer needs the model's CONFIGURED thinking levels, not a guess from
+    // its name. `thinking_levels_for()` is a hardcoded name whitelist (o1/claude/
+    // gemini/deepseek-r...), so a custom or newly-released model produced an empty
+    // list and the 思考强度 control never rendered - "没做思考强度按钮". The model
+    // table carries what the user (or the API) actually configured.
+    std::vector<std::string> levels;
+    std::string level_default;
+    std::string provider_of_model;
     if (r.data.contains("models") && r.data["models"].is_array()) {
       const Json& arr = r.data["models"];
+      std::string cur_model = sid == st_.active_tab ? st_.model
+                                                    : views_.get_or_create(sid).model;
       for (size_t i = 0; i < arr.size(); ++i) {
         std::string id = jsonutil::get<std::string>(arr[i], "id", "");
         if (!id.empty()) ids.push_back(id);
+        if (id != cur_model) continue;
+        provider_of_model =
+            jsonutil::get<std::string>(arr[i], "providerName",
+                                       jsonutil::get<std::string>(arr[i], "providerId", ""));
+        if (arr[i].contains("thinking") && arr[i]["thinking"].is_object() &&
+            arr[i]["thinking"].contains("levels") &&
+            arr[i]["thinking"]["levels"].is_array()) {
+          const Json& lv = arr[i]["thinking"]["levels"];
+          for (size_t k = 0; k < lv.size(); ++k) {
+            if (lv[k].is_string()) levels.push_back(lv[k].get<std::string>());
+          }
+          // The model's own default drives the pre-selection, so the composer
+          // shows the level configured in the model settings instead of a
+          // meaningless "默认" row.
+          level_default =
+              jsonutil::get<std::string>(arr[i]["thinking"], "default", "");
+        }
       }
     }
     // The reply belongs to whatever session was active when it was asked. If the
@@ -6021,6 +7639,20 @@ void UiApp::refresh_model_availability() {
     update([&](AppState& s) {
       s.available_model_ids = ids;
       s.model_available = !gone;
+      s.model_thinking_levels = levels;
+      s.model_thinking_default = level_default;
+      s.model_provider_label = provider_of_model;
+      // Pre-select the model's configured default when this session has not
+      // chosen a level yet. Setting it in STATE (not just the <select>) is what
+      // makes the choice visible to send_message: the request carries the level
+      // shown in the control.
+      if (s.thinking.empty() && !level_default.empty()) {
+        bool known = false;
+        for (size_t i = 0; i < levels.size(); ++i) {
+          if (levels[i] == level_default) known = true;
+        }
+        if (known) s.thinking = level_default;
+      }
       if (gone) {
         // Clearing the name is the point: an empty box says "pick one", while a
         // dead name next to a disabled send button says nothing useful.
@@ -6810,19 +8442,30 @@ VNodePtr UiApp::build_settings() {
     }), tr("影响工具/skill 说明的双语选择")));
 
     body.add(comp::section_title(tr("压缩")));
-    // 自动压缩阈值：会话视图长度达到窗口的 N% 就开始压缩。给档位而不是让用户
-    // 填一个百分比，因为"多少算满"本来就是个经验值。
+    // 自动压缩阈值：上下文水位（上一次请求的 prompt tokens / 模型窗口）达到该
+    // 百分比就开始压缩较早的轮次。给档位而不是让用户填百分比，因为"多少算满"
+    // 本来就是个经验值。键名与后端一致：history.compressAtPct。
     body.add(comp::field(tr("自动压缩阈值"), comp::select(
         std::vector<std::string>{"60%", "70%", "80%", "90%", tr("关闭")},
         [&]() {
-          int n = sv_int(st_.settings_values, "history.compressPct", 80);
+          int n = sv_int(st_.settings_values, "history.compressAtPct", 80);
           return n <= 0 ? 4 : n <= 60 ? 0 : n <= 70 ? 1 : n <= 80 ? 2 : 3;
         }(),
         [this](const std::string& v) {
       int idx = std::atoi(v.c_str());
       const int vals[5] = {60, 70, 80, 90, 0};
-      set_setting("history.compressPct", vals[idx < 0 || idx > 4 ? 2 : idx]);
+      set_setting("history.compressAtPct", vals[idx < 0 || idx > 4 ? 2 : idx]);
     }), tr("上下文占用达到该比例时自动压缩较早的轮次")));
+    // This page used to carry three more knobs. Only the threshold above is a
+    // real control:
+    //   * "保留最近轮数" - the number of full turns kept when compaction runs is an
+    //     internal detail (a constant now); exposing it asked the user to tune
+    //     something they cannot observe.
+    //   * "立即压缩当前会话" - it only set a flag consumed by the NEXT turn, so
+    //     pressing it changed nothing visible and read as broken.
+    //   * "最近轮次" window / "token 硬上限" - removed earlier: both compacted on
+    //     every turn regardless of the water level.
+    // The water-level threshold is the one automatic trigger and the only knob.
 
     body.add(comp::section_title(tr("摘要")));
     // 摘要默认继承会话模型：只有在需要便宜模型时才有必要单独指定
@@ -6844,7 +8487,7 @@ VNodePtr UiApp::build_settings() {
         if (!r.ok) return;
         std::string path = jsonutil::get<std::string>(r.data, "path", "");
         if (path.empty()) return;
-        // mcp.import reads a directory of MCP packages; it is the bulk form of
+        // mcp_import reads a directory of MCP packages; it is the bulk form of
         // add_mcp and does not need the per-entry dialog.
         call_async("mcp.import", Json{{"dir", path}},
                    [this](const BackendResult& r2) {
@@ -6853,7 +8496,7 @@ VNodePtr UiApp::build_settings() {
             return;
           }
           int n = static_cast<int>(jsonutil::get_int(r2.data, "added", 0));
-          // mcp.import reports the whole registry rather than a count; say what
+          // mcp_import reports the whole registry rather than a count; say what
           // happened without inventing a number the backend did not send.
           if (n > 0) toast(tr("已导入 ") + itos(n) + tr(" 个 MCP"));
           else toast(tr("已导入"));
@@ -6917,7 +8560,16 @@ VNodePtr UiApp::build_settings() {
         toggle_mcp(name, !en);
       }));
       card.add(top);
-      card.add(el("div", "mcp-card-path").text(m.dir));
+      // A server entry shows its command/url - that is what identifies it. A
+      // bare directory is the older "folder import" shape and says so instead of
+      // pretending to be a server definition.
+      if (!m.server_command.empty() || !m.server_url.empty()) {
+        std::string line = !m.server_command.empty() ? m.server_command : m.server_url;
+        for (size_t k = 0; k < m.server_args.size(); ++k) line += " " + m.server_args[k];
+        card.add(el("div", "mcp-card-path").text(line));
+      } else if (!m.dir.empty()) {
+        card.add(el("div", "mcp-card-path").text(m.dir));
+      }
       if (!m.description.empty()) {
         card.add(el("div", "mcp-card-desc").text(m.description));
       }
@@ -6954,7 +8606,7 @@ VNodePtr UiApp::build_settings() {
         s.skill_creating = true;
       });
     }, "ghost"));
-    head.add(comp::button(tr("自动探测"), [this](const std::string&) { detect_mcp(); },
+    head.add(comp::button(tr("自动探测"), [this](const std::string&) { detect_skills(); },
                           "primary"));
     head.add(comp::button(tr("手动导入"), [this](const std::string&) {
       call_async("project.pickFolder", Json::object(), [this](const BackendResult& r) {
@@ -7516,43 +9168,87 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "permissions.network.verifyCert", true);
       set_setting("permissions.network.verifyCert", !cur);
     })));
-    // 代理：三态。以前只有"主机 + 端口"，于是"跟随系统"和"关闭"这两种最常见
-    // 的意图都表达不出来（留空到底是直连还是跟随系统？）。
+    // 代理：只有主机 + 端口，留空/0 就是直连。
+    //
+    // There used to be a three-way choice above these fields (跟随系统 / 自定义 /
+    // 关闭), but nothing ever read it: the network layer applies host+port
+    // unconditionally, so "关闭" still proxied and "跟随系统" did not follow
+    // anything. A control that lies is worse than no control - the two fields are
+    // the whole truth, so show them and nothing else.
     body.add(comp::section_title(tr("代理")));
     {
-      std::vector<comp::ChoiceOption> px;
+      body.add(comp::field(tr("代理主机"), comp::text_input(
+          sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
+          [this](const std::string& v) {
+        set_setting("permissions.network.proxyHost", v);
+      }), "如 127.0.0.1（留空 = 直连）"));
+      body.add(comp::field(tr("代理端口"), comp::text_input(
+          std::to_string(sv_int(st_.settings_values, "permissions.network.proxyPort", 0)), "",
+          [this](const std::string& v) {
+        int p = std::atoi(v.c_str());
+        set_setting("permissions.network.proxyPort", p > 0 ? p : 0);
+      }), tr("如 7890")));
+    }
+
+    // ---- 搜索（search_web 工具的后端）----
+    // 搜索没有通用协议：每家 API 的请求体与响应都不一样，所以这里只让用户选
+    // 一家并填 key/endpoint。没配置时工具会返回"去设置里配"，而不是静默失败。
+    body.add(comp::section_title(tr("搜索")));
+    {
+      std::vector<comp::ChoiceOption> sp;
       comp::ChoiceOption o;
-      o.value = "system";
-      o.icon = "gear";
-      o.title = tr("跟随系统");
-      o.desc = tr("读取系统代理设置");
-      px.push_back(o);
-      o.value = "custom";
-      o.icon = "server";
-      o.title = tr("自定义");
-      o.desc = tr("手动填写主机与端口");
-      px.push_back(o);
-      o.value = "off";
-      o.icon = "plug";
+      o.value = "";
+      o.icon = "ban";
       o.title = tr("关闭");
-      o.desc = tr("直连，不使用代理");
-      px.push_back(o);
-      std::string mode = sv_str(st_.settings_values, "permissions.network.proxyMode", "system");
-      body.add(comp::choice_list(px, mode, [this](const std::string& v) {
-        set_setting("permissions.network.proxyMode", v);
+      o.desc = tr("search_web 返回\"未配置\"");
+      sp.push_back(o);
+      o.value = "tavily";
+      o.icon = "magnifying-glass";
+      o.title = "Tavily";
+      o.desc = tr("需要 API key");
+      sp.push_back(o);
+      o.value = "brave";
+      o.icon = "magnifying-glass";
+      o.title = "Brave Search";
+      o.desc = tr("需要 API key");
+      sp.push_back(o);
+      o.value = "searxng";
+      o.icon = "server";
+      o.title = "SearXNG";
+      o.desc = tr("自建实例，需要 endpoint");
+      sp.push_back(o);
+      o.value = "custom";
+      o.icon = "plug";
+      o.title = tr("自定义");
+      o.desc = tr("任意接受 {query,count} 的接口");
+      sp.push_back(o);
+      std::string provider = sv_str(st_.settings_values, "search.provider", "");
+      body.add(comp::choice_list(sp, provider, [this](const std::string& v) {
+        set_setting("search.provider", v);
       }));
-      if (mode == "custom") {
-        body.add(comp::field(tr("代理主机"), comp::text_input(
-            sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
+      if (!provider.empty()) {
+        if (provider == "searxng" || provider == "custom") {
+          body.add(comp::field(tr("接口地址"), comp::text_input(
+              sv_str(st_.settings_values, "search.endpoint", ""),
+              provider == "searxng" ? "https://searx.example.org/search"
+                                    : "https://example.com/search",
+              [this](const std::string& v) { set_setting("search.endpoint", v); }),
+              tr("完整 URL（必填）")));
+        }
+        if (provider != "searxng" && provider != "custom") {
+          body.add(comp::field("API key", comp::text_input(
+              sv_str(st_.settings_values, "search.apiKey", ""), "…",
+              [this](const std::string& v) { set_setting("search.apiKey", v); }),
+              tr("保存在本地配置文件")));
+        }
+        body.add(comp::field(tr("返回条数"), comp::text_input(
+            std::to_string(sv_int(st_.settings_values, "search.maxResults", 5)), "5",
             [this](const std::string& v) {
-          set_setting("permissions.network.proxyHost", v);
-        }), "如 127.0.0.1"));
-        body.add(comp::field(tr("代理端口"), comp::text_input(
-            std::to_string(sv_int(st_.settings_values, "permissions.network.proxyPort", 0)), "",
-            [this](const std::string& v) {
-          int p = std::atoi(v.c_str());
-          set_setting("permissions.network.proxyPort", p > 0 ? p : 0);
-        }), "如 7890"));
+          int n = std::atoi(v.c_str());
+          if (n < 1) n = 1;
+          if (n > 20) n = 20;
+          set_setting("search.maxResults", n);
+        }), "1-20"));
       }
     }
   } else if (sec == "terminal") {
@@ -7644,7 +9340,8 @@ VNodePtr UiApp::build_settings() {
     body.add(fsave);
     if (!st_.active_pid.empty()) {
       bool ignore = sv_bool(st_.settings_values, "settings.ignoreGlobal", false);
-      body.add(comp::field(tr("忽略全局设置"), comp::toggle(ignore, "", [this](const std::string&) {
+      body.add(comp::field(tr("忽略全局设置"), comp::toggle(ignore, "",
+          [this](const std::string&) {
         bool cur = sv_bool(st_.settings_values, "settings.ignoreGlobal", false);
         std::string pid = st_.active_pid;
         update([&](AppState& s) {
@@ -7699,7 +9396,12 @@ VNodePtr UiApp::build_settings() {
     body.add(cadd);
   } else if (sec == "shortcuts") {
     body.add(comp::section_title(tr("快捷键")));
-    body.add(comp::hint(tr("桌面端接入后生效")));
+    // These bindings are live now (see the global-key handler in render()):
+    // 关闭标签页 / 新建标签页 are matched against the document keydown, and
+    // 发送消息 / 换行 drive the composer's Enter behaviour. They used to be four
+    // text fields nothing read back.
+    body.add(comp::hint(tr(
+        "关闭/新建标签页在桌面端与浏览器端均生效；发送/换行由输入框的 Enter 行为决定")));
     const char* keys[][2] = {
         {"发送消息", "Enter"},    {"换行", "Shift+Enter"},
         {"关闭标签页", "Ctrl+W"}, {"新建标签页", "Ctrl+T"},
@@ -7715,58 +9417,18 @@ VNodePtr UiApp::build_settings() {
       }));
       body.add(row);
     }
-  } else if (sec == "browser") {
-    body.add(comp::section_title(tr("浏览器控制")));
-    body.add(comp::field(tr("启用浏览器控制"), comp::toggle(
-        sv_bool(st_.settings_values, "browser.enabled", true), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "browser.enabled", true);
-      set_setting("browser.enabled", !cur);
-    })));
-    // 驱动路径：给一个"选文件"按钮。手打一个可执行文件路径基本不可能打对，
-    // 而且这里要的是文件，用目录选择框也选不中。
-    {
-      H drv = el("div", "model-field");
-      drv.add(comp::text_input(sv_str(st_.settings_values, "browser.driver", ""),
-                               tr("自动（内置驱动）"),
-                               [this](const std::string& v) {
-        set_setting("browser.driver", v);
-      }));
-      drv.add(comp::icon_button("folder-open", tr("选择文件"), [this](const std::string&) {
-        pick_file_into("browser.driver", tr("可执行文件"),
-                       "*.exe;*.cmd;*.bat;*.ps1;*");
-      }));
-      body.add(comp::field(tr("驱动路径"), drv, tr("空 = 自动探测内置驱动")));
-    }
-    body.add(comp::field(tr("允许联网"), comp::toggle(
-        sv_bool(st_.settings_values, "browser.permissions.net", true), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "browser.permissions.net", true);
-      set_setting("browser.permissions.net", !cur);
-    })));
-    body.add(comp::field(tr("允许操作证书"), comp::toggle(
-        sv_bool(st_.settings_values, "browser.permissions.certs", false), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "browser.permissions.certs", false);
-      set_setting("browser.permissions.certs", !cur);
-    })));
-    // NOTE: "加载 skill 说明" was removed. Loading a skill is something the MODEL
-    // decides when it needs it; a button that pushes a skill into context is not
-    // a user-facing action.
   } else if (sec == "computer") {
-    body.add(comp::section_title(tr("电脑控制")));
-    body.add(comp::field(tr("启用电脑控制"), comp::toggle(
-        sv_bool(st_.settings_values, "computer.enabled", false), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "computer.enabled", false);
-      set_setting("computer.enabled", !cur);
-    })));
+    // 截图 only. There is no "computer control" (no mouse/keyboard tools yet), and
+    // the second toggle here ("允许截图") wrote a key nothing ever read - two
+    // switches for one feature, one of them inert. The one that IS read
+    // (`computer.enabled`) gates the screenshot tool, so that is the only row.
+    body.add(comp::section_title(tr("截图")));
     body.add(comp::field(tr("允许截图"), comp::toggle(
-        sv_bool(st_.settings_values, "computer.screenshot", false), "",
+        sv_bool(st_.settings_values, "computer.enabled", true), "",
         [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "computer.screenshot", false);
-      set_setting("computer.screenshot", !cur);
-    })));
+      bool cur = sv_bool(st_.settings_values, "computer.enabled", true);
+      set_setting("computer.enabled", !cur);
+    }), tr("关闭后模型的 screenshot 工具会被拒绝")));
   } else if (sec == "about") {
     body.add(comp::section_title(tr("关于")));
     body.add(comp::key_value(tr("版本"), st_.about_version));
@@ -7830,34 +9492,25 @@ VNodePtr UiApp::build_settings() {
 // ===========================================================================
 VNodePtr UiApp::build_overlays() {
   H layer = el("div", "overlay-layer");
-  if (st_.ask_modal) {
+  // The ASK panel is NOT an overlay: it replaces the composer area (see
+  // build_composer). A floating dialog covered the conversation it was asking
+  // about, and its options read as plain text - "分辨不出哪些是选项".
+  if (st_.ask_modal && st_.asks.empty()) {
+    // ---- permission gate: allow / deny ONE tool call ----
     std::vector<H> body;
     body.push_back(el("div").text(st_.ask_text.empty() ? "模型请求确认。" : st_.ask_text));
-    int ask_id = st_.ask_id;
     layer.add(comp::modal("需要确认", body, "允许",
-                          [this, ask_id](const std::string&) {
+                          [this](const std::string&) {
     std::string sid = active_sid();
     update([&](AppState& s) { s.ask_modal = false; });
     if (sid.empty()) return;
-    if (ask_id > 0) {
-      // ask tool: record the choice
-      call_async("tool.askAnswer",
-                 Json{{"sid", sid}, {"askId", ask_id}, {"selection", "allow"}});
-    } else {
-      // permission gate: approve and resume
-      call_async("session.approve", Json{{"sid", sid}, {"yes", true}});
-    }
+    call_async("session.approve", Json{{"sid", sid}, {"yes", true}});
   },
-                          [this, ask_id](const std::string&) {
+                          [this](const std::string&) {
     std::string sid = active_sid();
     update([&](AppState& s) { s.ask_modal = false; });
     if (sid.empty()) return;
-    if (ask_id > 0) {
-      call_async("tool.askAnswer",
-                 Json{{"sid", sid}, {"askId", ask_id}, {"selection", "deny"}});
-    } else {
-      call_async("session.approve", Json{{"sid", sid}, {"yes", false}});
-    }
+    call_async("session.approve", Json{{"sid", sid}, {"yes", false}});
   }));
   }
   // Generic confirm modal (destructive actions). Its own branch so a session
@@ -7976,6 +9629,27 @@ VNodePtr UiApp::build_overlays() {
         open_session(sid);
       });
       item(tr("重命名"), "pen", [this, sid]() { begin_rename_session(sid); });
+      // AI rename: ask the model for a title from the transcript. A separate
+      // entry because it is a different action from typing one - and because a
+      // bad generated title must be easy to overwrite by hand.
+      item(tr("AI 重命名"), "wand-magic-sparkles", [this, sid]() {
+        call_async("session.aiTitle", Json{{"sid", sid}},
+                   [this](const BackendResult& r) {
+          if (!r.ok) {
+            toast(tr("生成标题失败：") + r.message);
+            return;
+          }
+          std::string title = jsonutil::get<std::string>(r.data, "title", "");
+          if (title.empty()) {
+            toast(tr("模型没有给出标题"));
+            return;
+          }
+          toast(tr("已重命名为：") + title);
+          load_projects();
+          // The tab title comes from the session list, so reloading the projects
+          // is enough; the open tab picks the new name up on the next render.
+        });
+      });
       sep();
       item(tr("删除会话"), "trash", [this, sid]() {
         update([&](AppState& s) {
@@ -8001,7 +9675,8 @@ VNodePtr UiApp::build_overlays() {
     // to open the NEXT menu. `bind_outside_click` closes the menu on any press
     // outside it while letting the event continue to whatever was clicked, so
     // right-clicking another row closes this menu and opens that row's menu.
-    ctx_menu_node_ = menu.get()->dom;
+    // (The binding itself is made in render(), which looks the node up by key:
+    // caching the Node here went stale as soon as the menu was rebuilt.)
   }
   return layer.get();
 }
@@ -8031,6 +9706,45 @@ void UiApp::send_message() {
   }
   if (text.empty()) text = shown;   // attachments only: the paths are the message
   std::string sid = active_sid();
+  Json attachments = Json::array();
+  for (size_t i = 0; i < st_.attachments.size(); ++i) attachments.push_back(st_.attachments[i]);
+  // 编辑并重发: the send REPLACES the armed turn, so the backend history is cut
+  // first and only then is the new text sent. Doing it in this order means a
+  // failed trim cannot leave a duplicate question behind.
+  const std::string edit_tid = st_.edit_turn_id;
+  if (!edit_tid.empty() && backend_ && !sid.empty()) {
+    update([&](AppState& s) { s.edit_turn_id.clear(); });
+    call_async("session.trimHistory", Json{{"sid", sid}, {"turnId", edit_tid}},
+               [this, sid, edit_tid, text, shown, attachments](const BackendResult& r) {
+      if (!r.ok) {
+        toast(tr("无法替换这一轮：") + r.message);
+        return;
+      }
+      // Mirror the trim locally so the old question and its answer disappear now
+      // rather than after the reload that would otherwise be needed.
+      int from = -1;
+      for (size_t i = 0; i < st_.messages.size(); ++i) {
+        if (st_.messages[i].turn_id == edit_tid) {
+          from = static_cast<int>(i);
+          break;
+        }
+      }
+      if (from >= 0) {
+        update([&](AppState& s) {
+          int dropped = static_cast<int>(s.messages.size()) - from;
+          s.messages.resize(static_cast<size_t>(from));
+          if (dropped > 0) s.history_total -= dropped;
+        });
+      }
+      dispatch_message(sid, text, shown, attachments);
+    });
+    return;
+  }
+  dispatch_message(sid, text, shown, attachments);
+}
+
+void UiApp::dispatch_message(const std::string& sid, const std::string& text,
+                             const std::string& shown, const Json& attachments) {
   // echo the user's message immediately (optimistic; the assistant text streams in)
   // A message sent now is newer than everything loaded from disk. Its uid is
   // derived from the absolute history position so it stays distinct from the
@@ -8065,8 +9779,6 @@ void UiApp::send_message() {
     });
     return;
   }
-  Json attachments = Json::array();
-  for (size_t i = 0; i < st_.attachments.size(); ++i) attachments.push_back(st_.attachments[i]);
   // 发送时把当前模型一起带上：会话页上换过的模型必须真的用于这次请求，而不是
   // 只改了按钮上的字。
   Json args = Json{{"sid", sid}, {"text", text}, {"attachments", attachments}};
@@ -8095,6 +9807,7 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   mix(m.tools.size());
   mix(m.summary.size());
   mix(m.time.size());
+  mix(m.interim.size());
   mix(static_cast<uint64_t>(m.work_open));
   mix(static_cast<uint64_t>(m.thinking_open));
   mix(static_cast<uint64_t>(m.streaming));
@@ -8105,6 +9818,10 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
     mix(static_cast<uint64_t>(m.tools[i].expanded));
     mix(static_cast<uint64_t>(m.tools[i].ok));
   }
+  // The interim texts are part of the rendered work log: without mixing their
+  // length in, a new narration line could land under an unchanged signature and
+  // the cached node would be reused, silently hiding it.
+  for (size_t i = 0; i < m.interim.size(); ++i) mix(m.interim[i].size());
   return h;
 }
 
@@ -8138,6 +9855,7 @@ void UiApp::open_modal_page(const std::string& page) {
   // any transient popup belongs to the page we are leaving
   st_.model_picker_open = false;
   st_.skill_menu_open = false;
+  st_.thinking_menu_open = false;
   st_.side_menu_open = false;
   st_.modal_page = page;
   // A modal is not a tab navigation: it always enters the same way, regardless
@@ -8678,6 +10396,11 @@ void UiApp::save_model() {
       s.model_status = "已保存";
     });
     load_models(pid);
+    // The composer's thinking control is built from the model TABLE, so a level
+    // ladder edited here has to be re-read immediately. Without this the input row
+    // kept showing the old options (or the fallback pair) until the session was
+    // reopened - "我设置了模型，输入框那也没变".
+    refresh_model_availability();
   });
 }
 
@@ -8715,6 +10438,7 @@ void UiApp::toggle_model_enabled(const std::string& model_id, bool enabled) {
              Json{{"providerId", pid}, {"modelId", model_id}, {"enabled", enabled}},
              [this, pid](const BackendResult& r) {
     if (!r.ok) load_models(pid);  // revert by re-reading
+    else refresh_model_availability();  // a disabled model must leave the composer
   });
 }
 
@@ -8750,11 +10474,17 @@ void UiApp::open_model_picker(const std::string& owner, const std::string& targe
   // The picker lists providers, so make sure they are loaded before it opens
   // (it can be opened from the session page without ever visiting settings).
   if (!st_.providers_loaded) load_providers();
+  // Which model is this picker FOR? Opening it on the page of whatever provider
+  // was last browsed elsewhere left the current model on a different page - it
+  // was there, just not where the eye landed ("不会自动放到选择的那一页").
+  std::string focus = target.empty() ? st_.model
+                                     : sv_str(st_.settings_values, target, "");
   update([&](AppState& s) {
     s.model_picker_open = true;
     s.model_picker_owner = owner;
     s.model_picker_target = target;
     s.model_picker_query.clear();
+    s.model_picker_focus = focus;
     // Default to the provider being edited in settings, else the first one -
     // opening onto an empty right pane would look broken.
     if (s.model_picker_provider.empty()) {
@@ -8798,6 +10528,19 @@ void UiApp::load_picker_models(const std::string& provider_id) {
       s.model_picker_models = rows;
       s.model_picker_loaded = true;
       s.model_picker_status.clear();
+      // Open on the page the CURRENT model lives on: the left column is a
+      // provider list, and the focus model's provider may not be the one that
+      // happened to be selected (a fresh window defaults to providers[0]).
+      if (!s.model_picker_focus.empty()) {
+        for (size_t i = 0; i < rows.size(); ++i) {
+          if (rows[i].id != s.model_picker_focus) continue;
+          if (!rows[i].provider.empty() && rows[i].provider != s.model_picker_provider) {
+            s.model_picker_provider = rows[i].provider;
+          }
+          break;
+        }
+        s.model_picker_focus.clear();
+      }
     });
   });
 }
@@ -9024,13 +10767,37 @@ H UiApp::build_model_picker(const std::string& owner, const std::string& current
 // ===========================================================================
 // Settings actions: MCP / 外部工具
 // ===========================================================================
+// The shortcut table's stored binding for `action`, matched against the key the
+// adapter reported (which now includes modifiers, so "Ctrl+W" is expressible).
+bool UiApp::shortcut_matches(const std::string& key, const std::string& action,
+                             const std::string& def) {
+  std::string want = sv_str(st_.settings_values, "shortcuts." + action, def);
+  if (want.empty()) want = def;
+  return normalize_shortcut(want) == normalize_shortcut(key);
+}
+
 void UiApp::detect_mcp() {
   call_async("mcp.detect", Json::object(), [this](const BackendResult& r) {
     if (!r.ok) return;
     size_t n = r.data.contains("scanned") && r.data["scanned"].is_array()
                    ? r.data["scanned"].size() : 0;
-    toast(n > 0 ? ("探测到 " + std::to_string(n) + " 个目录") : "未发现常见工具目录");
+    toast(n > 0 ? (tr("探测到 ") + itos(static_cast<int>(n)) + tr(" 个 MCP 配置"))
+                : tr("未发现 MCP 服务器配置"));
     load_mcp_tools();
+  });
+}
+
+// Skill detection. The Skill page used to call detect_mcp, which only knows
+// about MCP server configs - so a skill directory was never found, and MCP
+// entries ended up listed where skills belong.
+void UiApp::detect_skills() {
+  call_async("skill.detect", Json::object(), [this](const BackendResult& r) {
+    if (!r.ok) return;
+    size_t n = r.data.contains("scanned") && r.data["scanned"].is_array()
+                   ? r.data["scanned"].size() : 0;
+    toast(n > 0 ? (tr("探测到 ") + itos(static_cast<int>(n)) + tr(" 个 Skill 目录"))
+                : tr("未发现 Skill 目录"));
+    load_skills();
   });
 }
 

@@ -1,5 +1,5 @@
-// check_dir_tools.cpp - dir.check 子代理筛目录工具实现
-// addon2.md：子代理提供需求，本工具列目录（复用 file.ls），模型按需筛查返回。
+// check_dir_tools.cpp - check_dir 子代理筛目录工具实现
+// addon2.md：子代理提供需求，本工具列目录（复用 list_dir），模型按需筛查返回。
 #include "check_dir_tools.hpp"
 
 #include "fs_error.hpp"
@@ -9,7 +9,7 @@ namespace fs {
 
 void register_check_dir_tools(ToolRegistry* registry) {
   ToolDef def;
-  def.name = "dir.check";
+  def.name = "check_dir";
   def.description =
       "列出目录并按需求筛选. List directory for subagent filtering. "
       "给子代理用/for subagents: 提供 requirement 描述要找什么, "
@@ -27,7 +27,7 @@ void register_check_dir_tools(ToolRegistry* registry) {
   params["properties"] = props;
   params["required"] = Json::array({"requirement"});
   def.parameters = params;
-  registry->register_tool("dir.check", def,
+  registry->register_tool("check_dir", def,
     [registry](const ToolContext& ctx, const Json& args) -> FsResult {
       std::string rel = jsonutil::get<std::string>(args, "path", ".");
       std::string requirement = jsonutil::get<std::string>(args, "requirement", "");
@@ -36,11 +36,11 @@ void register_check_dir_tools(ToolRegistry* registry) {
       if (requirement.empty()) {
         return FsResult::error(ErrCode::kInvalidArg, "requirement is required");
       }
-      // 复用 file.ls（注册表里已有）
+      // 复用 list_dir（注册表里已有）
       Json ls_args = Json::object();
       ls_args["path"] = rel;
       ls_args["detail"] = detail;
-      FsResult r = registry->invoke(ctx, "file.ls", ls_args);
+      FsResult r = registry->invoke(ctx, "list_dir", ls_args);
       if (!r.ok()) return r;
       Json out = r.data;
       // 基础过滤：取前 maxResults 条（详细模式 CSV 行数上限）

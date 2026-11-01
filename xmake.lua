@@ -67,6 +67,7 @@ includedirs = {
     "3rdparty/md4c-master/src",
     "3rdparty/httplib",
     "3rdparty/qjs-regex",
+    "3rdparty/stb",
     "3rdparty/reproc/include",
     "3rdparty/whaleui/include",
     "3rdparty/webview/include",
@@ -584,12 +585,23 @@ target("fs_core")
     add_cflags("-Wall")
     add_cxxflags("-Wall")
     if is_plat("windows") then
-        add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
+        -- gdi32: screen capture fallback (fs_screen.cpp BitBlt/GetDIBits).
+        -- d3d11/dxgi: Desktop Duplication, the primary capture path (it reads the
+        -- DWM-composited surface, which GDI cannot on several real setups).
+        add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
+                     "ole32", "uuid", "crypt32", "bcrypt")
     else
         -- std::thread (the UI server's listen thread, the terminal pollers,
         -- reproc's drain threads) needs -pthread; dl is what the webview Linux
         -- backend expects to be present.
         add_syslinks("pthread", "dl")
+        if is_plat("linux", "bsd") then
+            -- fs_screen.cpp captures through X11. The X11 headers are a normal
+            -- distro package (libx11-dev); without them the capture backend
+            -- compiles to a "no display" stub only if we guard it, so require
+            -- the library here where the platform can actually provide it.
+            add_syslinks("X11")
+        end
     end
 
 
@@ -815,7 +827,8 @@ target("fs_ui_host")
         end
     end
     if is_plat("windows") then
-        add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
+        add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
+                     "ole32", "uuid", "crypt32", "bcrypt")
     else
         add_syslinks("pthread", "dl")
     end
@@ -857,7 +870,8 @@ target("flashsight")
     end
     add_cxxflags("-Wall")
     if is_plat("windows") then
-        add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
+        add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
+                     "ole32", "uuid", "crypt32", "bcrypt")
     else
         -- see fs_core: -pthread for std::thread, dl for the webview backend
         add_syslinks("pthread", "dl")
@@ -939,12 +953,16 @@ target("fs_tests")
     add_deps("mbedtls_src")
     add_cxxflags("-Wall")
     if is_plat("windows") then
-        add_syslinks("ws2_32", "user32", "shell32", "ole32", "uuid", "crypt32", "bcrypt")
+        add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
+                     "ole32", "uuid", "crypt32", "bcrypt")
     else
         -- std::thread (the UI server's listen thread, the terminal pollers) needs
         -- -pthread; dlopen is used by nothing yet but the webview Linux backend
         -- expects libdl to be present.
         add_syslinks("pthread", "dl")
+        if is_plat("linux", "bsd") then
+            add_syslinks("X11")  -- fs_screen.cpp (tests exercise the capture path)
+        end
     end
     mbedtls_link()
 
