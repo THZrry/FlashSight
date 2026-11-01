@@ -31,5 +31,22 @@ bool valid(const std::string& s);
 // or a file with a legacy encoding).
 std::string sanitize(const std::string& s);
 
+// Decode arbitrary file bytes into well-formed UTF-8.
+//
+// A project has files written by every editor on every platform: UTF-8 with or
+// without a BOM, UTF-16 (Windows "Unicode" text, Notepad's default for years),
+// and the legacy ANSI codepage (GBK on Chinese Windows, which is what an old
+// .cpp/.txt edited by a native Chinese tool usually is). Reading those raw and
+// pushing them into a tool result killed the whole turn: nlohmann::json throws
+// on invalid UTF-8 when the message is dumped, and the exception unwound the
+// loop before anything was persisted.
+//
+// Order: BOM (UTF-8 / UTF-16LE / UTF-16BE) -> valid UTF-8 -> system ANSI
+// codepage -> GB18030 (a CJK heuristic for a non-Chinese locale) -> Latin-1.
+// The last step never fails, so this always returns valid UTF-8.
+// `encoding` (optional) receives a short name of what was used: "utf-8",
+// "utf-8-bom", "utf-16le", "utf-16be", "gbk", "gb18030", "latin1".
+std::string decode_to_utf8(const std::string& raw, std::string* encoding = nullptr);
+
 }  // namespace utf8
 }  // namespace fs

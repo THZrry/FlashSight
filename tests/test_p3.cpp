@@ -15,6 +15,7 @@
 #include "common/fs_clock.hpp"
 #include "common/fs_json.hpp"
 #include "common/fs_path.hpp"
+#include "common/fs_utf8.hpp"
 
 using namespace fs;
 
@@ -501,6 +502,63 @@ FS_TEST(preset_agents_cover_addon1) {
   }
 }
 
+// ---------- 编码：读文件必须永远产出合法 UTF-8 ----------
+// The turn used to DIE here: read_file returned raw bytes, the GBK text went into
+// a tool result, json::dump() threw on the invalid UTF-8 and the exception
+// unwound the loop with nothing persisted. These cases pin the decoder and the
+// never-throwing serializer.
+FS_TEST(utf8_decodes_legacy_encodings) {
+  // GBK bytes of 这是一段中文测试文本用于编码检测 (a Chinese Windows .txt).
+  const char gbk_raw[] =
+      "\xD5\xE2\xCA\xC7\xD2\xBB\xB6\xCE\xD6\xD0\xCE\xC4\xB2\xE2\xCA\xD4\xCE\xC4"
+      "\xB1\xBE\xD3\xC3\xD3\xDA\xB1\xE0\xC2\xEB\xBC\xEC\xB2\xE2";
+  std::string enc;
+  std::string out = utf8::decode_to_utf8(std::string(gbk_raw), &enc);
+  EXPECT_TRUE(utf8::valid(out));
+  EXPECT_TRUE(!out.empty());
+#ifdef _WIN32
+  // On Windows the system codepage (or the GB18030 heuristic for 16 CJK chars)
+  // decides; either way the Chinese must be readable.
+  EXPECT_TRUE(enc == "gbk" || enc == "gb18030");
+  EXPECT_TRUE(out.find("\xE8\xBF\x99") != std::string::npos);  // 这
+#endif
+
+  // UTF-8 BOM is stripped, not kept as content.
+  enc.clear();
+  EXPECT_EQ(utf8::decode_to_utf8(std::string("\xEF\xBB\xBFhello", 8), &enc),
+            std::string("hello"));
+  EXPECT_EQ(enc, std::string("utf-8-bom"));
+
+  // UTF-16LE with BOM (Notepad's "Unicode" save).
+  std::string u16("\xFF\xFE", 2);
+  const char* hi = "hi";
+  for (const char* p = hi; *p; ++p) {
+    u16.push_back(*p);
+    u16.push_back('\0');
+  }
+  enc.clear();
+  EXPECT_EQ(utf8::decode_to_utf8(u16, &enc), std::string("hi"));
+  EXPECT_EQ(enc, std::string("utf-16le"));
+
+  // Arbitrary bytes still produce VALID UTF-8 (the Latin-1 fallback): the point
+  // is that nothing downstream can throw.
+  const char junk[] = "\x81\xFE\xFF\x80 abc";
+  std::string jout = utf8::decode_to_utf8(std::string(junk, 8), nullptr);
+  EXPECT_TRUE(utf8::valid(jout));
+
+  // A 5-byte "ab\0cd" is NOT UTF-16: the old heuristic decoded it as CJK and the
+  // binary guard stopped recognising it.
+  std::string bin("ab\0cd", 5);
+  std::string bout = utf8::decode_to_utf8(bin, nullptr);
+  EXPECT_TRUE(bout.find('\0') != std::string::npos);
+
+  // dump_safe never throws on invalid UTF-8 and reports U+FFFD instead.
+  Json j = Json::object();
+  j["bad"] = std::string("\xD5\xE2", 2);
+  std::string dumped = dump_safe(j);
+  EXPECT_TRUE(utf8::valid(dumped));
+}
+
 // ---------- 文件工具：read/ls/find/write/edit/rm（含二进制守卫+逃逸）----------
 FS_TEST(file_tools_flow) {
   fstest::TempDir td("filetools");
@@ -545,6 +603,26 @@ FS_TEST(file_tools_flow) {
   Json bargs = Json::object();
   bargs["path"] = "bin.dat";
   EXPECT_FALSE(reg.invoke(ctx, "read_file", bargs).ok());
+
+  // A GBK file is decoded, not passed through raw. This is the read that used to
+  // kill a whole turn (invalid UTF-8 -> json::dump throws -> nothing persisted).
+  {
+    const char gbk_raw[] =
+        "\xD5\xE2\xCA\xC7\xD2\xBB\xB6\xCE\xD6\xD0\xCE\xC4\xB2\xE2\xCA\xD4\xCE"
+        "\xC4\xB1\xBE\xD3\xC3\xD3\xDA\xB1\xE0\xC2\xEB\xBC\xEC\xB2\xE2";
+    std::ofstream ofs((proj / "gbk.txt").string(), std::ios::binary);
+    ofs << std::string(gbk_raw);
+  }
+  Json encargs = Json::object();
+  encargs["path"] = "gbk.txt";
+  FsResult encr = reg.invoke(ctx, "read_file", encargs);
+  ASSERT_TRUE(encr.ok());
+  std::string gcontent = jsonutil::get<std::string>(encr.data, "content", "");
+  EXPECT_TRUE(utf8::valid(gcontent));
+  EXPECT_TRUE(gcontent.find("\xE8\xBF\x99") != std::string::npos);  // 这
+#ifdef _WIN32
+  EXPECT_TRUE(encr.data.contains("encoding"));
+#endif
 
   // ls
   Json largs = Json::object();

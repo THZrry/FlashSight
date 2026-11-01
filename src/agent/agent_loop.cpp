@@ -414,7 +414,10 @@ FsResult AgentLoop::run_tool_group(const Json& calls, Json* messages) {
         data_uri = body["dataUri"].get<std::string>();
         body.erase("dataUri");
       }
-      msg["content"] = body.is_string() ? body.get<std::string>() : body.dump();
+      // dump_safe: a tool result can carry bytes that are not UTF-8 (a legacy
+      // encoded file, a terminal's output). nlohmann::json::dump() throws on
+      // those, and that exception used to escape the loop and lose the turn.
+      msg["content"] = body.is_string() ? body.get<std::string>() : dump_safe(body);
       // Within the turn the model may need the real payload to act on, so the
       // result is NOT projected here - but it is still bounded: one 1 MB read
       // must not be re-sent in every subsequent round of this turn. The
@@ -474,7 +477,7 @@ FsResult AgentLoop::approve(bool yes) {
     msg["role"] = "tool";
     msg["toolCallId"] = call_id;
     msg["name"] = name;
-    msg["content"] = result.is_string() ? result.get<std::string>() : result.dump();
+    msg["content"] = result.is_string() ? result.get<std::string>() : dump_safe(result);
     if (is_error) msg["isError"] = true;
     messages.push_back(msg);
   };
@@ -594,14 +597,14 @@ FsResult AgentLoop::answer_ask(int ask_id, const std::string& selection) {
     msg["role"] = "tool";
     msg["toolCallId"] = jsonutil::get<std::string>(a, "callId", "");
     msg["name"] = "ask";
-    msg["content"] = result.dump();
+    msg["content"] = dump_safe(result);
     messages.push_back(msg);
     executed_calls_.push_back(
         Json{{"name", "ask"},
              {"args", Json{{"question", a["question"]}}},
              {"ok", true},
              {"summary", answer},
-             {"detail", result.dump(2)}});
+             {"detail", dump_safe(result, 2)}});
   }
   pending_asks_ = Json::array();
   ask_answers_ = Json::object();
@@ -669,7 +672,7 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
   call["id"] = current_call_id_;
   call["ok"] = r.ok();
   call["summary"] = summary;
-  std::string body = result.dump(2);
+  std::string body = dump_safe(result, 2);
   // Truncation must land on a character boundary: half a CJK character is
   // invalid UTF-8 and json::dump() throws when this is replayed next turn.
   body = utf8::truncate(body, 4000, "\n... (truncated)");
@@ -802,7 +805,88 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   return run_loop(messages, opts_.model, active_tools());
 }
 
+// A turn must never disappear because something threw.
+//
+// The whole point of this wrapper: a tool result that is not valid UTF-8 used to
+// make nlohmann::json::dump() throw inside run_loop, the exception unwound all
+// the way to the backend call, and NOTHING was persisted - the user's question
+// stayed on disk with no answer, no tool log, no error. "我前面讲的所有内容都
+// 必须保存" means the failure path has to write too.
 FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json& tools) {
+  try {
+    return run_loop_impl(std::move(messages), model, tools);
+  } catch (const std::exception& e) {
+    return fail_turn(std::string("internal error: ") + e.what());
+  } catch (...) {
+    return fail_turn("internal error");
+  }
+}
+
+FsResult AgentLoop::fail_turn(const std::string& error) {
+  // A parked turn is not a failure: it was saved and the UI offers 恢复.
+  if (parked_) return FsResult::error(ErrCode::kInternal, error);
+  std::string partial;
+  {
+    std::lock_guard<std::mutex> lk(live_mu_);
+    partial = live_text_;
+    live_running_ = false;
+  }
+  if (partial.empty() && last_text_.empty()) {
+    // Nothing streamed yet; the message list may still hold a narration.
+    for (size_t i = 0; i < interim_texts_.size(); ++i) {
+      if (interim_texts_[i].is_string()) partial += interim_texts_[i].get<std::string>();
+    }
+  }
+  persist_failed_turn(error, partial);
+  state_ = LoopState::kTurnDone;
+  {
+    std::lock_guard<std::mutex> lk(live_mu_);
+    live_running_ = false;
+  }
+  if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
+  emit("loop.interrupted", Json{{"sid", opts_.sid}, {"resumable", false},
+                                {"error", error}, {"saved", true}});
+  return FsResult::error(ErrCode::kInternal, error);
+}
+
+// Write the assistant half of a turn that did not finish.
+//
+// `error` is stored on the turn so a reload can say WHY it stopped; the partial
+// text and every tool call that actually ran are kept, because they are the work
+// the user watched happen. executed_calls_/interim_texts_ are cleared afterwards:
+// the turn is closed, the next one starts with an empty log.
+bool AgentLoop::persist_failed_turn(const std::string& error,
+                                    const std::string& partial_text) {
+  if (!persist_turn) return false;
+  bool has_tools = executed_calls_.is_array() && !executed_calls_.empty();
+  bool has_interim = interim_texts_.is_array() && !interim_texts_.empty();
+  if (partial_text.empty() && !has_tools && !has_interim && error.empty()) return false;
+  int64_t now = WallClock().now_ms();
+  if (!user_turn_persisted_) {
+    persist_user_turn_only(turn_started_ms_ > 0 ? turn_started_ms_ : now);
+    user_turn_persisted_ = true;
+  }
+  Json asst = Json::object();
+  asst["role"] = "assistant";
+  asst["streamSummary"] = partial_text;
+  asst["toolCalls"] = executed_calls_;
+  if (has_interim) asst["interim"] = interim_texts_;
+  asst["startedAt"] = turn_started_ms_ > 0 ? turn_started_ms_ : now;
+  asst["ts"] = now;
+  asst["error"] = error;
+  // A failed turn is finished, not streaming: without this the reloaded
+  // transcript showed a permanently "running" answer.
+  asst["failed"] = true;
+  int ar = current_auto_round_.load();
+  if (ar > 0) asst["autoRound"] = ar;
+  persist_turn(asst);
+  executed_calls_ = Json::array();
+  interim_texts_ = Json::array();
+  user_turn_persisted_ = false;
+  return true;
+}
+
+FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const Json& tools) {
   state_ = LoopState::kPlanning;
   {
     // Publish the turn as "live" so a reopened tab can render the in-flight
@@ -837,13 +921,22 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
     return FsResult::success();
   }
   if (!r.ok() || !result.error.empty()) {
-    // The user turn is already on disk (written when the turn started), so a
-    // failure here loses nothing; only the answer is missing.
+    // The user turn is already on disk (written when the turn started). The
+    // ASSISTANT half is persisted here too: whatever was streamed before the
+    // failure, plus every tool call that ran. Without this the transcript on
+    // reload showed the question and NOTHING else - "重新打开发现真没了".
     saved_messages_ = messages;
     saved_valid_ = true;
     saved_user_text_ = last_user_text_;
+    std::string why = result.error.empty() ? r.message : result.error;
+    persist_failed_turn(why.empty() ? "provider error" : why, result.text);
+    {
+      std::lock_guard<std::mutex> lk(live_mu_);
+      live_running_ = false;
+    }
+    if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
     emit("loop.interrupted", Json{{"sid", opts_.sid}, {"resumable", true},
-                                  {"error", result.error.empty() ? r.message : result.error}});
+                                  {"error", why}});
     state_ = LoopState::kTurnDone;
     return r;
   }
@@ -938,8 +1031,17 @@ FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json
     if (!nr.ok() || !next.error.empty()) {
       saved_messages_ = messages;
       saved_valid_ = true;
+      std::string why = next.error.empty() ? nr.message : next.error;
+      // Same contract as the first round: the work done so far is saved (tool
+      // calls included), not only the user's question.
+      persist_failed_turn(why.empty() ? "provider error" : why, result.text);
+      {
+        std::lock_guard<std::mutex> lk(live_mu_);
+        live_running_ = false;
+      }
+      if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
       emit("loop.interrupted", Json{{"sid", opts_.sid}, {"resumable", true},
-                                    {"error", next.error.empty() ? nr.message : next.error}});
+                                    {"error", why}});
       state_ = LoopState::kTurnDone;
       return nr;
     }

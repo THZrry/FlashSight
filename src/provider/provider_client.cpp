@@ -223,7 +223,7 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
   for (auto& kv : conn_.custom_headers) {
     http.headers[kv.first] = subst_session(kv.second, req.session_id);
   }
-  http.body = body.dump();
+  http.body = dump_safe(body);  // bad bytes in history must not abort the request
   http.timeout_ms = 120000;
 
   HttpResponse resp;
@@ -423,7 +423,7 @@ FsResult ProviderClient::chat_openai_response(const ChatRequest& req, ChatRespon
   for (auto& kv : conn_.custom_headers) {
     http.headers[kv.first] = subst_session(kv.second, req.session_id);
   }
-  http.body = body.dump();
+  http.body = dump_safe(body);  // bad bytes in history must not abort the request
   http.timeout_ms = 120000;
 
   HttpResponse resp;
@@ -507,7 +507,7 @@ FsResult ProviderClient::chat_anthropic(const ChatRequest& req, ChatResponse* ou
   for (auto& kv : conn_.custom_headers) {
     http.headers[kv.first] = subst_session(kv.second, req.session_id);
   }
-  http.body = body.dump();
+  http.body = dump_safe(body);  // bad bytes in history must not abort the request
   http.timeout_ms = 120000;
 
   HttpResponse resp;

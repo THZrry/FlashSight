@@ -47,7 +47,7 @@ void HistoryBuilder::turn_to_neutral(const Json& turn, Json* out) {
       msg["toolCallId"] = jsonutil::get<std::string>(r, "toolUseId", "");
       msg["content"] = r.contains("result")
                            ? (r["result"].is_string() ? r["result"].get<std::string>()
-                                                      : r["result"].dump())
+                                                      : dump_safe(r["result"]))
                            : "";
       if (msg["toolCallId"].get<std::string>().empty()) continue;
       out->push_back(msg);
@@ -315,7 +315,7 @@ std::string HistoryBuilder::project_tool_result(const std::string& name,
     // A failure's reason IS the useful part; never drop it.
     copy("error"); copy("errCode"); copy("howToProceed"); copy("denial");
   }
-  std::string s = out.dump();
+  std::string s = dump_safe(out);
   if (s.size() > 2400) s = utf8::truncate(s, 2400, "\n… (result summary truncated)");
   return s;
 }

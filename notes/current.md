@@ -2372,3 +2372,46 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **测试**：391 用例 3670 断言全过；web / webview 双变体编译通过。新增
     `uiapp_last_user_message_is_editable`（按钮只在最后一条 + 点击只 arm + 发送才 trim/send）、
     `uiapp_suspend_finalizes_the_live_message`（park 定格、空消息丢弃）；skill 双语用例改用 lsp。
+
+<88>(SOLVED): 会话完整性（失败/异常也落盘 + 工具输入显示 + 发送即现）+ 读文件编码（UTF-8/UTF-16/GBK 自动识别）+ 长文本横向悬浮滚动条 + 打开会话不再残留"中止"。
+  - **用户实测的 s_fbaea8c3f7f2（C:/aaa/Sliom）**：磁盘上确实只有 user 轮，assistant 轮
+    一个都没有——"重新打开发现真没了"是真的。真因链条：`read_file` 把 GBK 原文当字符串
+    返回 → 进 tool result → `nlohmann::json::dump()` 在非法 UTF-8 上抛 type_error.316 →
+    异常一路穿出 `run_loop`，**落盘代码根本没执行**。
+  - **读文件编码**：新增 `utf8::decode_to_utf8()`（BOM → UTF-8 → 系统 ANSI/GBK →
+    GB18030 启发 → Latin-1 兜底，永远返回合法 UTF-8），`read_file`/`find_files` grep/
+    侧栏预览/AGENTS.md（系统提示词！）全部先解码；GBK 文件的结果里带 `"encoding":"gbk"`。
+    UTF-16 无 BOM 的判定改成"每个 2 字节对有一侧是 NUL"的奇偶性启发（旧的宽松判定把
+    `ab\0cd` 这种 5 字节文件当成 UTF-16，二进制检查因此失效）。
+  - **序列化永不抛**：`dump_safe()`（`error_handler_t::replace`）用在工具结果、provider
+    请求体、历史投影、落盘（`write_atomic`）。`run_loop` 外面包了 try/catch → `fail_turn()`：
+    已流出的文本 + 已跑完的工具调用 + 原因写成正式 assistant 轮（`failed:true`/`error`），
+    再发 `loop.interrupted`；provider 失败的两个分支也调 `persist_failed_turn()`。
+    实测（本地 mock provider，read_file 读 GBK 文件 + 第二轮返回 400）：磁盘上出现了
+    `{"error":"http 400: mock provider failure","failed":true,...}` 的一轮。
+  - **"history 还显示加载中"**：`loop.interrupted` 同样没有 `turn.done`，UI 现在自己定格
+    （`streaming=false`），并把原因放进消息（`.turn-error` 行）。首轮就失败、还没有
+    assistant 消息时补一条只有错误的消息——否则问题后面空无一物，像发送被吞了。
+  - **"发送以后 history 没有反应，切页面才显示"**：`session.turns` 的回复描述的是**请求
+    那一刻的磁盘**，比屏幕旧。整表覆盖会抹掉乐观追加的用户消息和正在流的内容。现在合并：
+    保留本地 `turn_id` 为空且文本不在回复里的消息，追加在回复之后。
+  - **打开会话还显示"中止"**：`turn_running` 来自切走时暂存的视图，打开会话时没有任何
+    地方和后端对一次。`load_session` 现在调 `refresh_loop_state`；同时那条查询加了序号，
+    **只认最新一次请求的回复**（否则回合结束后晚到的 "running" 又把按钮改回中止）。
+  - **"read_file 只有返回 json 没有输入"**：`tool.start` 的 args 原本写进 `detail`，而
+    `tool.update` 会用结果覆盖它。现在 `ToolBlock::input` 是独立字段，展开后是"输入 /
+    返回"两段（只有一段时不加标签），历史和实时都恢复；`turn_to_message` 从 `tc[k].args`
+    读回来。mock 实测：输入 `{"path":"src/gbk.txt"}`、返回带 `encoding: gbk`。
+  - **"长文本 x 轴无法滚动看不全"**：`.tb-body` 是 `overflow: visible` + `pre`，长行被
+    `.tool-block { overflow: hidden }` 直接裁掉。现在 `white-space: pre; overflow-x: auto`
+    + **悬浮横向滚动条**（透明轨道，hover 才显示拇指），实测 600 字符行 scrollWidth
+    4239 > clientWidth 950 且可滚；`.tb-label` 是"输入/返回"的分段标签。
+  - **测试**：395 用例 3709 断言全过；web / webview 双变体编译通过。新增
+    `utf8_decodes_legacy_encodings`、`throwing_tool_still_persists_the_turn`、
+    `uiapp_interrupted_finalizes_and_explains`（含"首轮失败补消息"）、
+    `uiapp_turns_reply_keeps_live_messages`、`read_file` 的 GBK 用例。
+  - **验证方式**：写了一个本地 OpenAI 兼容 mock（`temp/mock_openai.cjs`：第一轮发
+    read_file 工具调用，第二轮给答案；用户文本含 fail 时第二轮返回 400），配合
+    `--root temp/mock/data` 跑真实循环，用 CDP 驱动页面断言"发送即出现""输入/返回两段"
+    "中断行""重开后仍在"。沙箱 sid 必须是 `s_`+十六进制（`s_mockgbk…` 被 valid_sid 拒绝，
+    表现为整页空白 + 选择模型）。

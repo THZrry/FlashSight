@@ -23,7 +23,7 @@ bool write_atomic(const std::string& path, const Json& j, std::string* err) {
         if (err) *err = "cannot open temp file: " + tmp;
         return false;
       }
-      ofs << j.dump(2);
+      ofs << dump_safe(j, 2);
       ofs.flush();
       if (!ofs) {
         if (err) *err = "write failed: " + tmp;

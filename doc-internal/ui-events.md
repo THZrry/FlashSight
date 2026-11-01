@@ -339,6 +339,30 @@ Enter 设置，不越权覆盖）。
 的空消息直接丢弃（否则转录里留一个转圈的空气泡）。同理，`loop.paused` 只处理一次
 （曾经的第二个 `else if` 分支永远走不到）。
 
+**`loop.interrupted` 是同一类事件的另一半**（provider 失败 / 工具抛异常）：它同样没有
+`turn.done`，所以也要定格（否则"history 一直显示加载中"而按钮已经变回发送）。区别是
+原因必须留在消息上（`ChatMsg::error` → `.turn-error` 行）：toast 三秒就没了，转录却要
+能解释"为什么停在这里"。首轮就失败时**还没有 assistant 消息**，此时要补一条只有错误
+的消息，否则问题后面什么都没有，看起来像发送被吞了。
+
+**`session.loopState` 的回复必须只认最新一次请求**。打开一个会话会发起一次查询，而回合
+可能在它返回前结束；晚到的 "running" 会把已经恢复成"发送"的按钮又改回"中止"。
+`refresh_loop_state()` 用序号丢弃过期回复；`session.turns` 的回复同理**不能整表覆盖**：
+发送是乐观追加的，磁盘上的转录比屏幕旧，整表覆盖会把刚发出的消息抹掉（"发送以后
+history 没有反应，切页面才显示"）。合并规则：保留本地 `turn_id` 为空、且文本不在回复里
+的消息，回复为底、这些消息追加在后。
+
+**工具块的"输入"是独立字段**。`tool.start` 里的 args 曾经写进 `detail`，而 `tool.update`
+会用结果覆盖 `detail`——于是完成的 read_file 只显示返回 JSON，永远看不到读了哪个文件。
+现在 `ToolBlock::input` 单独存参数，展开后是"输入 / 返回"两段（只有一段时不加标签）。
+`turn_to_message` 从 `tc[k].args` 恢复它，所以重新打开会话也还在。
+
+**长文本横向滚动**。`.tb-body` 曾经 `overflow: visible` + `pre`：一行 4000 字符的 JSON
+（`content` 字段就是一行）直接被 `.tool-block { overflow: hidden }` 裁掉，既看不到也滚不到。
+现在 `white-space: pre; overflow-x: auto`，横向滚动条是**悬浮式**的（轨道透明、hover 才
+显示拇指），不占高度、不打断阅读。换行（`pre-wrap`）对这类内容没意义——400 列折起来
+一样读不了。
+
 ## 4. 性能与空态（验收条目）
 
 - 历史虚拟化（一次 10 条）、diff div 限高滚动超长截断、流式渲染 diff 更新（md4c diff AST）。

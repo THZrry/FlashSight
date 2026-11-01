@@ -1034,6 +1034,9 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   // Reasoning is part of the stored turn when the provider returned it.
   m.thinking = jsonutil::get<std::string>(t, "thinking",
                  jsonutil::get<std::string>(t, "reasoning", ""));
+  // A turn that stopped on an error was persisted WITH the reason: the reload
+  // must say why the answer ended instead of showing a silently clipped reply.
+  m.error = jsonutil::get<std::string>(t, "error", "");
   m.started_at = jsonutil::get_int(t, "startedAt", 0);
   m.ended_at = jsonutil::get_int(t, "ts", 0);
   m.rev = next_msg_rev_++;
@@ -1048,8 +1051,13 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       // Prefer the stored, already-summarised detail: `args` alone says what was
       // asked for, not what came back. Older turns only have args, so fall back.
       std::string detail = jsonutil::get<std::string>(tc[k], "detail", "");
-      if (detail.empty() && tc[k].contains("args")) detail = tc[k]["args"].dump(2);
       tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
+      tb.detail = detail;
+      // The call's INPUT is its own section (the block used to show only the
+      // result). Older turns without `detail` still get their args rendered as
+      // the output, which is all they have.
+      if (tc[k].contains("args")) tb.input = dump_safe(tc[k]["args"], 2);
+      if (detail.empty()) detail = tb.input;
       tb.detail = detail;
       tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
       // A subagent tool call must keep its id across a reload, or the "打开记录"
@@ -1159,6 +1167,11 @@ void UiApp::load_session(const std::string& sid) {
       // The remembered model may have been disabled or its provider deleted
       // while this session was closed.
       refresh_model_availability();
+      // The stashed view remembers `turn_running` from whenever it was left. If
+      // the process is still alive but the turn ended meanwhile (it failed), the
+      // restored value put 中止 back on a stopped task and nothing ever corrected
+      // it - the composer must ask the backend when a session is opened.
+      refresh_loop_state(sid);
     }
     render();
   });
@@ -1188,7 +1201,28 @@ void UiApp::load_session(const std::string& sid) {
     v.history_has_more = has_more;
     v.history_loading_older = false;
     if (st_.active_tab == sid) {
+      // A reply describes the session as it was ON DISK when the request was
+      // made - which can be older than what the user is looking at: a send
+      // appends its message optimistically, and the model's deltas append more.
+      // Assigning the reply wholesale therefore ERASED a just-sent message (the
+      // transcript "did nothing" until a page switch reloaded it from disk).
+      // Keep the local messages that the reply does not know about: no stored
+      // turn id, and their text is not already in the reply.
+      std::vector<comp::ChatMsg> keep;
+      for (size_t i = 0; i < st_.messages.size(); ++i) {
+        const comp::ChatMsg& lm = st_.messages[i];
+        if (!lm.turn_id.empty()) continue;
+        bool seen = false;
+        for (size_t k = msgs.size(); k-- > 0;) {
+          if (msgs[k].role == lm.role && msgs[k].text == lm.text) {
+            seen = true;
+            break;
+          }
+        }
+        if (!seen) keep.push_back(lm);
+      }
       st_.messages = msgs;
+      for (size_t i = 0; i < keep.size(); ++i) st_.messages.push_back(keep[i]);
       st_.history_total = total;
       st_.history_start = start;
       st_.history_has_more = has_more;
@@ -2783,6 +2817,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         vp->session_usage_loaded = false;
       }
       load_session_usage(usage_sid);
+      // Reconcile the composer with the BACKEND after the turn: a stale
+      // session.loopState reply from before the turn could otherwise leave 中止
+      // on screen (refresh_loop_state only honours the newest request).
+      if (is_active) refresh_loop_state(usage_sid);
     }
   } else if (event == "assistant.interim") {
     // A round of the turn finished with narration (the model talking to itself
@@ -2817,7 +2855,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       tb.name = name;
       tb.summary = tr("运行中…");
       tb.running = true;
-      if (payload.contains("args")) tb.detail = payload["args"].dump(2);
+      // The ARGUMENTS are this block's input. They used to be written into
+      // `detail`, which tool.update then overwrote with the result - so the row
+      // looked like it never received a request.
+      if (payload.contains("args")) tb.input = dump_safe(payload["args"], 2);
       msg.tools.push_back(tb);
       msg.rev = next_msg_rev_++;
       render();
@@ -3066,10 +3107,41 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.interrupted = true;
     st_.turn_running = false;  // nothing is running after an interrupt
     st_.interrupt_reason = jsonutil::get<std::string>(payload, "error", "");
+    // The turn ends mid-stream here too (no turn.done), so the last message has
+    // to be closed by hand: it kept its "streaming" flag and the transcript
+    // showed a spinner + a counting timer next to a send button that had already
+    // gone back to 发送 ("history 还显示加载中"). The reason is stored on the
+    // message so the failure stays visible after the toast is gone.
+    //
+    // A turn that failed BEFORE producing anything has no assistant message yet
+    // (the provider rejected the very first call). One is created here, because a
+    // failure that exists only in a three-second toast is invisible a moment
+    // later - and the transcript then looked like the question was swallowed.
+    if (st_.messages.empty() || st_.messages.back().role != "assistant") {
+      comp::ChatMsg m;
+      m.role = "assistant";
+      m.rev = next_msg_rev_++;
+      m.uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
+      m.started_at = now_ms();
+      m.ended_at = m.started_at;
+      m.error = st_.interrupt_reason.empty() ? tr("未知错误") : st_.interrupt_reason;
+      st_.messages.push_back(m);
+    } else {
+      comp::ChatMsg& m = st_.messages.back();
+      m.streaming = false;
+      m.now_ms = 0;
+      if (m.ended_at <= 0) m.ended_at = now_ms();
+      if (m.started_at <= 0) m.started_at = m.ended_at;
+      if (!st_.interrupt_reason.empty()) m.error = st_.interrupt_reason;
+      m.rev = next_msg_rev_++;
+    }
     st_.toast = st_.interrupt_reason.empty()
                     ? "已中断（可继续）"
                     : ("已中断：" + st_.interrupt_reason);
     st_.toast_deadline_ms = now_ms() + kToastMs;
+    // Ask the backend too: the click/state we set above is our best guess, and
+    // the fresh reply also invalidates any older in-flight one.
+    if (!st_.active_tab.empty()) refresh_loop_state(st_.active_tab);
   } else if (event == "loop.state") {
     std::string state = jsonutil::get<std::string>(payload, "state", "");
     if (state == "resumed" || state == "turnDone" || state == "idle") {
@@ -7546,9 +7618,14 @@ void UiApp::forget_turn(const std::string& sid, const std::string& turn_id) {
 
 void UiApp::refresh_loop_state(const std::string& sid) {
   if (sid.empty()) return;
+  // Ordered replies only: opening a session fires a refresh, and a turn that
+  // ends while that request is in flight leaves a reply saying "running" -
+  // applying it AFTER `loop.interrupted` put 中止 back on a stopped turn.
+  int seq = ++loop_state_seq_;
   call_async("session.loopState", Json{{"sid", sid}},
-             [this, sid](const BackendResult& r) {
+             [this, sid, seq](const BackendResult& r) {
     if (!r.ok) return;
+    if (seq != loop_state_seq_) return;  // a newer request supersedes this reply
     std::string state = jsonutil::get<std::string>(r.data, "state", "idle");
     bool suspended = state == "suspended";
     // A turn is "in flight" for anything except idle/turnDone - and NOT for

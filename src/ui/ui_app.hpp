@@ -1005,6 +1005,10 @@ class UiApp {
   // mirror it into `suspended`. The button label follows the BACKEND, not the
   // click: suspension is a request that the loop may take a moment to honour.
   void refresh_loop_state(const std::string& sid);
+  // Replies to session.loopState arrive asynchronously and can be OLDER than an
+  // event that already changed the state (a `loop.interrupted` that cleared
+  // 中止). Only the reply to the LATEST request is applied.
+  int loop_state_seq_ = 0;
   // Pull the session's pending wake-ups (scheduled tasks / event wakes) into
   // state so the composer can show a countdown and offer to cancel them.
   void refresh_pending_wakes();

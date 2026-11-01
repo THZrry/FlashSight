@@ -286,7 +286,10 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
       if (!ifs) continue;
       std::stringstream ss;
       ss << ifs.rdbuf();
-      std::string text = ss.str();
+      // Decode first: an AGENTS.md saved by a Chinese editor is GBK, and its
+      // bytes go into the SYSTEM PROMPT. Invalid UTF-8 there throws when the
+      // provider request is serialized, so the turn dies before it starts.
+      std::string text = utf8::decode_to_utf8(ss.str());
       // Cap it: a 200 KB instructions file would be re-sent every turn and
       // would dwarf the actual conversation. Cut on a character boundary.
       text = utf8::truncate(text, 16000, "\n... (truncated)");
@@ -796,7 +799,10 @@ FsResult FsApi::project_read_file(const std::string& pid, const std::string& rel
   if (!ifs) return FsResult::error(ErrCode::kIo, "cannot open file: " + rel);
   std::stringstream ss;
   ss << ifs.rdbuf();
-  return FsResult::success(Json{{"content", ss.str()}});
+  // The preview pane renders this text; raw GBK bytes would make the whole
+  // reply unserializable (the side panel then showed "加载失败" for a perfectly
+  // ordinary file).
+  return FsResult::success(Json{{"content", utf8::decode_to_utf8(ss.str())}});
 }
 
 // 保存聊天附件：写进 <project>/.flashsight/uploads/。放在项目里（而不是临时

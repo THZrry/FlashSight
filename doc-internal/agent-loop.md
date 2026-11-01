@@ -118,6 +118,18 @@ idle ──send/append──▶ planning ⇄ toolCalling ──permission/ask─
   `loop.state = suspended` 当作"本轮结束"来处理：最后一个 assistant 消息
   `streaming = false`、补 `ended_at`，一个字都没产出的空消息直接丢掉。少了这一步，
   转录里会永远转圈、计时器继续走——"停止生成/挂起做不完整"。
+- **失败的一轮也必须落盘**（会话完整性）。用户看到的是：读文件编码出错 → 整轮死掉 →
+  切页/重开什么都没了。两条规则：
+  1. `run_loop` 是一个 try/catch 包着的 `run_loop_impl`。任何异常（最典型的是
+     `nlohmann::json::dump()` 在非法 UTF-8 上抛 type_error.316）都会被 `fail_turn()`
+     接住：把已流出的文本、已执行的 `executed_calls_`、`interim_texts_` 连同 `error`
+     字段写成一个正式 assistant 轮，再 `loop.interrupted`。
+  2. provider 失败的两个分支（首轮 / 后续轮）也调 `persist_failed_turn()`。以前这里
+     只把 user 轮写盘，回答和工作过程全部丢弃。
+  落盘的失败轮带 `failed: true` + `error`，重新打开时 UI 显示"本轮中断：…"。
+- **所有进入 JSON 的字符串都必须是合法 UTF-8**：工具结果、终端输出、模型分片都可能
+  不是。`dump_safe()`（fs_json.hpp）用 `error_handler_t::replace` 序列化，永不抛异常；
+  文件读取一律先 `utf8::decode_to_utf8()`（BOM / UTF-16 / GBK / Latin-1 回退）。
 - 唤醒源：用户输入 / 后台终端退出 / 模型定时唤醒 / 子代理完成。
 - 模型自设唤醒：单次时长不设上限，用户可手动取消；
   项目级可见待唤醒状态，会话输入框区域显示待唤醒信息；

@@ -12,6 +12,7 @@
 
 #include "fs_path.hpp"
 #include "fs_simhash.hpp"  // 未用，保持 include 习惯统一
+#include "fs_utf8.hpp"
 
 // libregexp is C. The upstream header has no extern "C" guard (it is meant to be
 // compiled as part of QuickJS), so without this the C++ compiler mangles the
@@ -207,8 +208,11 @@ FsResult regex_file(const ghc::filesystem::path& p, const std::string& pattern,
   Json data = Json::object();
   data["changed"] = true;
   data["count"] = count;
-  data["before"] = content;
-  data["after"] = out;
+  // The FILE keeps its own encoding on disk (the bytes are written back as they
+  // were), but these two snapshots go into a JSON result: sanitize them or a
+  // legacy-encoded file makes the whole result unserializable.
+  data["before"] = utf8::sanitize(content);
+  data["after"] = utf8::sanitize(out);
   return FsResult::success(data);
 }
 

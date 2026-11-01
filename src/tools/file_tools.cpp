@@ -274,9 +274,14 @@ void register_file_tools(ToolRegistry* registry) {
                   " bytes; pass explicit offset+limit to read a slice");
         }
         std::string content;
+        std::string encoding;
         if (!read_text_file(p, &content)) {
           return FsResult::error(ErrCode::kNotFound, "file not found: " + rel);
         }
+        // Decode BEFORE anything looks at the text: a GBK/UTF-16 file read raw is
+        // invalid UTF-8, and dumping that into a tool result throws inside
+        // nlohmann::json and kills the turn (nothing gets persisted).
+        content = utf8::decode_to_utf8(content, &encoding);
         if (is_binary(content)) {
           return FsResult::error(ErrCode::kInvalidArg,
                                  "binary file, use read_image for images: " + rel);
@@ -310,6 +315,13 @@ void register_file_tools(ToolRegistry* registry) {
         data["truncated"] = end < total;
         if (clipped) data["longLinesTruncated"] = true;
         data["eol"] = eol == "\r\n" ? "crlf" : "lf";
+        // Say WHICH encoding the bytes were: the model is reading a transcoded
+        // copy, so an edit that writes CJK back must not assume the file was
+        // UTF-8 to begin with. ("utf-8" is the overwhelmingly common case and is
+        // omitted so it does not add noise to every read.)
+        if (!encoding.empty() && encoding != "utf-8" && encoding != "utf-8-bom") {
+          data["encoding"] = encoding;
+        }
         // The hash covers the WHOLE file, not the slice: it is an identity for
         // "the file I read", which is what the edit protocol needs.
         data["hash"] = hash::short_hex(hash::xxh64_hex(content));
@@ -426,6 +438,10 @@ void register_file_tools(ToolRegistry* registry) {
             if (!szec && static_cast<int64_t>(sz) > kHardMaxBytes) continue;
             std::string content;
             if (!read_text_file(it->path(), &content)) continue;
+            // Search the DECODED text: matching raw GBK bytes against a UTF-8
+            // pattern silently misses every CJK line, and the matched line goes
+            // into the JSON result (where invalid bytes kill the turn).
+            content = utf8::decode_to_utf8(content);
             if (is_binary(content)) continue;
             std::string cur;
             int lineno = 0;

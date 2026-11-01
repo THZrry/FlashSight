@@ -772,6 +772,15 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   for (size_t i = 0; i < blocks.size(); ++i) body.add(blocks[i]);
   if (m.streaming) body.add(el("span", "caret"));
   wrap.add(body);
+  // A turn that stopped early says so, in place, right under the partial answer.
+  // It used to be invisible: the answer just ended, and after a reload the turn
+  // was gone entirely (nothing was persisted).
+  if (!m.error.empty()) {
+    H err = el("div", "turn-error");
+    err.add(el("i", "fa fa-triangle-exclamation"));
+    err.add(el("span", "te-text").text(tr("本轮中断：") + m.error));
+    wrap.add(err);
+  }
   if (!m.summary.empty()) wrap.add(turn_summary(m.summary));
   H meta = el("div", "meta");
   if (!m.time.empty()) meta.add(el("span", "time").text(m.time));
@@ -858,22 +867,38 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
   }
   head.add(el("span", "tb-caret").text(b.expanded ? "\u25be" : "\u25b8"));
   d.add(head);
-  if (b.expanded && !b.detail.empty()) {
-    // The detail is JSON in practice (tool args + results), so it gets the same
-    // highlighter the code blocks use. A wall of one-colour JSON is unreadable
-    // when what you want is "which field says what".
-    H pre = el("pre", "tb-body");
-    // Keyed so the shell can scroll it to the bottom after opening: the useful
-    // end of a tool result is its last lines.
-    pre.key("tb-body:" + b.key);
+  if (b.expanded && (!b.input.empty() || !b.detail.empty())) {
+    // 输入 first, 返回 second: a tool row answers "what did it do" before "what
+    // came back". The input used to be thrown away (tool.update replaced it), so
+    // a read_file block showed a wall of JSON without saying which file.
+    //
+    // Labels only when there is something to tell apart: a block that has just
+    // the result (an older stored turn, or a tool with no arguments) is not
+    // labelled "返回" - a single section explains itself.
+    const bool both = !b.input.empty() && !b.detail.empty();
     const highlight::LangSpec* spec = highlight::find_lang("json");
-    if (spec && std::strcmp(spec->id, "plain") != 0 &&
-        !b.detail.empty() && (b.detail[0] == '{' || b.detail[0] == '[')) {
-      pre.html(highlight::to_html_cached(b.detail, "json"));
-    } else {
-      pre.text(b.detail);
+    auto body = [&](const std::string& label, const std::string& text_str,
+                    const std::string& key) {
+      if (!label.empty()) d.add(el("div", "tb-label").text(label));
+      H pre = el("pre", "tb-body");
+      // Keyed so the shell can scroll it to the bottom after opening: the useful
+      // end of a tool result is its last lines.
+      pre.key(key);
+      if (spec && std::strcmp(spec->id, "plain") != 0 && !text_str.empty() &&
+          (text_str[0] == '{' || text_str[0] == '[')) {
+        pre.html(highlight::to_html_cached(text_str, "json"));
+      } else {
+        pre.text(text_str);
+      }
+      d.add(pre);
+    };
+    if (!b.input.empty()) {
+      body(both || b.detail.empty() ? tr("输入") : std::string(), b.input,
+           "tb-input:" + b.key);
     }
-    d.add(pre);
+    if (!b.detail.empty()) {
+      body(both ? tr("返回") : std::string(), b.detail, "tb-body:" + b.key);
+    }
   }
   return d;
 }

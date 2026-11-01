@@ -247,6 +247,55 @@ FS_TEST(failed_turn_still_persists_user_input) {
   EXPECT_TRUE(found);
 }
 
+// ---------- 会话完整性：异常也不能丢掉这一轮 ----------
+// The report was "读文件 utf8 问题，好像整轮都失败了…重新打开发现真没了": a tool
+// result that could not be serialized threw inside run_loop, the exception
+// unwound to the caller, and NOTHING was written. Now any exception closes the
+// turn: the partial work and the reason are persisted.
+FS_TEST(throwing_tool_still_persists_the_turn) {
+  AgentLoop::Options opts;
+  opts.sid = "s_boom";
+  opts.permission = "full";
+  AgentLoop loop(std::move(opts));
+  std::vector<Json> persisted;
+  loop.persist_turn = [&persisted](const Json& t) { persisted.push_back(t); };
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;
+    return st;
+  };
+  int step = 0;
+  loop.call_model = [&step](const ModelCallRequest&, ModelCallResult* out,
+                            const std::function<void(const std::string&)>&) {
+    ++step;
+    if (step == 1) {
+      *out = tool_reply({call("c_boom", "read_file", Json{{"path", "x.txt"}})});
+      return FsResult::success();
+    }
+    *out = text_reply("done");
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&)
+      -> FsResult { throw std::runtime_error("kaboom"); };
+  // The send reports failure instead of escaping as an exception.
+  FsResult r = loop.send("read the file");
+  EXPECT_FALSE(r.ok());
+
+  const Json* asst = nullptr;
+  for (size_t i = 0; i < persisted.size(); ++i) {
+    if (jsonutil::get<std::string>(persisted[i], "role", "") == "assistant") {
+      asst = &persisted[i];
+    }
+  }
+  ASSERT_TRUE(asst != nullptr);
+  // The reason is stored, and the turn is marked finished so a reload does not
+  // show a permanently streaming answer.
+  EXPECT_TRUE(jsonutil::get<std::string>(*asst, "error", "").find("kaboom") !=
+              std::string::npos);
+  EXPECT_TRUE(jsonutil::get<bool>(*asst, "failed", false));
+  EXPECT_TRUE(asst->contains("toolCalls"));
+}
+
 // ---------- 工具上限是"暂停"而不是"中断" ----------
 FS_TEST(tool_limit_pauses_instead_of_failing) {
   AgentLoop::Options opts;

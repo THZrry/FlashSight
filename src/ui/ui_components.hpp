@@ -106,7 +106,12 @@ H file_icon(const std::string& name, bool is_dir);
 struct ToolBlock {
   std::string name;
   std::string summary;   // one-line description shown collapsed
-  std::string detail;    // body shown expanded (mono)
+  std::string detail;    // body shown expanded (mono) - the RESULT
+  // What the call ASKED FOR (its arguments), rendered as its own labeled section
+  // ABOVE the result. read_file used to show only the returned JSON, so the block
+  // never said which file was read ("只有返回json没有输入"). It is a separate
+  // field because tool.update overwrites `detail` with the result.
+  std::string input;
   bool expanded = false;
   bool ok = true;
   // Still executing. The row shows a "running" state and is completed in place
@@ -149,6 +154,10 @@ struct ChatMsg {
   // on every render while anything streams; 0 means "do not show a live timer".
   int64_t now_ms = 0;
   std::string summary;           // turn summary (not folded, no border)
+  // Why a turn stopped early (provider error, tool crash). A failed turn still
+  // has its partial answer and work log; this line says what broke instead of
+  // leaving a permanently "streaming" bubble or a silent truncation.
+  std::string error;
   // Bumped by whoever mutates this message. The chat view memoises one rendered
   // VNode per message and reuses it while this number is unchanged: a session
   // can hold hundreds of turns, and re-parsing every markdown block and

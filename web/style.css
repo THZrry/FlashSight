@@ -1493,15 +1493,58 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .tb-name { font-family: var(--mono); }
 .tb-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tb-caret { margin-left: auto; color: var(--text-faint); }
+/* A tool block shows TWO sections: the call's arguments (输入) and its result
+   (返回). The label is what tells them apart when both are JSON. */
+.tb-label {
+  padding: 7px 10px 3px;
+  background: var(--code-bg);
+  border-top: 1px solid var(--border);
+  font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.tb-body + .tb-label { margin-top: 2px; }
 .tb-body {
   margin: 0; padding: 8px 10px;
   background: var(--code-bg); color: var(--code-text);
   font-family: var(--mono); font-size: 12px;
+  /* No top border when a label sits above it; a lone body keeps one. */
   border-top: 1px solid var(--border);
-  /* Uncapped: an opened result is read in full and the page scrolls. A cap here
-     meant nested scrolling (page inside box inside page) at every level. */
-  overflow: visible; max-height: none;
+  /* Uncapped vertically: an opened result is read in full and the page scrolls.
+     A cap here meant nested scrolling (page inside box inside page). */
+  max-height: none;
+  /* Long single lines (minified JSON, a one-line CSV dump) must be READABLE:
+     wrapping makes a 400-column row meaningless, and `overflow: visible` used to
+     paint them straight out of the box where the block's `overflow: hidden`
+     clipped them - unreadable, unreachable. Horizontal scroll instead, with a
+     thin bar that only shows on hover (see below). */
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
 }
+.tb-label + .tb-body { border-top: none; }
+/* Floating horizontal scrollbar: transparent until the block is hovered, so a
+   transcript full of tool rows does not show a permanent rail under each one. */
+.tb-body::-webkit-scrollbar { height: 8px; }
+.tb-body::-webkit-scrollbar-track { background: transparent; }
+.tb-body::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.tb-body:hover::-webkit-scrollbar-thumb { background: var(--border-strong); }
+.tb-body:hover { scrollbar-color: var(--border-strong) transparent; }
+
+/* A turn that stopped on an error: the partial answer stays, this says why. */
+.turn-error {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin-top: 8px; padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--err);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--err);
+  font-size: 12px; line-height: 1.5;
+}
+.turn-error .fa { margin-top: 2px; }
+.te-text { word-break: break-word; }
 
 /* turn summary: unfolded, no border */
 .turn-summary { margin-top: 10px; }

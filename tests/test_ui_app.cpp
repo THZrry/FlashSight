@@ -1503,6 +1503,115 @@ FS_TEST(uiapp_suspend_finalizes_the_live_message) {
   EXPECT_TRUE(app.state().messages.size() == 1);
 }
 
+// 中断 (the turn died on a provider/tool error) also ends mid-stream: the same
+// rule as a park, plus the reason is kept ON the message - the toast is gone in
+// three seconds and the transcript then said nothing about why it stopped.
+FS_TEST(uiapp_interrupted_finalizes_and_explains) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.messages.clear();
+    s.turn_running = true;
+  });
+  app.on_backend_event_for_test("stream.delta",
+                                Json{{"sid", "sess_a"}, {"text", "half"}});
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  EXPECT_TRUE(app.state().messages[0].streaming);
+  app.on_backend_event_for_test(
+      "loop.interrupted", Json{{"sid", "sess_a"}, {"error", "http 400: bad key"}});
+  EXPECT_FALSE(app.state().messages[0].streaming);
+  EXPECT_FALSE(app.state().turn_running);
+  EXPECT_TRUE(app.state().messages[0].error.find("http 400") != std::string::npos);
+  EXPECT_TRUE(dom.dump().find("\u672c\u8f6e\u4e2d\u65ad") != std::string::npos);
+
+  // A failure on the VERY FIRST provider call leaves no assistant message to
+  // attach to. One is created, so the transcript still says what happened instead
+  // of showing the question followed by nothing (the failure existed only in a
+  // three-second toast).
+  {
+    NullDom dom2;
+    AppState st2 = AppState::make();
+    UiApp app2(dom2, st2, nullptr);
+    app2.mount();
+    app2.update([](AppState& s) {
+      seed_session(s, "sess_b");
+      s.messages.clear();
+      comp::ChatMsg u;
+      u.role = "user";
+      u.text = "hi";
+      s.messages.push_back(u);
+      s.turn_running = true;
+    });
+    app2.on_backend_event_for_test(
+        "loop.interrupted",
+        Json{{"sid", "sess_b"}, {"error", "http 401: bad key"}});
+    ASSERT_TRUE(app2.state().messages.size() == 2);
+    EXPECT_EQ(app2.state().messages.back().role, std::string("assistant"));
+    EXPECT_FALSE(app2.state().messages.back().streaming);
+    EXPECT_TRUE(app2.state().messages.back().error.find("401") != std::string::npos);
+    EXPECT_TRUE(dom2.dump().find("\u672c\u8f6e\u4e2d\u65ad") != std::string::npos);
+  }
+}
+
+// A session.turns reply describes the disk, which is BEHIND the screen right after
+// a send: the optimistic question (and any streamed text) exists only in memory.
+// Assigning the reply wholesale erased it - "发送以后 history 没有反应，切页面才显示".
+FS_TEST(uiapp_turns_reply_keeps_live_messages) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class OneTurnBackend : public IUiBackend {
+   public:
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.info") {
+        r.data = Json{{"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}}},
+                      {"sessionSettings", Json::object()},
+                      {"systemOps", Json::array()}};
+      }
+      if (method == "session.turns") {
+        // The disk still holds ONLY the old turn: the reply was requested before
+        // the send landed.
+        r.data = Json{{"turns", Json::array({Json{{"role", "user"}, {"text", "old q"},
+                                                 {"turnId", "t_old"}}})},
+                      {"start", 0}, {"total", 1}, {"hasMore", false}};
+      }
+      if (method == "model.allEnabled") {
+        r.data = Json{{"models", Json::array({Json{{"id", "m1"}}})}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "m1";
+    s.model_available = true;
+  });
+  app.show("sess_a");
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  app.update([](AppState& s) { s.session_input = "new q"; });
+  app.send_message();
+  // The optimistic message is on screen now...
+  ASSERT_TRUE(app.state().messages.size() == 2);
+  EXPECT_EQ(app.state().messages.back().text, std::string("new q"));
+  // ...and a stale reload must not erase it.
+  app.show("home");
+  app.show("sess_a");
+  bool have_old = false, have_new = false;
+  for (size_t i = 0; i < app.state().messages.size(); ++i) {
+    if (app.state().messages[i].text == "old q") have_old = true;
+    if (app.state().messages[i].text == "new q") have_new = true;
+  }
+  EXPECT_TRUE(have_old);   // the disk content is there
+  EXPECT_TRUE(have_new);   // and the un-persisted send survived
+}
+
 FS_TEST(uiapp_permission_prompt_opens_modal) {
   NullDom dom;
   AppState st = AppState::make();
@@ -3512,12 +3621,15 @@ FS_TEST(uiapp_tool_call_start_and_complete) {
   app.on_backend_event_for_test(
       "tool.start",
       Json{{"name", "read_file"}, {"args", Json{{"path", "main.cpp"}}}});
-  // The row exists while it runs, with the arguments already captured (they are
-  // shown in the expandable body, so assert on the stored detail).
+  // The row exists while it runs, with the ARGUMENTS in their own `input` field.
+  // They used to be stored in `detail`, which tool.update then replaced - so a
+  // finished read_file row showed only the result and never said which file was
+  // read ("只有返回json没有输入").
   EXPECT_EQ(app.state().messages.back().tools.size(), 1u);
   EXPECT_TRUE(app.state().messages.back().tools[0].running);
-  EXPECT_TRUE(app.state().messages.back().tools[0].detail.find("main.cpp") !=
+  EXPECT_TRUE(app.state().messages.back().tools[0].input.find("main.cpp") !=
               std::string::npos);
+  EXPECT_TRUE(app.state().messages.back().tools[0].detail.empty());
   std::string running = dom.dump();
   EXPECT_TRUE(running.find("read_file") != std::string::npos);
   EXPECT_TRUE(running.find("tool-block running") != std::string::npos);
@@ -3530,6 +3642,11 @@ FS_TEST(uiapp_tool_call_start_and_complete) {
   EXPECT_EQ(app.state().messages.back().tools.size(), 1u);
   EXPECT_FALSE(app.state().messages.back().tools[0].running);
   EXPECT_TRUE(app.state().messages.back().tools[0].ok);
+  // The result lands in `detail` and the input SURVIVES: both sections are shown.
+  EXPECT_TRUE(app.state().messages.back().tools[0].detail.find("line2") !=
+              std::string::npos);
+  EXPECT_TRUE(app.state().messages.back().tools[0].input.find("main.cpp") !=
+              std::string::npos);
   std::string done = dom.dump();
   EXPECT_TRUE(done.find("42 lines") != std::string::npos);
   EXPECT_TRUE(done.find("tool-block running") == std::string::npos);

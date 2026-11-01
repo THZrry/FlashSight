@@ -309,7 +309,18 @@ class AgentLoop {
   // exists: the user's message must still be in the session file, otherwise
   // reopening the session shows the answer without the question.
   void persist_user_turn_only(int64_t now_ms);
+  // Persist a turn that died mid-flight (provider error, tool exception, a
+  // thrown nlohmann dump). Everything the turn produced is written - partial
+  // answer, executed tool calls, narration - plus an `error` field, so reopening
+  // the session shows what happened instead of nothing at all.
+  bool persist_failed_turn(const std::string& error, const std::string& partial_text);
   FsResult run_loop(Json messages, const std::string& model, const Json& tools);
+  // The body of run_loop. The public entry wraps it, so ANY exception still
+  // persists the turn and reports `loop.interrupted` instead of unwinding to the
+  // caller with the turn lost.
+  FsResult run_loop_impl(Json messages, const std::string& model, const Json& tools);
+  // Close a turn that died: persist what it produced, report it, return an error.
+  FsResult fail_turn(const std::string& error);
   // Execute one assistant reply's tool calls; returns when the group is done,
   // parked on an approval, or interrupted.
   FsResult run_tool_group(const Json& calls, Json* messages);
