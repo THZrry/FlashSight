@@ -1080,7 +1080,12 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 
 .history {
   flex: 1; min-width: 0; min-height: 0;
-  overflow: auto;
+  /* Vertical only. A WIDE table used to widen the whole transcript and give the
+     page a horizontal scrollbar, which moved the answer column sideways while
+     you were reading it; tables get their own scroll container instead (see
+     .md-table-wrap). Nothing else in the transcript may exceed the column. */
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 18px 22px;
   /* NOT `scroll-behavior: smooth`. Programmatic scrollTop assignments (jump to
      the bottom when a session opens, restore the saved offset on the way back)
@@ -1246,6 +1251,13 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 
 /* article typography */
+/* The transcript no longer scrolls sideways (`.history` is overflow-x: hidden),
+   so a single unbreakable token - a URL, a hash, a base64 chunk - must WRAP or it
+   is simply cut off. `anywhere` only kicks in when the word cannot fit, so normal
+   text keeps its usual line breaks. */
+.article p.md-p, .article li, .article .md-h, .article blockquote {
+  overflow-wrap: anywhere;
+}
 .article p.md-p { margin: 0 0 10px; }
 .article .md-h { margin: 14px 0 8px; }
 .article h1.md-h { font-size: 18px; }
@@ -1289,13 +1301,30 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 /* tables: a bordered grid with a shaded header. The transcript is where data
    comparisons happen, and a table rendered as pipes is unreadable. */
+/* A table can be WIDER than the conversation column (many columns, long cells).
+   It must not widen the transcript: the wrapper is the scroll container, so the
+   answer column stays put and only the table scrolls sideways. */
+.md-table-wrap {
+  max-width: 100%;
+  margin: 0 0 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.md-table-wrap:hover { scrollbar-color: var(--border-strong) transparent; }
+.md-table-wrap::-webkit-scrollbar { height: 8px; }
+.md-table-wrap::-webkit-scrollbar-track { background: transparent; }
+.md-table-wrap::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.md-table-wrap:hover::-webkit-scrollbar-thumb { background: var(--border-strong); }
 .article table.md-table {
   border-collapse: collapse;
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 12.5px;
-  /* Full width: a table in an answer is usually a comparison, and a narrow
-     table floating at the left edge wastes the column and reads as a widget. */
-  width: 100%;
+  /* max-content keeps every column at its natural width (so the wrapper can
+     scroll); min-width fills the column when the table is small. */
+  width: max-content;
+  min-width: 100%;
   table-layout: auto;
 }
 .article table.md-table th,
@@ -1442,8 +1471,14 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
      page scrolls - which is how the rest of the transcript behaves. */
   overflow: visible;
 }
-/* One expanded tool result: also uncapped, for the same reason. */
-.work-body .tb-body { max-height: none; }
+/* An expanded tool body is a WINDOW, not a page section.
+   It used to be uncapped like the rest of the fold, and a 200-line JSON dump
+   pushed its own horizontal scrollbar thousands of pixels down: the bar existed,
+   but it sat below the viewport and could not be reached without scrolling past
+   the whole record first. Capping the height keeps both scrollbars at the edge
+   of the visible window, which is the only way a scrollbar stays usable inside a
+   long record. */
+.work-body .tb-body { max-height: min(40vh, 26em); }
 /* The model's narration between tool calls (see ChatMsg::interim). It is not the
    answer, so it is dim and indented rather than a bubble - and it lives HERE,
    because gluing it onto the answer made the reply look like it repeated itself. */
@@ -1509,24 +1544,25 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   font-family: var(--mono); font-size: 12px;
   /* No top border when a label sits above it; a lone body keeps one. */
   border-top: 1px solid var(--border);
-  /* Uncapped vertically: an opened result is read in full and the page scrolls.
-     A cap here meant nested scrolling (page inside box inside page). */
-  max-height: none;
+  /* A bounded window (see the .work-body override): both scrollbars stay at the
+     edge of what you can see. `overscroll-behavior: contain` stops the page from
+     scrolling when the inner box hits its end. */
+  max-height: min(40vh, 26em);
+  overscroll-behavior: contain;
   /* Long single lines (minified JSON, a one-line CSV dump) must be READABLE:
      wrapping makes a 400-column row meaningless, and `overflow: visible` used to
      paint them straight out of the box where the block's `overflow: hidden`
      clipped them - unreadable, unreachable. Horizontal scroll instead, with a
-     thin bar that only shows on hover (see below). */
+     thin bar that is dim at rest and clear on hover. */
   white-space: pre;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
 }
 .tb-label + .tb-body { border-top: none; }
-/* Floating horizontal scrollbar: transparent until the block is hovered, so a
-   transcript full of tool rows does not show a permanent rail under each one. */
-.tb-body::-webkit-scrollbar { height: 8px; }
+/* Thin bars on both axes, thumb appearing on hover: a transcript full of tool
+   rows must not read as a stack of rails. */
+.tb-body::-webkit-scrollbar { width: 8px; height: 8px; }
 .tb-body::-webkit-scrollbar-track { background: transparent; }
 .tb-body::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
 .tb-body:hover::-webkit-scrollbar-thumb { background: var(--border-strong); }

@@ -583,6 +583,20 @@ void UiApp::pump() {
       }
     }
   }
+  // The project/nav session rows carry their own status (running / terminal /
+  // auto round) and come from `session.list`. Nothing in the app refreshed that
+  // list on the events that CHANGE it, so a project's dot stayed idle while its
+  // agent worked or a terminal printed ("项目那里的小圆点没有反应"). Coalesced:
+  // a fast turn emits dozens of events and each refresh is one request per
+  // project.
+  if (sessions_dirty_) {
+    int64_t now = now_ms();
+    if (now - sessions_refresh_ms_ >= 800) {
+      sessions_dirty_ = false;
+      sessions_refresh_ms_ = now;
+      refresh_session_rows();
+    }
+  }
 }
 
 // Terminal refresh, driven by its own (faster) timer: a terminal must keep up
@@ -949,6 +963,13 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   bool had_view = views_.has(sid);
   load_session_view(sid);
   last_session_key_ = sid;
+  // The user is looking at this tab now: its "new output" dot is spent.
+  for (size_t i = 0; i < st_.sessions.size(); ++i) {
+    if (st_.sessions[i].id == sid) {
+      st_.sessions[i].dirty = false;
+      break;
+    }
+  }
   // A returning visit already HAS its transcript in the view, so the render below
   // can position it in the same frame it paints - no flash of the top of the chat
   // while the refresh is in flight. (The refresh then lands and does the same
@@ -1054,9 +1075,11 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
       tb.detail = detail;
       // The call's INPUT is its own section (the block used to show only the
-      // result). Older turns without `detail` still get their args rendered as
-      // the output, which is all they have.
-      if (tc[k].contains("args")) tb.input = dump_safe(tc[k]["args"], 2);
+      // result). An empty object carries no information - skip it.
+      if (tc[k].contains("args") && tc[k]["args"].is_object() &&
+          !tc[k]["args"].empty()) {
+        tb.input = dump_safe(tc[k]["args"], 2);
+      }
       if (detail.empty()) detail = tb.input;
       tb.detail = detail;
       tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
@@ -1437,6 +1460,42 @@ void UiApp::load_sessions(size_t project_index) {
       }
     });
   });
+}
+
+// Re-read every project's session rows (the source of the dots).
+//
+// Called from pump() only, and only when something that changes a dot happened.
+// It deliberately does NOT reload the project list: pids and paths cannot change
+// from a turn or a terminal, and re-fetching them would also rebuild the cards
+// the user may be looking at.
+void UiApp::refresh_session_rows() {
+  for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
+}
+
+// The ACTIVE session's row, with the UI's live state taking precedence.
+//
+// The list is a snapshot from the backend (up to a second old), while
+// `turn_running` / `terminals` change on the event that CAUSED them. Using the
+// snapshot for the active row made the dot lag visibly right where the user is
+// looking; this override makes it immediate, and the refresh catches the rest.
+ProjectCard::SessionRow UiApp::live_session_row(ProjectCard::SessionRow row) const {
+  if (row.sid.empty() || row.sid != st_.active_tab) return row;
+  row.running = st_.turn_running || st_.auto_round > 0;
+  if (st_.auto_round > 0) row.auto_round = st_.auto_round;
+  // Terminal count from the LIVE list: opening one shows immediately, and a
+  // closed one stops counting even before the next refresh.
+  int running_terms = 0;
+  for (size_t i = 0; i < st_.terminals.size(); ++i) {
+    if (st_.terminals[i].status == "running") ++running_terms;
+  }
+  row.terminal_count = running_terms;
+  // An interrupted turn is a failure the list cannot know about yet.
+  if (st_.interrupted && !st_.interrupt_reason.empty()) {
+    row.last_error = st_.interrupt_reason;
+    row.running = false;
+  }
+  if (st_.suspended) row.running = false;
+  return row;
 }
 
 void UiApp::load_usage() {
@@ -2857,8 +2916,12 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       tb.running = true;
       // The ARGUMENTS are this block's input. They used to be written into
       // `detail`, which tool.update then overwrote with the result - so the row
-      // looked like it never received a request.
-      if (payload.contains("args")) tb.input = dump_safe(payload["args"], 2);
+      // looked like it never received a request. An empty object is not an
+      // input: `{}` would render as a labelled section holding two braces.
+      if (payload.contains("args") && payload["args"].is_object() &&
+          !payload["args"].empty()) {
+        tb.input = dump_safe(payload["args"], 2);
+      }
       msg.tools.push_back(tb);
       msg.rev = next_msg_rev_++;
       render();
@@ -2922,6 +2985,31 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     if (d != st_.subagent_details.end() && d->second.loaded) {
       load_subagent_detail(id);
     }
+  } else if (event == "subagent.started") {
+    // A NEW subagent gets its row here. The panel's rows come from
+    // `subagent.list`, which was fetched when the tab was opened - a subagent
+    // that starts AFTER that had no row at all, so its live text (the tagged
+    // stream.delta events look the row up by id) was dropped and the tab badge
+    // stayed at the old count.
+    std::string id = jsonutil::get<std::string>(payload, "id", "");
+    if (!id.empty()) {
+      std::vector<AppState::SubagentRow>& subs =
+          is_active ? st_.subagents : vp->subagents;
+      bool known = false;
+      for (size_t i = 0; i < subs.size(); ++i) {
+        if (subs[i].id == id) { known = true; break; }
+      }
+      if (!known) {
+        AppState::SubagentRow row;
+        row.id = id;
+        row.kind = jsonutil::get<std::string>(payload, "kind", "");
+        row.task = jsonutil::get<std::string>(payload, "task", "");
+        row.model = jsonutil::get<std::string>(payload, "model", "");
+        row.status = "running";
+        row.started_at = now_ms();
+        subs.push_back(row);
+      }
+    }
   } else if (event == "terminal.exit") {
     std::string tid = jsonutil::get<std::string>(payload, "tid", "");
     std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
@@ -2967,6 +3055,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         if (order[i] == tid) { in_order = true; break; }
       }
       if (!in_order) order.push_back(tid);
+      // A terminal appeared (the model started one): the session is now doing
+      // background work, so its dot changes. Marked here rather than per output
+      // chunk - see the note in on_backend_event.
+      mark_sessions_dirty();
     }
   }
 }
@@ -2974,6 +3066,20 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
 void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   ++event_count_;
   std::string sid = jsonutil::get<std::string>(payload, "sid", "");
+  // Anything that changes a session's STATUS also changes a project's dot (and
+  // the sidebar rows). The dot used to be fed only by `session.list`, which was
+  // fetched on load and never again - so a project looked idle while its agent
+  // worked and its terminal printed. Coalesced in pump(); one refresh per burst.
+  if (event == "turn.started" || event == "turn.done" ||
+      event == "loop.state" || event == "loop.interrupted" ||
+      event == "loop.paused" || event == "auto.next" ||
+      event == "tool.start" || event == "terminal.exit") {
+    mark_sessions_dirty();
+  }
+  // NOTE: terminal.OUTPUT is not in that list on purpose - a chatty terminal
+  // would refresh the lists 1.25 times a second forever. Only the appearance of a
+  // NEW terminal changes the count, and that is marked where it is registered
+  // (see the terminal.output branch).
   // A delta only appends text, and a fast model emits hundreds per poll burst.
   // Repainting per delta starves the browser's event loop (the next poll never
   // runs), which makes the stream LOOK frozen. pump() paints them on a ~50 ms
@@ -2981,6 +3087,18 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   const bool coalesced = (event == "stream.delta");
   // session-scoped events go to their own view (may be a background tab)
   if (!sid.empty() && sid != st_.active_tab) {
+    // A background tab that is working gets the dot on its tab: without it the
+    // only way to know another session produced something was to click every tab.
+    if (event == "turn.started" || event == "turn.done" ||
+        event == "loop.interrupted" || event == "stream.delta" ||
+        event == "tool.start" || event == "assistant.interim") {
+      for (size_t i = 0; i < st_.sessions.size(); ++i) {
+        if (st_.sessions[i].id == sid) {
+          st_.sessions[i].dirty = true;
+          break;
+        }
+      }
+    }
     apply_session_event(sid, event, payload);
     if (!coalesced) render();
     return;
@@ -3918,7 +4036,11 @@ VNodePtr UiApp::build_nav_rail() {
           s2.ctx_id = sid;
         });
       });
-      H nd = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round);
+      // The active session's dot follows the LIVE state (a turn that just
+      // started, a terminal that just opened), not the last list snapshot.
+      ProjectCard::SessionRow lr = live_session_row(s);
+      H nd = session_dot(lr.loop_state, lr.last_error, lr.running, lr.terminal_count,
+                         lr.auto_round);
       nd.cls("nav-dot");  // same colour rules, rail-sized
       row.add(nd);
       row.add(el("span", "nav-session-title").text(s.title));
@@ -4265,7 +4387,9 @@ VNodePtr UiApp::build_home_search() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      row.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round));
+      ProjectCard::SessionRow sr = live_session_row(s);
+      row.add(session_dot(sr.loop_state, sr.last_error, sr.running,
+                          sr.terminal_count, sr.auto_round));
       H txt = el("div", "search-row-text");
       txt.add(el("div", "search-row-title").text(s.title));
       txt.add(el("div", "search-row-sub dim").text(p.name + "  ·  " + p.path));
@@ -4387,7 +4511,9 @@ VNodePtr UiApp::build_home_projects() {
         // Inline rename: the row turns into an input. Enter commits, blur also
         // commits (clicking away is the normal way to finish), Esc cancels.
         H rrow = el("div", "proj-session renaming");
-        rrow.add(session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round));
+        ProjectCard::SessionRow lr = live_session_row(s);
+        rrow.add(session_dot(lr.loop_state, lr.last_error, lr.running,
+                             lr.terminal_count, lr.auto_round));
         H inp = comp::text_input(s.rename_text, tr("会话名称"),
                                  [this, sid](const std::string& v) {
           update([&](AppState& st2) {
@@ -4433,7 +4559,9 @@ VNodePtr UiApp::build_home_projects() {
           s2.ctx_id = sid;
         });
       });
-      H dot = session_dot(s.loop_state, s.last_error, s.running, s.terminal_count, s.auto_round);
+      ProjectCard::SessionRow lr = live_session_row(s);
+      H dot = session_dot(lr.loop_state, lr.last_error, lr.running,
+                          lr.terminal_count, lr.auto_round);
       row.add(dot);
       row.add(el("span", "ps-title").text(s.title));
       row.add(el("span", "grow"));
@@ -11078,6 +11206,10 @@ void UiApp::start_terminal(const std::string& shell, const std::string& label) {
     term_focus_pending_ = true;  // the new terminal takes the keyboard
     load_terminals(active_sid());
     if (!tid.empty()) load_terminal_grid(tid);
+    // The session is now "background busy" (a live terminal), and the project's
+    // dot says so: a terminal that is merely OPEN prints nothing, so no
+    // terminal.output event would have refreshed the row.
+    mark_sessions_dirty();
   });
 }
 

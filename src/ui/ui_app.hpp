@@ -1012,6 +1012,16 @@ class UiApp {
   // Pull the session's pending wake-ups (scheduled tasks / event wakes) into
   // state so the composer can show a countdown and offer to cancel them.
   void refresh_pending_wakes();
+  // Project/nav session rows carry running / terminal / auto-round status, and
+  // nothing refreshed them when those changed. `mark_sessions_dirty()` is called
+  // from the events that do change them; pump() coalesces the refresh.
+  void mark_sessions_dirty() { sessions_dirty_ = true; }
+  void refresh_session_rows();
+  // Override a session row with the LIVE state of the active session, so the dot
+  // reacts to a turn/terminal instantly instead of waiting for the list refresh.
+  ProjectCard::SessionRow live_session_row(ProjectCard::SessionRow row) const;
+  bool sessions_dirty_ = false;
+  int64_t sessions_refresh_ms_ = 0;
   // 读取 Web 服务当前监听状态（设置-Web 服务页）
   void refresh_server_status();
   // Ask which models are usable and clear the composer's model box if the one

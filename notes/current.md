@@ -2415,3 +2415,38 @@ The process of project: P0 环境搭建 + P1 AppCore
     `--root temp/mock/data` 跑真实循环，用 CDP 驱动页面断言"发送即出现""输入/返回两段"
     "中断行""重开后仍在"。沙箱 sid 必须是 `s_`+十六进制（`s_mockgbk…` 被 valid_sid 拒绝，
     表现为整页空白 + 选择模型）。
+
+<89>(SOLVED): 横向滚动收拾干净（history 不再横滚 / 表格自己滚 / 工具体限高才够得着）+ 空输入段隐藏 + 状态圆点实时联动（项目·会话·标签·子代理）+ 健壮性补丁。
+  - **"history 不应该有横向滚动"**：`.history` 从 `overflow: auto` 改成 `overflow-x: hidden;
+    overflow-y: auto`。表格不再是"把整页撑宽"的元凶——markdown 表格现在包一层
+    `.md-table-wrap{overflow-x:auto}`，表格本身 `width: max-content; min-width: 100%`，
+    宽表自己滚、窄表仍然占满列。顺带：既然历史不再横滚，段落里的超长不可断词（URL/哈希/
+    base64）必须 `overflow-wrap: anywhere`，否则会被直接裁掉。
+  - **"横向滚动条并没有悬浮，记录过长会被挤到下面"**：`max-height: none` 是我上一版
+    的错误决定——条确实存在，但在几千像素的下面。工具体现在是**有界窗口**
+    （`max-height: min(40vh, 26em)` + `overflow: auto` + `overscroll-behavior: contain`），
+    两轴的滚动条永远贴在可见窗口边缘，拇指 hover 才显现。实测：clientHeight 302 /
+    scrollHeight 2247，两轴都能滚且框底在视口内。
+  - **"工具调用输入为空没必要显示（{} 可以跳过）"**：组件层把只有括号/空白的输入视为
+    没有输入（不再出现一个只有 `{}` 的"输入"段，也不再单独显示"返回"标签）；两个填充点
+    （live 的 tool.start、历史的 turn_to_message）也跳过空对象。
+  - **状态圆点的链条断裂（用户："项目那里的小圆点没有反应"）**：
+    ① session 行状态（running / loopState / terminalCount / autoRound）只来自
+       `session.list`，而它**只在加载时取一次** → 新增 `mark_sessions_dirty()`：
+       turn.started/turn.done/loop.state/loop.interrupted/loop.paused/auto.next/tool.start/
+       terminal.exit 以及"终端刚出现/刚 spawn"时标记，`pump()` 里 800ms 合并刷新。
+       注意 terminal **output** 不标记（一直刷屏的终端会让列表每秒请求一次）。
+    ② 当前会话那一行用 UI 自己的实时状态覆盖（`live_session_row`：turn_running /
+       auto_round / 活动终端数 / interrupted 原因），点下去立刻变色，不用等网络。
+    ③ 后台标签的 "dot"（SessionTab::dirty）**从来没有被写过**：后台 turn/流式事件现在
+       会点亮它，切到该标签时清除。
+    ④ `subagent.started` 后端一直发，UI 从来没处理 —— 面板打开后才启动的子代理没有行，
+       它的流式文本按 id 找不到宿主（被丢弃），标签徽标也不涨。现在补行。
+  - **健壮性**：`fail_turn()` 里的落盘与快照都包了 try/catch（它在 catch 块里运行，
+    再次抛异常就会飞出处理器，连"已中断"的通知都发不出去）；测试覆盖异常落盘。
+  - **验证**：CDP 实测 history scrollWidth == clientWidth（938）且 overflow-x hidden；
+    宽表 wrap 1134 > 870 单独滚动；nav 圆点 running→done 与 中止/发送 按钮同步（web 与
+    原生 webview 都验过）。
+  - **测试**：399 用例 3724 断言全过；web / webview 双变体编译通过。新增
+    `uiapp_nav_dot_follows_live_state`、`uiapp_background_tab_gets_dirty_dot`、
+    `uiapp_empty_tool_input_is_hidden`、`comp_wide_table_gets_its_own_scroller`。

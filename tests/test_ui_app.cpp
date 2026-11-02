@@ -67,6 +67,59 @@ void seed_session(AppState& s, const std::string& sid = "sess_a") {
 
 }  // namespace
 
+// Count nodes whose class attribute contains `cls` (depth-first). Used by the
+// component-level checks that build a VNode directly instead of mounting it.
+static int count_class(const VNodePtr& v, const std::string& cls) {
+  if (!v) return 0;
+  int n = 0;
+  for (size_t i = 0; i < v->attrs.size(); ++i) {
+    if (v->attrs[i].key == "class" &&
+        v->attrs[i].value.find(cls) != std::string::npos) {
+      ++n;
+      break;
+    }
+  }
+  for (size_t i = 0; i < v->children.size(); ++i) n += count_class(v->children[i], cls);
+  return n;
+}
+
+// Exact class TOKEN ("md-table" must not match "md-table-wrap").
+static int count_class_exact(const VNodePtr& v, const std::string& cls) {
+  if (!v) return 0;
+  int n = 0;
+  for (size_t i = 0; i < v->attrs.size(); ++i) {
+    if (v->attrs[i].key != "class") continue;
+    const std::string& c = v->attrs[i].value;
+    size_t start = 0;
+    while (start <= c.size()) {
+      size_t sp = c.find(' ', start);
+      std::string tok = c.substr(start, sp == std::string::npos ? std::string::npos
+                                                                : sp - start);
+      if (tok == cls) {
+        ++n;
+        break;
+      }
+      if (sp == std::string::npos) break;
+      start = sp + 1;
+    }
+    break;
+  }
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    n += count_class_exact(v->children[i], cls);
+  }
+  return n;
+}
+
+// Does the subtree contain a text node with exactly this text?
+static bool has_txt(const VNodePtr& v, const std::string& text) {
+  if (!v) return false;
+  if (v->is_text() && v->text == text) return true;
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    if (has_txt(v->children[i], text)) return true;
+  }
+  return false;
+}
+
 // Collect every VNode whose key starts with `prefix` (depth-first). The chat
 // message keys are internal, so the test reads them from the tree itself.
 static void collect_msg_nodes(const VNodePtr& v, const std::string& prefix,
@@ -2340,6 +2393,102 @@ FS_TEST(uiapp_project_card_session_rows) {
   // the identity column offers the primary action directly
   EXPECT_TRUE(dump_has(dom, "proj-new"));
   EXPECT_TRUE(dump_has(dom, "新建会话"));
+}
+
+// A project's MODE is a live fact: the sidebar dot used to stay "idle" while the
+// agent worked or a terminal printed, because it was fed only by `session.list`
+// (fetched on load, never again). The row for the session you are looking at now
+// reads the UI's own state, so it reacts on the event that changed it.
+FS_TEST(uiapp_nav_dot_follows_live_state) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    // left-tab mode = project navigation rail (the mode where the session you are
+    // in is visible NEXT TO its transcript)
+    s.settings_values["ui.tabs"] = Json("left");
+    seed_project(s);            // p1 -> sess_a
+    seed_session(s, "sess_a");
+    s.projects[0].sessions[0].running = false;   // stale snapshot says idle
+    s.projects[0].sessions[0].loop_state = "idle";
+  });
+  EXPECT_FALSE(dump_has(dom, "ps-dot running"));
+  EXPECT_TRUE(dump_has(dom, "nav-dot"));  // the rail is the mode under test
+  // A turn starts: the dot is running without waiting for a session.list refresh.
+  app.update([](AppState& s) { s.turn_running = true; });
+  EXPECT_TRUE(dump_has(dom, "ps-dot running"));
+  // The turn ends but a terminal is still live: background (purple), not idle.
+  app.update([](AppState& s) {
+    s.turn_running = false;
+    TermItem t;
+    t.tid = "t1";
+    t.status = "running";
+    s.terminals.push_back(t);
+  });
+  EXPECT_TRUE(dump_has(dom, "ps-dot background"));
+  // A failed turn shows the failure the list cannot know about yet.
+  app.update([](AppState& s) {
+    s.terminals.clear();
+    s.interrupted = true;
+    s.interrupt_reason = "http 400";
+  });
+  EXPECT_TRUE(dump_has(dom, "ps-dot failed"));
+}
+
+// A background tab that produces output gets the dot on its TAB - nobody can see
+// the other session's transcript, and `SessionTab::dirty` was never written.
+FS_TEST(uiapp_background_tab_gets_dirty_dot) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    s.settings_values["ui.tabs"] = Json("top");
+    seed_session(s, "sess_a");
+    SessionTab b;
+    b.id = "sess_b";
+    b.title = "另一个";
+    s.sessions.push_back(b);
+    s.tab_ids.push_back("sess_b");
+    s.active_tab = "sess_a";
+  });
+  EXPECT_EQ(count_class_exact(app.tree_for_test(), "dot"), 0);
+  // Output for the NON-active session: the tab gets the dot, the screen does not.
+  app.on_backend_event_for_test(
+      "turn.started", Json{{"sid", "sess_b"}, {"text", "work"}});
+  EXPECT_EQ(count_class_exact(app.tree_for_test(), "dot"), 1);
+  // Opening that tab spends the dot.
+  app.show("sess_b");
+  EXPECT_EQ(count_class_exact(app.tree_for_test(), "dot"), 0);
+}
+
+// An empty argument object is not an input: it rendered a labelled section whose
+// whole content was "{}".
+FS_TEST(uiapp_empty_tool_input_is_hidden) {
+  comp::ToolBlock tb;
+  tb.name = "todo_write";
+  tb.detail = "{\n  \"ok\": true\n}";
+  tb.input = "{\n\n}";
+  tb.expanded = true;
+  H blk = comp::tool_block(tb, nullptr);
+  EXPECT_EQ(count_class(blk, "tb-label"), 0);
+  EXPECT_EQ(count_class(blk, "tb-body"), 1);
+  // With real arguments both labels appear.
+  tb.input = "{\n  \"path\": \"a.txt\"\n}";
+  H blk2 = comp::tool_block(tb, nullptr);
+  EXPECT_EQ(count_class(blk2, "tb-label"), 2);
+  EXPECT_EQ(count_class(blk2, "tb-body"), 2);
+}
+
+// A wide markdown table must scroll inside its own wrapper, not widen the
+// transcript (which used to give the whole history a horizontal scrollbar).
+FS_TEST(comp_wide_table_gets_its_own_scroller) {
+  std::vector<H> blocks = comp::markdown_blocks(
+      "| a | b |\n|---|---|\n| 1 | 2 |\n", nullptr, nullptr);
+  ASSERT_TRUE(blocks.size() == 1);
+  EXPECT_EQ(count_class_exact(blocks[0], "md-table-wrap"), 1);
+  EXPECT_EQ(count_class_exact(blocks[0], "md-table"), 1);
 }
 
 // Renaming is inline: the row becomes an input, Enter (or blur) commits.

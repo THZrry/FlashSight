@@ -355,13 +355,34 @@ history 没有反应，切页面才显示"）。合并规则：保留本地 `tur
 **工具块的"输入"是独立字段**。`tool.start` 里的 args 曾经写进 `detail`，而 `tool.update`
 会用结果覆盖 `detail`——于是完成的 read_file 只显示返回 JSON，永远看不到读了哪个文件。
 现在 `ToolBlock::input` 单独存参数，展开后是"输入 / 返回"两段（只有一段时不加标签）。
-`turn_to_message` 从 `tc[k].args` 恢复它，所以重新打开会话也还在。
+`turn_to_message` 从 `tc[k].args` 恢复它，所以重新打开会话也还在。**空的 `{}` 不算输入**：
+组件和两个填充点都会跳过它（否则每一行都多出一个只有两个括号的分段）。
 
-**长文本横向滚动**。`.tb-body` 曾经 `overflow: visible` + `pre`：一行 4000 字符的 JSON
-（`content` 字段就是一行）直接被 `.tool-block { overflow: hidden }` 裁掉，既看不到也滚不到。
-现在 `white-space: pre; overflow-x: auto`，横向滚动条是**悬浮式**的（轨道透明、hover 才
-显示拇指），不占高度、不打断阅读。换行（`pre-wrap`）对这类内容没意义——400 列折起来
-一样读不了。
+**长文本横向滚动：工具体是"有界窗口"，不是"整页那么长的一条"。**
+`.tb-body` 曾经 `overflow: visible` + `pre`（长行被外层 `overflow: hidden` 裁掉），后来
+改成 `overflow-x: auto` 但 `max-height: none`——条是有了，可一条 200 行的 JSON 把横向
+滚动条推到几千像素下面，鼠标根本够不着。现在的规则：
+
+- `white-space: pre`（不折行：400 列折起来更糟）+ `overflow: auto`（两轴）+ 轨道透明、
+  hover 才显拇指的细滚动条；
+- `max-height: min(40vh, 26em)` + `overscroll-behavior: contain`：条永远贴在可见窗口的
+  边缘，滚动到底也不会把整页带走。
+
+**记录不能撑宽记录区**。`.history` 是 `overflow-x: hidden; overflow-y: auto`：一个宽表格
+曾经把整个对话栏顶出横向滚动条，读者在看答案时整列会左右跑。表格由 markdown 包一层
+`.md-table-wrap`（自己横向滚，`table { width: max-content; min-width: 100% }`）。既然历史
+不再横滚，段落里的超长不可断词统一 `overflow-wrap: anywhere`，否则会被裁掉而不是折行。
+
+**状态圆点的链条**（项目/会话/标签三处必须同时成立）：
+
+1. 会话行的 running / loopState / terminalCount / autoRound 来自 `session.list`。它只在
+   加载时取一次，所以"正在干活/开着终端"时圆点不动。现在这些事件会
+   `mark_sessions_dirty()`，`pump()` 里 800ms 合并成一次刷新（terminal.output 故意不标记：
+   刷屏的终端会让列表每秒请求）。
+2. 当前会话那一行用 UI 的实时状态覆盖（`live_session_row`），点下去立刻变色。
+3. 后台标签的 `SessionTab::dirty` 从来没人写：后台的 turn/流式事件现在点亮它，切过去清除。
+4. `subagent.started` 之前完全没处理：新起的子代理没有行，它的流式文本按 id 找不到宿主，
+   徽标也不涨——面板打开后才启动的子代理等于隐身。
 
 ## 4. 性能与空态（验收条目）
 

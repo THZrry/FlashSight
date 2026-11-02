@@ -867,7 +867,23 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
   }
   head.add(el("span", "tb-caret").text(b.expanded ? "\u25be" : "\u25b8"));
   d.add(head);
-  if (b.expanded && (!b.input.empty() || !b.detail.empty())) {
+  // "{}" is not an input: a tool with no arguments (or a model that sent an empty
+  // object) would otherwise get a labelled section showing two braces. The
+  // detail is what matters there.
+  bool has_input = !b.input.empty();
+  if (has_input) {
+    bool braces_only = true;
+    for (size_t i = 0; i < b.input.size(); ++i) {
+      char c = b.input[i];
+      if (c != '{' && c != '}' && c != '[' && c != ']' && c != ' ' && c != '\n' &&
+          c != '\r' && c != '\t') {
+        braces_only = false;
+        break;
+      }
+    }
+    if (braces_only) has_input = false;
+  }
+  if (b.expanded && (has_input || !b.detail.empty())) {
     // 输入 first, 返回 second: a tool row answers "what did it do" before "what
     // came back". The input used to be thrown away (tool.update replaced it), so
     // a read_file block showed a wall of JSON without saying which file.
@@ -875,7 +891,7 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
     // Labels only when there is something to tell apart: a block that has just
     // the result (an older stored turn, or a tool with no arguments) is not
     // labelled "返回" - a single section explains itself.
-    const bool both = !b.input.empty() && !b.detail.empty();
+    const bool both = has_input && !b.detail.empty();
     const highlight::LangSpec* spec = highlight::find_lang("json");
     auto body = [&](const std::string& label, const std::string& text_str,
                     const std::string& key) {
@@ -892,7 +908,7 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
       }
       d.add(pre);
     };
-    if (!b.input.empty()) {
+    if (has_input) {
       body(both || b.detail.empty() ? tr("输入") : std::string(), b.input,
            "tb-input:" + b.key);
     }
@@ -1148,7 +1164,12 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
         ++i;
       }
       table.add(tbody);
-      out.push_back(table);
+      // The wrapper is the horizontal scroll container: a wide table scrolls on
+      // its own instead of widening the transcript (which used to move the whole
+      // answer column sideways).
+      H twrap = el("div", "md-table-wrap");
+      twrap.add(table);
+      out.push_back(twrap);
       continue;
     }
     // blank

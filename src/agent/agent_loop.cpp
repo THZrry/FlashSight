@@ -837,13 +837,22 @@ FsResult AgentLoop::fail_turn(const std::string& error) {
       if (interim_texts_[i].is_string()) partial += interim_texts_[i].get<std::string>();
     }
   }
-  persist_failed_turn(error, partial);
+  // The persist call itself must not escape: this function runs from a catch
+  // block, and an I/O failure here would re-throw out of the handler and lose
+  // even the notification. A turn that cannot be written still has to be REPORTED.
+  try {
+    persist_failed_turn(error, partial);
+  } catch (...) {
+  }
   state_ = LoopState::kTurnDone;
   {
     std::lock_guard<std::mutex> lk(live_mu_);
     live_running_ = false;
   }
-  if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
+  try {
+    if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
+  } catch (...) {
+  }
   emit("loop.interrupted", Json{{"sid", opts_.sid}, {"resumable", false},
                                 {"error", error}, {"saved", true}});
   return FsResult::error(ErrCode::kInternal, error);
