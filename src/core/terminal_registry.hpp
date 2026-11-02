@@ -50,6 +50,9 @@ class TerminalRegistry {
   TermEntry* find(const std::string& tid);
   const TermEntry* find(const std::string& tid) const;
   std::vector<TermEntry> list_for_session(const std::string& sid) const;
+  // 把上一次运行留下的终端记录装回注册表（进程已不在 → status=exited）。
+  // 同 id 的活动终端不会被覆盖，返回 false。
+  bool add_saved(const Json& entry);
 
   // 前台超 5min 转后台（时钟注入）
   FsResult promote_to_background(const std::string& tid, int64_t now_ms);

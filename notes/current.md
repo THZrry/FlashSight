@@ -2491,3 +2491,43 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **实测**：用量页两行——Mock 显示"不支持"，一个指向 `api.deepseek.com.invalid` 的测试
     供应商显示"获取失败：HTTP 401"；侧栏默认 `ptab active`（用量）；一轮结束后圆点
     running→done→（看过后）idle，web 与原生都验过。
+
+<91>(SOLVED): 余额进侧栏（用量页的余额挪到最后）+ 供应商图标（按 endpoint 认品牌，未知用首字母）+ 工作流改成"模型规划 → 用户允许 → 侧栏看进度" + 终端记录落盘（重启后还在）。
+  - **余额进侧栏**：用量面板底部新增"余额 / 额度"一栏，一行一家（名称 + 金额 / 不支持 / 获取失败的
+    原因，悬停看 endpoint）。打开面板会强制刷新一次（仍有 8s 下限）。用量页里的同一块移到了**最后**
+    （先看用了多少，再看还剩多少）。
+  - **"新增的供应商没图片"**：供应商列表的每一行原来**根本没有图标元素**（模板网格有，列表没有）。
+    现在每行有一个 22px 的品牌标记：`provider_brand_for_endpoint()` 按 **endpoint**（再按名字）
+    认品牌——deepseek / moonshot / openrouter / siliconflow / zhipu / dashscope / openai /
+    anthropic / gemini / groq / mistral / x.ai / together / fireworks / cerebras / minimax /
+    stepfun / volces / :11434 / :1234 / opencode——认不出的用首字母（DeepInfra 就没有 lobe
+    图标，显示 "D"，不再是空白方块）。模板网格也补齐了新预设品牌（groq/mistral/xai/together/
+    fireworks/cerebras/minimax/stepfun/bytedance）。
+  - **工作流：模型规划、用户允许、侧栏看进度**。以前侧栏是"流水线列表 + 启动按钮"（用户发起），
+    不符合"模型自己规划"的要求。现在：
+    ① 工具 `workflow_plan {goal, steps:[{title, task?, kind?}]}`（取代 `workflow_start`）只
+       **提交**计划：后端 `workflow_propose()` 落成 `state="proposed"` 的运行实例，每步交给一个
+       complete-step 子代理，然后停下等用户；
+    ② 侧栏面板不再是启动器：顶部是"待允许"的卡片（目标 + 编号步骤 + **允许 / 拒绝**），
+       下面是运行中/历史的步骤进度（✓/●/○、失败步可重试/跳过、运行步可引导）；
+    ③ `workflow.approve`（唯一真正开始执行的地方）/ `workflow.reject`，以及 `workflow_proposed`
+       事件 → pump 里节流刷新面板，计划出现不用重开面板。
+    实测：API 提交 2 步计划 → 面板显示"模型规划了 2 步，允许后开始执行" + 步骤 → 点允许 →
+    "运行中 ✓ 调查现有实现 ● 写测试"。
+  - **"打开过的终端没保留，文件夹里也是空的"**：`terminals/` 目录只在建会话时 mkdir，**没有任何
+    代码往里写**（`terminal_log_path` / `list_terminal_logs` 是死代码）。现在：
+    ① 每次 spawn 把元数据写 `<session>/terminals/<tid>.json`，把 PTY 输出追加到 `<tid>.log`
+       （超过 4MB 自动保留最后 1MB，从行首开始）；
+    ② 退出时把 status/exitCode 冻结进 json；
+    ③ `terminal_list` 先把磁盘记录**装回注册表**（`TerminalRegistry::add_saved`，强制 exited、
+       不覆盖活动终端、并抬高 tid 序号避免复用日志文件名），所以重启后列表还在；
+    ④ `terminal_grid` 对没有进程的终端**从日志重建**（去掉 ANSI 序列、CRLF 归一、单独的 \r
+       按重绘取最后一段，保留最后 2000 行）。
+    实测：API spawn 一个 cmd → `terminals/1.json` + `1.log` 落盘 → 杀掉进程重启 → `terminal.list`
+    仍返回 tid=1（status=exited、logAttached）→ `terminal.grid` 回放出原来的提示符与命令。
+  - **测试**：408 用例 3829 断言全过；web / webview 双变体编译通过。新增
+    `addon2_workflow_propose_needs_approval`（提交→待允许→拒绝→再提交→允许）、
+    `uiapp_workflow_panel_shows_the_plan_for_approval`（待允许卡片、步骤、允许按钮）、
+    `terminal_record_survives_restart`（磁盘记录 → 列表 → 日志回放，ANSI 剥离）。
+  - **顺手修的链条**：`ops` 面板在重写工作流面板时被误删，已补回并按时间倒序显示；
+    工作流类事件现在也会让会话行刷新（运行中的工作流算后台工作）。

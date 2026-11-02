@@ -84,6 +84,28 @@ TermEntry* TerminalRegistry::find(const std::string& tid) {
   auto it = entries_.find(tid);
   return it == entries_.end() ? nullptr : &it->second;
 }
+// Load a terminal RECORD from disk (a previous run's terminal).
+//
+// The process is gone by definition, so the entry is marked exited; it stays in
+// the list so "打开过的终端" is still there after a restart, and its log can be
+// replayed. Returns false when the id is already live (never overwrite reality
+// with a stale file).
+bool TerminalRegistry::add_saved(const Json& j) {
+  TermEntry e = TermEntry::from_json(j);
+  if (e.tid.empty()) return false;
+  if (entries_.find(e.tid) != entries_.end()) return false;
+  e.status = TermStatus::kExited;
+  e.exit_code = jsonutil::get_int(j, "exitCode", e.exit_code);
+  e.ended_at = jsonutil::get_int(j, "endedAt", e.ended_at);
+  entries_[e.tid] = e;
+  // Keep the id sequence above the loaded ones: a new terminal must not reuse a
+  // historical id (its log file would be appended to).
+  int64_t n = std::strtoll(e.tid.c_str(), nullptr, 10);
+  if (n > 0 && n < 1000000000) {
+    while (next_tid_ <= n) ++next_tid_;
+  }
+  return true;
+}
 const TermEntry* TerminalRegistry::find(const std::string& tid) const {
   auto it = entries_.find(tid);
   return it == entries_.end() ? nullptr : &it->second;

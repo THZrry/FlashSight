@@ -386,6 +386,10 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
       if (out) *out = Json{{"items", arr}};
       return FsResult::success(Json{{"items", arr}});
     }
+    if (op == "propose") {
+      // Model-planned workflow: one implementation, shared with the API route.
+      return workflow_propose(sid, req);
+    }
     if (op == "start") {
       std::string name = jsonutil::get<std::string>(req, "name", "");
       const WorkflowDef* def = wf->find_def(name);
@@ -1609,7 +1613,176 @@ FsResult FsApi::set_thinking_lang(const std::string& lang) {
 }
 
 // ----- terminal.* -----
+namespace {
+
+// The PTY stream is bytes with escape sequences in it. A saved transcript is
+// read by a human (or the history grid), so the escapes are dropped: CSI / OSC /
+// simple two-byte sequences, plus \r progress redraws (keep what came last).
+std::string terminal_plain_text(const std::string& raw) {
+  std::string out;
+  out.reserve(raw.size());
+  size_t i = 0;
+  while (i < raw.size()) {
+    unsigned char c = static_cast<unsigned char>(raw[i]);
+    if (c == 0x1b && i + 1 < raw.size()) {
+      char k = raw[i + 1];
+      if (k == '[') {  // CSI: ESC [ params final
+        size_t j = i + 2;
+        while (j < raw.size()) {
+          unsigned char b = static_cast<unsigned char>(raw[j]);
+          if (b >= 0x40 && b <= 0x7e) { ++j; break; }
+          ++j;
+        }
+        i = j;
+        continue;
+      }
+      if (k == ']') {  // OSC: ESC ] ... BEL, or ESC followed by a backslash
+        size_t j = i + 2;
+        while (j < raw.size()) {
+          if (raw[j] == 0x07) { ++j; break; }
+          if (raw[j] == 0x1b && j + 1 < raw.size() && raw[j + 1] == '\\') {
+            j += 2;
+            break;
+          }
+          ++j;
+        }
+        i = j;
+        continue;
+      }
+      if (k == '(' || k == ')') { i += 3; continue; }  // charset select
+      i += 2;
+      continue;
+    }
+    out.push_back(static_cast<char>(c));
+    ++i;
+  }
+  // CRLF is a LINE ENDING (what a Windows shell prints), not a redraw: drop the
+  // \r so "hello\r\n" becomes "hello" and not an empty line. A LONE \r inside a
+  // line IS a redraw (progress bars), and there the last segment is what the
+  // screen ended up showing.
+  std::string norm;
+  norm.reserve(out.size());
+  for (size_t k = 0; k < out.size(); ++k) {
+    if (out[k] == '\r' && k + 1 < out.size() && out[k + 1] == '\n') continue;
+    norm.push_back(out[k]);
+  }
+  std::string text;
+  text.reserve(norm.size());
+  size_t start = 0;
+  while (start <= norm.size()) {
+    size_t nl = norm.find('\n', start);
+    std::string line = norm.substr(start, nl == std::string::npos ? std::string::npos
+                                                                  : nl - start);
+    size_t cr = line.rfind('\r');
+    if (cr != std::string::npos) line = line.substr(cr + 1);
+    text += line;
+    if (nl == std::string::npos) break;
+    text.push_back('\n');
+    start = nl + 1;
+  }
+  return text;
+}
+
+std::string read_file_bytes(const std::string& path) {
+  std::ifstream ifs(path, std::ios::binary);
+  if (!ifs) return std::string();
+  std::stringstream ss;
+  ss << ifs.rdbuf();
+  return ss.str();
+}
+
+std::string lower_ext(const std::string& name) {
+  size_t dot = name.find_last_of('.');
+  if (dot == std::string::npos) return std::string();
+  std::string e = name.substr(dot);
+  for (size_t i = 0; i < e.size(); ++i) {
+    if (e[i] >= 'A' && e[i] <= 'Z') e[i] = static_cast<char>(e[i] - 'A' + 'a');
+  }
+  return e;
+}
+
+}  // namespace
+
+// Persist one terminal's metadata next to its log (best effort).
+void FsApi::persist_terminal_entry(const Json& entry) {
+  std::string sid = jsonutil::get<std::string>(entry, "sid", "");
+  std::string tid = jsonutil::get<std::string>(entry, "tid", "");
+  if (sid.empty() || tid.empty()) return;
+  try {
+    ghc::filesystem::path dir =
+        sessions_->make_store(sid).terminal_log_path(sid, tid).parent_path();
+    std::error_code ec;
+    ghc::filesystem::create_directories(dir, ec);
+    std::string err;
+    jsonutil::write_atomic((dir / (tid + ".json")).string(), entry, &err);
+  } catch (...) {
+  }
+}
+
+// Append raw output to the terminal's log (best effort, capped growth).
+//
+// A shell that runs for hours (a dev server, a log tail) would otherwise write
+// hundreds of megabytes. Past 4 MB the log is rewritten with its last 1 MB, so
+// the record stays useful without growing without bound.
+void FsApi::append_terminal_log(const std::string& tid, const std::string& text) {
+  if (tid.empty() || text.empty()) return;
+  TermEntry* e = terminals_->find(tid);
+  if (!e || e->log_path.empty()) return;
+  try {
+    std::error_code ec;
+    auto sz = ghc::filesystem::file_size(e->log_path, ec);
+    const uintmax_t kCap = 4u * 1024 * 1024;
+    if (!ec && sz > kCap) {
+      std::string old = read_file_bytes(e->log_path);
+      const size_t keep = 1024 * 1024;
+      std::string tail = old.size() > keep ? old.substr(old.size() - keep) : old;
+      // Start at a line boundary so the replay does not begin mid-line.
+      size_t nl = tail.find('\n');
+      if (nl != std::string::npos && nl + 1 < tail.size()) tail = tail.substr(nl + 1);
+      std::ofstream trunc(e->log_path, std::ios::binary | std::ios::trunc);
+      if (trunc) trunc.write(tail.data(), static_cast<std::streamsize>(tail.size()));
+    }
+    std::ofstream ofs(e->log_path, std::ios::binary | std::ios::app);
+    if (!ofs) return;
+    ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
+    ofs.flush();
+  } catch (...) {
+  }
+}
+
 FsResult FsApi::terminal_list(const std::string& sid) {
+  // First, hydrate the registry with records left by a previous run: the LIST is
+  // the only entry point the UI has, and a terminal that is not in the registry
+  // cannot be listed, shown or replayed. `add_saved` marks them exited and never
+  // overwrites a live one.
+  try {
+    ghc::filesystem::path dir =
+        sessions_->make_store(sid).terminal_log_path(sid, std::string()).parent_path();
+    std::error_code ec;
+    if (ghc::filesystem::exists(dir, ec)) {
+      std::vector<Json> saved;
+      for (auto& it : ghc::filesystem::directory_iterator(dir, ec)) {
+        if (!it.path().has_filename()) continue;
+        if (lower_ext(it.path().filename().string()) != ".json") continue;
+        std::string body = read_file_bytes(it.path().string());
+        if (body.empty()) continue;
+        Json j;
+        try {
+          j = Json::parse(body);
+        } catch (...) {
+          continue;
+        }
+        if (jsonutil::get<std::string>(j, "sid", "") != sid) continue;
+        saved.push_back(j);
+      }
+      std::sort(saved.begin(), saved.end(), [](const Json& a, const Json& b) {
+        return jsonutil::get_int(a, "startedAt", 0) <
+               jsonutil::get_int(b, "startedAt", 0);
+      });
+      for (size_t k = 0; k < saved.size(); ++k) terminals_->add_saved(saved[k]);
+    }
+  } catch (...) {
+  }
   Json arr = Json::array();
   for (auto& e : terminals_->list_for_session(sid)) arr.push_back(e.to_json());
   return FsResult::success(arr);
@@ -1661,6 +1834,21 @@ FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
   Json out;
   FsResult r = terminal_mgr_->spawn(args, &out);
   if (!r.ok()) return r;
+  // Give the registry entry its log file and write the metadata NOW, not at
+  // exit: a terminal that outlives this process (or a crash) must still be
+  // listed next time.
+  std::string tid = jsonutil::get<std::string>(out, "tid", "");
+  if (!tid.empty()) {
+    TermEntry* e = terminals_->find(tid);
+    if (e) {
+      try {
+        e->log_path = sessions_->make_store(sid).terminal_log_path(sid, tid).string();
+        e->log_attached = true;
+      } catch (...) {
+      }
+      persist_terminal_entry(e->to_json());
+    }
+  }
   // 立即把首个提示符推进事件流，用户不用等下一次 tick
   terminal_tick();
   return r;
@@ -1679,7 +1867,83 @@ FsResult FsApi::terminal_resize(const std::string& tid, int cols, int rows) {
 
 FsResult FsApi::terminal_grid(const std::string& tid) {
   Json out;
-  return terminal_mgr_->grid(Json{{"tid", tid}}, &out);
+  FsResult r = terminal_mgr_->grid(Json{{"tid", tid}}, &out);
+  if (r.ok()) return r;
+  // Not a live process: a terminal from a previous run. Rebuild the view from its
+  // saved log so "打开过的终端" can still be read (the record is the point).
+  TermEntry* e = terminals_->find(tid);
+  if (!e || e->log_path.empty()) return r;
+  std::string raw = read_file_bytes(e->log_path);
+  if (raw.empty()) {
+    Json empty = Json::object();
+    empty["cols"] = 100;
+    empty["rows"] = 20;
+    empty["from"] = 0;
+    empty["scrollback"] = 0;
+    empty["totalLines"] = 0;
+    empty["lines"] = Json::array();
+    empty["cursorX"] = 0;
+    empty["cursorY"] = 0;
+    empty["cursorVisible"] = false;
+    empty["alt"] = false;
+    empty["appKeys"] = false;
+    empty["bracketedPaste"] = false;
+    empty["title"] = "";
+    empty["tid"] = tid;
+    empty["status"] = "exited";
+    empty["exitCode"] = e->exit_code;
+    return FsResult::success(empty);
+  }
+  std::string text = terminal_plain_text(raw);
+  // Split into lines, keep the tail (a long-lived shell's log can be huge).
+  std::vector<std::string> lines;
+  size_t start = 0;
+  while (start <= text.size()) {
+    size_t nl = text.find('\n', start);
+    std::string line = text.substr(start, nl == std::string::npos ? std::string::npos
+                                                                  : nl - start);
+    lines.push_back(line);
+    if (nl == std::string::npos) break;
+    start = nl + 1;
+  }
+  const size_t kMax = 2000;
+  size_t from = lines.size() > kMax ? lines.size() - kMax : 0;
+  Json arr = Json::array();
+  size_t width = 0;
+  for (size_t i = from; i < lines.size(); ++i) {
+    const std::string& ln = lines[i];
+    size_t w = 0;
+    for (size_t k = 0; k < ln.size(); ++k) {
+      if ((static_cast<unsigned char>(ln[k]) & 0xC0) != 0x80) ++w;
+    }
+    if (w > width) width = w;
+    Json runs = Json::array();
+    if (!ln.empty()) {
+      Json run = Json::object();
+      run["x"] = 0;
+      run["t"] = ln;
+      runs.push_back(run);
+    }
+    arr.push_back(runs);
+  }
+  Json g = Json::object();
+  g["cols"] = static_cast<int>(width > 100 ? width : 100);
+  g["rows"] = 20;
+  g["from"] = 0;
+  g["scrollback"] = static_cast<int>(from);
+  g["totalLines"] = static_cast<int>(lines.size());
+  g["lines"] = arr;
+  g["cursorX"] = 0;
+  g["cursorY"] = 0;
+  g["cursorVisible"] = false;
+  g["alt"] = false;
+  g["appKeys"] = false;
+  g["bracketedPaste"] = false;
+  g["title"] = "";
+  g["tid"] = tid;
+  g["status"] = "exited";
+  g["exitCode"] = e->exit_code;
+  return FsResult::success(g);
 }
 
 FsResult FsApi::terminal_rename(const std::string& tid, const std::string& label) {
@@ -1707,14 +1971,19 @@ void FsApi::terminal_tick() {
   for (size_t i = 0; i < changes.size(); ++i) {
     const Json& c = changes[i];
     std::string sid = jsonutil::get<std::string>(c, "sid", "");
+    std::string tid = jsonutil::get<std::string>(c, "tid", "");
     if (c.contains("output") && c["output"].is_string()) {
-      emit_event("terminal.output", Json{{"sid", sid},
-                                         {"tid", jsonutil::get<std::string>(c, "tid", "")},
-                                         {"text", c["output"]}});
+      std::string text = c["output"].get<std::string>();
+      // The terminal's own record: the screen lives in memory and dies with the
+      // process, this file does not.
+      append_terminal_log(tid, text);
+      emit_event("terminal.output", Json{{"sid", sid}, {"tid", tid}, {"text", text}});
     }
     if (jsonutil::get<bool>(c, "justExited", false)) {
-      emit_event("terminal.exit", Json{{"sid", sid},
-                                       {"tid", jsonutil::get<std::string>(c, "tid", "")},
+      // Freeze the entry on disk with its exit status.
+      TermEntry* e = terminals_->find(tid);
+      if (e) persist_terminal_entry(e->to_json());
+      emit_event("terminal.exit", Json{{"sid", sid}, {"tid", tid},
                                        {"exitCode", jsonutil::get_int(c, "exitCode", 0)}});
     }
   }
@@ -2164,6 +2433,83 @@ FsResult FsApi::workflow_start(const std::string& sid, const std::string& name) 
   emit_event("workflow_started", Json{{"runId", run->id}, {"sid", sid},
                                       {"name", name}});
   start_next_pending_step(run);
+  return FsResult::success(run->to_json());
+}
+
+// Approve a proposed run: this is the ONLY place a model-planned workflow starts.
+FsResult FsApi::workflow_approve(const std::string& runId) {
+  WorkflowRun* run = workflows_->find_run(runId);
+  if (!run) return FsResult::error(ErrCode::kNotFound, "run not found: " + runId);
+  if (run->state != "proposed") {
+    return FsResult::error(ErrCode::kInvalidArg,
+                           "run is not waiting for approval: " + run->state);
+  }
+  run->state = "running";
+  emit_event("workflow_started", Json{{"runId", run->id}, {"sid", run->sid},
+                                      {"name", run->name}});
+  start_next_pending_step(run);
+  Json j = run->to_json();
+  j["graph"] = run->graph_json();
+  return FsResult::success(j);
+}
+
+FsResult FsApi::workflow_reject(const std::string& runId) {
+  WorkflowRun* run = workflows_->find_run(runId);
+  if (!run) return FsResult::error(ErrCode::kNotFound, "run not found: " + runId);
+  if (run->state != "proposed") {
+    return FsResult::error(ErrCode::kInvalidArg,
+                           "run is not waiting for approval: " + run->state);
+  }
+  run->state = "rejected";
+  emit_event("workflow_rejected", Json{{"runId", run->id}, {"sid", run->sid}});
+  return FsResult::success(run->to_json());
+}
+
+// Propose a workflow from the MODEL's plan: steps are titles + tasks, each run by
+// a subagent. The run waits for the user's approval (state "proposed").
+FsResult FsApi::workflow_propose(const std::string& sid, const Json& def) {
+  Json req = def.is_object() ? def : Json::object();
+  req["op"] = "propose";
+  Json out;
+  // The op handler also needs the sid.
+  req["sid"] = sid;
+  // Re-use the same path the tool uses, through the agent host's deps? Simpler:
+  // implement here (the deps lambda cannot call a member).
+  Json steps = req.contains("steps") && req["steps"].is_array() ? req["steps"]
+                                                                : Json::array();
+  std::string name = jsonutil::get<std::string>(req, "name", "");
+  std::string goal = jsonutil::get<std::string>(req, "goal", "");
+  if (name.empty()) name = goal.empty() ? std::string("模型计划") : goal;
+  if (name.size() > 60) name = name.substr(0, 60);
+  Json steps_out = Json::array();
+  int idx = 0;
+  for (size_t i = 0; i < steps.size(); ++i) {
+    const Json& sj = steps[i];
+    if (!sj.is_object()) continue;
+    std::string title = jsonutil::get<std::string>(sj, "title", "");
+    if (title.empty()) title = jsonutil::get<std::string>(sj, "name", "");
+    if (title.empty()) continue;
+    std::string task = jsonutil::get<std::string>(sj, "task", title);
+    std::string kind = jsonutil::get<std::string>(sj, "kind", "complete-step");
+    steps_out.push_back(Json{{"id", "step_" + std::to_string(++idx)},
+                             {"name", title},
+                             {"agents", Json::array({Json{{"kind", kind},
+                                                          {"task", task}}})}});
+  }
+  if (steps_out.empty()) {
+    return FsResult::error(ErrCode::kInvalidArg, "workflow needs at least one step");
+  }
+  Json wfdef = Json{{"name", name}, {"description", goal}, {"steps", steps_out}};
+  FsResult dr = workflows_->define(wfdef);
+  if (!dr.ok()) return dr;
+  const WorkflowDef* d = workflows_->find_def(name);
+  if (!d) return FsResult::error(ErrCode::kInternal, "define failed");
+  WorkflowRun* run = workflows_->create_run(*d, sid);
+  if (!run) return FsResult::error(ErrCode::kInternal, "create_run failed");
+  run->state = "proposed";
+  emit_event("workflow_proposed", Json{{"runId", run->id}, {"sid", sid},
+                                       {"name", name},
+                                       {"steps", static_cast<int>(steps_out.size())}});
   return FsResult::success(run->to_json());
 }
 

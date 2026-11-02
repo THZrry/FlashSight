@@ -432,3 +432,65 @@ FS_TEST(wiring_legacy_full_json_still_reads) {
   EXPECT_EQ(get<std::string>(after.data["turns"][5], "text", ""), std::string("new one"));
 }
 
+
+// ---------- 终端的记录必须活过重启 ----------
+// A terminal process cannot survive the app, but "which terminals did I open and
+// what did they print" must: the session's terminals/ directory was created and
+// then never written, so every restart showed an empty list (the user checked the
+// folder). The list merges saved entries (listed as exited) and the grid falls
+// back to the saved log.
+FS_TEST(terminal_record_survives_restart) {
+  using namespace fs;
+  fstest::TempDir td("termrec");
+  FsApi api(ghc::filesystem::path(td.path()));
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj_dir);
+  FsResult pr = api.project_create(proj_dir.string());
+  ASSERT_TRUE(pr.ok());
+  std::string pid = pr.data["pid"].get<std::string>();
+  FsResult sr = api.session_new(pid, proj_dir.string());
+  ASSERT_TRUE(sr.ok());
+  std::string sid = sr.data["sid"].get<std::string>();
+
+  // An empty session lists no terminals.
+  FsResult before = api.terminal_list(sid);
+  ASSERT_TRUE(before.ok());
+  EXPECT_TRUE(before.data.is_array());
+  EXPECT_EQ((int)before.data.size(), 0);
+
+  // A "previous run" left a record: metadata + the PTY log (with escape codes).
+  ghc::filesystem::path tdir =
+      ghc::filesystem::path(proj_dir) / ".flashsight" / "sessions" / sid / "terminals";
+  ghc::filesystem::create_directories(tdir);
+  Json meta = Json{{"tid", "t_1"}, {"sid", sid}, {"shell", "bash"},
+                   {"status", "exited"}, {"startedAt", 1000}, {"exitCode", 0},
+                   {"logPath", (tdir / "t_1.log").string()}};
+  {
+    std::ofstream ofs((tdir / "t_1.json").string(), std::ios::binary);
+    ofs << meta.dump(2);
+  }
+  {
+    std::ofstream ofs((tdir / "t_1.log").string(), std::ios::binary);
+    ofs << "\x1b[32mhello\x1b[0m\r\nworld\r\n";
+  }
+
+  FsResult after = api.terminal_list(sid);
+  ASSERT_TRUE(after.ok());
+  ASSERT_TRUE(after.data.size() == 1);
+  EXPECT_EQ(after.data[0]["tid"].get<std::string>(), std::string("t_1"));
+  // Its process is gone, so the entry is reported as exited no matter what the
+  // file says.
+  EXPECT_EQ(after.data[0]["status"].get<std::string>(), std::string("exited"));
+  EXPECT_EQ(after.data[0]["shell"].get<std::string>(), std::string("bash"));
+
+  // The grid comes from the log, with the escape sequences stripped.
+  FsResult g = api.terminal_grid("t_1");
+  ASSERT_TRUE(g.ok());
+  ASSERT_TRUE(g.data["lines"].is_array());
+  ASSERT_TRUE(g.data["lines"].size() >= 2);
+  std::string first = g.data["lines"][0][0]["t"].get<std::string>();
+  EXPECT_EQ(first, std::string("hello"));
+  std::string second = g.data["lines"][1][0]["t"].get<std::string>();
+  EXPECT_EQ(second, std::string("world"));
+  EXPECT_EQ(g.data["status"].get<std::string>(), std::string("exited"));
+}

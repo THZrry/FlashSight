@@ -402,6 +402,29 @@ OpenAI 系 `/v1/dashboard/billing/credit_grants`。其余如实写"不支持"；
 却在显示统计"）。另外 `views_.get_or_create(sid)` 造的是**裸 SessionView**（没有 panels），
 `load_session_view` 会补回默认面板，否则从后台会话切回来时面板会是空的。
 
+**工作流是"模型规划 → 用户允许 → 侧栏看进度"**，不是侧栏里的启动器：
+
+- 工具 `workflow_plan {goal, steps:[{title, task?, kind?}]}` 只**提交**计划：后端落成
+  `state="proposed"` 的运行实例（每步一个 complete-step 子代理），然后停住。
+- `workflow.approve` 是唯一真正开始执行的地方（`workflow.reject` 结束它）。任何别的路径让
+  模型直接跑流水线，都违背了"先给人看计划"。
+- 侧栏面板：上面是待允许卡片（目标 + 编号步骤 + 允许/拒绝），下面是运行的步骤进度（失败可
+  重试/跳过，运行中可引导）。`workflow_proposed` / `workflow.step` 等事件会触发节流刷新，
+  计划出现不用重开面板。
+
+**终端记录必须落盘**。终端进程活不过本进程，但"开过哪些终端、打印过什么"要活过重启：
+
+- spawn 时写 `<session>/terminals/<tid>.json`（元数据）并把 PTY 输出追加到 `<tid>.log`
+  （超 4MB 只留最后 1MB，从行首切）；退出时把 status/exitCode 冻结进 json。
+- `terminal_list` 先把磁盘记录装回注册表（`add_saved`：强制 exited、不覆盖活动终端、抬高
+  tid 序号以免复用日志文件名）——**列表是 UI 唯一入口，不在注册表里的终端既不能显示也不能回放**。
+- `terminal_grid` 对没有进程的终端从日志重建：剥 ANSI、CRLF 归一（CRLF 是换行不是重绘）、
+  单独的 `\\r` 取最后一段，保留最后 2000 行。
+
+**供应商图标按 endpoint 认品牌**：列表行原来没有图标元素（模板网格有，列表没有）。现在每行是
+`provider_brand_for_endpoint(endpoint, name)`：先看 endpoint（改名成"我的 API"也认得 api.deepseek.com），
+再看名字，最后用首字母——绝不出现空白方块。
+
 ## 4. 性能与空态（验收条目）
 
 - 历史虚拟化（一次 10 条）、diff div 限高滚动超长截断、流式渲染 diff 更新（md4c diff AST）。

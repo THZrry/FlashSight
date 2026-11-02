@@ -203,7 +203,68 @@ std::string provider_brand_for_template(const std::string& id) {
   if (id == "lmstudio") return "lmstudio";
   if (id == "vllm") return "vllm";
   if (id == "azure") return "azure";
+  // The mainstream endpoints added later: each has a lobe brand mark, so the
+  // template grid stays scannable instead of showing a bare first letter.
+  if (id == "groq") return "groq";
+  if (id == "mistral") return "mistral";
+  if (id == "xai") return "xai";
+  if (id == "together") return "together";
+  if (id == "fireworks") return "fireworks";
+  if (id == "cerebras") return "cerebras";
+  if (id == "minimax") return "minimax";
+  if (id == "stepfun") return "stepfun";
+  if (id == "volcengine") return "bytedance";
   return std::string();  // "custom" and anything unknown: letter fallback
+}
+
+// Brand mark for a SAVED provider, derived from its endpoint (then its name).
+//
+// The template id is gone once the provider is created, so the list could not use
+// it: a provider added from the 模板 grid showed no logo at all ("新增的供应商没
+// 图片"). The endpoint is stable and is what identifies the vendor everywhere else
+// (the balance probe uses the same trick).
+std::string provider_brand_for_endpoint(const std::string& base_url,
+                                        const std::string& name) {
+  std::string s = base_url;
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] >= 'A' && s[i] <= 'Z') s[i] = static_cast<char>(s[i] - 'A' + 'a');
+  }
+  std::string n = name;
+  for (size_t i = 0; i < n.size(); ++i) {
+    if (n[i] >= 'A' && n[i] <= 'Z') n[i] = static_cast<char>(n[i] - 'A' + 'a');
+  }
+  auto has = [](const std::string& h, const char* k) {
+    return h.find(k) != std::string::npos;
+  };
+  if (has(s, "deepseek")) return "deepseek";
+  if (has(s, "moonshot") || has(s, "kimi")) return "moonshot";
+  if (has(s, "openrouter")) return "openrouter";
+  if (has(s, "siliconflow")) return "siliconcloud";
+  if (has(s, "bigmodel") || has(s, "zhipu")) return "zhipu";
+  if (has(s, "dashscope") || has(s, "aliyun")) return "alibaba";
+  if (has(s, "openai.azure")) return "azure";
+  if (has(s, "openai.com")) return "openai";
+  if (has(s, "anthropic")) return "anthropic";
+  if (has(s, "generativelanguage") || has(s, "gemini")) return "gemini";
+  if (has(s, "groq.com")) return "groq";
+  if (has(s, "mistral.ai")) return "mistral";
+  if (has(s, "x.ai")) return "xai";
+  if (has(s, "together")) return "together";
+  if (has(s, "fireworks")) return "fireworks";
+  if (has(s, "cerebras")) return "cerebras";
+  if (has(s, "minimax")) return "minimax";
+  if (has(s, "stepfun")) return "stepfun";
+  if (has(s, "volces") || has(s, "volcengine")) return "bytedance";
+  if (has(s, ":11434")) return "ollama";
+  if (has(s, ":1234")) return "lmstudio";
+  if (has(s, "opencode")) return "opencode";
+  // Fall back to the NAME: a gateway or a renamed provider still says what it is.
+  if (has(n, "deepseek")) return "deepseek";
+  if (has(n, "claude") || has(n, "anthropic")) return "anthropic";
+  if (has(n, "gpt") || has(n, "openai")) return "openai";
+  if (has(n, "gemini")) return "gemini";
+  if (has(n, "qwen") || has(n, "通义")) return "qwen";
+  return std::string();
 }
 
 // last path segment (both separators; the backend may be on another OS)
@@ -625,6 +686,18 @@ void UiApp::pump() {
       if (now - last_ops_refresh_ms_ >= 2000) {
         last_ops_refresh_ms_ = now;
         refresh_session_ops();
+      }
+    }
+  }
+  // A proposed / advancing workflow: refresh the panel (and the runs the panel
+  // reads) shortly after the event, so a plan appears without reopening it.
+  if (workflows_dirty_) {
+    int64_t now = now_ms();
+    if (now - workflows_refresh_ms_ >= 1200) {
+      workflows_dirty_ = false;
+      workflows_refresh_ms_ = now;
+      if (!st_.active_tab.empty() && st_.active_tab != "home") {
+        load_workflows(st_.active_tab);
       }
     }
   }
@@ -3243,6 +3316,12 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       event == "tool.start" || event == "terminal.exit") {
     mark_sessions_dirty();
   }
+  // A workflow event changes BOTH the sidebar panel and the session dot (a run is
+  // background work). The panel used to update only when it was reopened.
+  if (event.compare(0, 8, "workflow") == 0) {
+    workflows_dirty_ = true;
+    mark_sessions_dirty();
+  }
   // NOTE: terminal.OUTPUT is not in that list on purpose - a chatty terminal
   // would refresh the lists 1.25 times a second forever. Only the appearance of a
   // NEW terminal changes the count, and that is marked where it is registered
@@ -4874,75 +4953,6 @@ VNodePtr UiApp::build_home_usage() {
   head.add(comp::key_value(tr("总成本"), cost));
   panel.add(head);
 
-  // ---- 余额 / 额度 ----
-  // Per provider, by its ENDPOINT (the only thing that identifies a vendor
-  // reliably). Three states, all honest: the number, 不支持 (no public balance
-  // API), or 获取失败 WITH the reason. Asked on entering this page, after every
-  // finished turn and when the provider filter changes.
-  load_balances(false);
-  {
-    H bal = el("div", "usage-balances");
-    H bh = el("div", "chart-head");
-    bh.add(el("div", "chart-title").text(tr("余额 / 额度")));
-    bh.add(el("span", "grow"));
-    if (st_.balances_loading) {
-      bh.add(el("span", "bal-loading dim").text(tr("查询中…")));
-    } else {
-      bh.add(comp::button(tr("刷新"), [this](const std::string&) {
-        load_balances(true);
-      }, "ghost"));
-    }
-    bal.add(bh);
-    auto money = [](const std::string& cur, const std::string& v) {
-      if (v.empty()) return std::string("—");
-      if (cur == "CNY") return "¥" + v;
-      if (cur == "USD") return "$" + v;
-      return cur.empty() ? v : (cur + " " + v);
-    };
-    if (st_.balances.empty()) {
-      bal.add(el("div", "hint").text(
-          st_.balances_loading ? tr("正在查询各供应商的余额…")
-                               : tr("还没有供应商。在设置-供应商里添加一家之后这里会显示余额。")));
-    }
-    for (size_t i = 0; i < st_.balances.size(); ++i) {
-      const AppState::BalanceRow& b = st_.balances[i];
-      H row = el("div", "bal-row");
-      row.style("animation-delay", itos(static_cast<int>(i) * 30) + "ms");
-      H nm = el("div", "bal-name");
-      nm.add(el("span", "bal-pname").text(b.name.empty() ? b.pid : b.name));
-      if (!b.enabled) nm.add(el("span", "bal-off dim").text(tr("已停用")));
-      row.add(nm);
-      H val = el("div", "bal-val");
-      std::string cls = "bal-amount";
-      std::string text;
-      if (b.status == "ok") {
-        text = money(b.currency, b.balance);
-        if (!b.used.empty() || !b.limit.empty()) {
-          text += "  ";
-          if (!b.used.empty()) text += tr("已用 ") + money(b.currency, b.used);
-          if (!b.limit.empty()) {
-            text += tr(" / 额度 ") + money(b.currency, b.limit);
-          }
-        }
-      } else if (b.status == "unsupported") {
-        cls += " dim";
-        text = tr("不支持");
-        if (!b.note.empty()) text += " · " + tr(b.note.c_str());
-      } else {
-        cls += " bad";
-        // The backend already wrote "获取失败：HTTP 401"; show it verbatim - a
-        // silent dash would hide that the key or the endpoint is wrong.
-        text = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
-      }
-      val.add(el("span", cls).text(text));
-      row.add(val);
-      if (!b.endpoint.empty()) {
-        row.add(el("div", "bal-ep dim").text(b.endpoint));
-      }
-      bal.add(row);
-    }
-    panel.add(bal);
-  }
 
   // ---- by model: a proportional bar per model (the pie could not show values) ----
   Json pm = st_.usage_loaded && st_.usage.contains("byProviderModel") &&
@@ -5131,6 +5141,75 @@ VNodePtr UiApp::build_home_usage() {
     tbl.add(tr);
   }
   panel.add(tbl);
+  // ---- 余额 / 额度（放在最后：它是"还剩多少"，先看用量再看余额）----
+  // Per provider, by its ENDPOINT (the only thing that identifies a vendor
+  // reliably). Three states, all honest: the number, 不支持 (no public balance
+  // API), or 获取失败 WITH the reason. Asked on entering this page, after every
+  // finished turn and when the provider filter changes.
+  load_balances(false);
+  {
+    H bal = el("div", "usage-balances");
+    H bh = el("div", "chart-head");
+    bh.add(el("div", "chart-title").text(tr("余额 / 额度")));
+    bh.add(el("span", "grow"));
+    if (st_.balances_loading) {
+      bh.add(el("span", "bal-loading dim").text(tr("查询中…")));
+    } else {
+      bh.add(comp::button(tr("刷新"), [this](const std::string&) {
+        load_balances(true);
+      }, "ghost"));
+    }
+    bal.add(bh);
+    auto money = [](const std::string& cur, const std::string& v) {
+      if (v.empty()) return std::string("—");
+      if (cur == "CNY") return "¥" + v;
+      if (cur == "USD") return "$" + v;
+      return cur.empty() ? v : (cur + " " + v);
+    };
+    if (st_.balances.empty()) {
+      bal.add(el("div", "hint").text(
+          st_.balances_loading ? tr("正在查询各供应商的余额…")
+                               : tr("还没有供应商。在设置-供应商里添加一家之后这里会显示余额。")));
+    }
+    for (size_t i = 0; i < st_.balances.size(); ++i) {
+      const AppState::BalanceRow& b = st_.balances[i];
+      H row = el("div", "bal-row");
+      row.style("animation-delay", itos(static_cast<int>(i) * 30) + "ms");
+      H nm = el("div", "bal-name");
+      nm.add(el("span", "bal-pname").text(b.name.empty() ? b.pid : b.name));
+      if (!b.enabled) nm.add(el("span", "bal-off dim").text(tr("已停用")));
+      row.add(nm);
+      H val = el("div", "bal-val");
+      std::string cls = "bal-amount";
+      std::string text;
+      if (b.status == "ok") {
+        text = money(b.currency, b.balance);
+        if (!b.used.empty() || !b.limit.empty()) {
+          text += "  ";
+          if (!b.used.empty()) text += tr("已用 ") + money(b.currency, b.used);
+          if (!b.limit.empty()) {
+            text += tr(" / 额度 ") + money(b.currency, b.limit);
+          }
+        }
+      } else if (b.status == "unsupported") {
+        cls += " dim";
+        text = tr("不支持");
+        if (!b.note.empty()) text += " · " + tr(b.note.c_str());
+      } else {
+        cls += " bad";
+        // The backend already wrote "获取失败：HTTP 401"; show it verbatim - a
+        // silent dash would hide that the key or the endpoint is wrong.
+        text = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
+      }
+      val.add(el("span", cls).text(text));
+      row.add(val);
+      if (!b.endpoint.empty()) {
+        row.add(el("div", "bal-ep dim").text(b.endpoint));
+      }
+      bal.add(row);
+    }
+    panel.add(bal);
+  }
   wrap.add(panel);
   return wrap.get();
 }
@@ -6479,6 +6558,50 @@ VNodePtr UiApp::build_side_panel() {
     if (st_.usage_calls > 0) {
       body.add(comp::key_value(tr("调用次数"), itos(static_cast<int>(st_.usage_calls))));
     }
+    // ---- 余额 / 额度 ----
+    // The same provider.balances rows the usage page shows, in the sidebar: this
+    // is where "how much is left" is usually asked (while working, not while
+    // reading a report). Asked when the panel is opened and after every turn.
+    load_balances(false);
+    body.add(el("div", "side-sep"));
+    H bhead = el("div", "side-section");
+    bhead.add(el("span").text(tr("余额 / 额度")));
+    bhead.add(el("span", "grow"));
+    if (!st_.balances_loading) {
+      bhead.add(comp::icon_button("rotate", tr("重新查询"), [this](const std::string&) {
+        load_balances(true);
+      }));
+    }
+    body.add(bhead);
+    auto money = [](const std::string& cur, const std::string& v) {
+      if (v.empty()) return std::string("—");
+      if (cur == "CNY") return "¥" + v;
+      if (cur == "USD") return "$" + v;
+      return cur.empty() ? v : (cur + " " + v);
+    };
+    if (st_.balances.empty()) {
+      body.add(el("div", "hint").text(st_.balances_loading ? tr("正在查询…")
+                                                           : tr("还没有供应商")));
+    }
+    for (size_t i = 0; i < st_.balances.size(); ++i) {
+      const AppState::BalanceRow& b = st_.balances[i];
+      std::string right;
+      std::string cls = "sb-bal";
+      if (b.status == "ok") {
+        right = money(b.currency, b.balance);
+      } else if (b.status == "unsupported") {
+        right = tr("不支持");
+        cls += " dim";
+      } else {
+        right = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
+        cls += " bad";
+      }
+      H row = el("div", "sb-bal-row");
+      row.add(el("span", "sb-bal-name").text(b.name.empty() ? b.pid : b.name));
+      row.add(el("span", cls).text(right));
+      if (!b.endpoint.empty()) row.attr("title", b.endpoint);
+      body.add(row);
+    }
   } else if (kind == "subagent") {
     // One subagent's full transcript, in the SIDEBAR (see open_subagent_tab).
     // The id comes from THIS panel, so two agents can be open side by side.
@@ -7089,25 +7212,85 @@ VNodePtr UiApp::build_side_panel() {
       }  // end of the "changes" view
     }
   } else if (kind == "workflow") {
-    // ---- workflows: definitions you can start, runs in progress ----
-    if (!st_.workflow_defs_loaded) {
+    // ---- 工作流：模型规划 → 用户允许 → 这里看进度 ----
+    // This panel is NOT a launcher. A workflow is planned by the model (the
+    // `workflow_plan` tool), waits for the user's 允许, and then runs; the panel's
+    // job is to show the PLAN before it runs and the PROGRESS while it does.
+    if (!st_.workflow_runs_loaded) {
       body.add(comp::empty_state(tr("读取工作流…"), "", nullptr));
       load_workflows(active_sid());
     } else {
-      if (st_.workflow_runs.empty()) {
-        body.add(comp::hint(tr("这个会话还没有运行中的工作流。")));
-      }
+      std::vector<AppState::WorkflowRunRow> proposed;
+      std::vector<AppState::WorkflowRunRow> active;
       for (size_t i = 0; i < st_.workflow_runs.size(); ++i) {
-        AppState::WorkflowRunRow run = st_.workflow_runs[i];
+        if (st_.workflow_runs[i].state == "proposed") proposed.push_back(st_.workflow_runs[i]);
+        else active.push_back(st_.workflow_runs[i]);
+      }
+      if (proposed.empty() && active.empty()) {
+        body.add(comp::empty_state(
+            tr("还没有工作流。模型规划多步任务时会在这里等你允许。"), "", nullptr));
+      }
+      // ---- 待允许：the plan, with the two buttons that matter ----
+      for (size_t i = 0; i < proposed.size(); ++i) {
+        AppState::WorkflowRunRow run = proposed[i];
+        H card = el("div", "wf-run proposed");
+        H head = el("div", "wf-run-head");
+        head.add(el("span", "wf-dot wait"));
+        head.add(el("span", "wf-run-name").text(run.name));
+        head.add(el("span", "grow"));
+        head.add(el("span", "wf-state dim").text(tr("待允许")));
+        card.add(head);
+        body.add(el("div", "wf-plan-note").text(
+            tr("模型规划了 " + itos(static_cast<int>(run.steps.size())) + " 步，允许后开始执行").c_str()));
+        for (size_t k = 0; k < run.steps.size(); ++k) {
+          H row = el("div", "wf-step pending");
+          row.add(el("span", "wf-step-state").text(itos(static_cast<int>(k + 1)) + "."));
+          row.add(el("span", "wf-step-name").text(run.steps[k].name));
+          card.add(row);
+        }
+        H acts = el("div", "wf-acts");
+        std::string run_id = run.id;
+        acts.add(comp::button(tr("允许"), [this, run_id](const std::string&) {
+          call_async("workflow.approve", Json{{"runId", run_id}},
+                     [this](const BackendResult& r) {
+            if (!r.ok) {
+              toast(tr("启动失败：") + r.message);
+              return;
+            }
+            toast(tr("已允许，开始执行"));
+            load_workflows(active_sid());
+          });
+        }, "primary"));
+        acts.add(comp::button(tr("拒绝"), [this, run_id](const std::string&) {
+          call_async("workflow.reject", Json{{"runId", run_id}},
+                     [this](const BackendResult& r) {
+            if (!r.ok) {
+              toast(tr("取消失败：") + r.message);
+              return;
+            }
+            load_workflows(active_sid());
+          });
+        }, "ghost"));
+        card.add(acts);
+        body.add(card);
+      }
+      // ---- 运行中 / 历史：the progress ----
+      for (size_t i = 0; i < active.size(); ++i) {
+        AppState::WorkflowRunRow run = active[i];
         H card = el("div", "wf-run");
         H head = el("div", "wf-run-head");
         std::string state_cls = run.state == "done" ? "ok"
                                 : run.state == "failed" ? "err"
-                                                        : "run";
+                                : run.state == "rejected" ? "err"
+                                                          : "run";
         head.add(el("span", "wf-dot " + state_cls));
         head.add(el("span", "wf-run-name").text(run.name));
         head.add(el("span", "grow"));
-        head.add(el("span", "wf-state dim").text(run.state));
+        std::string state_text = run.state == "done" ? tr("完成")
+                                 : run.state == "failed" ? tr("失败")
+                                 : run.state == "rejected" ? tr("已拒绝")
+                                                           : tr("运行中");
+        head.add(el("span", "wf-state dim").text(state_text));
         card.add(head);
         for (size_t k = 0; k < run.steps.size(); ++k) {
           const AppState::WorkflowStepRow& st = run.steps[k];
@@ -7154,47 +7337,14 @@ VNodePtr UiApp::build_side_panel() {
         }
         body.add(card);
       }
-
-      if (!st_.workflow_defs.empty()) {
-        body.add(comp::section_title(tr("可启动的工作流")));
-        for (size_t i = 0; i < st_.workflow_defs.size(); ++i) {
-          const AppState::WorkflowDefRow& d = st_.workflow_defs[i];
-          H row = el("div", "wf-def");
-          row.add(el("span", "wf-def-name").text(d.name));
-          row.add(el("span", "wf-def-steps dim").text(
-              itos(d.steps) + tr(" 步")));
-          row.add(el("span", "grow"));
-          std::string name = d.name;
-          row.add(comp::button(tr("启动"), [this, name](const std::string&) {
-            std::string sid = active_sid();
-            if (sid.empty()) {
-              toast(tr("先打开一个会话"));
-              return;
-            }
-            call_async("workflow.start", Json{{"sid", sid}, {"name", name}},
-                       [this](const BackendResult& r) {
-              if (!r.ok) {
-                toast(tr("启动失败：") + r.message);
-                return;
-              }
-              toast(tr("已启动"));
-              load_workflows(active_sid());
-            });
-          }, "primary"));
-          if (!d.description.empty()) {
-            row.attr("title", d.description);
-          }
-          body.add(row);
-        }
-      } else {
-        body.add(comp::empty_state(tr("还没有工作流定义。"), "", nullptr));
-      }
     }
   } else if (kind == "ops") {
+    // systemOps: a live log while the panel is open (refresh_session_ops runs on
+    // pump's 2 s tick - it used to be fetched once, when the session opened).
     if (st_.session_ops.empty()) {
       body.add(comp::empty_state(tr("暂无操作记录（systemOps）。"), "", nullptr));
     }
-    for (size_t i = 0; i < st_.session_ops.size(); ++i) {
+    for (size_t i = st_.session_ops.size(); i-- > 0;) {
       H row = el("div", "op-row");
       row.add(el("span", "op-name").text(st_.session_ops[i].op));
       row.add(el("span", "op-detail dim").text(st_.session_ops[i].detail));
@@ -8300,6 +8450,16 @@ VNodePtr UiApp::build_settings() {
       H it = el("div", sel ? "pv-item active" : "pv-item");
       std::string id = p.id;
       it.on(EventKind::kClick, [this, id](const std::string&) { select_provider(id); });
+      // The provider's brand mark, from its ENDPOINT: a provider created from a
+      // template has no template id any more, so the list used to show no logo at
+      // all for anything the user added.
+      {
+        std::string brand = provider_brand_for_endpoint(p.endpoint, p.name);
+        H mark = el("span", "pv-item-mark");
+        if (!brand.empty()) mark.add(comp::model_icon(brand, p.name, "mi-lg"));
+        else mark.text(p.name.empty() ? "?" : p.name.substr(0, 1));
+        it.add(mark);
+      }
       H top = el("div", "pv-item-top");
       top.add(el("span", "pv-item-name").text(p.name.empty() ? p.id : p.name));
       if (!p.enabled) top.add(comp::badge(tr("停用")));
@@ -11952,7 +12112,12 @@ void UiApp::load_side_tab(const std::string& id) {
   if (kind == "files" && !st_.active_pid.empty()) load_files(id, st_.active_pid, path);
   if (kind == "git" && !st_.active_pid.empty()) load_git(id);
   if (kind == "workflow") load_workflows(active_sid());
-  if (kind == "usage") load_session_usage(active_sid());
+  if (kind == "usage") {
+    load_session_usage(active_sid());
+    // Opening the panel is a deliberate "what is left?" moment: refresh the
+    // balances even if the last query was recent (the 8s floor still applies).
+    load_balances(true);
+  }
 }
 // 侧栏标签拖拽排序：把 from 移到 to 的位置（其余保持相对顺序）。
 void UiApp::move_side_tab(const std::string& from, const std::string& to) {

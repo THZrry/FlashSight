@@ -294,6 +294,16 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   reg("workflow.start", [api](const Json& a) {
     return api->workflow_start(s(a, "sid"), s(a, "name"));
   });
+  // 模型规划的工作流：propose 落成待允许的实例，approve/reject 由侧栏按钮触发
+  reg("workflow.propose", [api](const Json& a) {
+    return api->workflow_propose(s(a, "sid"), a);
+  });
+  reg("workflow.approve", [api](const Json& a) {
+    return api->workflow_approve(s(a, "runId"));
+  });
+  reg("workflow.reject", [api](const Json& a) {
+    return api->workflow_reject(s(a, "runId"));
+  });
   reg("workflow.get", [api](const Json& a) { return api->workflow_get(s(a, "runId")); });
   reg("workflow.retryStep", [api](const Json& a) {
     return api->workflow_retry_step(s(a, "runId"), s(a, "stepId"));

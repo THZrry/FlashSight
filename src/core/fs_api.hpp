@@ -228,6 +228,11 @@ class FsApi {
   // start itself (another window, a resumed app).
   FsResult workflow_runs(const std::string& sid);
   FsResult workflow_start(const std::string& sid, const std::string& name);
+  // 模型规划的工作流：先落成 state="proposed" 的运行，等用户允许才真正开跑。
+  // `workflow_propose` 接受 {name, goal, steps:[{title, task?, kind?}]}。
+  FsResult workflow_propose(const std::string& sid, const Json& def);
+  FsResult workflow_approve(const std::string& runId);
+  FsResult workflow_reject(const std::string& runId);
   FsResult workflow_get(const std::string& runId);
   FsResult workflow_retry_step(const std::string& runId, const std::string& stepId);
   FsResult workflow_skip_step(const std::string& runId, const std::string& stepId);
@@ -396,6 +401,11 @@ class FsApi {
   std::unique_ptr<DenyList> deny_list_;
   std::unique_ptr<PlanStore> plans_;
   std::unique_ptr<WorkflowStore> workflows_;
+  // 终端落盘：元数据 <session>/terminals/<tid>.json + 输出 <tid>.log。一个终端
+  // 进程活不过本进程，但"我开过哪些终端、里面打印过什么"必须活过重启。
+  // 写失败不报错：落盘是尽力而为，绝不能因为它让终端功能失灵。
+  void persist_terminal_entry(const Json& entry);
+  void append_terminal_log(const std::string& tid, const std::string& text);
   std::map<int, std::function<void(const std::string&, const Json&)> > event_listeners_;
   int next_listener_id_ = 1;
   // Guards the mutable state above for callers that are not the turn thread.

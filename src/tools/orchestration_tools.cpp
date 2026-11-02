@@ -202,21 +202,33 @@ void register_orchestration_tools(ToolRegistry* registry) {
       });
   }
   {
+    // 规划工作流：模型提出步骤，用户允许后才执行。
+    //
+    // This replaced `workflow_start`, which let the MODEL start a pipeline on its
+    // own. That is not what a workflow is here: the user approves the plan first
+    // (the sidebar shows it with 允许 / 拒绝), because a pipeline spends real time
+    // and tokens across several subagents.
     ToolDef def;
-    def.name = "workflow_start";
+    def.name = "workflow_plan";
     def.description =
-        "启动一个工作流. Start a workflow run by definition name. "
-        "每步是一组子代理，失败只影响该步（可重试/跳过）。";
+        "规划一个工作流并提交给用户批准. Propose a multi-step workflow for the "
+        "USER TO APPROVE; nothing runs until they allow it. 每步由子代理执行，"
+        "失败只影响该步（可重试/跳过）。一次性任务用 todo，不要用这个。";
     Json params = Json::object();
     params["type"] = "object";
     params["properties"] = obj({
-        {"name", obj({{"type", "string"}, {"description", "定义名 definition name"}})} });
-    params["required"] = Json::array({"name"});
+        {"goal", obj({{"type", "string"},
+                      {"description", "总体目标（工作流名）goal / workflow name"}})},
+        {"steps", obj({{"type", "array"},
+                       {"description",
+                        "[{title, task?, kind?}]：title 是一步的名字，task 给子代理的"
+                        "具体任务（默认等于 title），kind 默认 complete-step"}})} });
+    params["required"] = Json::array({"goal", "steps"});
     def.parameters = params;
-    registry->register_tool("workflow_start", def,
+    registry->register_tool("workflow_plan", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         Json req = args;
-        req["op"] = "start";
+        req["op"] = "propose";
         return need(ctx, ctx.workflow_op, req);
       });
   }

@@ -2583,6 +2583,54 @@ FS_TEST(uiapp_calls_panel_reads_the_transcript) {
   EXPECT_TRUE(dump_has(dom, "src/app.cpp"));
 }
 
+// 工作流面板是"看规划/看进度"，不是启动器：模型规划的一步跑在用户点 允许 之前
+// 必须停着，面板要能列出它的步骤并给出 允许 / 拒绝。
+FS_TEST(uiapp_workflow_panel_shows_the_plan_for_approval) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class WfBackend : public IUiBackend {
+   public:
+    std::vector<std::string> methods;
+    BackendResult call(const std::string& method, const Json&) override {
+      methods.push_back(method);
+      BackendResult r;
+      r.ok = true;
+      if (method == "workflow.list") r.data = Json{{"defs", Json::array()}};
+      if (method == "workflow.runs") {
+        r.data = Json{{"runs", Json::array({Json{
+            {"id", "run_1"},
+            {"name", "重构解析器"},
+            {"state", "proposed"},
+            {"steps", Json::array({Json{{"id", "s1"}, {"name", "调查现有实现"},
+                                        {"state", "pending"}},
+                                   Json{{"id", "s2"}, {"name", "写测试"},
+                                        {"state", "pending"}}})}}})}};
+      }
+      if (method == "workflow.approve") r.data = Json{{"state", "running"}};
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.open_or_focus_side_tab("workflow");
+  EXPECT_TRUE(dump_has(dom, "\u5f85\u5141\u8bb8"));        // 待允许
+  EXPECT_TRUE(dump_has(dom, "\u91cd\u6784\u89e3\u6790\u5668"));  // the goal
+  EXPECT_TRUE(dump_has(dom, "\u8c03\u67e5\u73b0\u6709\u5b9e\u73b0"));  // step 1
+  EXPECT_TRUE(dump_has(dom, "\u5199\u6d4b\u8bd5"));        // step 2
+  // The panel must not be a launcher any more.
+  EXPECT_FALSE(dump_has(dom, "\u53ef\u542f\u52a8\u7684\u5de5\u4f5c\u6d41"));
+  int hid = click_hid_in(app.tree_for_test(), "btn primary", "\u5141\u8bb8");  // 允许
+  ASSERT_TRUE(hid != 0);
+  bus().fire(hid, "");
+  bool approved = false;
+  for (size_t i = 0; i < backend.methods.size(); ++i) {
+    if (backend.methods[i] == "workflow.approve") approved = true;
+  }
+  EXPECT_TRUE(approved);
+}
+
 // A background tab that produces output gets the dot on its TAB - nobody can see
 // the other session's transcript, and `SessionTab::dirty` was never written.
 FS_TEST(uiapp_background_tab_gets_dirty_dot) {

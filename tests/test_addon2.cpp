@@ -494,6 +494,63 @@ FS_TEST(addon2_fsapi_workflow) {
   EXPECT_FALSE(api.workflow_start(sid, "no-such-wf").ok());
 }
 
+// ---------- 模型规划的工作流：先提出，用户允许后才跑 ----------
+FS_TEST(addon2_workflow_propose_needs_approval) {
+  fstest::TempDir td("a2wfp");
+  FakeClockA2 clock(1000);
+  FsApi api(ghc::filesystem::path(td.path()), &clock, nullptr);
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj_dir);
+  FsResult pr = api.project_create(proj_dir.string());
+  ASSERT_TRUE(pr.ok());
+  std::string pid = pr.data["pid"].get<std::string>();
+  FsResult sr = api.session_new(pid, proj_dir.string());
+  ASSERT_TRUE(sr.ok());
+  std::string sid = sr.data["sid"].get<std::string>();
+
+  Json plan = Json::object();
+  plan["goal"] = "重构解析器";
+  plan["steps"] = Json::array({
+      Json{{"title", "调查现有实现"},
+           {"task", "读 src/parser.cpp 并列出问题"}},
+      Json{{"title", "写测试"}, {"task", "给 lexer 补单测"}}});
+  FsResult n = api.workflow_propose(sid, plan);
+  ASSERT_TRUE(n.ok());
+  std::string run_id = n.data["id"].get<std::string>();
+  // NOT started: the run waits for the user.
+  EXPECT_EQ(n.data["state"].get<std::string>(), std::string("proposed"));
+
+  FsResult runs = api.workflow_runs(sid);
+  ASSERT_TRUE(runs.ok());
+  ASSERT_TRUE(runs.data["runs"].is_array());
+  ASSERT_TRUE(runs.data["runs"].size() == 1);
+  EXPECT_EQ(runs.data["runs"][0]["state"].get<std::string>(),
+            std::string("proposed"));
+  EXPECT_EQ((int)runs.data["runs"][0]["steps"].size(), 2);
+  // Each step is executed by a subagent.
+  const Json& first_agents = runs.data["runs"][0]["steps"][0]["agents"];
+  ASSERT_TRUE(first_agents.is_array() && first_agents.size() == 1);
+  EXPECT_EQ(first_agents[0]["kind"].get<std::string>(),
+            std::string("complete-step"));
+
+  // Rejecting it ends it without running anything.
+  FsResult rj = api.workflow_reject(run_id);
+  ASSERT_TRUE(rj.ok());
+  EXPECT_EQ(rj.data["state"].get<std::string>(), std::string("rejected"));
+
+  // Approve only works on a PROPOSED run.
+  FsResult bad = api.workflow_approve(run_id);
+  EXPECT_FALSE(bad.ok());
+
+  // A second proposal, then approve: it becomes running and the first step
+  // starts (no agent kind override needed here - kind defaults to complete-step).
+  FsResult n2 = api.workflow_propose(sid, plan);
+  ASSERT_TRUE(n2.ok());
+  FsResult ap = api.workflow_approve(n2.data["id"].get<std::string>());
+  ASSERT_TRUE(ap.ok());
+  EXPECT_EQ(ap.data["state"].get<std::string>(), std::string("running"));
+}
+
 // ---------- FsApi 层：中断-继续 + approve 门 ----------
 FS_TEST(addon2_fsapi_continue_and_approve) {
   fstest::TempDir td("a2ct");

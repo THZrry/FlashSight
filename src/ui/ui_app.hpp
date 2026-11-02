@@ -1050,6 +1050,9 @@ class UiApp {
   bool provider_auto_opened_ = false;
   bool sessions_dirty_ = false;
   int64_t sessions_refresh_ms_ = 0;
+  // A workflow event (proposed / step / rejected) changed what the panel shows.
+  bool workflows_dirty_ = false;
+  int64_t workflows_refresh_ms_ = 0;
   int64_t last_ops_refresh_ms_ = 0;
   // 读取 Web 服务当前监听状态（设置-Web 服务页）
   void refresh_server_status();
