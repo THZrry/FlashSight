@@ -50,6 +50,9 @@ class FsApi {
   FsResult project_list();
   FsResult project_open(const std::string& path);
   FsResult project_create(const std::string& path);
+  // 新项目自动建一个空会话：侧边栏按"项目 → 会话"列出，没有会话的项目在侧栏里
+  // 根本不存在（主页能看到、侧栏看不到）。
+  void ensure_project_session(const std::string& pid, const std::string& path);
   FsResult project_remove(const std::string& pid);
   FsResult project_get(const std::string& pid);
   // 打开系统"选择文件夹"对话框（浏览器无法提供本机路径，由本进程弹窗）
@@ -177,6 +180,10 @@ class FsApi {
                            int limit = 200);
   FsResult terminal_kill(const std::string& tid);
   FsResult terminal_set_encoding(const std::string& tid, const std::string& enc);
+  // 唯一的终端启动口：UI 的交互式终端和模型的 terminal_exec/spawn 都走这里。
+  // 缺省 cwd = 会话的项目根（模型曾经因此在本应用的目录里跑 git，读到的是本仓
+  // 的提交）。同时给每个终端分配输出日志（转写脚本、搜索都依赖它）。
+  FsResult spawn_terminal(Json args, Json* out);
   // 非阻塞轮询所有终端，把新增输出/退出推成 terminal.output / terminal.exit
   // 事件（UI 不再手动轮询）。宿主定时调用（桌面线程 / 浏览器定时器）。
   void terminal_tick();

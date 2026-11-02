@@ -41,6 +41,29 @@ EM_JS(void, fs_dom_boot, (), {
     document.addEventListener('contextmenu', function (ev) {
       ev.preventDefault();
     }, true);
+    // Middle-click belongs to the app, not to Chromium: its default is
+    // scroll-to-pan, which over a tab strip reads as "middle click did something
+    // weird to the page". Swallow both the press and the aux-click.
+    document.addEventListener('mousedown', function (ev) {
+      if (ev.button === 1) ev.preventDefault();
+    }, true);
+    document.addEventListener('auxclick', function (ev) {
+      if (ev.button === 1) ev.preventDefault();
+    }, true);
+    // A vertical wheel over the tab strip scrolls it SIDEWAYS: the strip is the
+    // only horizontally scrolling bar in the app, and a wheel is all most mice
+    // have. Horizontal wheels / trackpads keep their native behaviour.
+    document.addEventListener('wheel', function (ev) {
+      var el = ev.target;
+      while (el && el !== document.body &&
+             !(el.classList && el.classList.contains('tabs-scroll'))) {
+        el = el.parentElement;
+      }
+      if (!el || el === document.body) return;
+      if (Math.abs(ev.deltaY) <= Math.abs(ev.deltaX)) return;
+      el.scrollLeft += ev.deltaY;
+      ev.preventDefault();
+    }, { passive: false });
   }
 });
 

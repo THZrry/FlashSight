@@ -3150,6 +3150,46 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       // on screen (refresh_loop_state only honours the newest request).
       if (is_active) refresh_loop_state(usage_sid);
     }
+  } else if (event == "loop.usage") {
+    // Per-CALL usage: the side panel's context level / cache / this-turn numbers
+    // move as each model round comes back, instead of jumping once at turn end.
+    // Everything here is a FACT the provider reported for THAT call. A background
+    // session is skipped: its panel numbers are re-read from usage.session when
+    // the tab is opened.
+    if (!is_active) return;
+    int64_t in = jsonutil::get_int(payload, "in", -1);
+    int64_t out = jsonutil::get_int(payload, "out", -1);
+    int64_t cached = jsonutil::get_int(payload, "cached", -1);
+    double cost = jsonutil::get_number(payload, "cost", 0.0);
+    std::string cost_kind = jsonutil::get<std::string>(payload, "costKind", "");
+    update([&](AppState& s) {
+      if (in >= 0) {
+        s.turn_in = in;
+        if (out >= 0) s.turn_out = out;
+        s.context_tokens = in;
+        if (s.context_window > 0) {
+          s.context_pct = static_cast<int>(in * 100 / s.context_window);
+        }
+        // Between the authoritative usage.session refreshes (turn.done), keep a
+        // running total so "累计 tokens" does not freeze mid-turn.
+        if (s.session_tokens_in >= 0) s.session_tokens_in += in;
+        if (out >= 0 && s.session_tokens_out >= 0) s.session_tokens_out += out;
+      }
+      if (cached >= 0 && in > 0) {
+        s.cache_reported = true;
+        s.session_cache_tokens = cached;
+        s.cache_hit_pct = static_cast<int>(cached * 100 / in);
+      }
+      if (!cost_kind.empty()) {
+        s.turn_cost_kind = cost_kind;
+        s.turn_cost_micros = static_cast<int64_t>(cost * 1000000.0);
+        if (cost_kind == "money" && cost > 0) {
+          char buf[48];
+          std::snprintf(buf, sizeof(buf), "¥%.4f", cost);
+          s.session_cost = buf;
+        }
+      }
+    });
   } else if (event == "assistant.interim") {
     // A round of the turn finished with narration (the model talking to itself
     // between tool calls). File it under the CURRENT assistant message's work log
@@ -3381,7 +3421,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   if (event == "stream.delta" || event == "turn.done" || event == "turn.started" ||
       event == "tool.start" ||
       event == "tool.update" || event == "assistant.interim" ||
-      event == "subagent.done" ||
+      event == "subagent.done" || event == "loop.usage" ||
       event == "terminal.exit" || event == "terminal.output") {
     apply_session_event(sid, event, payload);
   } else if (event == "permission.prompt") {

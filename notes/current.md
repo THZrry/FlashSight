@@ -2557,3 +2557,36 @@ The process of project: P0 环境搭建 + P1 AppCore
     扩展成覆盖轮转档 + 输入日志 + `terminal_search`。实测：起 cmd → 敲 `echo alpha-live` + `dir`
     → **立刻杀进程** → 重启：`terminal.list` 有记录、`terminal.grid` 12 行完整（含中文与两个命令
     的输出）、`terminal.search "alpha-live"` 命中输出 2 处 + 输入日志 1 处。
+
+<93>(SOLVED): cwd 真因（模型的终端工具绕过项目根）+ 工作过程合成一条流并默认展开 + webview 分隔条方向 + 每次 API 调用实时更新用量 + 新项目自动建会话 + 顶栏滚轮/中键。
+  - **`git log` 读到的是 FlashSight 自己的提交（严重）**：模型工具走的是
+    `deps.terminal_spawn -> TerminalManager::spawn`，**绕过了 `FsApi::terminal_spawn`**，
+    而项目根 cwd 的缺省逻辑只写在后者里。于是命令在**应用进程的目录**（release 目录，
+    正好在本仓库内）里跑。现在只有一个入口 `FsApi::spawn_terminal(args)`：缺省 cwd =
+    会话的项目根（pid → path → meta.cwd 逐级回落）、缺省编码 = 设置里的编码，并且给
+    **每个**终端（包括模型起的）分配输出日志。实测：工具调用 `git log --oneline -3` 在
+    mock 项目里返回 `57a6a87 mockproj first commit`（修前是 FlashSight 的提交）。
+  - **"工作过程的输出保留在外层，重新进入不再显示"**：工作过程折默认是**关**的，重开
+    会话时整段过程都看不见；而且里面的"思考 / 过程说明 / 工具调用"被分成三段。现在：
+    ① 工作过程**默认展开**（想收起来点头部）；② 三段合成**一条流**——思考在最上，
+    过程说明和工具块按顺序交替，不再有"工具调用"这个小标题；③ 工具体**不再限高**
+    （之前为了够得着横向滚动条加了 max-height，反而变成里外两层滚动），横向仍然可滚。
+  - **"侧边栏拖动方向和实际方向又相反了"**：webview 的 `splitter()` 三个绑定符号全反了
+    （`split` +1、`vsplit` +1、`navsplit` -1），而 wasm 适配器是对的（右侧面板分隔条在它
+    **左边**，所以拖动向左 = 变宽）。统一成：split -1 / vsplit -1 / navsplit +1。
+    实测：右侧面板向左拖 60px，宽度 420 → 480。
+  - **上下文/缓存要按每次 API 调用更新**：循环在每次模型返回后发 `loop.usage
+    {sid,in,out,cached}`，侧栏据此立刻更新上下文水位、缓存命中、本轮/累计 tokens
+    （此前只有 turn.done 之后的一次 usage.session 往返）。实测：回合进行中侧栏已显示
+    `上下文水位 1% (100 / 128.0K)`、`本轮 200/40`。
+  - **新项目只出现在主页、不在侧边栏**：侧栏按"项目 → 会话"列出，没有会话的项目根本
+    不存在。`project.open`/`project.create` 现在会给**没有任何会话**的新项目自动建一个
+    空会话（已有会话的项目不动）。实测：打开 freshproj → `session.list` 返回 1 条。
+  - **顶栏**：滚轮在标签条上**横向滚动**（纵向滚轮转成 scrollLeft，横向滚轮/触控板保持
+    原生），中键**不再触发 Chromium 的自动滚动**（mousedown/auxclick 都 preventDefault），
+    同时标签条滚动条是 4px 细条（hover 才显拇指）。
+  - **测试**：411 用例 3863 断言全过；web / webview 双变体编译通过。新增
+    `terminal_spawn_defaults_to_the_project_root`（缺省 cwd 必须是会话项目根）、
+    `project_open_creates_a_first_session`（且重复打开不重复建）、
+    `uiapp_per_call_usage_updates_the_panel`；工作过程的两个折叠用例改成"默认展开、
+    收起后隐藏"，并断言不再出现"工具调用"分段标题。

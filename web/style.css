@@ -1514,14 +1514,11 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
      page scrolls - which is how the rest of the transcript behaves. */
   overflow: visible;
 }
-/* An expanded tool body is a WINDOW, not a page section.
-   It used to be uncapped like the rest of the fold, and a 200-line JSON dump
-   pushed its own horizontal scrollbar thousands of pixels down: the bar existed,
-   but it sat below the viewport and could not be reached without scrolling past
-   the whole record first. Capping the height keeps both scrollbars at the edge
-   of the visible window, which is the only way a scrollbar stays usable inside a
-   long record. */
-.work-body .tb-body { max-height: min(40vh, 26em); }
+/* An expanded tool body is uncapped, like the rest of the fold: the work log is
+   read top to bottom in the page's own scroll, and an inner window meant a
+   scroll-inside-scroll for every record. The horizontal bar sits at the end of
+   the block; the page scroll reaches it. */
+.work-body .tb-body { max-height: none; }
 /* The model's narration between tool calls (see ChatMsg::interim). It is not the
    answer, so it is dim and indented rather than a bubble - and it lives HERE,
    because gluing it onto the answer made the reply look like it repeated itself. */
@@ -1587,10 +1584,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   font-family: var(--mono); font-size: 12px;
   /* No top border when a label sits above it; a lone body keeps one. */
   border-top: 1px solid var(--border);
-  /* A bounded window (see the .work-body override): both scrollbars stay at the
-     edge of what you can see. `overscroll-behavior: contain` stops the page from
-     scrolling when the inner box hits its end. */
-  max-height: min(40vh, 26em);
+  /* Uncapped vertically: the page scrolls. `overscroll-behavior: contain` keeps
+     a sideways swipe inside the block from scrolling the page. */
+  max-height: none;
   overscroll-behavior: contain;
   /* Long single lines (minified JSON, a one-line CSV dump) must be READABLE:
      wrapping makes a 400-column row meaningless, and `overflow: visible` used to

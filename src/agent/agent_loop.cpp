@@ -223,6 +223,15 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
     }
     last_in_tokens_ = out->in_tokens > 0 ? out->in_tokens : last_in_tokens_;
     last_out_tokens_ = out->out_tokens;
+    // Per-CALL usage, the moment it is known. The UI used to learn these numbers
+    // only at turn end (one usage.session round trip AFTER the turn), so a long
+    // multi-round turn showed stale context/cache figures while it was working -
+    // and those are exactly the numbers you watch during a turn.
+    emit("loop.usage", Json{{"sid", opts_.sid},
+                            {"in", out->in_tokens},
+                            {"out", out->out_tokens},
+                            {"cached", out->cache_tokens},
+                            {"model", req.model}});
     // 防过拟合：只提示，不截断（agent-loop.md §5）。
     if (overfit_.enabled() && !out->text.empty() && overfit_.push(out->text)) {
       emit("truncate.hint", Json{{"sid", opts_.sid},

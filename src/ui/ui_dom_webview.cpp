@@ -108,6 +108,31 @@ const char* kGlueJs = R"JS(
     ev.preventDefault();
   }, true);
 
+  // Middle-click belongs to the app, not to Chromium: its default is
+  // scroll-to-pan, which over a tab strip reads as "middle click did something
+  // weird to the page". Swallow both the press and the aux-click.
+  document.addEventListener('mousedown', function (ev) {
+    if (ev.button === 1) ev.preventDefault();
+  }, true);
+  document.addEventListener('auxclick', function (ev) {
+    if (ev.button === 1) ev.preventDefault();
+  }, true);
+
+  // A vertical wheel over the tab strip scrolls it SIDEWAYS: the strip is the
+  // only horizontally scrolling bar in the app, and a wheel is all most mice
+  // have. Horizontal wheels / trackpads keep their native behaviour.
+  document.addEventListener('wheel', function (ev) {
+    var el = ev.target;
+    while (el && el !== document.body &&
+           !(el.classList && el.classList.contains('tabs-scroll'))) {
+      el = el.parentElement;
+    }
+    if (!el || el === document.body) return;
+    if (Math.abs(ev.deltaY) <= Math.abs(ev.deltaX)) return;
+    el.scrollLeft += ev.deltaY;
+    ev.preventDefault();
+  }, { passive: false });
+
   function N(i) { return S.nodes[i] || null; }
   // Call a C++ binding. webview exposes bindings as plain JS functions taking
   // POSITIONAL arguments (it wraps them in a Promise internally), so `args`
@@ -390,9 +415,17 @@ const char* kGlueJs = R"JS(
       case 'classAdd':    if (el) el.classList.add(a); return;
       case 'classRemove': if (el) el.classList.remove(a); return;
       case 'timeout':     setTimeout(function () { post('fs_ui_timeout', [parseInt(a, 10)]); }, parseInt(b, 10) || 0); return;
-      case 'split':    splitter(i, j, 'fs_ui_split', parseInt(a, 10), 0, 1); return;
-      case 'vsplit':   splitter(i, j, 'fs_ui_vsplit', parseInt(a, 10), 1, 1); return;
-      case 'navsplit': splitter(i, j, 'fs_ui_nav_split', parseInt(a, 10), 0, -1); return;
+      // Sign = which way the panel grows relative to the pointer delta, and it
+      // is fixed by WHICH EDGE the divider is on - the same geometry the wasm
+      // adapter uses:
+      //   split    (right side panel, divider = its LEFT edge): drag left = wider
+      //   vsplit   (bottom panel, divider = its TOP edge):       drag up   = taller
+      //   navsplit (nav rail, divider = its RIGHT edge):         drag right = wider
+      // These were all negated here, so every divider grew the WRONG way in the
+      // native window ("拖动方向和实际方向相反").
+      case 'split':    splitter(i, j, 'fs_ui_split', parseInt(a, 10), 0, -1); return;
+      case 'vsplit':   splitter(i, j, 'fs_ui_vsplit', parseInt(a, 10), 1, -1); return;
+      case 'navsplit': splitter(i, j, 'fs_ui_nav_split', parseInt(a, 10), 0, 1); return;
       case 'outside':
         if (!el) return;
         el.__fsOutCb = parseInt(a, 10);

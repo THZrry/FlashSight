@@ -433,6 +433,71 @@ FS_TEST(wiring_legacy_full_json_still_reads) {
 }
 
 
+// ---------- 新项目自带一个会话 ----------
+// The sidebar lists SESSIONS under projects, so a project without one appeared on
+// the home page and nowhere else ("新打开的项目会出现在主页，但不会出现在侧边栏").
+FS_TEST(project_open_creates_a_first_session) {
+  using namespace fs;
+  fstest::TempDir td("projsess");
+  FsApi api(ghc::filesystem::path(td.path()));
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "fresh";
+  ghc::filesystem::create_directories(proj_dir);
+
+  FsResult pr = api.project_open(proj_dir.string());
+  ASSERT_TRUE(pr.ok());
+  std::string pid = pr.data["pid"].get<std::string>();
+  FsResult sl = api.session_list(pid);
+  ASSERT_TRUE(sl.ok());
+  ASSERT_TRUE(sl.data.is_array());
+  EXPECT_TRUE(sl.data.size() == 1);
+
+  // Opening the same folder again must NOT add another one.
+  ASSERT_TRUE(api.project_open(proj_dir.string()).ok());
+  FsResult sl2 = api.session_list(pid);
+  ASSERT_TRUE(sl2.ok());
+  EXPECT_TRUE(sl2.data.size() == 1);
+}
+
+// ---------- 模型的命令必须在项目根跑 ----------
+// The model's terminal tools used to call TerminalManager::spawn directly, which
+// skipped the cwd default: `git log` then ran in the APP's directory (the release
+// folder, inside this repo) and the model read FlashSight's own history instead of
+// the user's project.
+FS_TEST(terminal_spawn_defaults_to_the_project_root) {
+  using namespace fs;
+  fstest::TempDir td("termcwd");
+  FsApi api(ghc::filesystem::path(td.path()));
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj_dir);
+  FsResult pr = api.project_create(proj_dir.string());
+  ASSERT_TRUE(pr.ok());
+  std::string pid = pr.data["pid"].get<std::string>();
+  // No cwd passed, exactly like the tool call the model makes.
+  FsResult sr = api.session_new(pid, "");
+  ASSERT_TRUE(sr.ok());
+  std::string sid = sr.data["sid"].get<std::string>();
+
+  Json args = Json::object();
+  args["sid"] = sid;
+  args["command"] = "echo cwd-probe";
+  args["background"] = false;
+  args["timeoutMs"] = 15000;
+  Json out;
+  FsResult r = api.spawn_terminal(args, &out);
+  ASSERT_TRUE(r.ok());
+  std::string tid = jsonutil::get<std::string>(out, "tid", "");
+  EXPECT_TRUE(!tid.empty());
+
+  FsResult list = api.terminal_list(sid);
+  ASSERT_TRUE(list.ok());
+  ASSERT_TRUE(list.data.is_array() && list.data.size() >= 1);
+  std::string cwd = jsonutil::get<std::string>(list.data[0], "cwd", "");
+  EXPECT_TRUE(!cwd.empty());
+  // It must be the session's project, not wherever the app was started from.
+  std::string tail = cwd.substr(cwd.size() >= 4 ? cwd.size() - 4 : 0);
+  EXPECT_EQ(tail, std::string("proj"));
+}
+
 // ---------- 终端的记录必须活过重启 ----------
 // A terminal process cannot survive the app, but "which terminals did I open and
 // what did they print" must: the session's terminals/ directory was created and

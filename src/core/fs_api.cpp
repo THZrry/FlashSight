@@ -167,8 +167,11 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   };
   // 终端回调（reproc 经 TerminalManager；工具层只调回调）
   TerminalManager* tm = terminal_mgr_.get();
-  deps.terminal_spawn = [tm](const Json& a, Json* out) -> FsResult {
-    return tm->spawn(a, out);
+  // Through spawn_terminal, NOT the manager directly: that shortcut skipped
+  // the project-root cwd default, so model commands ran in the app's own
+  // directory (git log showed THIS repo instead of the user's project).
+  deps.terminal_spawn = [this](const Json& a, Json* out) -> FsResult {
+    return spawn_terminal(a, out);
   };
   deps.terminal_poll = [tm](const Json& a, Json* out) -> FsResult {
     return tm->poll(a, out);
@@ -534,9 +537,33 @@ FsApi::~FsApi() {
 
 // ----- project.* -----
 FsResult FsApi::project_list() { return proj_->list_projects(); }
-FsResult FsApi::project_open(const std::string& path) { return proj_->open_project(path); }
+
+// A project with no session cannot appear in the sidebar (the rail lists SESSIONS
+// per project), so opening a folder looked like "the project went nowhere". Give
+// a brand-new project one empty session; a project that already has sessions is
+// left alone.
+void FsApi::ensure_project_session(const std::string& pid, const std::string& path) {
+  if (pid.empty()) return;
+  FsResult r = sessions_->list_sessions(pid);
+  if (r.ok() && r.data.is_array() && !r.data.empty()) return;
+  sessions_->new_session(pid, path);
+}
+
+FsResult FsApi::project_open(const std::string& path) {
+  FsResult r = proj_->open_project(path);
+  if (r.ok()) {
+    ensure_project_session(jsonutil::get<std::string>(r.data, "pid", ""),
+                           jsonutil::get<std::string>(r.data, "path", ""));
+  }
+  return r;
+}
 FsResult FsApi::project_create(const std::string& path) {
-  return proj_->create_project(path);
+  FsResult r = proj_->create_project(path);
+  if (r.ok()) {
+    ensure_project_session(jsonutil::get<std::string>(r.data, "pid", ""),
+                           jsonutil::get<std::string>(r.data, "path", ""));
+  }
+  return r;
 }
 FsResult FsApi::project_remove(const std::string& pid) { return proj_->remove_project(pid); }
 FsResult FsApi::project_get(const std::string& pid) { return proj_->get_project(pid); }
@@ -1939,29 +1966,18 @@ FsResult FsApi::terminal_show(const std::string& tid) {
   j["logExists"] = !e->log_path.empty() && ghc::filesystem::exists(e->log_path);
   return FsResult::success(j);
 }
-FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
-                               const std::string& label, const std::string& cwd,
-                               int cols, int rows) {
-  Json args = Json::object();
-  args["sid"] = sid;
-  args["interactive"] = true;   // 交互式 shell：没有"要执行的命令"
-  args["background"] = true;
-  args["label"] = label;
-  args["cols"] = cols;
-  args["rows"] = rows;
-  if (!shell.empty()) {
-    args["shell"] = shell;
-  } else {
-    // 没指定就用设置里的默认 shell（用户终端 = "设置里的那个 shell"）
-    Json def = settings_->get_value(kKeyTerminalShell, Json(""));
-    if (def.is_string() && !def.get<std::string>().empty()) {
-      args["shell"] = def.get<std::string>();
-    }
-  }
-  std::string work = cwd;
+// 所有终端都从这里起：UI 的交互式终端和模型调用 terminal_exec/terminal_spawn。
+//
+// WHY this is one function: the model's tools used to call TerminalManager::spawn
+// DIRECTLY, bypassing the cwd default below - so `git log` ran in the APP's
+// directory (the release folder, inside this repo) and the model read FlashSight's
+// own history instead of the user's project. One spawn path is the fix.
+FsResult FsApi::spawn_terminal(Json args, Json* out) {
+  std::string sid = jsonutil::get<std::string>(args, "sid", "");
+  // Default the working directory to the PROJECT ROOT (the session's cwd).
+  // A missing cwd must never mean "wherever the app happens to run".
+  std::string work = jsonutil::get<std::string>(args, "cwd", "");
   if (work.empty()) {
-    // 默认在项目根起终端（模型与用户看到同一个工作目录）。项目注册表重建后
-    // 老会话的 pid 会悬空：从 meta.cwd 找回当前注册的 pid。
     std::string pid = sessions_->pid_of(sid);
     work = path_for(pid);
     if (work.empty()) {
@@ -1973,16 +1989,21 @@ FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
     }
   }
   if (!work.empty()) args["cwd"] = work;
-  Json enc = settings_->get_value(kKeyTerminalEncoding, Json(""));
-  if (enc.is_string() && !enc.get<std::string>().empty()) args["encoding"] = enc;
-  Json out;
-  FsResult r = terminal_mgr_->spawn(args, &out);
+  // Output encoding: the setting, unless the caller named one.
+  if (!args.contains("encoding")) {
+    Json enc = settings_->get_value(kKeyTerminalEncoding, Json(""));
+    if (enc.is_string() && !enc.get<std::string>().empty()) {
+      args["encoding"] = enc.get<std::string>();
+    }
+  }
+  Json o;
+  FsResult r = terminal_mgr_->spawn(args, &o);
+  if (out) *out = o;
   if (!r.ok()) return r;
-  // Give the registry entry its log file and write the metadata NOW, not at
-  // exit: a terminal that outlives this process (or a crash) must still be
-  // listed next time.
-  std::string tid = jsonutil::get<std::string>(out, "tid", "");
-  if (!tid.empty()) {
+  // The transcript belongs to EVERY terminal, including the ones the model
+  // starts: give it a log file and write the metadata now (see persistence).
+  std::string tid = jsonutil::get<std::string>(o, "tid", "");
+  if (!tid.empty() && !sid.empty()) {
     TermEntry* e = terminals_->find(tid);
     if (e) {
       try {
@@ -2000,6 +2021,30 @@ FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
   // 立即把首个提示符推进事件流，用户不用等下一次 tick
   terminal_tick();
   return r;
+}
+
+FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
+                               const std::string& label, const std::string& cwd,
+                               int cols, int rows) {
+  Json args = Json::object();
+  args["sid"] = sid;
+  args["interactive"] = true;   // 交互式 shell：没有"要执行的命令"
+  args["background"] = true;
+  args["label"] = label;
+  args["cols"] = cols;
+  args["rows"] = rows;
+  if (!cwd.empty()) args["cwd"] = cwd;
+  if (!shell.empty()) {
+    args["shell"] = shell;
+  } else {
+    // 没指定就用设置里的默认 shell（用户终端 = "设置里的那个 shell"）
+    Json def = settings_->get_value(kKeyTerminalShell, Json(""));
+    if (def.is_string() && !def.get<std::string>().empty()) {
+      args["shell"] = def.get<std::string>();
+    }
+  }
+  Json out;
+  return spawn_terminal(args, &out);
 }
 
 FsResult FsApi::terminal_write(const std::string& tid, const std::string& text) {

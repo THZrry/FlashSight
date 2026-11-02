@@ -1510,6 +1510,38 @@ FS_TEST(uiapp_stream_delta_appends) {
   EXPECT_FALSE(app.state().messages[0].streaming);
 }
 
+// 每次 API 调用就更新上下文/缓存，而不是等一轮结束：这些数字正是跑的时候看的。
+FS_TEST(uiapp_per_call_usage_updates_the_panel) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.context_window = 100000;
+    s.session_tokens_in = 0;
+    s.session_tokens_out = 0;
+  });
+  app.on_backend_event_for_test(
+      "loop.usage",
+      Json{{"sid", "sess_a"}, {"in", 25000}, {"out", 400}, {"cached", 20000}});
+  // Context level, cache and this-turn numbers move immediately...
+  EXPECT_EQ(app.state().context_tokens, int64_t(25000));
+  EXPECT_EQ(app.state().context_pct, 25);
+  EXPECT_TRUE(app.state().cache_reported);
+  EXPECT_EQ(app.state().cache_hit_pct, 80);
+  EXPECT_EQ(app.state().turn_in, int64_t(25000));
+  EXPECT_EQ(app.state().turn_out, int64_t(400));
+  EXPECT_EQ(app.state().session_tokens_in, int64_t(25000));
+  // ...and the next round keeps accumulating.
+  app.on_backend_event_for_test(
+      "loop.usage",
+      Json{{"sid", "sess_a"}, {"in", 40000}, {"out", 500}, {"cached", 10000}});
+  EXPECT_EQ(app.state().context_tokens, int64_t(40000));
+  EXPECT_EQ(app.state().session_tokens_in, int64_t(65000));
+  EXPECT_EQ(app.state().cache_hit_pct, 25);
+}
+
 // 停止/挂起 ends the turn MID-STREAM, so no turn.done follows. The live message
 // has to be finalized by the state event itself - otherwise the transcript kept
 // a spinner and a counting timer for a task that had already stopped, which is
@@ -3938,9 +3970,12 @@ FS_TEST(uiapp_thinking_block_folds) {
   std::string d = dom.dump();
   EXPECT_TRUE(d.find("work-block") != std::string::npos);
   EXPECT_TRUE(d.find("工作过程") != std::string::npos);
-  EXPECT_TRUE(d.find("let me reason about it") == std::string::npos);  // folded
-  app.update([](AppState& s) { s.messages[0].work_open = true; });
-  EXPECT_TRUE(dom.dump().find("let me reason about it") != std::string::npos);
+  // The work process is OPEN by default: the process is the work, and a closed
+  // fold meant a reloaded turn showed none of it ("重新进入不再显示").
+  EXPECT_TRUE(d.find("let me reason about it") != std::string::npos);
+  // Collapsing still hides it (the header stays and the click toggles).
+  app.update([](AppState& s) { s.messages[0].work_open = false; });
+  EXPECT_TRUE(dom.dump().find("let me reason about it") == std::string::npos);
 }
 
 // A tool call must appear when it STARTS and be completed in place when it
@@ -4081,14 +4116,16 @@ FS_TEST(uiapp_work_group_shows_time_and_folds) {
   EXPECT_TRUE(d.find("工作过程") != std::string::npos);
   EXPECT_TRUE(d.find("1m 20s") != std::string::npos);  // duration
   EXPECT_TRUE(d.find("完成") != std::string::npos);
-  // folded: the reasoning and the tool rows are not rendered
-  EXPECT_TRUE(d.find("reasoning") == std::string::npos);
-  EXPECT_TRUE(d.find("read_file") == std::string::npos);
-  // opening it shows both
-  app.update([](AppState& s) { s.messages[0].work_open = true; });
+  // Open by default: the reasoning and the tool rows are in the tree. The
+  // narration/tool sections are ONE stream now (no "工具调用" heading).
+  EXPECT_TRUE(d.find("reasoning") != std::string::npos);
+  EXPECT_TRUE(d.find("read_file") != std::string::npos);
+  EXPECT_TRUE(d.find("工具调用") == std::string::npos);
+  // Collapsing hides both.
+  app.update([](AppState& s) { s.messages[0].work_open = false; });
   std::string o = dom.dump();
-  EXPECT_TRUE(o.find("reasoning") != std::string::npos);
-  EXPECT_TRUE(o.find("read_file") != std::string::npos);
+  EXPECT_TRUE(o.find("reasoning") == std::string::npos);
+  EXPECT_TRUE(o.find("read_file") == std::string::npos);
 }
 
 // Code blocks carry a language label, a line-number gutter and a copy button.

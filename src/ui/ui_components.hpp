@@ -143,10 +143,11 @@ struct ChatMsg {
   // the model thinking out loud while it works - so it belongs in the work log and
   // used to be dropped entirely (only the final round's text was kept).
   std::vector<std::string> interim;
-  // 工作过程: reasoning + tool calls folded into ONE group above the answer.
-  // A turn with a dozen tool blocks used to be a wall of rows; the answer is
-  // what you read, the process is what you open when curious.
-  bool work_open = false;
+  // 工作过程: reasoning + narration + tool calls, ONE continuous stream above the
+  // answer - no separate "工具调用" section (splitting them made the same turn read
+  // as two unrelated things), and OPEN by default: the process IS the work, and a
+  // collapsed fold meant a reloaded transcript showed none of it.
+  bool work_open = true;
   // When the turn ended and how long it took (ms since epoch; 0 = unknown).
   int64_t started_at = 0;
   int64_t ended_at = 0;
