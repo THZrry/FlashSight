@@ -8,6 +8,7 @@
 #include "provider/provider_client.hpp"
 #include "provider/provider_runtime.hpp"
 #include "provider/provider_store.hpp"
+#include "provider/balance_probe.hpp"
 #include "common/fs_clock.hpp"
 
 using namespace fs;
@@ -561,4 +562,129 @@ FS_TEST(model_disabled_excluded_from_enabled_list) {
     if (all[i].enabled) ++enabled;
   }
   EXPECT_EQ(enabled, 1);
+}
+
+// ---------- 余额查询：按 endpoint 识别供应商 ----------
+// "How much credit is left" has no standard: each vendor's private endpoint has
+// its own shape. These cases pin the identification AND the honesty rules - a
+// failure must say 获取失败 (with the reason), never 0.
+namespace {
+
+class BalNet : public NetClient {
+ public:
+  mutable std::vector<HttpResponse> responses;
+  mutable std::vector<HttpRequest> requests;
+  FsResult request(const HttpRequest& req, HttpResponse* out) const override {
+    requests.push_back(req);
+    if (responses.empty()) {
+      out->status = 0;
+      out->error = "no canned response";
+      return FsResult::error(ErrCode::kNetwork, "no canned response");
+    }
+    *out = responses.front();
+    responses.erase(responses.begin());
+    if (out->status == 0) {
+      return FsResult::error(ErrCode::kNetwork, out->error);
+    }
+    return FsResult::success();
+  }
+};
+
+HttpResponse ok_body(const std::string& body) {
+  HttpResponse r;
+  r.status = 200;
+  r.body = body;
+  return r;
+}
+
+}  // namespace
+
+FS_TEST(provider_balance_by_endpoint) {
+  ProviderConn c;
+  c.api_key = "sk-test";
+
+  // ---- DeepSeek: /user/balance ----
+  {
+    BalNet net;
+    net.responses.push_back(ok_body(
+        "{\"is_available\":true,\"balance_infos\":[{\"currency\":\"CNY\","
+        "\"total_balance\":\"12.34\",\"granted_balance\":\"0.00\","
+        "\"topped_up_balance\":\"12.34\"}]}"));
+    c.base_url = "https://api.deepseek.com/v1";
+    BalanceProbe p = probe_balance(c, &net);
+    EXPECT_EQ(p.status, std::string("ok"));
+    EXPECT_EQ(p.currency, std::string("CNY"));
+    EXPECT_EQ(p.balance, std::string("12.34"));
+    ASSERT_TRUE(!net.requests.empty());
+    EXPECT_TRUE(net.requests.back().url.find("/user/balance") != std::string::npos);
+    EXPECT_EQ(net.requests.back().headers.at("Authorization"),
+              std::string("Bearer sk-test"));
+  }
+
+  // ---- OpenRouter: credits minus usage ----
+  {
+    BalNet net;
+    net.responses.push_back(ok_body(
+        "{\"data\":{\"total_credits\":10,\"total_usage\":2.5}}"));
+    c.base_url = "https://openrouter.ai/api/v1";
+    BalanceProbe p = probe_balance(c, &net);
+    EXPECT_EQ(p.status, std::string("ok"));
+    EXPECT_EQ(p.balance, std::string("7.50"));
+    EXPECT_EQ(p.used, std::string("2.50"));
+    EXPECT_EQ(p.limit, std::string("10.00"));
+    EXPECT_TRUE(net.requests.back().url.find("/api/v1/credits") != std::string::npos);
+  }
+
+  // ---- Moonshot ----
+  {
+    BalNet net;
+    net.responses.push_back(ok_body("{\"data\":{\"available_balance\":3.5}}"));
+    c.base_url = "https://api.moonshot.cn/v1";
+    BalanceProbe p = probe_balance(c, &net);
+    EXPECT_EQ(p.status, std::string("ok"));
+    EXPECT_EQ(p.balance, std::string("3.50"));
+    EXPECT_EQ(p.currency, std::string("CNY"));
+  }
+
+  // ---- HTTP 401 is a FAILURE with the reason, never a number ----
+  {
+    BalNet net;
+    HttpResponse r;
+    r.status = 401;
+    r.body = "{}";
+    net.responses.push_back(r);
+    c.base_url = "https://api.deepseek.com/v1";
+    BalanceProbe p = probe_balance(c, &net);
+    EXPECT_EQ(p.status, std::string("failed"));
+    EXPECT_TRUE(p.balance.empty());
+    EXPECT_TRUE(p.note.find("401") != std::string::npos);
+  }
+
+  // ---- garbage body ----
+  {
+    BalNet net;
+    net.responses.push_back(ok_body("<html>not json</html>"));
+    c.base_url = "https://api.deepseek.com/v1";
+    BalanceProbe p = probe_balance(c, &net);
+    EXPECT_EQ(p.status, std::string("failed"));
+  }
+
+  // ---- a vendor with no public balance API is UNSUPPORTED, not failed ----
+  {
+    BalNet net;
+    c.base_url = "https://api.groq.com/openai/v1";
+    BalanceProbe p = probe_balance(c, &net);
+    EXPECT_EQ(p.status, std::string("unsupported"));
+    EXPECT_TRUE(net.requests.empty());
+  }
+
+  // ---- no key ----
+  {
+    BalNet net;
+    ProviderConn nk;
+    nk.base_url = "https://api.deepseek.com/v1";
+    BalanceProbe p = probe_balance(nk, &net);
+    EXPECT_EQ(p.status, std::string("failed"));
+    EXPECT_TRUE(net.requests.empty());
+  }
 }

@@ -275,6 +275,10 @@ class FsApi {
   FsResult provider_templates();
   FsResult provider_list_models(const std::string& providerId);
   FsResult provider_test_connection(const std::string& providerId);
+  // 余额 / 额度：按 endpoint 识别供应商支持的查询接口，一次返回所有供应商。
+  // 每家一行：status = ok | unsupported | failed；失败的原因写在 note 里
+  // （"获取失败: HTTP 401"），不支持的写 "该供应商没有公开的余额接口"。
+  FsResult provider_balances();
   // ----- model.*（逐模型设置：能力/档位/重试/启用/图标）-----
   // 某 provider 的完整模型列表（用户 + API + 预置兜底，含档位与图标）
   FsResult model_list(const std::string& providerId);

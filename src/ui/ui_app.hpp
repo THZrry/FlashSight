@@ -350,12 +350,8 @@ struct AppState {
     std::string detail;
   };
   std::vector<OpRow> session_ops;         // systemOps from session.get
-  struct CallRow {
-    std::string name;
-    std::string args;
-    bool ok = true;
-  };
-  std::vector<CallRow> session_calls;     // toolCalls flattened from turns
+  // (No tool-call list here: the 工具调用 panel derives its rows from the
+  // transcript's own tool blocks, so it cannot drift from what is on screen.)
   // ---- composer / skill picker ----
   bool skill_menu_open = false;
   // The 思考档位 list opened by the composer's thinking button. It is the ONLY
@@ -508,6 +504,23 @@ struct AppState {
   };
   std::vector<ProviderRow> providers;
   bool providers_loaded = false;
+  // 余额 / 额度（provider.balances）：一家一行。status = ok | unsupported |
+  // failed；失败的原因在 note 里，UI 原样显示（"获取失败：HTTP 401"），绝不补 0。
+  struct BalanceRow {
+    std::string pid;
+    std::string name;
+    std::string endpoint;
+    std::string status;
+    std::string currency;
+    std::string balance;
+    std::string used;
+    std::string limit;
+    std::string note;
+    bool enabled = true;
+  };
+  std::vector<BalanceRow> balances;
+  bool balances_loading = false;
+  int64_t balances_at = 0;   // last successful query (ms since epoch)
   struct ProviderTemplate {
     std::string id;
     std::string name;
@@ -844,7 +857,6 @@ struct SessionView {
   std::string active_pid;
 
   std::vector<AppState::OpRow> session_ops;
-  std::vector<AppState::CallRow> session_calls;
 
   bool skill_menu_open = false;
   bool thinking_menu_open = false;
@@ -936,6 +948,9 @@ class UiApp {
   void load_sessions(size_t project_index);
   // Load usage summary into the usage page.
   void load_usage();
+  // Balance / credit for every provider (provider.balances). `force` ignores the
+  // staleness window; the in-flight guard is always honoured.
+  void load_balances(bool force = false);
   // Load per-session usage for the side panel (context level, cost, tokens).
   void load_session_usage(const std::string& sid);
   // Pull the in-flight turn from the backend and append it as a streaming
@@ -1017,11 +1032,25 @@ class UiApp {
   // from the events that do change them; pump() coalesces the refresh.
   void mark_sessions_dirty() { sessions_dirty_ = true; }
   void refresh_session_rows();
+  // Re-read the open session's systemOps (the 操作记录 panel is a live log: it
+  // used to be fetched once, when the session opened).
+  void refresh_session_ops();
   // Override a session row with the LIVE state of the active session, so the dot
   // reacts to a turn/terminal instantly instead of waiting for the list refresh.
   ProjectCard::SessionRow live_session_row(ProjectCard::SessionRow row) const;
+  // The status dot for a session row: live state for the active session, and a
+  // "finished/failed" dot only while it is still news (cleared once you open it).
+  H dot_for(const ProjectCard::SessionRow& row) const;
+  // When each session was last shown. The backend's loopState stays "turnDone"
+  // after a turn, so the blue dot used to be permanent.
+  std::map<std::string, int64_t> session_seen_ms_;
+  // Set once, when the 供应商 page finds no providers and opens the create
+  // wizard by itself. One shot: re-opening it after the user closed it would
+  // fight them.
+  bool provider_auto_opened_ = false;
   bool sessions_dirty_ = false;
   int64_t sessions_refresh_ms_ = 0;
+  int64_t last_ops_refresh_ms_ = 0;
   // 读取 Web 服务当前监听状态（设置-Web 服务页）
   void refresh_server_status();
   // Ask which models are usable and clear the composer's model box if the one

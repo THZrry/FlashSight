@@ -2436,6 +2436,153 @@ FS_TEST(uiapp_nav_dot_follows_live_state) {
   EXPECT_TRUE(dump_has(dom, "ps-dot failed"));
 }
 
+// The blue "done" dot means "news since you last looked". The backend's loopState
+// stays "turnDone" forever, so it used to be permanent - it survived opening the
+// session AND switching tabs ("可查看了不会消失").
+FS_TEST(uiapp_done_dot_clears_after_viewing) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    s.settings_values["ui.tabs"] = Json("left");  // rail: the row is on screen
+    seed_project(s);                              // p1 -> sess_a
+    seed_session(s, "sess_a");
+    ProjectCard::SessionRow& r = s.projects[0].sessions[0];
+    r.running = false;                            // the list says "finished"
+    r.loop_state = "turnDone";
+    r.last_error.clear();
+    r.updated_ms = 1700000000000LL;               // long before "now"
+  });
+  EXPECT_TRUE(dump_has(dom, "ps-dot done"));
+  // Looking at it spends the dot (switch_tab records the "seen" moment).
+  app.show("sess_a");
+  EXPECT_FALSE(dump_has(dom, "ps-dot done"));
+  // New activity AFTER that moment is news again.
+  int64_t future = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count()) +
+      60000;
+  app.update([&](AppState& s) {
+    s.projects[0].sessions[0].updated_ms = future;
+    s.projects[0].sessions[0].last_error = "http 500";
+  });
+  EXPECT_TRUE(dump_has(dom, "ps-dot failed"));
+}
+
+// The side panel always SHOWED the usage body (the kind falls back to "usage")
+// with no tab highlighted when `active_side` was empty - it read as "nothing is
+// open, yet stats are showing".
+// 供应商 page: the first provider opens by default; with NO providers at all the
+// create wizard opens (an empty page with only a "新增" button is a dead end).
+FS_TEST(uiapp_providers_page_auto_selects) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class ProvBackend : public IUiBackend {
+   public:
+    Json providers = Json::array();
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "provider.listProviders") r.data = providers;
+      if (method == "provider.listModels") r.data = Json{{"models", Json::array()}};
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  // No providers -> the wizard opens by itself.
+  app.load_providers();
+  EXPECT_TRUE(app.state().provider_creating);
+  // With one provider -> it is selected instead.
+  backend.providers = Json::array(
+      {Json{{"id", "pr_a"}, {"name", "A"}, {"baseUrl", "https://api.deepseek.com/v1"}}});
+  app.update([](AppState& s) { s.provider_creating = false; });
+  app.load_providers();
+  EXPECT_FALSE(app.state().provider_creating);
+  EXPECT_EQ(app.state().provider_selected, std::string("pr_a"));
+}
+
+FS_TEST(uiapp_side_panel_defaults_to_usage) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  EXPECT_EQ(app.state().active_side, std::string("usage"));
+  EXPECT_TRUE(dump_has(dom, "ptab active"));
+}
+
+// 操作记录 must follow the log while it is open: it used to be fetched once, when
+// the session was opened, so permission/model changes made with the panel visible
+// never appeared.
+FS_TEST(uiapp_ops_panel_refreshes_while_open) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class OpsBackend : public IUiBackend {
+   public:
+    Json ops = Json::array({Json{{"op", "first"}}});
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.info") {
+        r.data = Json{{"meta", Json{{"sid", "sess_a"}, {"pid", "p1"}}},
+                      {"sessionSettings", Json::object()},
+                      {"systemOps", ops}};
+      }
+      if (method == "session.turns") {
+        r.data = Json{{"turns", Json::array()}, {"start", 0}, {"total", 0},
+                      {"hasMore", false}};
+      }
+      if (method == "model.allEnabled") {
+        r.data = Json{{"models", Json::array({Json{{"id", "m1"}}})}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "m1";
+    s.model_available = true;
+  });
+  app.show("sess_a");
+  app.open_or_focus_side_tab("ops");
+  EXPECT_TRUE(dump_has(dom, "first"));
+  // The backend appends an op while the panel is on screen.
+  backend.ops.push_back(Json{{"op", "setModel"}});
+  app.pump();  // the coalesced tick that refreshes an open ops panel
+  EXPECT_TRUE(dump_has(dom, "setModel"));
+}
+
+// 工具调用 used to read `session_calls`, a field nothing ever filled - the panel
+// said "暂无工具调用记录" during a busy turn. It now derives its rows from the
+// transcript's own tool blocks.
+FS_TEST(uiapp_calls_panel_reads_the_transcript) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "done";
+    comp::ToolBlock tb;
+    tb.name = "read_file";
+    tb.summary = "src/app.cpp";
+    tb.ok = true;
+    m.tools.push_back(tb);
+    s.messages.push_back(m);
+  });
+  app.open_or_focus_side_tab("calls");
+  EXPECT_TRUE(dump_has(dom, "read_file"));
+  EXPECT_TRUE(dump_has(dom, "src/app.cpp"));
+}
+
 // A background tab that produces output gets the dot on its TAB - nobody can see
 // the other session's transcript, and `SessionTab::dirty` was never written.
 FS_TEST(uiapp_background_tab_gets_dirty_dot) {

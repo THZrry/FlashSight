@@ -2450,3 +2450,44 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **测试**：399 用例 3724 断言全过；web / webview 双变体编译通过。新增
     `uiapp_nav_dot_follows_live_state`、`uiapp_background_tab_gets_dirty_dot`、
     `uiapp_empty_tool_input_is_hidden`、`comp_wide_table_gets_its_own_scroller`。
+
+<90>(SOLVED): 操作记录实时刷新 + 蓝点看过后清除（切页也清）+ 侧栏默认打开用量 + 余额/额度按 endpoint 自动查询（每轮结束/进页面/切供应商）+ 供应商预设扩充与自动选中。
+  - **操作记录（systemOps）是活的日志，却只在打开会话时取一次**：面板开着改权限/模型，
+    列表一动不动。`pump()` 现在在 ops 面板可见时每 2 秒调 `refresh_session_ops()`
+    （`session.info` 回来的列表相同就不重绘）。顺带发现"工具调用"面板读的
+    `session_calls` **从来没有任何代码填过**——它永远显示"暂无记录"。现在直接从转录里的
+    工具块生成（名字+摘要+✓/✗），并把那个死字段整个删掉。
+  - **"工作完成会亮蓝点，可查看了不会消失，即使切页面也是"**：`loopState` 在后端一旦变成
+    "turnDone" 就永远不变，而圆点把它当成"已完成"永久显示。现在圆点表示"你上次查看之后
+    有新动静"：`session_seen_ms_` 在打开会话（以及你正看着的那一轮结束/中断）时记时间，
+    行上 `updatedAt <= seen` 的 done/failed 状态不再显示。
+    **踩坑**：`now_ms()` 是单调时钟（steady_clock / performance.now），和行里的 epoch
+    `updatedAt` 比大小永远不成立——新增 `wall_ms()`（system_clock）专用于这种比较，
+    否则"看过了也不消失"照旧。
+  - **"侧边栏默认什么都不开却显示用量统计"**：两处原因。① `active_side` 从来没设过默认值，
+    面板的 kind 兜底成 "usage"，所以内容在、标签却没一个高亮——`AppState::make()` 和
+    `default_session_view()` 都把第一个标签设为激活。② `views_.get_or_create(sid)` 给后台
+    事件造的是**裸 SessionView**（没有 side_tabs），切回该会话恢复出来就是"零个面板"——
+    `load_session_view` 现在补回默认面板。
+  - **余额 / 额度**：新增 `provider.balances`。没有统一标准，所以按 **endpoint** 识别供应商
+    （改名成 "我的 API" 也还能认出 api.deepseek.com）：
+    DeepSeek `/user/balance`、OpenRouter `/api/v1/credits`（credits−usage）、
+    Moonshot `/v1/users/me/balance`、SiliconFlow `/v1/user/info`、
+    OpenAI/网关 `/v1/dashboard/billing/credit_grants`。没有公开接口的（Groq/Mistral/xAI/
+    通义/智谱/火山…）如实写"不支持 · 该供应商没有公开的余额接口"；请求失败写
+    "获取失败：HTTP 401"之类，**绝不补 0**。解析逻辑独立在 `provider/balance_probe.cpp`，
+    用 FakeNet 单测（DeepSeek/OpenRouter/Moonshot 的字段、401、坏 JSON、不支持、无 Key）。
+    刷新时机：用量页进入（30s 节流）、每轮 `turn.done`（8s 下限，避免连发把供应商打限流）、
+    切换用量范围/模型（换供应商）。UI 在用量页顶部加"余额 / 额度"一栏，一行一家，
+    带 endpoint 和禁用标记。
+  - **供应商预设扩充**：Groq / Mistral / xAI / Together / Fireworks / DeepInfra / Cerebras /
+    MiniMax / 阶跃星辰 / 火山方舟（余额识别靠的就是这里填对的 endpoint）。
+  - **供应商页**：默认选中第一个（原来就有）；**一个都没有时自动打开新增向导**（一次性，
+    关掉后不会再抢）。
+  - **测试**：405 用例 3758 断言全过；web / webview 双变体编译通过。新增
+    `provider_balance_by_endpoint`（FakeNet）、`uiapp_done_dot_clears_after_viewing`、
+    `uiapp_side_panel_defaults_to_usage`、`uiapp_ops_panel_refreshes_while_open`、
+    `uiapp_calls_panel_reads_the_transcript`、`uiapp_providers_page_auto_selects`。
+  - **实测**：用量页两行——Mock 显示"不支持"，一个指向 `api.deepseek.com.invalid` 的测试
+    供应商显示"获取失败：HTTP 401"；侧栏默认 `ptab active`（用量）；一轮结束后圆点
+    running→done→（看过后）idle，web 与原生都验过。

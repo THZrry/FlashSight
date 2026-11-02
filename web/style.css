@@ -1023,6 +1023,41 @@ html, body {
 /* by model: proportional bars. A pie could not carry a value next to each slice,
    and with more than three models it stopped meaning anything. */
 .usage-bymodel { padding: 12px; }
+/* 余额 / 额度: one row per provider. The number is the point, so it is mono and
+   right-aligned; the endpoint sits under it because THAT is what identified the
+   vendor (and what the user would have to fix if the query failed). */
+.usage-balances {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+.usage-balances .chart-head { margin-bottom: 2px; }
+.bal-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  animation: anim-list .16s cubic-bezier(.22,.61,.36,1) backwards;
+}
+.bal-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bal-pname {
+  font-size: 12.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bal-off { font-size: 11px; flex: none; }
+.bal-val { text-align: right; }
+.bal-amount { font-family: var(--mono); font-size: 13.5px; font-weight: 600; }
+.bal-amount.bad { color: var(--err); font-size: 12px; font-weight: 500; }
+.bal-amount.dim { color: var(--text-faint); font-size: 12px; font-weight: 500; }
+.bal-ep {
+  grid-column: 1 / -1;
+  font-family: var(--mono); font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bal-loading { font-size: 12px; }
 .ub-row {
   display: flex; align-items: center; gap: 10px; padding: 3px 0;
   animation: anim-list .16s cubic-bezier(.22,.61,.36,1) backwards;
@@ -1895,7 +1930,19 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   background: var(--panel-2);
   border: 1px solid var(--border);
 }
+/* A call row is ONE line: icon, name, summary. The list is scanned, not read. */
+.call-row {
+  display: grid;
+  grid-template-columns: 13px minmax(0, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 7px;
+}
+.call-ico { font-size: 11px; font-weight: 700; text-align: center; }
+.call-ico.ok { color: var(--ok); }
+.call-ico.err { color: var(--err); }
+.call-ico.run { color: var(--text-faint); }
 .op-name, .call-name { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.call-name { white-space: nowrap; }
 .op-detail, .call-args {
   font-family: var(--mono); font-size: 11px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

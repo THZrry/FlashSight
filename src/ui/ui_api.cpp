@@ -361,6 +361,8 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   reg("provider.testConnection", [api](const Json& a) {
     return api->provider_test_connection(s(a, "providerId"));
   });
+  // 余额/额度：一家一行，status 告诉 UI 是查到了、不支持还是获取失败
+  reg("provider.balances", [api](const Json&) { return api->provider_balances(); });
 
   // ---- model.*（逐模型设置：能力/档位/重试/启用/图标）----
   reg("model.list", [api](const Json& a) { return api->model_list(s(a, "providerId")); });

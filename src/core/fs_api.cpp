@@ -13,6 +13,7 @@
 #include "fs_git.hpp"
 #include "fs_path.hpp"
 #include "fs_utf8.hpp"
+#include "provider/balance_probe.hpp"
 #include "provider/prompt_adapter.hpp"
 #include "tools/search_backend.hpp"
 #include "tools/skill_registry.hpp"
@@ -2423,6 +2424,29 @@ FsResult FsApi::provider_templates() {
       "硅基流动聚合端点（OpenAI 兼容）。", Json::object());
   add("openrouter", "OpenRouter", "https://openrouter.ai/api/v1",
       "多模型聚合网关（OpenAI 兼容）。", Json::object());
+  // More mainstream endpoints. They are here because the BALANCE probe identifies
+  // a vendor by its endpoint - a preset that types the right URL is what makes
+  // "余额 / 额度" work without the user knowing the account API exists.
+  add("groq", "Groq", "https://api.groq.com/openai/v1",
+      "Groq 官方端点（OpenAI 兼容，低延迟推理）。", Json::object());
+  add("mistral", "Mistral", "https://api.mistral.ai/v1",
+      "Mistral 官方端点（OpenAI 兼容）。", Json::object());
+  add("xai", "xAI Grok", "https://api.x.ai/v1",
+      "xAI 官方端点（OpenAI 兼容）。", Json::object());
+  add("together", "Together AI", "https://api.together.xyz/v1",
+      "Together 聚合端点（OpenAI 兼容）。", Json::object());
+  add("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1",
+      "Fireworks 推理端点（OpenAI 兼容）。", Json::object());
+  add("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai",
+      "DeepInfra 推理端点（OpenAI 兼容）。", Json::object());
+  add("cerebras", "Cerebras", "https://api.cerebras.ai/v1",
+      "Cerebras 推理端点（OpenAI 兼容）。", Json::object());
+  add("minimax", "MiniMax", "https://api.minimax.chat/v1",
+      "MiniMax 官方端点（OpenAI 兼容）。", Json::object());
+  add("stepfun", "阶跃星辰 StepFun", "https://api.stepfun.com/v1",
+      "阶跃星辰官方端点（OpenAI 兼容）。", Json::object());
+  add("volcengine", "火山方舟", "https://ark.cn-beijing.volces.com/api/v3",
+      "火山引擎方舟端点（OpenAI 兼容；模型名用接入点 id）。", Json::object());
   add("ollama", "Ollama（本地）", "http://127.0.0.1:11434/v1",
       "本地推理，无需密钥。", Json::object());
   add("lmstudio", "LM Studio（本地）", "http://127.0.0.1:1234/v1",
@@ -2500,6 +2524,38 @@ FsResult FsApi::provider_test_connection(const std::string& providerId) {
       {"latencyMs", out.latency_ms},
       {"status", out.http_status},
   });
+}
+
+// ---------------------------------------------------------------------------
+// 余额 / 额度
+//
+// The per-vendor probing lives in provider/balance_probe.cpp (unit-testable with a
+// stub NetClient): every vendor that offers one uses a different private endpoint,
+// the vendor is identified by the ENDPOINT, and a failure is reported with its
+// reason instead of a made-up 0.
+//
+// This wrapper turns the enabled providers into the rows the UI renders.
+// ---------------------------------------------------------------------------
+FsResult FsApi::provider_balances() {
+  Json rows = Json::array();
+  if (!providers_ || !net_) return FsResult::success(Json{{"providers", rows}});
+  std::vector<ProviderConn> all = providers_->list();
+  for (size_t i = 0; i < all.size(); ++i) {
+    const ProviderConn& c = all[i];
+    BalanceProbe b = probe_balance(c, net_.get());
+    Json row = Json{{"pid", c.id},
+                    {"name", c.name.empty() ? c.id : c.name},
+                    {"endpoint", c.base_url},
+                    {"enabled", c.enabled},
+                    {"status", b.status}};
+    if (!b.currency.empty()) row["currency"] = b.currency;
+    if (!b.balance.empty()) row["balance"] = b.balance;
+    if (!b.used.empty()) row["used"] = b.used;
+    if (!b.limit.empty()) row["limit"] = b.limit;
+    if (!b.note.empty()) row["note"] = b.note;
+    rows.push_back(row);
+  }
+  return FsResult::success(Json{{"providers", rows}});
 }
 
 // ----- model.*（逐模型设置）-----

@@ -383,6 +383,24 @@ history 没有反应，切页面才显示"）。合并规则：保留本地 `tur
 3. 后台标签的 `SessionTab::dirty` 从来没人写：后台的 turn/流式事件现在点亮它，切过去清除。
 4. `subagent.started` 之前完全没处理：新起的子代理没有行，它的流式文本按 id 找不到宿主，
    徽标也不涨——面板打开后才启动的子代理等于隐身。
+5. **done / failed 是"新闻"，不是状态**。后端的 `loopState` 一旦是 `turnDone` 就永远不变，
+   所以蓝点曾永久亮着（看过了、切页了都还在）。`dot_for()` 用 `session_seen_ms_` 过滤：
+   打开会话、以及你正看着的那一轮结束/中断时记下"已看"，行上 `updatedAt` 不晚于它的
+   done/failed 不再显示；之后再有事就是新的新闻。
+   **时间基准必须一致**：`now_ms()` 是单调时钟（steady_clock / performance.now），
+   行里的 `updatedAt` 是 epoch —— 用 `wall_ms()` 比较，否则"看过了也不消失"照旧。
+
+**余额 / 额度**（`provider.balances`）：没有统一标准，所以按 **endpoint** 识别供应商
+（改名成"我的 API"也还能认出 api.deepseek.com）。支持的：DeepSeek `/user/balance`、
+OpenRouter `/api/v1/credits`、Moonshot `/v1/users/me/balance`、SiliconFlow `/v1/user/info`、
+OpenAI 系 `/v1/dashboard/billing/credit_grants`。其余如实写"不支持"；请求失败写
+"获取失败：<原因>"，**绝不补 0**。刷新：进入用量页（30s 节流）、每轮 `turn.done`
+（8s 下限）、切换用量范围/模型。解析在 `provider/balance_probe.cpp`，用 FakeNet 单测。
+
+**侧边栏默认面板**：`AppState::make()` / `default_session_view()` 把第一个面板设为激活
+（原来 `active_side` 为空，kind 兜底成 usage——内容在、标签全不高亮，看起来像"什么都没开
+却在显示统计"）。另外 `views_.get_or_create(sid)` 造的是**裸 SessionView**（没有 panels），
+`load_session_view` 会补回默认面板，否则从后台会话切回来时面板会是空的。
 
 ## 4. 性能与空态（验收条目）
 

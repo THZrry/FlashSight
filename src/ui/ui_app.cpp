@@ -272,6 +272,17 @@ int64_t now_ms() {
 
 const int64_t kToastMs = 3200;  // how long a toast stays on screen
 
+// EPOCH milliseconds (not the monotonic `now_ms()` above). Anything compared with
+// a timestamp that came from the BACKEND - a session's updatedAt, a turn's ts -
+// must use this: steady_clock starts at boot, so comparing it with epoch values
+// silently never matches (the "the blue dot never clears" bug).
+int64_t wall_ms() {
+  return static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
 // The strip shows a search box only once terminals are numerous enough to get
 // lost in; below that it is just noise.
 const size_t kTermSearchThreshold = 10;
@@ -338,6 +349,10 @@ SessionView default_session_view() {
   // No terminal panel: terminals live in the bottom drawer now, so a sidebar
   // copy would be a worse duplicate of the same thing.
   v.side_seq = 2;
+  // The FIRST panel is the one on screen. Leaving active_side empty showed the
+  // usage body (the kind falls back to "usage") with NO tab highlighted - it
+  // looked like "nothing is open but stats are showing".
+  v.active_side = v.side_tabs[0].id;
   return v;
 }
 
@@ -464,6 +479,7 @@ AppState AppState::make() {
   s.side_tabs.push_back(SideTab{"usage", "用量", "usage"});
   s.side_tabs.push_back(SideTab{"subagents", "子代理", "subagents"});
   s.side_seq = 2;
+  s.active_side = s.side_tabs[0].id;
   // project/session/terminal/subagent lists are loaded from the backend
   return s;
 }
@@ -595,6 +611,21 @@ void UiApp::pump() {
       sessions_dirty_ = false;
       sessions_refresh_ms_ = now;
       refresh_session_rows();
+    }
+  }
+  // The 操作记录 panel must follow the log while it is on screen. Coarse (2 s):
+  // it is a log, and each refresh is a session.info round trip.
+  {
+    std::string kind;
+    for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
+      if (st_.side_tabs[i].id == st_.active_side) kind = st_.side_tabs[i].kind;
+    }
+    if (kind == "ops" && !st_.side_collapsed) {
+      int64_t now = now_ms();
+      if (now - last_ops_refresh_ms_ >= 2000) {
+        last_ops_refresh_ms_ = now;
+        refresh_session_ops();
+      }
     }
   }
 }
@@ -787,7 +818,6 @@ void UiApp::save_session_view(const std::string& sid) {
   v.side_width = st_.side_width;
   v.active_pid = st_.active_pid;
   v.session_ops = st_.session_ops;
-  v.session_calls = st_.session_calls;
   v.skill_menu_open = st_.skill_menu_open;
   v.command_menu = st_.command_menu;
   v.terminals = st_.terminals;
@@ -814,6 +844,17 @@ void UiApp::save_session_view(const std::string& sid) {
 void UiApp::load_session_view(const std::string& sid) {
   SessionView v = default_session_view();
   views_.restore(sid, &v);  // keeps the defaults when the key is new
+  // A view can exist WITHOUT the defaults: `views_.get_or_create(sid)` (used for
+  // background events and when stashing) constructs a raw SessionView, and
+  // restoring that one left the side panel with no tabs and no active tab - it
+  // then showed the usage body with nothing highlighted ("默认什么都不开却显示
+  // 用量统计"). Put the defaults back where they are missing.
+  if (v.side_tabs.empty()) {
+    SessionView d = default_session_view();
+    v.side_tabs = d.side_tabs;
+    if (v.side_seq <= 0) v.side_seq = d.side_seq;
+  }
+  if (v.active_side.empty()) v.active_side = v.side_tabs[0].id;
   st_.messages = v.messages;
   st_.session_loaded = v.session_loaded;
   st_.hist_scroll = v.hist_scroll;
@@ -877,7 +918,6 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.side_width = v.side_width;
   st_.active_pid = v.active_pid;
   st_.session_ops = v.session_ops;
-  st_.session_calls = v.session_calls;
   st_.skill_menu_open = false;
   st_.thinking_menu_open = false;
   st_.command_menu = v.command_menu;
@@ -970,6 +1010,11 @@ void UiApp::switch_tab(const std::string& id, int dir) {
       break;
     }
   }
+  // ...and the "finished / failed" dot on its session row is spent too - it
+  // means "something happened since you last looked", which stops being true
+  // the moment you look.
+  session_seen_ms_[sid] = wall_ms();
+  if (session_seen_ms_.size() > 512) session_seen_ms_.clear();
   // A returning visit already HAS its transcript in the view, so the render below
   // can position it in the same frame it paints - no flash of the top of the chat
   // while the refresh is in flight. (The refresh then lands and does the same
@@ -1472,6 +1517,44 @@ void UiApp::refresh_session_rows() {
   for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
 }
 
+// Re-read the 操作记录 (systemOps) list for the open session.
+//
+// The panel was filled once, when the session was opened, and never again: with
+// the panel visible you could change permission/model/etc. and watch nothing
+// appear. pump() calls this while the ops panel is the ACTIVE one, at a coarse
+// interval - it is a log, not a live stream.
+void UiApp::refresh_session_ops() {
+  std::string sid = active_sid();
+  if (sid.empty() || !backend_) return;
+  call_async("session.info", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    if (st_.active_tab != sid) return;  // another tab is in front now
+    std::vector<AppState::OpRow> ops;
+    if (r.data.contains("systemOps") && r.data["systemOps"].is_array()) {
+      const Json& so = r.data["systemOps"];
+      for (size_t i = 0; i < so.size(); ++i) {
+        AppState::OpRow o;
+        o.op = jsonutil::get<std::string>(so[i], "op", "");
+        o.detail = so[i].dump();
+        ops.push_back(o);
+      }
+    }
+    // Same list twice: skip the repaint (this runs on a timer).
+    if (ops.size() == st_.session_ops.size()) {
+      bool same = true;
+      for (size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].op != st_.session_ops[i].op ||
+            ops[i].detail != st_.session_ops[i].detail) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return;
+    }
+    update([&](AppState& s) { s.session_ops = ops; });
+  });
+}
+
 // The ACTIVE session's row, with the UI's live state taking precedence.
 //
 // The list is a snapshot from the backend (up to a second old), while
@@ -1498,6 +1581,31 @@ ProjectCard::SessionRow UiApp::live_session_row(ProjectCard::SessionRow row) con
   return row;
 }
 
+// The dot for one session row.
+//
+// Two rules on top of the raw snapshot:
+//   * the active session reads the LIVE state (see live_session_row);
+//   * "已完成 / 失败" means NEWS since you last looked. The backend's loopState
+//     stays "turnDone" forever after a turn, so the blue dot used to be permanent
+//     - it survived opening the session AND switching tabs ("可查看了不会消失").
+// (session_dot is defined further down with the other home builders.)
+H session_dot(const std::string& loop_state, const std::string& last_error,
+              bool running, int terminal_count, int auto_round);
+H UiApp::dot_for(const ProjectCard::SessionRow& row) const {
+  ProjectCard::SessionRow r = live_session_row(row);
+  if (!r.running && !r.auto_round && !r.loop_state.empty() &&
+      r.loop_state != "waiting") {
+    std::map<std::string, int64_t>::const_iterator it =
+        session_seen_ms_.find(r.sid);
+    if (it != session_seen_ms_.end() && r.updated_ms <= it->second) {
+      r.loop_state = "idle";
+      r.last_error.clear();
+    }
+  }
+  return session_dot(r.loop_state, r.last_error, r.running, r.terminal_count,
+                     r.auto_round);
+}
+
 void UiApp::load_usage() {
   // The filter is real: a provider scope and a time range both narrow the query,
   // so the numbers on the page are the numbers that were asked for.
@@ -1516,6 +1624,50 @@ void UiApp::load_usage() {
     update([&](AppState& s) {
       s.usage = r.data;
       s.usage_loaded = true;
+    });
+  });
+}
+
+// Balance / credit per provider.
+//
+// Every vendor that exposes one uses a DIFFERENT private endpoint, so the backend
+// probes by the configured endpoint and reports one row per provider: the number,
+// or why there is none ("不支持" / "获取失败：HTTP 401"). The UI never invents a 0.
+void UiApp::load_balances(bool force) {
+  if (!backend_ || st_.balances_loading) return;
+  int64_t now = now_ms();
+  if (st_.balances_at > 0) {
+    int64_t since = now - st_.balances_at;
+    // "Refresh after every turn" must not become "hammer the vendor": a run of
+    // short turns would fire one request per provider each time. The floor is
+    // short enough that a normal turn always refreshes.
+    if (!force && since < 30000) return;
+    if (force && since < 8000) return;
+  }
+  update([&](AppState& s) { s.balances_loading = true; });
+  call_async("provider.balances", Json::object(), [this](const BackendResult& r) {
+    std::vector<AppState::BalanceRow> rows;
+    if (r.ok && r.data.contains("providers") && r.data["providers"].is_array()) {
+      const Json& arr = r.data["providers"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        AppState::BalanceRow row;
+        row.pid = jsonutil::get<std::string>(arr[i], "pid", "");
+        row.name = jsonutil::get<std::string>(arr[i], "name", "");
+        row.endpoint = jsonutil::get<std::string>(arr[i], "endpoint", "");
+        row.status = jsonutil::get<std::string>(arr[i], "status", "failed");
+        row.currency = jsonutil::get<std::string>(arr[i], "currency", "");
+        row.balance = jsonutil::get<std::string>(arr[i], "balance", "");
+        row.used = jsonutil::get<std::string>(arr[i], "used", "");
+        row.limit = jsonutil::get<std::string>(arr[i], "limit", "");
+        row.note = jsonutil::get<std::string>(arr[i], "note", "");
+        row.enabled = jsonutil::get<bool>(arr[i], "enabled", true);
+        rows.push_back(row);
+      }
+    }
+    update([&](AppState& s) {
+      s.balances = rows;
+      s.balances_loading = false;
+      s.balances_at = now_ms();
     });
   });
 }
@@ -1745,9 +1897,15 @@ void UiApp::load_providers() {
         picker_wants_default = true;
       }
       // Opening 供应商 with nothing selected showed an empty right pane and made
-      // you click the only item in the list. Select the first provider instead.
+      // you click the only item in the list. Select the first provider instead;
+      // with NO providers at all, open the create wizard - an empty page with a
+      // "新增" button somewhere is a dead end.
       if (!s.provider_creating && s.provider_selected.empty() && !rows.empty()) {
         select_default = rows[0].id;
+      } else if (!s.provider_creating && s.provider_selected.empty() &&
+                 rows.empty() && !provider_auto_opened_) {
+        provider_auto_opened_ = true;
+        s.provider_creating = true;
       }
     });
     if (picker_wants_default) load_picker_models(rows[0].id);
@@ -2846,6 +3004,15 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   } else if (event == "turn.done") {
     // The final paint of the turn: flush any delta held back by the 25 ms floor.
     stream_dirty_ = false;
+    // A turn that finished while you were looking at it is NOT news: mark the
+    // session as seen, or its blue "done" dot would appear on a transcript you
+    // just watched finish.
+    if (is_active && !sid.empty()) session_seen_ms_[sid] = wall_ms();
+    // A turn just spent credit: refresh the provider balances (the usage page
+    // shows them, and "how much is left" is the question right after a run).
+    // Throttled inside load_balances so a burst of short turns cannot hammer the
+    // vendor's balance endpoint.
+    load_balances(true);
     // The turn is over: the primary button goes back to 发送. Derived from the
     // event, not from a click, so it cannot drift from the backend.
     if (is_active) {
@@ -3225,6 +3392,11 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.interrupted = true;
     st_.turn_running = false;  // nothing is running after an interrupt
     st_.interrupt_reason = jsonutil::get<std::string>(payload, "error", "");
+    // Watched live = already seen: the row's red dot is for news you have NOT
+    // looked at (the error line is in the transcript right here).
+    if (!st_.active_tab.empty() && st_.active_tab != "home") {
+      session_seen_ms_[st_.active_tab] = wall_ms();
+    }
     // The turn ends mid-stream here too (no turn.done), so the last message has
     // to be closed by hand: it kept its "streaming" flag and the transcript
     // showed a spinner + a counting timer next to a send button that had already
@@ -4036,11 +4208,9 @@ VNodePtr UiApp::build_nav_rail() {
           s2.ctx_id = sid;
         });
       });
-      // The active session's dot follows the LIVE state (a turn that just
-      // started, a terminal that just opened), not the last list snapshot.
-      ProjectCard::SessionRow lr = live_session_row(s);
-      H nd = session_dot(lr.loop_state, lr.last_error, lr.running, lr.terminal_count,
-                         lr.auto_round);
+      // LIVE state for the active session + "news since you looked" for the rest
+      // (see dot_for).
+      H nd = dot_for(s);
       nd.cls("nav-dot");  // same colour rules, rail-sized
       row.add(nd);
       row.add(el("span", "nav-session-title").text(s.title));
@@ -4387,9 +4557,7 @@ VNodePtr UiApp::build_home_search() {
       row.on(EventKind::kClick, [this, sid, title](const std::string&) {
         open_session(sid, title);
       });
-      ProjectCard::SessionRow sr = live_session_row(s);
-      row.add(session_dot(sr.loop_state, sr.last_error, sr.running,
-                          sr.terminal_count, sr.auto_round));
+      row.add(dot_for(s));
       H txt = el("div", "search-row-text");
       txt.add(el("div", "search-row-title").text(s.title));
       txt.add(el("div", "search-row-sub dim").text(p.name + "  ·  " + p.path));
@@ -4511,9 +4679,7 @@ VNodePtr UiApp::build_home_projects() {
         // Inline rename: the row turns into an input. Enter commits, blur also
         // commits (clicking away is the normal way to finish), Esc cancels.
         H rrow = el("div", "proj-session renaming");
-        ProjectCard::SessionRow lr = live_session_row(s);
-        rrow.add(session_dot(lr.loop_state, lr.last_error, lr.running,
-                             lr.terminal_count, lr.auto_round));
+        rrow.add(dot_for(s));
         H inp = comp::text_input(s.rename_text, tr("会话名称"),
                                  [this, sid](const std::string& v) {
           update([&](AppState& st2) {
@@ -4559,9 +4725,7 @@ VNodePtr UiApp::build_home_projects() {
           s2.ctx_id = sid;
         });
       });
-      ProjectCard::SessionRow lr = live_session_row(s);
-      H dot = session_dot(lr.loop_state, lr.last_error, lr.running,
-                          lr.terminal_count, lr.auto_round);
+      H dot = dot_for(s);
       row.add(dot);
       row.add(el("span", "ps-title").text(s.title));
       row.add(el("span", "grow"));
@@ -4617,6 +4781,7 @@ VNodePtr UiApp::build_home_usage() {
   tot.on(EventKind::kClick, [this](const std::string&) {
     update([&](AppState& s) { s.usage_scope.clear(); });
     load_usage();
+    load_balances(false);  // a different scope = a different provider
   });
   tot.add(el("span").text(tr("总计")));
   left.add(tot);
@@ -4628,6 +4793,7 @@ VNodePtr UiApp::build_home_usage() {
     it.on(EventKind::kClick, [this, pid](const std::string&) {
       update([&](AppState& s) { s.usage_scope = pid; });
       load_usage();
+      load_balances(false);  // a different scope = a different provider
     });
     it.add(el("span").text(p.name.empty() ? p.id : p.name));
     left.add(it);
@@ -4707,6 +4873,76 @@ VNodePtr UiApp::build_home_usage() {
   head.add(comp::key_value(tr("输出 tokens"), out_tok));
   head.add(comp::key_value(tr("总成本"), cost));
   panel.add(head);
+
+  // ---- 余额 / 额度 ----
+  // Per provider, by its ENDPOINT (the only thing that identifies a vendor
+  // reliably). Three states, all honest: the number, 不支持 (no public balance
+  // API), or 获取失败 WITH the reason. Asked on entering this page, after every
+  // finished turn and when the provider filter changes.
+  load_balances(false);
+  {
+    H bal = el("div", "usage-balances");
+    H bh = el("div", "chart-head");
+    bh.add(el("div", "chart-title").text(tr("余额 / 额度")));
+    bh.add(el("span", "grow"));
+    if (st_.balances_loading) {
+      bh.add(el("span", "bal-loading dim").text(tr("查询中…")));
+    } else {
+      bh.add(comp::button(tr("刷新"), [this](const std::string&) {
+        load_balances(true);
+      }, "ghost"));
+    }
+    bal.add(bh);
+    auto money = [](const std::string& cur, const std::string& v) {
+      if (v.empty()) return std::string("—");
+      if (cur == "CNY") return "¥" + v;
+      if (cur == "USD") return "$" + v;
+      return cur.empty() ? v : (cur + " " + v);
+    };
+    if (st_.balances.empty()) {
+      bal.add(el("div", "hint").text(
+          st_.balances_loading ? tr("正在查询各供应商的余额…")
+                               : tr("还没有供应商。在设置-供应商里添加一家之后这里会显示余额。")));
+    }
+    for (size_t i = 0; i < st_.balances.size(); ++i) {
+      const AppState::BalanceRow& b = st_.balances[i];
+      H row = el("div", "bal-row");
+      row.style("animation-delay", itos(static_cast<int>(i) * 30) + "ms");
+      H nm = el("div", "bal-name");
+      nm.add(el("span", "bal-pname").text(b.name.empty() ? b.pid : b.name));
+      if (!b.enabled) nm.add(el("span", "bal-off dim").text(tr("已停用")));
+      row.add(nm);
+      H val = el("div", "bal-val");
+      std::string cls = "bal-amount";
+      std::string text;
+      if (b.status == "ok") {
+        text = money(b.currency, b.balance);
+        if (!b.used.empty() || !b.limit.empty()) {
+          text += "  ";
+          if (!b.used.empty()) text += tr("已用 ") + money(b.currency, b.used);
+          if (!b.limit.empty()) {
+            text += tr(" / 额度 ") + money(b.currency, b.limit);
+          }
+        }
+      } else if (b.status == "unsupported") {
+        cls += " dim";
+        text = tr("不支持");
+        if (!b.note.empty()) text += " · " + tr(b.note.c_str());
+      } else {
+        cls += " bad";
+        // The backend already wrote "获取失败：HTTP 401"; show it verbatim - a
+        // silent dash would hide that the key or the endpoint is wrong.
+        text = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
+      }
+      val.add(el("span", cls).text(text));
+      row.add(val);
+      if (!b.endpoint.empty()) {
+        row.add(el("div", "bal-ep dim").text(b.endpoint));
+      }
+      bal.add(row);
+    }
+    panel.add(bal);
+  }
 
   // ---- by model: a proportional bar per model (the pie could not show values) ----
   Json pm = st_.usage_loaded && st_.usage.contains("byProviderModel") &&
@@ -6965,14 +7201,27 @@ VNodePtr UiApp::build_side_panel() {
       body.add(row);
     }
   } else if (kind == "calls") {
-    if (st_.session_calls.empty()) {
-      body.add(comp::empty_state(tr("暂无工具调用记录。"), "", nullptr));
+    // The call log IS the transcript's tool blocks - no separate fetch, and no
+    // way for the two to disagree. (`session_calls` was a field nothing ever
+    // filled, so this panel said "暂无工具调用记录" even during a busy turn.)
+    int shown = 0;
+    for (size_t i = st_.messages.size(); i-- > 0;) {
+      const comp::ChatMsg& m = st_.messages[i];
+      for (size_t k = 0; k < m.tools.size(); ++k) {
+        const comp::ToolBlock& tb = m.tools[k];
+        if (tb.name.empty()) continue;
+        H row = el("div", "call-row");
+        std::string cls = "call-ico ";
+        cls += tb.running ? "run" : (tb.ok ? "ok" : "err");
+        row.add(el("span", cls).text(tb.running ? "\u25cb" : (tb.ok ? "\u2713" : "\u2717")));
+        row.add(el("span", "call-name").text(tb.name));
+        row.add(el("span", "call-args dim").text(tb.summary));
+        body.add(row);
+        ++shown;
+      }
     }
-    for (size_t i = 0; i < st_.session_calls.size(); ++i) {
-      H row = el("div", "call-row");
-      row.add(el("span", "call-name").text(st_.session_calls[i].name));
-      row.add(el("span", "call-args dim").text(st_.session_calls[i].args));
-      body.add(row);
+    if (shown == 0) {
+      body.add(comp::empty_state(tr("暂无工具调用记录。"), "", nullptr));
     }
   } else {
     body.add(comp::empty_state(tr("面板内容"), "", nullptr));
@@ -10776,6 +11025,9 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
         // The context window follows the model, so the water level must be
         // recomputed (the old percentage belongs to the old window).
         load_session_usage(sid);
+        // A different model is usually a different PROVIDER: the balance shown on
+        // the usage page is then stale.
+        load_balances(false);
       });
     }
     toast(tr("已切换到 ") + model_id);
