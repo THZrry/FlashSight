@@ -2,6 +2,7 @@
 // TerminalRegistry 记录元数据，本类持有真实 reproc 句柄并做 spawn/poll/kill。
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -55,8 +56,19 @@ class TerminalManager {
   // are not safe to touch from two threads at once.
   std::vector<Json> tick();
 
+  // Every drained chunk of output, the moment it is produced (tid + text). The
+  // host writes the terminal's transcript from here - NOT from tick(), which may
+  // never run again if the app closes right after a command exits. That gap is
+  // why the tail of a session was missing on reopen. Called with the manager's
+  // mutex held, so the sink must not call back into the manager.
+  typedef std::function<void(const std::string&, const std::string&)> OutputSink;
+  // Per-INSTANCE, not static: a static sink outlived its FsApi and a bare
+  // TerminalManager (the unit test) then called into a destroyed object.
+  void set_output_sink(OutputSink fn) { output_sink_ = std::move(fn); }
+
  private:
   struct Proc;
+  OutputSink output_sink_;
   TerminalRegistry* reg_;
   const Clock* clock_;
   std::map<std::string, std::unique_ptr<Proc> > procs_;

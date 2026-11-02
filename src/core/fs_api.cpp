@@ -35,6 +35,11 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   locks_.reset(new LockArbiter(clock_));
   terminals_.reset(new TerminalRegistry(clock_));
   terminal_mgr_.reset(new TerminalManager(terminals_.get(), clock_));
+  // Every drained byte goes straight to the transcript (see the sink's docs).
+  terminal_mgr_->set_output_sink([this](const std::string& tid,
+                                        const std::string& text) {
+    append_terminal_log(tid, text);
+  });
   deny_list_.reset(new DenyList());
   plans_.reset(new PlanStore());
   workflows_.reset(new WorkflowStore(clock_));
@@ -1719,35 +1724,174 @@ void FsApi::persist_terminal_entry(const Json& entry) {
   }
 }
 
-// Append raw output to the terminal's log (best effort, capped growth).
-//
-// A shell that runs for hours (a dev server, a log tail) would otherwise write
-// hundreds of megabytes. Past 4 MB the log is rewritten with its last 1 MB, so
-// the record stays useful without growing without bound.
-void FsApi::append_terminal_log(const std::string& tid, const std::string& text) {
-  if (tid.empty() || text.empty()) return;
-  TermEntry* e = terminals_->find(tid);
-  if (!e || e->log_path.empty()) return;
-  try {
-    std::error_code ec;
-    auto sz = ghc::filesystem::file_size(e->log_path, ec);
-    const uintmax_t kCap = 4u * 1024 * 1024;
-    if (!ec && sz > kCap) {
-      std::string old = read_file_bytes(e->log_path);
-      const size_t keep = 1024 * 1024;
-      std::string tail = old.size() > keep ? old.substr(old.size() - keep) : old;
-      // Start at a line boundary so the replay does not begin mid-line.
-      size_t nl = tail.find('\n');
-      if (nl != std::string::npos && nl + 1 < tail.size()) tail = tail.substr(nl + 1);
-      std::ofstream trunc(e->log_path, std::ios::binary | std::ios::trunc);
-      if (trunc) trunc.write(tail.data(), static_cast<std::streamsize>(tail.size()));
+// 写一个日志文件；超过 cap 就把它轮转成 <base>.<epoch>.log 再从空文件继续。
+// NOTHING IS DISCARDED: a long session gets a chain of files instead of a
+// truncated one, because the history is also what a search reads (and what the
+// replay shows).
+namespace {
+
+// 按行边界切：返回 buf 中第一行结束后的位置
+size_t line_start_after(const std::string& buf) {
+  size_t nl = buf.find('\n');
+  return nl == std::string::npos ? buf.size() : nl + 1;
+}
+
+bool append_with_rotate(const std::string& path, const std::string& text,
+                        uintmax_t cap) {
+  if (path.empty() || text.empty()) return false;
+  std::error_code ec;
+  auto sz = ghc::filesystem::file_size(path, ec);
+  if (!ec && sz + text.size() > cap) {
+    // <dir>/<name>.log -> <dir>/<name>.<epoch>.log
+    ghc::filesystem::path p(path);
+    std::string stem = p.stem().string();  // "1"
+    std::string dir = p.parent_path().string();
+    int64_t now = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    std::string arch = dir + "/" + stem + "." + std::to_string(now) + ".log";
+    ghc::filesystem::rename(path, arch, ec);
+    if (ec) {
+      // Rename failed (file locked): fall back to copying the bytes.
+      std::string old = read_file_bytes(path);
+      std::ofstream o(arch, std::ios::binary | std::ios::trunc);
+      if (o) o.write(old.data(), static_cast<std::streamsize>(old.size()));
+      std::ofstream clr(path, std::ios::binary | std::ios::trunc);
     }
-    std::ofstream ofs(e->log_path, std::ios::binary | std::ios::app);
-    if (!ofs) return;
-    ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
-    ofs.flush();
+  }
+  std::ofstream ofs(path, std::ios::binary | std::ios::app);
+  if (!ofs) return false;
+  ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
+  ofs.flush();
+  return true;
+}
+
+}  // namespace
+
+// 日志文件链：轮转档按时间从旧到新，当前日志在最后。
+std::vector<std::string> FsApi::terminal_log_chain(const std::string& log_path) const {
+  std::vector<std::string> out;
+  if (log_path.empty()) return out;
+  try {
+    ghc::filesystem::path p(log_path);
+    std::string dir = p.parent_path().string();
+    std::string stem = p.stem().string();          // "1"
+    std::string cur_name = stem + ".log";          // "1.log"
+    std::vector<std::pair<int64_t, std::string> > arch;
+    std::error_code ec;
+    if (ghc::filesystem::exists(dir, ec)) {
+      for (auto& it : ghc::filesystem::directory_iterator(dir, ec)) {
+        if (!it.path().has_filename()) continue;
+        std::string name = it.path().filename().string();
+        // 1.<epoch>.log
+        if (name.compare(0, stem.size() + 1, stem + ".") != 0) continue;
+        if (lower_ext(name) != ".log") continue;
+        std::string mid = name.substr(stem.size() + 1,
+                                      name.size() - stem.size() - 1 - 4);
+        if (mid.empty()) continue;
+        bool digits = true;
+        for (size_t k = 0; k < mid.size(); ++k) {
+          if (mid[k] < '0' || mid[k] > '9') { digits = false; break; }
+        }
+        if (!digits) continue;
+        arch.push_back(std::make_pair(std::strtoll(mid.c_str(), nullptr, 10),
+                                      it.path().string()));
+      }
+    }
+    std::sort(arch.begin(), arch.end());
+    for (size_t i = 0; i < arch.size(); ++i) out.push_back(arch[i].second);
+    if (ghc::filesystem::exists(log_path, ec)) out.push_back(log_path);
   } catch (...) {
   }
+  return out;
+}
+
+// Append output to the terminal's log. Every byte the PTY produced passes here
+// (TerminalManager's output sink), so the record is complete even if the app is
+// closed right after the process exits.
+void FsApi::append_terminal_log(const std::string& tid, const std::string& text) {
+  if (tid.empty() || text.empty()) return;
+  std::string path;
+  {
+    std::lock_guard<std::mutex> lk(term_log_mu_);
+    std::map<std::string, std::string>::const_iterator it = term_log_paths_.find(tid);
+    if (it == term_log_paths_.end()) return;
+    path = it->second;
+  }
+  try {
+    // 4 MB per file, then rotate. Never drop: the chain keeps everything.
+    append_with_rotate(path, text, 4u * 1024 * 1024);
+  } catch (...) {
+  }
+}
+
+// 用户敲进去的东西单独记：输出里虽然有回显，但进程可能不回显（密码、全屏程序），
+// 而"我敲过什么"正是搜索时最常找的东西。
+void FsApi::append_terminal_input(const std::string& tid, const std::string& text) {
+  if (tid.empty() || text.empty()) return;
+  std::string path;
+  {
+    std::lock_guard<std::mutex> lk(term_log_mu_);
+    std::map<std::string, std::string>::const_iterator it = term_log_paths_.find(tid);
+    if (it == term_log_paths_.end()) return;
+    path = it->second;
+  }
+  // <dir>/1.log -> <dir>/1.input.log
+  ghc::filesystem::path p(path);
+  std::string ipath = (p.parent_path() / (p.stem().string() + ".input.log")).string();
+  try {
+    append_with_rotate(ipath, text, 2u * 1024 * 1024);
+  } catch (...) {
+  }
+}
+
+// 在历史里搜：输出日志（含轮转档）+ 用户输入日志，返回匹配行。
+FsResult FsApi::terminal_search(const std::string& tid, const std::string& query,
+                                int limit) {
+  if (query.empty()) {
+    return FsResult::success(Json{{"matches", Json::array()}, {"scanned", 0}});
+  }
+  std::string path;
+  {
+    std::lock_guard<std::mutex> lk(term_log_mu_);
+    std::map<std::string, std::string>::const_iterator it = term_log_paths_.find(tid);
+    if (it != term_log_paths_.end()) path = it->second;
+  }
+  if (path.empty()) {
+    TermEntry* e = terminals_->find(tid);
+    if (e) path = e->log_path;
+  }
+  if (path.empty()) {
+    return FsResult::success(Json{{"matches", Json::array()}, {"scanned", 0}});
+  }
+  std::vector<std::string> files = terminal_log_chain(path);
+  ghc::filesystem::path p(path);
+  std::string ipath = (p.parent_path() / (p.stem().string() + ".input.log")).string();
+  if (ghc::filesystem::exists(ipath)) files.push_back(ipath);
+  Json matches = Json::array();
+  int scanned = 0;
+  for (size_t f = 0; f < files.size() && (int)matches.size() < limit; ++f) {
+    ++scanned;
+    std::string raw = read_file_bytes(files[f]);
+    if (raw.empty()) continue;
+    std::string text = terminal_plain_text(raw);
+    std::string fname = ghc::filesystem::path(files[f]).filename().string();
+    size_t start = 0;
+    int lineno = 0;
+    while (start <= text.size() && (int)matches.size() < limit) {
+      size_t nl = text.find('\n', start);
+      std::string line = text.substr(start, nl == std::string::npos ? std::string::npos
+                                                                    : nl - start);
+      ++lineno;
+      if (line.find(query) != std::string::npos) {
+        matches.push_back(Json{{"file", fname}, {"line", lineno},
+                               {"text", utf8::truncate(line, 400)}});
+      }
+      if (nl == std::string::npos) break;
+      start = nl + 1;
+    }
+  }
+  return FsResult::success(Json{{"matches", matches}, {"scanned", scanned}});
 }
 
 FsResult FsApi::terminal_list(const std::string& sid) {
@@ -1846,6 +1990,10 @@ FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
         e->log_attached = true;
       } catch (...) {
       }
+      {
+        std::lock_guard<std::mutex> lk(term_log_mu_);
+        term_log_paths_[tid] = e->log_path;
+      }
       persist_terminal_entry(e->to_json());
     }
   }
@@ -1855,6 +2003,10 @@ FsResult FsApi::terminal_spawn(const std::string& sid, const std::string& shell,
 }
 
 FsResult FsApi::terminal_write(const std::string& tid, const std::string& text) {
+  // What the USER typed is its own record: the output log only has it when the
+  // program echoes (a password prompt or a full-screen app does not), and
+  // "what did I type" is what a search looks for.
+  append_terminal_input(tid, text);
   Json out;
   return terminal_mgr_->write(Json{{"tid", tid}, {"text", text}}, &out);
 }
@@ -1869,11 +2021,27 @@ FsResult FsApi::terminal_grid(const std::string& tid) {
   Json out;
   FsResult r = terminal_mgr_->grid(Json{{"tid", tid}}, &out);
   if (r.ok()) return r;
-  // Not a live process: a terminal from a previous run. Rebuild the view from its
-  // saved log so "打开过的终端" can still be read (the record is the point).
+  // Not a live process: a terminal from a previous run (or the manager has
+  // already reaped it). Rebuild the view from the saved transcript chain so
+  // "打开过的终端" can still be read - and return an EMPTY grid rather than
+  // "not found" when there is no record at all: a terminal tab that was just
+  // restored is allowed to be empty, and the error only looked like a bug.
   TermEntry* e = terminals_->find(tid);
-  if (!e || e->log_path.empty()) return r;
-  std::string raw = read_file_bytes(e->log_path);
+  std::string log_path = e ? e->log_path : std::string();
+  if (log_path.empty()) {
+    std::lock_guard<std::mutex> lk(term_log_mu_);
+    std::map<std::string, std::string>::const_iterator it = term_log_paths_.find(tid);
+    if (it != term_log_paths_.end()) log_path = it->second;
+  }
+  // Every archived file plus the current one, oldest first.
+  std::string raw;
+  if (!log_path.empty()) {
+    std::vector<std::string> chain = terminal_log_chain(log_path);
+    for (size_t i = 0; i < chain.size(); ++i) {
+      raw += read_file_bytes(chain[i]);
+      raw += "\n";
+    }
+  }
   if (raw.empty()) {
     Json empty = Json::object();
     empty["cols"] = 100;
@@ -1891,20 +2059,21 @@ FsResult FsApi::terminal_grid(const std::string& tid) {
     empty["title"] = "";
     empty["tid"] = tid;
     empty["status"] = "exited";
-    empty["exitCode"] = e->exit_code;
+    empty["exitCode"] = e ? e->exit_code : 0;
+    empty["replay"] = "empty";
     return FsResult::success(empty);
   }
   std::string text = terminal_plain_text(raw);
   // Split into lines, keep the tail (a long-lived shell's log can be huge).
   std::vector<std::string> lines;
-  size_t start = 0;
-  while (start <= text.size()) {
-    size_t nl = text.find('\n', start);
-    std::string line = text.substr(start, nl == std::string::npos ? std::string::npos
-                                                                  : nl - start);
+  size_t start2 = 0;
+  while (start2 <= text.size()) {
+    size_t nl = text.find('\n', start2);
+    std::string line = text.substr(start2, nl == std::string::npos ? std::string::npos
+                                                                   : nl - start2);
     lines.push_back(line);
     if (nl == std::string::npos) break;
-    start = nl + 1;
+    start2 = nl + 1;
   }
   const size_t kMax = 2000;
   size_t from = lines.size() > kMax ? lines.size() - kMax : 0;
@@ -1942,7 +2111,8 @@ FsResult FsApi::terminal_grid(const std::string& tid) {
   g["title"] = "";
   g["tid"] = tid;
   g["status"] = "exited";
-  g["exitCode"] = e->exit_code;
+  g["exitCode"] = e ? e->exit_code : 0;
+  g["replay"] = "log";
   return FsResult::success(g);
 }
 
@@ -1973,10 +2143,9 @@ void FsApi::terminal_tick() {
     std::string sid = jsonutil::get<std::string>(c, "sid", "");
     std::string tid = jsonutil::get<std::string>(c, "tid", "");
     if (c.contains("output") && c["output"].is_string()) {
+      // The transcript was already written by the manager's output sink, the
+      // moment the bytes were drained - not here (tick may never run again).
       std::string text = c["output"].get<std::string>();
-      // The terminal's own record: the screen lives in memory and dies with the
-      // process, this file does not.
-      append_terminal_log(tid, text);
       emit_event("terminal.output", Json{{"sid", sid}, {"tid", tid}, {"text", text}});
     }
     if (jsonutil::get<bool>(c, "justExited", false)) {
@@ -2886,14 +3055,44 @@ FsResult FsApi::provider_balances() {
   Json rows = Json::array();
   if (!providers_ || !net_) return FsResult::success(Json{{"providers", rows}});
   std::vector<ProviderConn> all = providers_->list();
+  // IN PARALLEL. One unreachable endpoint used to make the whole request take
+  // N x 8 s while the UI waited for its rows ("打开时迟迟不更新"); now the total
+  // is the SLOWEST single probe. Each request builds its own client, so probing
+  // from several threads is safe.
+  std::vector<BalanceProbe> probes(all.size());
+  std::vector<std::thread> threads;
+  try {
+    for (size_t i = 0; i < all.size(); ++i) {
+      const ProviderConn* c = &all[i];
+      BalanceProbe* out = &probes[i];
+      NetClient* net = net_.get();
+      threads.push_back(std::thread([c, out, net]() { *out = probe_balance(*c, net); }));
+    }
+  } catch (...) {
+  }
+  for (size_t i = 0; i < threads.size(); ++i) {
+    if (threads[i].joinable()) threads[i].join();
+  }
   for (size_t i = 0; i < all.size(); ++i) {
     const ProviderConn& c = all[i];
-    BalanceProbe b = probe_balance(c, net_.get());
+    const BalanceProbe& b = probes[i];
+    if (b.status.empty() && threads.size() <= i) {
+      // A probe that never ran (thread creation failed): report it as failed
+      // rather than as an empty success.
+      Json row = Json{{"pid", c.id},
+                      {"name", c.name.empty() ? c.id : c.name},
+                      {"endpoint", c.base_url},
+                      {"enabled", c.enabled},
+                      {"status", "failed"},
+                      {"note", "获取失败：无法启动查询"}};
+      rows.push_back(row);
+      continue;
+    }
     Json row = Json{{"pid", c.id},
                     {"name", c.name.empty() ? c.id : c.name},
                     {"endpoint", c.base_url},
                     {"enabled", c.enabled},
-                    {"status", b.status}};
+                    {"status", b.status.empty() ? "failed" : b.status}};
     if (!b.currency.empty()) row["currency"] = b.currency;
     if (!b.balance.empty()) row["balance"] = b.balance;
     if (!b.used.empty()) row["used"] = b.used;

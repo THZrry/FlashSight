@@ -901,3 +901,29 @@ The process of project: P0 环境搭建
     `terminal_record_survives_restart`（磁盘记录 → 列表 → 日志回放，ANSI 剥离）。
   - **顺手修的链条**：`ops` 面板在重写工作流面板时被误删，已补回并按时间倒序显示；
     工作流类事件现在也会让会话行刷新（运行中的工作流算后台工作）。
+
+<92>(SOLVED): 终端历史改成轮转（不丢）+ 输入单独记 + 搜索进历史 + 输出按 sink 实时落盘（重建不再缺尾）+ 余额查询并行/5s + 顶栏标签细滚动条。
+  - **"过多的历史压缩处理…不主动丢弃"**：上一版把超过 4MB 的日志截成最后 1MB——那是丢弃，不是
+    压缩。现在 `1.log` 满 4MB 就**轮转**成 `1.<epoch>.log`，链条一直留着；回放读整条链，搜索
+    也扫所有轮转档。
+  - **"搜索可能输入还要单独保存"**：用户敲进去的内容单独写 `<tid>.input.log`（程序不一定回显：
+    密码提示、全屏程序），新增 `terminal.search {tid,q}` 同时扫输出链 + 输入日志，返回
+    `{file,line,text}`。侧栏筛选框对"恢复出来的终端"也能用：回放时把文本折进 `term_outputs`。
+  - **"输入命令运行后直接退出，重建不完整"（真因）**：日志原来写在 `terminal_tick()` 里，tick 是
+    60ms 一次的轮询——命令跑完立刻关应用，最后一段输出就永远没写进去。现在由
+    `TerminalManager::feed_screen` 的 **output sink** 在字节落地的同一刻写盘（sink 是实例成员，
+    不是 static：静态版会活过它的 FsApi，单测直接构造 TerminalManager 时会调到已析构对象，
+    表现为整个测试挂住）。
+    **顺带去掉假报错**：`terminal_grid` 对没有任何记录的 tid 现在返回**空网格**而不是
+    "not found"——刚恢复的终端允许是空的。另外 `tick_terminal` 以前只给 running 的终端拉网格，
+    恢复出来的终端永远显示"暂无输出"：现在每条记录**拉一次**回放（`term_replay_done_`），
+    标签页和"所有终端"卡片都不用先点一下才出内容。
+  - **"打开时获取余额导致界面迟迟不更新"**：`provider_balances` 现在**每个供应商一个线程**（每家
+    5s 超时），总耗时 ≈ 最慢的一个而不是求和；之前 2 家 × 8s 串行，阻塞感就是这么来的。UI 侧
+    本来就是回调式异步（browser= fetch，桌面= worker 池），面板先画"查询中…"再落数据。
+  - **顶栏标签太多放不全**：`.tabs-scroll` 原来把滚动条藏了（`scrollbar-width:none`），开十几个
+    会话根本看不出还有标签。现在 4px 高、hover 才显拇指的细条（VS Code 做法），只占 2px 高度。
+  - **测试**：408 用例 3837 断言全过；web / webview 双变体编译通过。`terminal_record_survives_restart`
+    扩展成覆盖轮转档 + 输入日志 + `terminal_search`。实测：起 cmd → 敲 `echo alpha-live` + `dir`
+    → **立刻杀进程** → 重启：`terminal.list` 有记录、`terminal.grid` 12 行完整（含中文与两个命令
+    的输出）、`terminal.search "alpha-live"` 命中输出 2 处 + 输入日志 1 处。

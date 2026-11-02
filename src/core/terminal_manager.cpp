@@ -30,6 +30,10 @@ struct TerminalManager::Proc {
   size_t reported = 0;    // out 中已上报给 UI 的字节数（tick 只发新增）
   bool exited = false;
   int exit_code = 0;
+  // Which manager owns this process: feed_screen is static and needs it to reach
+  // the per-instance output sink (a static sink outlived its FsApi and called
+  // into a destroyed object in the unit test).
+  TerminalManager* owner = nullptr;
 };
 
 TerminalManager::TerminalManager(TerminalRegistry* reg, const Clock* clock)
@@ -96,6 +100,9 @@ std::vector<std::string> TerminalManager::build_argv_interactive(const ShellInfo
 // 单元格状态。文本缓冲只用于"所有终端"概览和复制。
 void TerminalManager::feed_screen(Proc& p, const std::string& text) {
   p.out += text;
+  // Log it NOW: this is the only place every byte passes through, and tick()
+  // may not run again (the app can close right after a command exits).
+  if (p.owner && p.owner->output_sink_) p.owner->output_sink_(p.tid, text);
   p.screen.feed(text);
   p.screen_dirty = true;
   // 终端要回话（DSR：shell 问光标在哪，不回就卡住）时立刻写回子进程
@@ -232,6 +239,7 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
   p->pty = pty.release();
   p->tid = e.tid;
   p->sid = sid;
+  p->owner = this;
   p->enc = encoding;
   p->cols = cols;
   p->rows = rows;

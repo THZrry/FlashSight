@@ -414,12 +414,26 @@ OpenAI 系 `/v1/dashboard/billing/credit_grants`。其余如实写"不支持"；
 
 **终端记录必须落盘**。终端进程活不过本进程，但"开过哪些终端、打印过什么"要活过重启：
 
-- spawn 时写 `<session>/terminals/<tid>.json`（元数据）并把 PTY 输出追加到 `<tid>.log`
-  （超 4MB 只留最后 1MB，从行首切）；退出时把 status/exitCode 冻结进 json。
+- spawn 时写 `<session>/terminals/<tid>.json`（元数据）并把 PTY 输出追加到 `<tid>.log`；
+  退出时把 status/exitCode 冻结进 json。
+- **输出必须从 `TerminalManager::feed_screen` 的 sink 写，不是从 `tick()` 写**：tick 可能再也
+  不跑（命令一结束就关应用），那条尾巴就丢了——"重建时不完整"的真因。sink 是**实例成员**
+  （不是 static：静态 sink 会活过它的 FsApi，单测里直接构造 TerminalManager 时调到已析构对象）。
+- **历史"压缩"但不丢**：`<tid>.log` 满 4MB 就轮转成 `<tid>.<epoch>.log`，链条一直留着；
+  用户输入单独写 `<tid>.input.log`（程序不一定回显，而"我敲过什么"正是搜索最常找的）。
+  `terminal.search {tid,q}` 扫**输出链条 + 输入日志**，返回 `{file,line,text}`。
 - `terminal_list` 先把磁盘记录装回注册表（`add_saved`：强制 exited、不覆盖活动终端、抬高
   tid 序号以免复用日志文件名）——**列表是 UI 唯一入口，不在注册表里的终端既不能显示也不能回放**。
-- `terminal_grid` 对没有进程的终端从日志重建：剥 ANSI、CRLF 归一（CRLF 是换行不是重绘）、
-  单独的 `\\r` 取最后一段，保留最后 2000 行。
+- `terminal_grid` 对没有进程的终端从**整条日志链**重建（剥 ANSI、CRLF 归一、单独的 `\r` 取最后
+  一段，保留最后 2000 行）；真的没有任何记录时返回**空网格**而不是 "not found"——刚恢复的终端
+  允许是空的，那个错误只是看起来像 bug。
+
+**顶部标签条的滚动条**：`.tabs-scroll` 以前把滚动条藏掉（`scrollbar-width:none`），开十几个
+会话后根本看不出还有别的标签。现在 4px、hover 才显拇指（VS Code 的做法），高度只占 2px。
+
+**余额查询是并行的**：`provider_balances` 每个供应商一个线程（每家 5s 超时），总耗时 ≈ 最慢
+的一个而不是求和；UI 侧本来就是 callback 式异步（web 用 fetch、桌面用 worker 池），面板先画
+"查询中…"再落数据。
 
 **供应商图标按 endpoint 认品牌**：列表行原来没有图标元素（模板网格有，列表没有）。现在每行是
 `provider_brand_for_endpoint(endpoint, name)`：先看 endpoint（改名成"我的 API"也认得 api.deepseek.com），

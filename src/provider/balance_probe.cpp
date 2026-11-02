@@ -108,7 +108,7 @@ BalanceProbe probe_balance(const ProviderConn& conn, const NetClient* net) {
   HttpRequest req;
   req.method = "GET";
   req.url = url;
-  req.timeout_ms = 8000;
+  req.timeout_ms = 5000;  // a balance check must not hold the UI hostage
   req.size_cap = 256 * 1024;
   req.headers["Accept"] = "application/json";
   req.headers["Authorization"] = "Bearer " + conn.api_key;

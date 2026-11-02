@@ -178,6 +178,13 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   });
   // 屏幕网格（终端真正画的东西）
   reg("terminal.grid", [api](const Json& a) { return api->terminal_grid(s(a, "tid")); });
+  // Search the SAVED history (output chain + typed input). The screen in memory
+  // only covers the visible window; this is what makes a restored terminal
+  // searchable.
+  reg("terminal.search", [api](const Json& a) {
+    return api->terminal_search(s(a, "tid"), s(a, "q"),
+                                static_cast<int>(jsonutil::get_int(a, "limit", 200)));
+  });
   // 改名字（终端跑着也能改）
   reg("terminal.rename", [api](const Json& a) {
     return api->terminal_rename(s(a, "tid"), s(a, "label"));

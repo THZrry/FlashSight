@@ -171,6 +171,10 @@ class FsApi {
   FsResult terminal_grid(const std::string& tid);
   // 改终端名字（终端跑着也能改；不影响进程）
   FsResult terminal_rename(const std::string& tid, const std::string& label);
+  // 在已保存的历史里搜（输出日志 + 轮转档 + 用户输入日志）。
+  // 返回 {matches:[{file, line, text}], scanned: 文件数}；没有历史时 matches 为空。
+  FsResult terminal_search(const std::string& tid, const std::string& query,
+                           int limit = 200);
   FsResult terminal_kill(const std::string& tid);
   FsResult terminal_set_encoding(const std::string& tid, const std::string& enc);
   // 非阻塞轮询所有终端，把新增输出/退出推成 terminal.output / terminal.exit
@@ -401,11 +405,17 @@ class FsApi {
   std::unique_ptr<DenyList> deny_list_;
   std::unique_ptr<PlanStore> plans_;
   std::unique_ptr<WorkflowStore> workflows_;
-  // 终端落盘：元数据 <session>/terminals/<tid>.json + 输出 <tid>.log。一个终端
-  // 进程活不过本进程，但"我开过哪些终端、里面打印过什么"必须活过重启。
-  // 写失败不报错：落盘是尽力而为，绝不能因为它让终端功能失灵。
+  // 终端落盘：元数据 <session>/terminals/<tid>.json + 输出 <tid>.log（写满按
+  // 时间戳轮转成 <tid>.<epoch>.log，**从不丢弃**；用户输入另记 <tid>.input.log，
+  // 搜索时两路都查）。一个终端进程活不过本进程，但"我开过哪些终端、里面打印过
+  // 什么、我敲过什么"必须活过重启。写失败不报错：落盘是尽力而为。
   void persist_terminal_entry(const Json& entry);
   void append_terminal_log(const std::string& tid, const std::string& text);
+  void append_terminal_input(const std::string& tid, const std::string& text);
+  // 当前日志文件 + 所有轮转档（按时间从旧到新）
+  std::vector<std::string> terminal_log_chain(const std::string& log_path) const;
+  std::mutex term_log_mu_;
+  std::map<std::string, std::string> term_log_paths_;  // tid -> 当前日志
   std::map<int, std::function<void(const std::string&, const Json&)> > event_listeners_;
   int next_listener_id_ = 1;
   // Guards the mutable state above for callers that are not the turn thread.

@@ -452,14 +452,22 @@ html, body {
   display: flex; align-items: center; gap: 2px;
   flex: none;
 }
-/* Scrollable slot: takes the remaining width and scrolls sideways. */
+/* Scrollable slot: takes the remaining width and scrolls sideways. The bar is
+   THIN and appears on hover (the VS Code treatment): a dozen session tabs cannot
+   fit, and with the bar hidden there was no way to tell that more existed. */
 .tabs-scroll {
   display: flex; align-items: center; gap: 2px;
   flex: 1 1 auto; min-width: 0;
   overflow-x: auto; overflow-y: hidden;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  padding-bottom: 2px;
 }
-.tabs-scroll::-webkit-scrollbar { display: none; }
+.tabs-scroll:hover { scrollbar-color: var(--border-strong) transparent; }
+.tabs-scroll::-webkit-scrollbar { height: 4px; }
+.tabs-scroll::-webkit-scrollbar-track { background: transparent; }
+.tabs-scroll::-webkit-scrollbar-thumb { background: transparent; border-radius: 2px; }
+.tabs-scroll:hover::-webkit-scrollbar-thumb { background: var(--border-strong); }
 .tabs .tab { flex: none; }
 .tabs .tab {
   display: flex;

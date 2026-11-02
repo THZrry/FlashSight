@@ -14,6 +14,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1050,6 +1051,9 @@ class UiApp {
   bool provider_auto_opened_ = false;
   bool sessions_dirty_ = false;
   int64_t sessions_refresh_ms_ = 0;
+  // Terminals whose REPLAY (a record from a previous run) has been fetched: it is
+  // static, so once is enough - and without this the drawer showed 暂无输出.
+  std::set<std::string> term_replay_done_;
   // A workflow event (proposed / step / rejected) changed what the panel shows.
   bool workflows_dirty_ = false;
   int64_t workflows_refresh_ms_ = 0;

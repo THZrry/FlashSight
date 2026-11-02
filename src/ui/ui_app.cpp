@@ -716,7 +716,16 @@ void UiApp::tick_terminal() {
   if (st_.term_tab != "all") {
     for (size_t i = 0; i < st_.terminals.size(); ++i) {
       if (st_.terminals[i].tid == st_.term_tab) {
-        if (st_.terminals[i].status == "running") load_terminal_grid(st_.term_tab);
+        if (st_.terminals[i].status == "running") {
+          load_terminal_grid(st_.term_tab);
+        } else if (term_replay_done_.find(st_.term_tab) == term_replay_done_.end()) {
+          // A RESTORED terminal (a record from a previous run) has a fixed
+          // replay: fetch it ONCE. Without this the screen said "暂无输出" until
+          // you clicked the tab - the record existed but nothing ever asked for
+          // its content ("列表确实没有终端内容，点进去才有").
+          term_replay_done_.insert(st_.term_tab);
+          load_terminal_grid(st_.term_tab);
+        }
         return;
       }
     }
@@ -725,11 +734,23 @@ void UiApp::tick_terminal() {
   // overview: round-robin over the running terminals
   if (st_.terminals.empty()) return;
   size_t n = st_.terminals.size();
+  bool any_running = false;
   for (size_t k = 0; k < n; ++k) {
     size_t i = (term_grid_rr_ + k) % n;
     if (st_.terminals[i].status != "running") continue;
+    any_running = true;
     term_grid_rr_ = (i + 1) % n;
     load_terminal_grid(st_.terminals[i].tid);
+    return;
+  }
+  // Nothing is running: give the restored ones their one replay fetch each, so
+  // the overview cards are not all "暂无输出".
+  if (any_running) return;
+  for (size_t k = 0; k < n; ++k) {
+    const std::string& tid = st_.terminals[k].tid;
+    if (term_replay_done_.find(tid) != term_replay_done_.end()) continue;
+    term_replay_done_.insert(tid);
+    load_terminal_grid(tid);
     return;
   }
 }
@@ -809,6 +830,14 @@ void UiApp::load_terminals(const std::string& sid) {
       st_.active_term = st_.terminals[0].tid;
     }
     render();
+    // The terminal drawer can be opened on a terminal that has never been
+    // clicked this session (a restored record, or one the model started): its
+    // screen was empty until you re-selected it. Pull the grid for the tab that
+    // would be shown.
+    if (st_.terminal_open && !st_.term_tab.empty() && st_.term_tab != "all" &&
+        st_.term_grids.find(st_.term_tab) == st_.term_grids.end()) {
+      load_terminal_grid(st_.term_tab);
+    }
   });
 }
 
@@ -11715,7 +11744,27 @@ void UiApp::load_terminal_grid(const std::string& tid) {
     // terminal is visible, and an idle terminal's screen is byte-identical.
     std::map<std::string, Json>::iterator it = st_.term_grids.find(tid);
     if (it != st_.term_grids.end() && it->second == r.data) return;
-    update([&](AppState& s) { s.term_grids[tid] = r.data; });
+    update([&](AppState& s) {
+      s.term_grids[tid] = r.data;
+      // A REPLAYED terminal (a record from a previous run) has no live output
+      // buffer, so the overview's filters matched nothing. Fold the replayed
+      // text in once, so searching a restored terminal works like a live one.
+      if (jsonutil::get<std::string>(r.data, "replay", "") == "log" &&
+          s.term_outputs.find(tid) == s.term_outputs.end()) {
+        std::string text;
+        if (r.data.contains("lines") && r.data["lines"].is_array()) {
+          const Json& lines = r.data["lines"];
+          for (size_t i = 0; i < lines.size(); ++i) {
+            if (!lines[i].is_array()) continue;
+            for (size_t k = 0; k < lines[i].size(); ++k) {
+              text += jsonutil::get<std::string>(lines[i][k], "t", "");
+            }
+            text += "\n";
+          }
+        }
+        if (!text.empty()) s.term_outputs[tid] = text;
+      }
+    });
   });
 }
 // Report how many character cells fit. The backend resizes the pseudo console,

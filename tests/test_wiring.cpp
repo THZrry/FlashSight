@@ -493,4 +493,42 @@ FS_TEST(terminal_record_survives_restart) {
   std::string second = g.data["lines"][1][0]["t"].get<std::string>();
   EXPECT_EQ(second, std::string("world"));
   EXPECT_EQ(g.data["status"].get<std::string>(), std::string("exited"));
+
+  // ---- 轮转档与输入日志：历史"压缩"但不丢，搜索两路都查 ----
+  // A rotated archive (older) + the separate typed-input log, exactly what the
+  // live app leaves after a long session.
+  {
+    std::ofstream ofs((tdir / "t_1.1700000000000.log").string(), std::ios::binary);
+    ofs << "ancient line with needle\r\n";
+  }
+  {
+    std::ofstream ofs((tdir / "t_1.input.log").string(), std::ios::binary);
+    ofs << "echo typed-needle\r\n";
+  }
+  // The replay reads the WHOLE chain: the archive comes before the current log.
+  FsResult g2 = api.terminal_grid("t_1");
+  ASSERT_TRUE(g2.ok());
+  bool saw_ancient = false, saw_hello = false;
+  for (size_t i = 0; i < g2.data["lines"].size(); ++i) {
+    if (!g2.data["lines"][i].is_array() || g2.data["lines"][i].empty()) continue;
+    std::string t = g2.data["lines"][i][0]["t"].get<std::string>();
+    if (t.find("ancient line") != std::string::npos) saw_ancient = true;
+    if (t.find("hello") != std::string::npos) saw_hello = true;
+  }
+  EXPECT_TRUE(saw_ancient);
+  EXPECT_TRUE(saw_hello);
+
+  // Search the archive...
+  FsResult tsr = api.terminal_search("t_1", "needle", 50);
+  ASSERT_TRUE(tsr.ok());
+  ASSERT_TRUE(tsr.data["matches"].is_array());
+  EXPECT_TRUE(tsr.data["matches"].size() >= 2);
+  bool saw_archive = false, saw_input = false;
+  for (size_t i = 0; i < tsr.data["matches"].size(); ++i) {
+    std::string f = tsr.data["matches"][i]["file"].get<std::string>();
+    if (f.find(".1700000000000.log") != std::string::npos) saw_archive = true;
+    if (f == "t_1.input.log") saw_input = true;
+  }
+  EXPECT_TRUE(saw_archive);   // the rotated history is still searched
+  EXPECT_TRUE(saw_input);     // and what the USER typed is its own record
 }
