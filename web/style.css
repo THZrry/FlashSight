@@ -198,6 +198,18 @@
 .anim-slide-left  { animation: anim-slide-left .22s cubic-bezier(.22,.61,.36,1); }
 .anim-slide-right { animation: anim-slide-right .22s cubic-bezier(.22,.61,.36,1); }
 .anim-drawer { animation: anim-drawer .16s cubic-bezier(.22,.61,.36,1); }
+
+/* A window nobody is looking at (minimized / occluded / background tab) keeps
+   NO animations running. A spinners-and-caret UI left streaming overnight is a
+   continuous compositor/GPU load for zero benefit - and on the integrated-GPU
+   WebView2 setups this project runs on, that sustained load is exactly the
+   kind of thing that ends in a driver hang. The shell also stops repainting
+   while hidden (IDom::hidden); this is the GPU half of the same decision. */
+html.fs-asleep *,
+html.fs-asleep *::before,
+html.fs-asleep *::after {
+  animation-play-state: paused !important;
+}
 .anim-exit-left  { animation: anim-exit-left .26s ease-in forwards; }
 .anim-exit-right { animation: anim-exit-right .26s ease-in forwards; }
 .anim-exit-fade  { animation: anim-exit-fade .2s ease-in forwards; }

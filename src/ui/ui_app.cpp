@@ -619,7 +619,31 @@ void UiApp::call_async(const std::string& method, const Json& args,
 
 void UiApp::pump() {
   if (backend_) backend_->poll();
-  // Flush a delta that the 25 ms floor held back. Deltas normally paint from the
+  // Nothing is painted while the window is hidden (minimized, occluded, another
+  // virtual desktop). A turn can stream for hours while nobody watches; every
+  // one of those paints is CPU + DOM churn + raster work whose only outcome is
+  // an unseen frame. Backend events were consumed above, so the state is
+  // current; one paint restores the view when the window returns.
+  if (dom_.hidden()) {
+    hidden_paint_ = true;
+    // Safety valve: an engine that reports "hidden" while the window IS on
+    // screen (or never reports it back) must not leave a frozen UI. One paint
+    // every two seconds keeps the view truthful at 0.5 Hz - still ~30x less
+    // work than a streaming turn at the normal paint floor.
+    int64_t now = now_ms();
+    if (now - last_hidden_paint_ms_ >= 2000) {
+      last_hidden_paint_ms_ = now;
+      render();
+      follow_history_if_pinned();
+    }
+    return;
+  }
+  if (hidden_paint_) {
+    hidden_paint_ = false;
+    render();
+    follow_history_if_pinned();
+  }
+  // Flush a delta that the paint floor held back. Deltas normally paint from the
   // SSE frame itself (see apply_session_event) - this is only the tail of a
   // burst, and it is the last paint of a streaming turn.
   if (stream_dirty_) {
@@ -3183,11 +3207,15 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // throttled to 1 Hz in an occluded tab, and the elapsed time must still move
     // while deltas keep arriving.
     msg.now_ms = now;
-    if (now - last_stream_paint_ms_ >= 25) {
+    // A 60 ms floor (about 16 paints a second) is smooth for text and FOUR
+    // times less DOM/raster churn than the old 25 ms: every paint re-parses the
+    // growing answer and re-rasterises the column, and a long turn kept that
+    // going for hours. A hidden window paints nothing at all (see paint()).
+    if (now - last_stream_paint_ms_ >= 60) {
       last_stream_paint_ms_ = now;
       stream_dirty_ = false;
-      render();
-      follow_history_if_pinned();
+      paint();
+      if (!dom_.hidden()) follow_history_if_pinned();
     } else {
       stream_dirty_ = true;
     }
@@ -3311,7 +3339,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       }
       msg.interim.push_back(text);
       msg.rev = next_msg_rev_++;
-      render();
+      paint();
     }
   } else if (event == "tool.start") {
     // A tool was invoked. Show it IMMEDIATELY with its arguments: a slow tool
@@ -3343,7 +3371,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       }
       msg.tools.push_back(tb);
       msg.rev = next_msg_rev_++;
-      render();
+      paint();
     }
   } else if (event == "tool.update") {
     std::string name = jsonutil::get<std::string>(payload, "name", "");
@@ -3389,7 +3417,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       if (!detail.empty()) slot->detail = detail;
       if (!subagent_id.empty()) slot->subagent_id = subagent_id;
       msg.rev = next_msg_rev_++;
-      render();
+      paint();
     }
   } else if (event == "subagent.done") {
     std::string id = jsonutil::get<std::string>(payload, "id", "");
@@ -3773,6 +3801,17 @@ void UiApp::update(const std::function<void(AppState&)>& f) {
 void UiApp::toast(const std::string& text) {
   st_.toast = text;
   st_.toast_deadline_ms = now_ms() + kToastMs;
+  render();
+}
+
+void UiApp::paint() {
+  // A hidden window is not painted. `mount()` is the exception: the first frame
+  // must exist before anything asks whether the window is visible, and a test or
+  // an engine that never reports visibility would otherwise never paint at all.
+  if (render_count_ > 0 && dom_.hidden()) {
+    hidden_paint_ = true;
+    return;
+  }
   render();
 }
 

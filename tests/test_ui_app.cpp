@@ -4676,9 +4676,10 @@ FS_TEST(uiapp_work_process_puts_thinking_last) {
   EXPECT_TRUE(tool_at != std::string::npos);
   EXPECT_TRUE(narr_at != std::string::npos);
   EXPECT_TRUE(think_at != std::string::npos);
-  // Pile of calls, then its words, then the reasoning - not interleaved.
-  EXPECT_TRUE(narr_at > tool_at);
-  EXPECT_TRUE(think_at > narr_at);
+  // Arrival order: the round's note, its tool call, then the reasoning appended
+  // where the stream has reached (a later call would land below it).
+  EXPECT_TRUE(narr_at < tool_at);
+  EXPECT_TRUE(think_at > tool_at);
 }
 
 // A subagent transcript shows the tools a message called even when it also has

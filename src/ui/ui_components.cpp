@@ -737,12 +737,34 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     work.add(whead);
     if (work_open) {
       H inner = el("div", "work-body");
-      // The process reads as a PILE of tool calls, then the model's own words.
-      // Interleaving narration between the calls made the same turn look like
-      // two independent channels taking turns; in practice a round is one pile
-      // of calls plus one piece of thinking. So: calls in order, then the
-      // narration, then the reasoning last.
-      for (size_t i = 0; i < m.tools.size(); ++i) {
+      // ONE stream in ARRIVAL ORDER: narration and tool blocks as they come,
+      // then the reasoning at the point where nothing newer has arrived. The
+      // loop emits one narration per round before that round's tool calls, so
+      // putting the note above its call IS the chronological order - and a
+      // thought that lands between two calls stays between them instead of
+      // being herded into a separate section.
+      // While a turn RUNS, only the newest steps are kept in the DOM. A long
+      // unattended turn can reach hundreds of rows, and every repaint then
+      // walks/re-rasters the whole column - the sustained UI load that runs for
+      // hours. The finished turn (streaming == false) renders every step again,
+      // so nothing is lost.
+      const size_t kLiveToolCap = 120;
+      size_t first = 0;
+      if (m.streaming && m.tools.size() > kLiveToolCap) {
+        first = m.tools.size() - kLiveToolCap;
+        inner.add(el("div", "work-note dim").text(
+            tr("更早的 ") + itos(static_cast<int>(first)) +
+            tr(" 步已省略（本轮结束后可展开查看全部）")));
+      }
+      size_t interim_at = 0;
+      while (interim_at < m.interim.size() && interim_at < first) ++interim_at;
+      for (size_t i = first; i < m.tools.size(); ++i) {
+        while (interim_at < m.interim.size() && interim_at <= i) {
+          if (!m.interim[interim_at].empty()) {
+            inner.add(el("div", "work-note").text(m.interim[interim_at]));
+          }
+          ++interim_at;
+        }
         EventFn toggle = nullptr;
         if (on_tool_toggle) {
           EventFn base = on_tool_toggle;
@@ -755,11 +777,14 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         if (tb.key.empty()) tb.key = std::to_string(m.uid) + ":" + itos(static_cast<int>(i));
         inner.add(tool_block(tb, toggle, on_open_subagent));
       }
-      for (size_t i = 0; i < m.interim.size(); ++i) {
-        if (!m.interim[i].empty()) {
-          inner.add(el("div", "work-note").text(m.interim[i]));
+      // Anything left (a turn that narrated but called no tool).
+      for (; interim_at < m.interim.size(); ++interim_at) {
+        if (!m.interim[interim_at].empty()) {
+          inner.add(el("div", "work-note").text(m.interim[interim_at]));
         }
       }
+      // Appended, not grouped: it goes where the stream has reached, and a tool
+      // call that arrives later simply lands below it.
       if (!m.thinking.empty()) {
         inner.add(el("div", "work-label").text(tr("思考")));
         inner.add(el("pre", "think-body").text(m.thinking));

@@ -949,6 +949,9 @@ class UiApp {
   void mount();
   // re-render whole tree and patch
   void render();
+  // render, unless the window is hidden - then remember and let pump() paint
+  // once when it comes back (see IDom::hidden).
+  void paint();
   void show(const std::string& tab_id);
 
   AppState& state() { return st_; }
@@ -1283,6 +1286,11 @@ class UiApp {
   // Stream text arrived since the last paint, and when that paint happened. See
   // pump(): deltas are coalesced instead of rendering once per token.
   bool stream_dirty_ = false;
+  // A paint was asked for while the window was hidden (see paint()). pump()
+  // repaints once when it becomes visible again.
+  bool hidden_paint_ = false;
+  // Last safety-valve paint while hidden (0.5 Hz, see pump()).
+  int64_t last_hidden_paint_ms_ = 0;
   // A programmatic scroll restore is in flight. The scroll handler must not write
   // the reported offset back while this is set: a restore against a container that
   // is still short gets clamped, and saving that clamped value is what made a
