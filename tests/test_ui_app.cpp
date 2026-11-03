@@ -4604,3 +4604,113 @@ FS_TEST(uiapp_subagent_events_split_by_kind) {
                            {"subagentKind", "complete-step"}});
   EXPECT_TRUE(dom.dump().find("step output") != std::string::npos);
 }
+
+// ---- 第四十三批：todo 悬浮清单 / 思考排在工作过程末尾 / 子代理记录里的工具 ----
+
+// The model's checklist has its own floating panel. Before this, todo.updated
+// ended in a toast: the backend could add items while the UI kept no list, so
+// "todo 可以设置但悬浮窗口不显示".
+FS_TEST(uiapp_todo_panel_shows_model_checklist) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.on_backend_event_for_test(
+      "todo.updated",
+      Json{{"sid", "sess_a"},
+           {"owner", "sess_a"},
+           {"items", Json::array({Json{{"id", 1}, {"task", "读配置文件"}, {"done", false}},
+                                  Json{{"id", 2}, {"task", "写补丁"}, {"done", true}}})}});
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("任务清单") != std::string::npos);
+  EXPECT_TRUE(d.find("读配置文件") != std::string::npos);
+  EXPECT_TRUE(d.find("写补丁") != std::string::npos);
+  EXPECT_TRUE(app.state().todo_open);
+  ASSERT_TRUE(app.state().todos.size() == 2u);
+  // The composer grows a 清单 toggle only while a list exists.
+  EXPECT_TRUE(d.find("清单") != std::string::npos);
+  // Closing hides the float; a later update does NOT force it back open.
+  app.update([](AppState& s) { s.todo_open = false; });
+  EXPECT_TRUE(dom.dump().find("任务清单") == std::string::npos);
+  app.on_backend_event_for_test(
+      "todo.updated",
+      Json{{"sid", "sess_a"},
+           {"owner", "sess_a"},
+           {"items", Json::array({Json{{"id", 1}, {"task", "读配置文件"}, {"done", true}}})}});
+  EXPECT_FALSE(app.state().todo_open);
+  // A SUBAGENT's private checklist must not replace the session's.
+  app.on_backend_event_for_test(
+      "todo.updated",
+      Json{{"sid", "sess_a"},
+           {"owner", "sub_1"},
+           {"items", Json::array({Json{{"id", 9}, {"task", "子代理的事"}, {"done", false}}})}});
+  EXPECT_EQ((int)app.state().todos.size(), 1);
+  EXPECT_TRUE(app.state().todos[0].task == std::string("读配置文件"));
+}
+
+// 工作过程里，思考排在工具/解说之后：真实的一轮常常是一堆工具调用带一段思考。
+FS_TEST(uiapp_work_process_puts_thinking_last) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "the answer";
+    m.thinking = "REASONING_MARKER";
+    m.work_open = true;
+    comp::ToolBlock tb;
+    tb.name = "read_file";
+    tb.summary = "a.cpp";
+    m.tools.push_back(tb);
+    m.interim.push_back("NARRATION_MARKER");
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  size_t tool_at = d.find("read_file");
+  size_t narr_at = d.find("NARRATION_MARKER");
+  size_t think_at = d.find("REASONING_MARKER");
+  EXPECT_TRUE(tool_at != std::string::npos);
+  EXPECT_TRUE(narr_at != std::string::npos);
+  EXPECT_TRUE(think_at != std::string::npos);
+  // Pile of calls, then its words, then the reasoning - not interleaved.
+  EXPECT_TRUE(narr_at > tool_at);
+  EXPECT_TRUE(think_at > narr_at);
+}
+
+// A subagent transcript shows the tools a message called even when it also has
+// text: a round that both spoke and called tools used to read as speech only.
+FS_TEST(uiapp_subagent_transcript_shows_tools_with_text) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    AppState::SubagentDetail det;
+    det.loaded = true;
+    det.row.id = "sub_1";
+    det.row.kind = "explore";
+    det.row.status = "done";
+    det.row.transcript = Json::array(
+        {Json{{"role", "assistant"},
+              {"content", "先看看目录结构"},
+              {"toolCalls", Json::array({Json{{"name", "list_dir"}}})}},
+         Json{{"role", "tool"}, {"content", "{\"ok\":true}"}}});
+    s.subagent_details["sub_1"] = det;
+    SideTab t;
+    t.id = "sb1";
+    t.kind = "subagent";
+    t.subagent_id = "sub_1";
+    t.title = "explore";
+    s.side_tabs.push_back(t);
+    s.active_side = "sb1";
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("先看看目录结构") != std::string::npos);
+  EXPECT_TRUE(d.find("list_dir") != std::string::npos);
+  EXPECT_TRUE(d.find("工具调用") != std::string::npos);
+}

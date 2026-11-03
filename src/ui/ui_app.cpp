@@ -538,6 +538,10 @@ std::string rel_time(int64_t ms) {
 
 }  // namespace
 
+// Defined next to the plan/todo parsers further down; load_session is above it
+// and needs the declaration here.
+std::vector<AppState::TodoItem> parse_todo_items(const Json& items);
+
 // ===========================================================================
 // AppState
 // ===========================================================================
@@ -952,6 +956,8 @@ void UiApp::save_session_view(const std::string& sid) {
   v.plan_steps = st_.plan_steps;
   v.plan_goal = st_.plan_goal;
   v.plan_editing = -1;  // a transient edit does not survive a tab switch
+  v.todos = st_.todos;
+  v.todo_open = st_.todo_open;
 }
 
 void UiApp::load_session_view(const std::string& sid) {
@@ -1053,6 +1059,8 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.plan_steps = v.plan_steps;
   st_.plan_goal = v.plan_goal;
   st_.plan_editing = -1;
+  st_.todos = v.todos;
+  st_.todo_open = v.todo_open;
 }
 
 void UiApp::switch_tab(const std::string& id, int dir) {
@@ -1360,6 +1368,24 @@ void UiApp::load_session(const std::string& sid) {
       refresh_loop_state(sid);
     }
     render();
+  });
+  // The model's checklist is host memory, not part of the stored turns: read it
+  // when the session opens so the floating todo panel still shows a list written
+  // before the app was started.
+  call_async("session.todos", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    std::vector<AppState::TodoItem> list =
+        parse_todo_items(r.data.contains("items") ? r.data["items"] : Json::array());
+    if (st_.active_tab == sid) {
+      bool was_empty = st_.todos.empty();
+      st_.todos = list;
+      if (!list.empty() && was_empty) st_.todo_open = true;
+      render();
+    } else {
+      SessionView& v = views_.get_or_create(sid);
+      if (v.todos.empty() && !list.empty()) v.todo_open = true;
+      v.todos = list;
+    }
   });
   call_async("session.turns", Json{{"sid", sid}, {"before", -1}, {"limit", kHistoryPage}},
              [this, sid](const BackendResult& r) {
@@ -2217,6 +2243,25 @@ std::vector<AppState::PlanStep> parse_plan_steps(const Json& tree,
       s.status = "pending";
     }
     if (!s.title.empty()) out.push_back(s);
+  }
+  return out;
+}
+
+// The model's checklist items ({id, task, done}) as the floating panel shows
+// them. Shared by the live `todo.updated` event and the on-open fetch, so the
+// two paths cannot disagree about the shape.
+std::vector<AppState::TodoItem> parse_todo_items(const Json& items) {
+  std::vector<AppState::TodoItem> out;
+  if (!items.is_array()) return out;
+  for (size_t i = 0; i < items.size(); ++i) {
+    const Json& e = items[i];
+    if (!e.is_object()) continue;
+    AppState::TodoItem t;
+    t.id = jsonutil::get_int(e, "id", 0);
+    t.task = jsonutil::get<std::string>(e, "task",
+                                         jsonutil::get<std::string>(e, "text", ""));
+    t.done = jsonutil::get<bool>(e, "done", false);
+    if (!t.task.empty()) out.push_back(t);
   }
   return out;
 }
@@ -3562,12 +3607,33 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "todo.updated") {
-    // Todo is the MAIN AGENT's own checklist (todo_add/todo_check, one owner per
-    // session). It is a different thing from the plan tree below: the plan is
-    // the model's step plan with statuses, and it is what the loop reads to
-    // decide whether auto mode continues. Both are shown, separately.
-    st_.toast = "任务清单已更新";
-    st_.toast_deadline_ms = now_ms() + kToastMs;
+    // The model's own checklist (todo_add/todo_check, one owner per session).
+    // It used to end in a toast and nothing else: the backend could add items
+    // while the UI kept no list, so the panel the user expected had nothing to
+    // show. It is a DIFFERENT thing from the plan tree (the plan is what the
+    // loop reads to decide auto-continue), and both are shown separately.
+    std::vector<AppState::TodoItem> list =
+        parse_todo_items(payload.contains("items") ? payload["items"] : Json::array());
+    // The host tags the list with its OWNER: a session id for the main agent, a
+    // subagent id for a subagent's private tree. The panel is the session's, so
+    // a subagent's checklist must not replace it.
+    std::string owner = jsonutil::get<std::string>(payload, "owner", "");
+    std::string routed = sid.empty() ? st_.active_tab : sid;
+    if (!owner.empty() && !routed.empty() && owner != routed) return;
+    if (sid.empty() || sid == st_.active_tab) {
+      bool was_empty = st_.todos.empty();
+      st_.todos = list;
+      // A NEW checklist opens its panel: the model just wrote down what it is
+      // about to do, and that is exactly the moment the user wants to see it. A
+      // list the user has closed stays closed on later updates.
+      if (!list.empty() && was_empty) st_.todo_open = true;
+    } else {
+      SessionView& v = views_.get_or_create(sid);
+      bool was_empty = v.todos.empty();
+      v.todos = list;
+      if (!list.empty() && was_empty) v.todo_open = true;
+    }
+    render();
   } else if (event == "plan.update") {
     // The model wrote a plan. The panel used to update ONLY when the user clicked
     // the 规划 button, so a plan produced mid-turn was invisible until the panel
@@ -3740,6 +3806,11 @@ void UiApp::render() {
       }
     }
     patch(dom_, tree_, neu, root_);
+    // Ship this frame's DOM writes as one batch before anything below READS the
+    // DOM (the scroll restore reads real heights, the wiring binds handlers to
+    // live nodes). A bridged adapter buffers per-node writes; without this they
+    // would still be sitting in its buffer while those calls execute.
+    dom_.flush();
     tree_ = neu;
     last_rendered_tab_ = st_.active_tab;
     // The transcript (if this render created one) is in the DOM now, so a
@@ -5636,6 +5707,36 @@ VNodePtr UiApp::build_session() {
     center.add(plan);
   }
 
+  // The model's own checklist (todo_add / todo_check), floating like the plan
+  // but on the RIGHT so the two never cover each other. It exists because the
+  // backend could already add items while the UI dropped every update into a
+  // toast - "todo 可以设置但悬浮窗口不显示".
+  if (st_.todo_open && !st_.todos.empty()) {
+    H todo = el("div", "todo-float");
+    todo.key("todo-float");
+    todo.anim(anim::kPop);
+    H thead = el("div", "plan-head");
+    thead.add(el("span", "plan-title").text(tr("任务清单")));
+    thead.add(el("span", "grow"));
+    int tdone = 0;
+    for (size_t i = 0; i < st_.todos.size(); ++i) {
+      if (st_.todos[i].done) ++tdone;
+    }
+    thead.add(el("span", "todo-progress dim").text(
+        itos(tdone) + "/" + itos(static_cast<int>(st_.todos.size()))));
+    thead.add(comp::icon_button("\u2715", tr("收起"), [this](const std::string&) {
+      update([&](AppState& s) { s.todo_open = false; });
+    }));
+    todo.add(thead);
+    for (size_t i = 0; i < st_.todos.size(); ++i) {
+      const AppState::TodoItem& it = st_.todos[i];
+      H row = el("div", it.done ? "plan-step st-done" : "plan-step");
+      row.add(el("span", "plan-status").text(it.done ? "\u2713" : "\u25cb"));
+      row.add(el("span", "plan-text").text(it.task));
+      todo.add(row);
+    }
+    center.add(todo);
+  }
   // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");
   // Right-click anywhere in the composer (including the textarea) opens the
@@ -6045,6 +6146,15 @@ VNodePtr UiApp::build_session() {
       });
     }
   }, "ghost"));
+  // The model's checklist, only while it HAS one: the composer row is already
+  // tight, and a session without todos gets no extra control.
+  if (!st_.todos.empty()) {
+    left_tools.add(comp::icon_text_button("list-check", tr("清单"),
+                                          [this](const std::string&) {
+      bool open = !st_.todo_open;
+      update([&](AppState& s) { s.todo_open = open; });
+    }, "ghost"));
+  }
   // 自动挡: a toggle button, not a select - it is one bit and it is switched
   // often. The label says which mode is active.
   // 顺序：自动挡 在 批准模式 前面。先决定"谁来做"（人/AI），再决定"做到什么
@@ -6778,24 +6888,26 @@ VNodePtr UiApp::build_side_panel() {
           std::string text = jsonutil::get<std::string>(e, "content",
                               jsonutil::get<std::string>(e, "text", ""));
           // The transcript is shown WHOLE here: this panel exists precisely
-          // because the card could not show it.
-          if (text.empty() && e.contains("toolCalls") && e["toolCalls"].is_array()) {
-            std::string names;
+          // because the card could not show it. Tool calls are listed whenever
+          // the message HAS them - the old code only fell back to the names when
+          // the text was empty, so a round that both spoke and called tools
+          // looked like it only spoke.
+          std::string names;
+          if (e.contains("toolCalls") && e["toolCalls"].is_array()) {
             for (size_t c = 0; c < e["toolCalls"].size(); ++c) {
               std::string nm = jsonutil::get<std::string>(e["toolCalls"][c], "name", "");
               if (nm.empty()) continue;
               if (!names.empty()) names += ", ";
               names += nm;
             }
-            if (!names.empty()) {
-              text = tr("工具调用") + ": " + names;
-              if (role.empty()) role = "tool";
-            }
           }
-          if (text.empty()) continue;
+          if (text.empty() && names.empty()) continue;
           H row_h = el("div", "sap-msg " + (role.empty() ? std::string("note") : role));
           row_h.add(el("div", "sap-role").text(role));
-          row_h.add(el("pre", "sap-body").text(text));
+          if (!text.empty()) row_h.add(el("pre", "sap-body").text(text));
+          if (!names.empty()) {
+            row_h.add(el("div", "sap-tools").text(tr("工具调用") + ": " + names));
+          }
           body.add(row_h);
         }
       } else {

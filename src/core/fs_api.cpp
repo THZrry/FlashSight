@@ -1400,6 +1400,11 @@ FsResult FsApi::session_loop_state(const std::string& sid) {
   return FsResult::success(Json{{"sid", sid}, {"state", state}});
 }
 
+FsResult FsApi::session_todos(const std::string& sid) {
+  Json items = agent_host_ ? agent_host_->todos_for(sid) : Json::array();
+  return FsResult::success(Json{{"sid", sid}, {"items", items}});
+}
+
 // addon2 任务健壮性：打断后续接
 FsResult FsApi::session_continue(const std::string& sid, const std::string& guidance) {
   return agent_host_->continue_task(sid, guidance);

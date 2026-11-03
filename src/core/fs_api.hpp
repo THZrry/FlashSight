@@ -147,6 +147,10 @@ class FsApi {
   // "toolCalling" | "waiting" | "turnDone"). The composer's suspend button and
   // the session status dots read this instead of guessing from local clicks.
   FsResult session_loop_state(const std::string& sid);
+  // The model's checklist for a session (todo_add/todo_check). Read when a
+  // session is reopened: items added before the app loaded are still in the
+  // host, and the floating todo panel has to show them.
+  FsResult session_todos(const std::string& sid);
   // addon2 任务健壮性：打断后续接（给原任务发引导并续跑）
   FsResult session_continue(const std::string& sid, const std::string& guidance);
   // approve 档权限门：批准/拒绝当前等待的 tool

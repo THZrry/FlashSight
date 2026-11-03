@@ -776,6 +776,17 @@ struct AppState {
   };
   std::vector<PlanStep> plan_steps;
   std::string plan_goal;
+  // The model's own checklist (todo_add / todo_check). A different thing from
+  // the plan: the plan is a step tree the loop reads, a todo is the agent's
+  // working list. It gets a floating panel of its own - the backend could
+  // already add items while the UI dropped every update into a toast.
+  struct TodoItem {
+    int64_t id = 0;
+    std::string task;
+    bool done = false;
+  };
+  std::vector<TodoItem> todos;
+  bool todo_open = false;
   // Inline plan editing: -1 = no step being edited. The plan is user-editable,
   // not just model output, so the panel needs an edit path.
   int plan_editing = -1;
@@ -917,6 +928,10 @@ struct SessionView {
   // panel displays and what the loop reads.
   std::vector<AppState::PlanStep> plan_steps;
   std::string plan_goal;
+  // The model's checklist travels with the session view (a background session's
+  // todo.updated must land there, not on whatever tab is active).
+  std::vector<AppState::TodoItem> todos;
+  bool todo_open = false;
   // Inline plan editing: -1 = no step being edited. The plan is user-editable,
   // not just model output, so the panel needs an edit path.
   int plan_editing = -1;

@@ -210,6 +210,10 @@ class AgentHost {
   // "turnDone"). The UI turns this into a status dot: waiting means the model is
   // blocked on the user (a permission prompt), which is different from running.
   std::string loop_state(const std::string& sid) const;
+  // The model's checklist for a session, as stored in memory. The floating todo
+  // panel needs it when a session is REOPENED - the live `todo.updated` event
+  // only covers items added while the user is watching.
+  Json todos_for(const std::string& sid);
   // The auto-continue round this session is currently on (0 = not in one).
   // The UI uses it for the purple "background" dot and the round divider.
   int auto_round(const std::string& sid) const;

@@ -1187,6 +1187,11 @@ std::string AgentHost::loop_state(const std::string& sid) const {
   return loop_state_str(it->second->state());
 }
 
+Json AgentHost::todos_for(const std::string& sid) {
+  std::lock_guard<std::recursive_mutex> host_lock(lock());
+  return todos_.to_json(sid);
+}
+
 FsResult AgentHost::live_turn(const std::string& sid) {
   std::lock_guard<std::recursive_mutex> host_lock(lock());
   auto it = loops_.find(sid);

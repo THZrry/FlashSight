@@ -112,6 +112,10 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   reg("session.loopState", [api](const Json& a) {
     return api->session_loop_state(s(a, "sid"));
   });
+  // The model's checklist, for the floating todo panel when a session reopens.
+  reg("session.todos", [api](const Json& a) {
+    return api->session_todos(s(a, "sid"));
+  });
   // 编辑并重发最后一条：只截断转录，不回退文件改动
   reg("session.trimHistory", [api](const Json& a) {
     return api->session_trim_history(s(a, "sid"), s(a, "turnId"));

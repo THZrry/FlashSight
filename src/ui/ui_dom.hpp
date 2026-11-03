@@ -78,6 +78,13 @@ class IDom {
   virtual void remove(Node node) = 0;
   virtual void clear(Node parent) = 0;
 
+  // Send any operations an adapter has buffered. The synchronous backends
+  // (wasm / null / whale) apply each call immediately and have nothing to do;
+  // a bridged backend (webview) batches a frame's DOM writes into ONE script
+  // instead of one IPC round trip per node, which is what kept the UI from
+  // starving its own message loop during a long turn.
+  virtual void flush() {}
+
   // --- content / attributes ---
   virtual void set_text(Node node, const std::string& text) = 0;
   // Replace the node's children with parsed markup (element.innerHTML). Used for

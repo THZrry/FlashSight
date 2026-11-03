@@ -93,9 +93,17 @@ const char* kGlueJs = R"JS(
   if (globalThis.__fsDom) return;
   var S = {
     nodes: [null],   // id -> DOM node (id 1 = root)
-    handlers: []     // id -> { kind -> [eventName, listener] }
+    handlers: [],    // id -> { kind -> [eventName, listener] }
+    outside: Object.create(null)  // popup node id -> element awaiting outside click
   };
   globalThis.__fsDom = S;
+
+  // Batched dispatch: the C++ adapter appends one call per DOM write and flushes
+  // the whole frame as ONE script. Per-call try/catch keeps one bad op from
+  // cancelling the rest of the frame.
+  globalThis.__fsDomTry = function (op, i, j, a, b) {
+    try { globalThis.__fsDomCall(op, i, j, a, b); } catch (e) {}
+  };
 
   // The browser's own context menu is a document-level default, so a per-node
   // contextmenu listener never fires on the parts of the page that have no
@@ -143,6 +151,28 @@ const char* kGlueJs = R"JS(
     if (typeof fn !== 'function') return;
     try { fn.apply(null, args); } catch (e) {}
   }
+
+  // ONE document-level dismissal dispatcher for ALL popups. The old design put
+  // a listener on the document PER POPUP, which could never be removed once the
+  // popup node was destroyed - and its closure kept the whole detached popup
+  // subtree alive for the rest of the session. That is a slow leak that only
+  // shows up after hours of use ("内存泄漏，界面卡死").
+  document.addEventListener('mousedown', function (ev) {
+    var t = ev.target;
+    // Only the ANCHOR is exempt (the button that toggles the popup); exempting
+    // the parent container swallowed presses on its siblings.
+    if (t && t.closest && t.closest('.model-field, .model-btn-wrap, [data-keep-popup]')) {
+      return;
+    }
+    for (var k in S.outside) {
+      var el = S.outside[k];
+      if (!el || !el.isConnected) { delete S.outside[k]; continue; }
+      if (el.contains(t)) continue;
+      var cb = el.__fsOutCb;
+      delete S.outside[k];
+      if (cb) { post('fs_ui_outside', [cb]); return; }
+    }
+  }, true);
 
   // Push state the C++ mirror needs. Called BEFORE the app handler runs.
   function push(what, id, v) { post('fs_ui_push', [what, id | 0, String(v == null ? '' : v)]); }
@@ -305,6 +335,7 @@ const char* kGlueJs = R"JS(
           if (el.parentNode) el.parentNode.removeChild(el);
           S.nodes[i] = null;
           S.handlers[i] = null;
+          delete S.outside[i];
         }
         return;
       case 'clear':   if (el) el.innerHTML = ''; return;
@@ -429,25 +460,9 @@ const char* kGlueJs = R"JS(
       case 'outside':
         if (!el) return;
         el.__fsOutCb = parseInt(a, 10);
-        if (el.__fsOutInit) return;
-        el.__fsOutInit = 1;
-        el.__fsOutHandler = function (ev) {
-          // The node may have been removed from the DOM while this document
-          // listener stayed installed. Firing then would dismiss whatever popup
-          // is open NOW because of a dead one - so a detached popup is inert.
-          if (!el.isConnected) return;
-          if (!el.__fsOutCb) return;
-          var t = ev.target;
-          if (el.contains(t)) return;
-          // Only the ANCHOR is exempt (the button that toggles this popup).
-          // Exempting the whole parent container also swallowed presses on
-          // siblings, which made the popup look undismissable.
-          if (t && t.closest && t.closest('.model-field, .model-btn-wrap, [data-keep-popup]')) {
-            return;
-          }
-          post('fs_ui_outside', [el.__fsOutCb]);
-        };
-        document.addEventListener('mousedown', el.__fsOutHandler, true);
+        // Register in the ONE dismissal map instead of installing a document
+        // listener per popup (see the dispatcher near the top).
+        S.outside[i] = el;
         return;
       case 'placePopup': {
         if (!el || !el2) return;
@@ -782,56 +797,67 @@ class WebViewDom : public IDom {
 
   Node create_element(const std::string& tag) override {
     uint64_t id = alloc();
-    call("create", static_cast<int>(id), 0, tag, "");
+    enqueue("create", static_cast<int>(id), 0, tag, "");
     return Node{id};
   }
   Node create_text(const std::string& text) override {
     uint64_t id = alloc();
-    call("text", static_cast<int>(id), 0, text, "");
+    enqueue("text", static_cast<int>(id), 0, text, "");
     slots_[id].is_text = true;
     slots_[id].text = text;
     return Node{id};
   }
   void append(Node parent, Node child) override {
-    call("append", idx(parent), idx(child), "", "");
+    enqueue("append", idx(parent), idx(child), "", "");
   }
   void insert_before(Node parent, Node child, Node ref) override {
     // `ref` travels in slot `a` (the glue's signature is (op, i, j, a, b) and
     // `j` is the child). Dropping it here made every reorder append to the end
     // instead of inserting at the anchor - which reads as "the page went blank"
     // once the diff starts moving keyed children around.
-    call("insertBefore", idx(parent), idx(child), std::to_string(idx(ref)), "");
+    enqueue("insertBefore", idx(parent), idx(child), std::to_string(idx(ref)), "");
   }
   void remove(Node node) override {
     if (!node.valid()) return;
-    call("remove", idx(node), 0, "", "");
-    if (node.id < slots_.size()) slots_[node.id].valid = false;
+    enqueue("remove", idx(node), 0, "", "");
+    if (node.id < slots_.size()) {
+      // RELEASE the mirror strings. Keeping them on a dead slot meant every node
+      // ever created still carried its last text/value - the transcript re-creates
+      // nodes for growing content, so this grew with the length of a session.
+      slots_[node.id] = Slot();
+    }
+    // A popup that is gone must not keep its dismissal callback alive either.
+    std::map<uint64_t, int>::iterator ob = outside_by_node_.find(node.id);
+    if (ob != outside_by_node_.end()) {
+      outside_cbs_.erase(ob->second);
+      outside_by_node_.erase(ob);
+    }
     if (focused_ == node.id) focused_ = 0;
   }
-  void clear(Node parent) override { call("clear", idx(parent), 0, "", ""); }
+  void clear(Node parent) override { enqueue("clear", idx(parent), 0, "", ""); }
 
   // ---- content / attributes ---------------------------------------------
 
   void set_text(Node node, const std::string& text) override {
-    call("textSet", idx(node), 0, text, "");
+    enqueue("textSet", idx(node), 0, text, "");
     if (node.id < slots_.size()) slots_[node.id].text = text;
   }
   void set_html(Node node, const std::string& html) override {
-    call("html", idx(node), 0, html, "");
+    enqueue("html", idx(node), 0, html, "");
   }
   void set_attr(Node node, const std::string& key, const std::string& value) override {
-    call("attr", idx(node), 0, key, value);
+    enqueue("attr", idx(node), 0, key, value);
     if (key == "value" && node.id < slots_.size()) slots_[node.id].value = value;
   }
   void remove_attr(Node node, const std::string& key) override {
-    call("attrRemove", idx(node), 0, key, "");
+    enqueue("attrRemove", idx(node), 0, key, "");
     if (key == "value" && node.id < slots_.size()) slots_[node.id].value.clear();
   }
   void set_style(Node node, const std::string& key, const std::string& value) override {
-    call("style", idx(node), 0, key, value);
+    enqueue("style", idx(node), 0, key, value);
   }
   void set_visible(Node node, bool visible) override {
-    call("visible", idx(node), 0, visible ? "1" : "0", "");
+    enqueue("visible", idx(node), 0, visible ? "1" : "0", "");
   }
   std::string get_value(Node node) override {
     return node.id < slots_.size() ? slots_[node.id].value : std::string();
@@ -841,11 +867,11 @@ class WebViewDom : public IDom {
   // ---- events ------------------------------------------------------------
 
   void on(Node node, EventKind kind, int handler_id) override {
-    call("bind", idx(node), 0, std::to_string(static_cast<int>(kind)),
-         std::to_string(handler_id));
+    enqueue("bind", idx(node), 0, std::to_string(static_cast<int>(kind)),
+            std::to_string(handler_id));
   }
   void off(Node node, EventKind kind) override {
-    call("unbind", idx(node), 0, std::to_string(static_cast<int>(kind)), "");
+    enqueue("unbind", idx(node), 0, std::to_string(static_cast<int>(kind)), "");
   }
 
   // ---- splitters / popovers / tab drag -----------------------------------
@@ -872,9 +898,17 @@ class WebViewDom : public IDom {
   void bind_outside_click(Node popup, std::function<void()> cb) override {
     // ONE callback per popup, keyed by the popup node. A single slot meant the
     // last binding won: with a model picker open and a context menu opened on
-    // top, the picker's dismissal callback was overwritten by the menu's - and
-    // the document listeners that earlier popups installed kept firing the
-    // NEWEST callback, so a press outside closed the wrong thing (or nothing).
+    // top, the picker's dismissal callback was overwritten by the menu's.
+    //
+    // This is called on EVERY render while a popup is open, so the REPLACEMENT
+    // matters: the map used to keep the previous callback for the same node
+    // forever - one std::function per frame, per open popup, for the life of
+    // the window.
+    std::map<uint64_t, int>::iterator old = outside_by_node_.find(popup.id);
+    if (old != outside_by_node_.end()) {
+      outside_cbs_.erase(old->second);
+      outside_by_node_.erase(old);
+    }
     int id = ++outside_seq_;
     if (cb) {
       outside_cbs_[id] = std::move(cb);
@@ -902,7 +936,10 @@ class WebViewDom : public IDom {
     key_input_cb_ = cb;
     call("keyInput", idx(node), 0, "", "");
   }
-  void focus(Node node) override { call("focus", idx(node), 0, "", ""); }
+  void focus(Node node) override {
+    flush();  // the node may have just been created in this frame's batch
+    call("focus", idx(node), 0, "", "");
+  }
 
   // ---- terminal geometry -------------------------------------------------
 
@@ -971,6 +1008,9 @@ class WebViewDom : public IDom {
   // ---- animation ---------------------------------------------------------
 
   void play_animation(Node node, const std::string& cls) override {
+    // The exit path sets style/class and then plays: those writes are in the
+    // batch, and the animation must start with them already applied.
+    flush();
     call("animation", idx(node), 0, cls, "");
   }
   void schedule(int ms, std::function<void()> cb) override {
@@ -980,6 +1020,14 @@ class WebViewDom : public IDom {
     call("timeout", 0, 0, std::to_string(id), std::to_string(ms));
   }
   bool supports_exit_animations() const override { return true; }
+
+  // Ship the buffered DOM writes as ONE script. Called at the end of a render
+  // (UiApp::render) and whenever a direct call must observe the patched DOM.
+  void flush() override {
+    if (batch_.empty()) return;
+    webview_eval(w_, batch_.c_str());
+    batch_.clear();
+  }
 
   // ---- appearance --------------------------------------------------------
 
@@ -1142,6 +1190,18 @@ class WebViewDom : public IDom {
     webview_eval(w_, js.c_str());
   }
 
+  // Buffer a structural/content write into the frame's batch. See flush().
+  void enqueue(const char* op, int i, int j, const std::string& a,
+               const std::string& b) {
+    batch_ += "globalThis.__fsDomTry(";
+    batch_ += js_str(op);
+    batch_ += "," + std::to_string(i) + "," + std::to_string(j) + ",";
+    batch_ += js_str(a) + "," + js_str(b) + ");";
+    // A pathological frame (a big file preview) must not build an unbounded
+    // script in memory: ship it in chunks.
+    if (batch_.size() >= 512 * 1024) flush();
+  }
+
   // Same, but reports whether the glue is actually present. Used once at
   // startup: a blank window is otherwise indistinguishable from a broken
   // adapter, and the only way to see inside is a script that writes back.
@@ -1185,6 +1245,8 @@ class WebViewDom : public IDom {
 
   webview_t w_ = nullptr;
   std::vector<Slot> slots_;
+  // Buffered DOM writes for the current frame (see enqueue/flush).
+  std::string batch_;
   uint64_t next_id_ = 2;
   uint64_t focused_ = 0;
   int split_seq_ = 0;

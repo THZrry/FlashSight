@@ -1005,3 +1005,40 @@ The process of project: P0 环境搭建
     `project_read_file_kinds`（文本/图片/二进制/UTF-16 四态）、`find_files` 跳过 `build/` 并给出 note、
     `edit_file` 拒绝 33MB 文件、`uiapp_interim_moves_narration_out_of_the_answer`（解说从答案移到工作日志，
     turn.done 后折叠）；两个工作过程折叠用例改成"运行中展开、结束后折叠、点开可见"。
+
+<95>(SOLVED): webview 桥接泄漏与逐节点 IPC（"界面卡死/内存暴涨"的排查结论）+ 侧栏不递归 + 工作过程改成"工具在前、解说与思考在后" + 子代理记录补上工具名 + todo 悬浮清单。
+  - **"放了一晚，电脑直接重启了"的排查**：事件日志给出的是 **BugCheck 0x0000010E
+    (VIDEO_MEMORY_MANAGEMENT_INTERNAL)**——显卡驱动崩溃，不是用户态 OOM（16:50 异常关机，17:02 重启，
+    dump 在 `C:\Windows\Minidump\110326-22062-0*.dmp`）。同一天 9:03/9:08 的 Resource-Exhaustion
+    (事件 2004) 把 `flashsight-webview.exe` 报成占用 52GB，但实测那是**固定保留的虚拟地址空间，不是增长**：
+    • 一个 hello-world 级 mingw 程序在这台机器上就保留 4.39GB（4GB 的那块区域，工具链/加载器行为）；
+    • WebView2 再保留 32GB + 16GB 两个 cage，进程启动即 56GB VirtualSize，私有提交只有 7.5MB；
+    • 40 轮工具调用的压力回合里，本进程私有内存 12→16MB、WebView2 进程组 ~2.0→2.1GB 后回落，
+      回合结束空闲 60 秒内存不涨。
+    结论：2004 事件里的 52GB 是 VirtualSize（Windows 按它报"最大虚拟内存使用者"），不是提交；真正的重启
+    是 GPU 驱动 bugcheck。驱动该更新；若再复发，minidump 能指认具体驱动。**但这不代表桥接没问题**：
+    同一轮排查找到了三处真实的泄漏，全部修掉：
+    ① 每个弹窗都在 document 上装一个 mousedown 监听（`outside`），弹窗节点销毁后监听永远不删，
+      闭包把**整棵游离的弹窗子树**留在内存里。现在只有一个全局 dismiss 分发器 + 节点表，断开即清。
+    ② `bind_outside_click` 在弹窗/模态开着时**每次 render 都调用**（每秒几十次），旧实现只覆盖
+      `node → id` 映射，旧回调永远留在 `outside_cbs_` 里。现在同一 popup 先删后加，`remove()` 时一并清理。
+    ③ C++ 的 `Slot` 在 `remove()` 后只置 `valid=false`，**文本/值字符串还留着**；转录里被替换掉的
+      节点把最后一版内容带进坟墓。现在直接重置整个 Slot。
+    另外把"沟通"本身收紧了：每个 DOM 写原来都是一次 `ExecuteScript`（COM 跨进程），一帧成百上千次；
+    现在 adapter 把一帧的结构/内容写**攒成一个脚本**，`UiApp::render` 在 patch 后 flush 一次，
+    动效/焦点/滚动这些必须立即可见的操作仍然即时发。
+  - **"文件夹搜索为什么递归，如果是侧边栏就过分了"**：全代码库只有一处 `recursive_directory_iterator`，
+    就是模型工具 `find_files`（上一批已经加了生成目录跳过 + 单文件 4MB / 整次 64MB 预算）；
+    侧栏文件面板走 `project_files`，是**单层 listdir**、最多 2000 项，永远不会递归。可以放心。
+  - **工作过程顺序**：之前是"工具块和过程解说交替"。真实的一轮绝大多数是**一堆工具调用 + 一段话**，
+    所以现在顺序固定为：工具块（按调用顺序）→ 过程解说 → 思考（最后）。折叠头不变。
+  - **子代理记录**：一条 assistant 消息同时有文字和工具调用时，以前只在"没有文字"的情况下显示工具名；
+    现在两者都显示（文字 + `工具调用: a, b`）。
+  - **todo 悬浮清单**：`todo.updated` 以前只弹一个 toast，UI 根本没有列表——模型能加待办但什么都看不到。
+    现在：右上角悬浮"任务清单"（进度 done/total、逐项状态、收起按钮），与左侧"任务规划"浮窗分开；
+    composer 里只在存在清单时出现"清单"按钮（可重新打开）；事件实时更新，重开会话由新接口
+    `session.todos` 从宿主内存取回（父会话与子代理的清单按 owner 隔离，不会被子代理覆盖）。
+  - **测试**：416 用例 3907 断言全过；web / webview 双变体编译通过。新增
+    `uiapp_todo_panel_shows_model_checklist`、`uiapp_work_process_puts_thinking_last`（工具 < 解说 < 思考）、
+    `uiapp_subagent_transcript_shows_tools_with_text`。实测：浏览器与原生窗口各跑一轮真实回合，
+    清单浮窗出现/收起/重开/重载后仍在，工作过程里工具块在解说之前。

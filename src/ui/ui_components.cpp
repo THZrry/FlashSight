@@ -737,23 +737,12 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     work.add(whead);
     if (work_open) {
       H inner = el("div", "work-body");
-      // ONE stream, in the order the work happened: reasoning, then the narration
-      // and tool blocks as they come. The old layout had a "工具调用" heading
-      // between them, which made a single turn read as two unrelated sections -
-      // and the narration looked like it belonged to the answer instead.
-      if (!m.thinking.empty()) {
-        inner.add(el("div", "work-label").text(tr("思考")));
-        inner.add(el("pre", "think-body").text(m.thinking));
-      }
-      size_t interim_at = 0;
+      // The process reads as a PILE of tool calls, then the model's own words.
+      // Interleaving narration between the calls made the same turn look like
+      // two independent channels taking turns; in practice a round is one pile
+      // of calls plus one piece of thinking. So: calls in order, then the
+      // narration, then the reasoning last.
       for (size_t i = 0; i < m.tools.size(); ++i) {
-        // Narration that arrived BEFORE this tool call goes above it.
-        while (interim_at < m.interim.size() && interim_at <= i) {
-          if (!m.interim[interim_at].empty()) {
-            inner.add(el("div", "work-note").text(m.interim[interim_at]));
-          }
-          ++interim_at;
-        }
         EventFn toggle = nullptr;
         if (on_tool_toggle) {
           EventFn base = on_tool_toggle;
@@ -766,11 +755,14 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         if (tb.key.empty()) tb.key = std::to_string(m.uid) + ":" + itos(static_cast<int>(i));
         inner.add(tool_block(tb, toggle, on_open_subagent));
       }
-      // Anything left (a turn that narrated but called no tool).
-      for (; interim_at < m.interim.size(); ++interim_at) {
-        if (!m.interim[interim_at].empty()) {
-          inner.add(el("div", "work-note").text(m.interim[interim_at]));
+      for (size_t i = 0; i < m.interim.size(); ++i) {
+        if (!m.interim[i].empty()) {
+          inner.add(el("div", "work-note").text(m.interim[i]));
         }
+      }
+      if (!m.thinking.empty()) {
+        inner.add(el("div", "work-label").text(tr("思考")));
+        inner.add(el("pre", "think-body").text(m.thinking));
       }
       work.add(inner);
     }

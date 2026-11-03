@@ -169,7 +169,13 @@ void start_exit(IDom& dom, const VNodePtr& oldv) {
   // a node could survive on screen until the next render - and a background tab
   // whose timers the browser throttles kept it for seconds.
   Node dying = oldv->dom;
-  dom.schedule(page ? 320 : 220, [&dom, dying]() { dom.remove(dying); });
+  dom.schedule(page ? 320 : 220, [&dom, dying]() {
+    dom.remove(dying);
+    // This removal runs OUTSIDE a render (a timer callback), and a bridged
+    // adapter buffers writes for the frame's single script: without the flush
+    // the dead node would stay on screen until the next unrelated render.
+    dom.flush();
+  });
 }
 
 }  // namespace
