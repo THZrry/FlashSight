@@ -40,6 +40,38 @@ namespace {
 // i18n: 源码写中文，) 按当前语言查表（中文时原样返回）
 std::string tr(const std::string& zh) { return i18n::tr(zh); }
 
+// Logs a backend event whose handler (state update + render) took long enough
+// to be felt as a freeze. The user's report is precise: the window froze right
+// after a tool call, and the system followed seconds later. If the UI thread
+// blocks inside a tool event, this names the event and the duration instead of
+// leaving another "it froze" with nothing to go on. Opt-in: FS_RES_LOG=1, same
+// file as the periodic resource samples.
+class SlowEventLog {
+ public:
+  explicit SlowEventLog(const std::string& name) : name_(name), t0_(mono_ms()) {}
+  ~SlowEventLog() {
+    int64_t dt = mono_ms() - t0_;
+    if (dt < 500) return;
+    if (!std::getenv("FS_RES_LOG")) return;
+    const char* tmp = std::getenv("TEMP");
+    std::string path =
+        std::string(tmp && *tmp ? tmp : ".") + "\\flashsight_res.log";
+    if (FILE* f = std::fopen(path.c_str(), "a")) {
+      std::fprintf(f, "[slow] event=%s ms=%lld\n", name_.c_str(),
+                   static_cast<long long>(dt));
+      std::fclose(f);
+    }
+  }
+
+ private:
+  static int64_t mono_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  std::string name_;
+  int64_t t0_;
+};
+
 // Normalise a shortcut string for comparison: trim, drop spaces around "+",
 // lowercase the key name. "Ctrl+W", "ctrl+w" and "Ctrl + W" are the same binding.
 std::string normalize_shortcut(const std::string& s) {
@@ -887,6 +919,22 @@ void UiApp::save_session_view(const std::string& sid) {
   v.session_loaded = st_.session_loaded;
   v.hist_scroll = st_.hist_scroll;
   v.hist_follow = st_.hist_follow;
+  // Anchor to a MESSAGE, not only to pixels: when the view is rebuilt (a
+  // reopened session, a page of older turns arriving) the content above can
+  // change height, and a pixel offset then lands anywhere. The adapter can tell
+  // which message is at the top; stores that message's stable uid so the
+  // restore can scroll IT into view. -1 (unsupported adapter) keeps the pixel
+  // path as the fallback.
+  v.hist_anchor_uid = 0;
+  if (!st_.hist_follow) {
+    VNodePtr hist = find_by_key(tree_, "chat-history");
+    if (hist && hist->dom.valid()) {
+      int idx = dom_.scroll_anchor(hist->dom);
+      if (idx >= 0 && static_cast<size_t>(idx) < st_.messages.size()) {
+        v.hist_anchor_uid = st_.messages[static_cast<size_t>(idx)].uid;
+      }
+    }
+  }
   v.history_total = st_.history_total;
   v.history_start = st_.history_start;
   v.history_has_more = st_.history_has_more;
@@ -977,6 +1025,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.messages = v.messages;
   st_.session_loaded = v.session_loaded;
   st_.hist_scroll = v.hist_scroll;
+  st_.hist_anchor_uid = v.hist_anchor_uid;
   st_.hist_follow = v.hist_follow;
   st_.history_total = v.history_total;
   st_.history_start = v.history_start;
@@ -1287,6 +1336,15 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
         m.interim.push_back(t["interim"][k].get<std::string>());
       }
     }
+    // Where each note sits relative to the tool calls. Older stored turns do not
+    // have it; the stream then falls back to the note index.
+    if (t.contains("interimAfter") && t["interimAfter"].is_array()) {
+      for (size_t k = 0; k < t["interimAfter"].size(); ++k) {
+        int64_t n = 0;
+        if (t["interimAfter"][k].is_number()) n = t["interimAfter"][k].get<int64_t>();
+        m.interim_after.push_back(static_cast<size_t>(n < 0 ? 0 : n));
+      }
+    }
   }
   return m;
 }
@@ -1481,6 +1539,7 @@ void UiApp::request_history_scroll_restore() {
   pending_scroll_apply_ = true;
   pending_scroll_target_ = st_.hist_scroll;
   pending_scroll_follow_ = st_.hist_follow;
+  pending_anchor_uid_ = st_.hist_anchor_uid;
   restoring_scroll_ = true;
 }
 
@@ -1514,6 +1573,18 @@ void UiApp::apply_pending_history_scroll() {
       // pixel offset even when the view was pinned to the bottom.
       dom_.scroll_to_bottom(h->dom);
       st_.hist_follow = true;
+    } else if (pending_anchor_uid_ != 0) {
+      // ANCHOR TO A MESSAGE. The transcript is rebuilt from the view, so the
+      // height above the viewport can differ from when the offset was saved
+      // (older pages loaded, tool blocks expanded); a pixel offset then points
+      // at the wrong message. Scroll the SAVED message to the top instead.
+      std::string key = comp::chat_message_key(st_.active_tab, pending_anchor_uid_);
+      VNodePtr msg = find_by_key(tree_, key);
+      if (msg && msg->dom.valid()) {
+        dom_.scroll_into_view(msg->dom);
+      } else {
+        dom_.set_scroll_top(h->dom, pending_scroll_target_);
+      }
     } else {
       dom_.set_scroll_top(h->dom, pending_scroll_target_);
     }
@@ -2289,12 +2360,11 @@ void UiApp::load_subagents(const std::string& sid) {
       row.ended_at = jsonutil::get_int(a, "endedAt", 0);
       row.transcript = a.contains("full") ? a["full"] : Json::array();
       // Preserve the user's own row state across the poll-driven refresh: the
-      // open fold, the typed steer draft, and the live text (which comes from
-      // events, not from this listing).
+      // open fold and the live text (which comes from events, not from this
+      // listing). The steer draft lives on the detail page now.
       for (size_t k = 0; k < st_.subagents.size(); ++k) {
         if (st_.subagents[k].id == row.id) {
           row.open = st_.subagents[k].open;
-          row.steer_draft = st_.subagents[k].steer_draft;
           row.live_text = st_.subagents[k].live_text;
         }
       }
@@ -2529,18 +2599,20 @@ VNodePtr UiApp::build_complete_menu() {
 // Steering is a typed instruction. The old button sent a hardcoded "继续", which
 // is why it looked like it did nothing: the user had no way to say WHAT to
 // change, and the toast confirmed a message they never wrote.
-void UiApp::send_subagent_steer(size_t index) {
-  if (index >= st_.subagents.size()) return;
-  std::string id = st_.subagents[index].id;
-  std::string text = st_.subagents[index].steer_draft;
-  bool running = st_.subagents[index].status == "running";
+//
+// Addressed by ID: the 引导 box lives on the DETAIL page now, and a finished
+// agent may no longer be in the overview list (it was pruned), so an index into
+// that list cannot name it.
+void UiApp::send_subagent_steer_text(const std::string& id, const std::string& text,
+                                     bool running) {
+  if (id.empty()) return;
   if (text.empty()) {
     toast(tr("请先输入要发送的引导"));
     return;
   }
   std::string method = running ? "subagent.steer" : "subagent.followUp";
   call_async(method, Json{{"id", id}, {"text", text}},
-             [this, index, running](const BackendResult& r) {
+             [this, id, running](const BackendResult& r) {
     if (!r.ok) {
       toast(tr("引导失败：") + r.message);
       return;
@@ -2549,7 +2621,9 @@ void UiApp::send_subagent_steer(size_t index) {
     // Clear the box: the message is queued, and leaving it there would send it
     // twice on the next press.
     update([&](AppState& s) {
-      if (index < s.subagents.size()) s.subagents[index].steer_draft.clear();
+      std::map<std::string, AppState::SubagentDetail>::iterator it =
+          s.subagent_details.find(id);
+      if (it != s.subagent_details.end()) it->second.steer_draft.clear();
     });
     // A follow-up produced a new summary; refresh the row from the backend.
     if (!running) load_subagents(active_sid());
@@ -3315,6 +3389,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         if (at != std::string::npos) ans.erase(at, text.size());
       }
       msg.interim.push_back(text);
+      // The anchor: how many tools had already run when this note arrived.
+      int64_t done = jsonutil::get_int(payload, "tools", -1);
+      msg.interim_after.push_back(
+          done >= 0 ? static_cast<size_t>(done) : msg.tools.size());
       msg.rev = next_msg_rev_++;
       render();
     }
@@ -3488,6 +3566,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
 }
 
 void UiApp::on_backend_event(const std::string& event, const Json& payload) {
+  // Times the whole handler (including its render); a freeze caused by one
+  // event is written to the resource log (see SlowEventLog).
+  SlowEventLog slow_event_log(event);
   ++event_count_;
   std::string sid = jsonutil::get<std::string>(payload, "sid", "");
   // Anything that changes a session's STATUS also changes a project's dot (and
@@ -3632,11 +3713,15 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       // about to do, and that is exactly the moment the user wants to see it. A
       // list the user has closed stays closed on later updates.
       if (!list.empty() && was_empty) st_.todo_open = true;
+      // The newer checklist replaces the plan view (they say the same thing;
+      // showing both duplicated every row).
+      if (!list.empty()) st_.plan_open = false;
     } else {
       SessionView& v = views_.get_or_create(sid);
       bool was_empty = v.todos.empty();
       v.todos = list;
       if (!list.empty() && was_empty) v.todo_open = true;
+      if (!list.empty()) v.plan_open = false;
     }
     render();
   } else if (event == "plan.update") {
@@ -3652,13 +3737,25 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
     // `sid` is empty or the active session for events this handler sees (a
     // background session's events were routed into its view by the caller).
+    //
+    // The plan and the todo checklist are TWO VIEWS OF THE SAME THING ("what is
+    // this turn doing"): showing both duplicates every row. A new plan clears
+    // the checklist; a new checklist hides the plan (see todo.updated).
     if (sid.empty() || sid == st_.active_tab) {
       st_.plan_steps = steps;
       st_.plan_goal = goal;
+      if (!steps.empty()) {
+        st_.todos.clear();
+        st_.todo_open = false;
+      }
     } else {
       SessionView& v = views_.get_or_create(sid);
       v.plan_steps = steps;
       v.plan_goal = goal;
+      if (!steps.empty()) {
+        v.todos.clear();
+        v.todo_open = false;
+      }
     }
   } else if (event == "loop.paused") {
     // A guard tripped (tool-call limit / repeated call). The turn still produced
@@ -5646,7 +5743,9 @@ VNodePtr UiApp::build_session() {
   //   * it must not be a column, because then it reads like a second side panel.
   // Absolute inside .session-center (its positioned ancestor) gives exactly the
   // old floating behaviour while keeping it out of the history's subtree.
-  if (st_.plan_open) {
+  // One checklist at a time: while the model keeps a todo list, that IS the
+  // progress view and the plan float stays closed (both show the same steps).
+  if (st_.plan_open && st_.todos.empty()) {
     H plan = el("div", "plan-float");
     plan.key("plan-float");
     plan.anim(anim::kPop);
@@ -6156,24 +6255,28 @@ VNodePtr UiApp::build_session() {
       });
     });
   }, "ghost"));
-  left_tools.add(comp::icon_text_button("diagram-project", tr("规划"),
-                                        [this](const std::string&) {
-    bool open = !st_.plan_open;
-    std::string sid = active_sid();
-    update([&](AppState& s) { s.plan_open = open; });
-    if (open && !sid.empty()) {
-      call_async("plan.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
-        if (!r.ok) return;
-        const Json& tree = r.data.contains("plan") ? r.data["plan"] : r.data;
-        std::string goal;
-        std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
-        update([&](AppState& s) {
-          s.plan_steps = steps;
-          s.plan_goal = goal;
+  // 规划 and 清单 are the same "what is in progress" view, so only one control is
+  // shown: the checklist when the model keeps one, the plan otherwise.
+  if (st_.todos.empty()) {
+    left_tools.add(comp::icon_text_button("diagram-project", tr("规划"),
+                                          [this](const std::string&) {
+      bool open = !st_.plan_open;
+      std::string sid = active_sid();
+      update([&](AppState& s) { s.plan_open = open; });
+      if (open && !sid.empty()) {
+        call_async("plan.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
+          if (!r.ok) return;
+          const Json& tree = r.data.contains("plan") ? r.data["plan"] : r.data;
+          std::string goal;
+          std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
+          update([&](AppState& s) {
+            s.plan_steps = steps;
+            s.plan_goal = goal;
+          });
         });
-      });
-    }
-  }, "ghost"));
+      }
+    }, "ghost"));
+  }
   // The model's checklist, only while it HAS one: the composer row is already
   // tight, and a session without todos gets no extra control.
   if (!st_.todos.empty()) {
@@ -6907,6 +7010,40 @@ VNodePtr UiApp::build_side_panel() {
         sm.add(el("div", "sap-summary-text").text(row.summary));
         body.add(sm);
       }
+      // 引导 lives HERE, on the detail page: a running agent takes it between
+      // tool calls, a finished one gets a follow-up that continues with the same
+      // transcript. On the overview card the field was unreachable - the card
+      // opens the record on click, so every press in the field bubbled into that
+      // navigation.
+      {
+        bool running = row.status == "running";
+        H steer = el("div", "sa-steer");
+        H input = comp::text_input(
+            det->steer_draft,
+            running ? tr("给这个子代理的引导…") : tr("追加任务，让它继续…"),
+            [this, sub_id](const std::string& v) {
+          std::map<std::string, AppState::SubagentDetail>::iterator it =
+              st_.subagent_details.find(sub_id);
+          if (it != st_.subagent_details.end()) it->second.steer_draft = v;
+        },
+            [this, sub_id, running](const std::string&) {
+          std::map<std::string, AppState::SubagentDetail>::iterator it =
+              st_.subagent_details.find(sub_id);
+          if (it == st_.subagent_details.end()) return;
+          send_subagent_steer_text(sub_id, it->second.steer_draft, running);
+        });
+        input.key("sa-detail-steer:" + sub_id);
+        steer.add(input);
+        steer.add(comp::icon_button("paper-plane",
+                                    running ? tr("发送引导") : tr("追加任务"),
+                                    [this, sub_id, running](const std::string&) {
+          std::map<std::string, AppState::SubagentDetail>::iterator it =
+              st_.subagent_details.find(sub_id);
+          if (it == st_.subagent_details.end()) return;
+          send_subagent_steer_text(sub_id, it->second.steer_draft, running);
+        }));
+        body.add(steer);
+      }
       if (row.transcript.is_array() && row.transcript.size() > 0) {
         body.add(el("div", "sap-label").text(
             tr("对话记录") + " · " + itos(static_cast<int>(row.transcript.size()))));
@@ -7045,26 +7182,13 @@ VNodePtr UiApp::build_side_panel() {
       } else if (!a.summary.empty()) {
         card.add(el("div", "sa-summary").text(a.summary));
       }
-      // Steer: a real text field, not a button that sends "继续". The button
-      // looked like it opened something and then silently sent a fixed message -
-      // "引导按钮也不知道在干什么". Typing the guidance is the whole point.
-      {
-        H steer = el("div", "sa-steer");
-        H input = comp::text_input(
-            a.steer_draft, tr("给这个子代理的引导…"),
-            [this, i](const std::string& v) {
-          if (i < st_.subagents.size()) st_.subagents[i].steer_draft = v;
-        },
-            [this, i](const std::string&) { send_subagent_steer(i); });
-        input.key("sa-steer-input:" + a.id);
-        steer.add(input);
-        steer.add(comp::icon_button("paper-plane", tr("发送引导"),
-                                    [this, i](const std::string&) {
-          send_subagent_steer(i);
-        }));
-        card.add(steer);
-      }
+      // Steering lives on the DETAIL page (this card NAVIGATES on click, so a
+      // text field here could not even be clicked into: the click bubbled and
+      // opened the record instead). Only 取消 stays here.
       H acts = el("div", "sa-actions");
+      // The card itself opens the record on click; the action row must not
+      // trigger that as well.
+      acts.attr("data-no-bubble", "1");
       acts.add(comp::button(tr("取消"), [this, i](const std::string&) {
         if (i >= st_.subagents.size()) return;
         std::string id = st_.subagents[i].id;
@@ -10773,6 +10897,8 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   // length in, a new narration line could land under an unchanged signature and
   // the cached node would be reused, silently hiding it.
   for (size_t i = 0; i < m.interim.size(); ++i) mix(m.interim[i].size());
+  // ...and so is WHERE each note sits relative to the calls (see interim_after).
+  for (size_t i = 0; i < m.interim_after.size(); ++i) mix(m.interim_after[i] + 1);
   return h;
 }
 

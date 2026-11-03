@@ -85,6 +85,18 @@ class IDom {
   // starving its own message loop during a long turn.
   virtual void flush() {}
 
+  // Which child of `scroller` is at the top of its viewport (the message the
+  // reader is looking at), or -1 when the adapter cannot measure synchronously.
+  // Used to ANCHOR the reading position to a message instead of a pixel offset:
+  // a rebuilt transcript changes height above the viewport, and pixels then
+  // point at the wrong place.
+  virtual int scroll_anchor(Node scroller) {
+    (void)scroller;
+    return -1;
+  }
+  // Put `node` at the top of its scrollable ancestor.
+  virtual void scroll_into_view(Node node) { (void)node; }
+
   // --- content / attributes ---
   virtual void set_text(Node node, const std::string& text) = 0;
   // Replace the node's children with parsed markup (element.innerHTML). Used for

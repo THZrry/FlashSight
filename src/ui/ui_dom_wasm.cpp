@@ -67,8 +67,30 @@ EM_JS(void, fs_dom_boot, (), {
   }
 });
 
-EM_JS(void, fs_dom_off, (int node_id, int kind), {
-  var h = globalThis.__fsHandlers[node_id];
+// Which message is at the top of the transcript: the first one whose bottom
+// edge is below the scroller's top edge. Synchronous, like every wasm DOM read.
+EM_JS(int, fs_dom_anchor, (int node_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return -1;
+  var kids = el.querySelectorAll('.msg');
+  if (!kids.length) return -1;
+  var rect = el.getBoundingClientRect();
+  var base = rect.top + (el.clientTop || 0);
+  for (var i = 0; i < kids.length; i++) {
+    var r = kids[i].getBoundingClientRect();
+    if (r.bottom - base > 1) return i;
+  }
+  return kids.length - 1;
+});
+
+EM_JS(void, fs_dom_scroll_into_view, (int node_id), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  try { el.scrollIntoView({ block: 'start', behavior: 'auto' }); }
+  catch (e) { try { el.scrollIntoView(true); } catch (e2) {} }
+});
+
+EM_JS(void, fs_dom_off, (int node_id, int kind), {  var h = globalThis.__fsHandlers[node_id];
   if (h && h[kind]) {
     var el = globalThis.__fsNodes[node_id];
     if (el) el.removeEventListener(h[kind][0], h[kind][1], false);
@@ -94,6 +116,14 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
+    // A control INSIDE a clickable row (a card, a fold header) must not also
+    // trigger the row: without this, pressing a subagent's 引导 or a tool row's
+    // 打开记录 both ran its own action AND bubbled into the row's handler -
+    // navigation on top of the action, or a fold toggling on every click.
+    if (name === 'click' && evt.target && evt.target.closest &&
+        evt.target.closest('[data-no-bubble]')) {
+      return;
+    }
     // Enter behaviour is a PER-ELEMENT choice, not a global constant: the
     // composer's "Enter 行为" setting says whether plain Enter sends or only
     // Ctrl/Cmd+Enter does. Without reading it here the setting could never take
@@ -1396,6 +1426,12 @@ class WasmDom : public IDom {
 
   int scroll_top(Node node) override {
     return fs_dom_scroll_top(static_cast<int>(node.id));
+  }
+  int scroll_anchor(Node node) override {
+    return fs_dom_anchor(static_cast<int>(node.id));
+  }
+  void scroll_into_view(Node node) override {
+    fs_dom_scroll_into_view(static_cast<int>(node.id));
   }
 
   void set_scroll_top(Node node, int top) override {

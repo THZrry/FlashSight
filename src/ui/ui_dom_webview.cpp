@@ -219,6 +219,13 @@ const char* kGlueJs = R"JS(
     var name = NAMES[kind] || 'click';
     var evName = (name === 'keyenter') ? 'keydown' : name;
     var listener = function (evt) {
+      // A control INSIDE a clickable row (a card, a fold header) must not also
+      // trigger the row: pressing a subagent's 引导 or a tool row's 打开记录 both
+      // ran its own action AND bubbled into the row's handler.
+      if (name === 'click' && evt.target && evt.target.closest &&
+          evt.target.closest('[data-no-bubble]')) {
+        return;
+      }
       if (name === 'keyenter') {
         // Enter-to-send is a per-element choice (data-enter-send).
         if (evt.key !== 'Enter') return;
@@ -405,6 +412,13 @@ const char* kGlueJs = R"JS(
         });
         return;
       }
+      // Put a node at the top of its scrollable ancestor (message anchoring on a
+      // rebuilt transcript - see IDom::scroll_into_view).
+      case 'scrollIntoView':
+        if (!el) return;
+        try { el.scrollIntoView({ block: 'start', behavior: 'auto' }); }
+        catch (e) { try { el.scrollIntoView(true); } catch (e2) {} }
+        return;
       case 'scrollPin':
         if (!el) return;
         // `a` is an ENABLE flag ("1"), not a callback id: the host keeps one
@@ -957,6 +971,11 @@ class WebViewDom : public IDom {
   }
   void scroll_to_bottom(Node node) override {
     call("scrollBottom", idx(node), 0, "", "");
+  }
+  // Measurement is not available synchronously here (the adapter reads a
+  // one-frame-behind mirror), so message anchoring falls back to pixels.
+  void scroll_into_view(Node node) override {
+    call("scrollIntoView", idx(node), 0, "", "");
   }
   void bind_scroll_edges(Node node,
                          std::function<void(bool, bool)> cb) override {

@@ -265,6 +265,11 @@ class AgentLoop {
   // commentary ("let me check X first"), not the answer - stored with the turn so
   // the work log can show it after a reload instead of losing it.
   Json interim_texts_ = Json::array();
+  // For each entry of interim_texts_: how many tool calls had already run when
+  // it arrived. That is where the note belongs in the work stream (a round can
+  // issue several tools, so the note index and the tool index are not the same
+  // thing). Persisted as `interimAfter`.
+  std::vector<int> interim_after_;
 
   // 防过拟合
   OverfitDetector overfit_;

@@ -737,15 +737,19 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     work.add(whead);
     if (work_open) {
       H inner = el("div", "work-body");
-      // ONE stream in ARRIVAL ORDER: narration and tool blocks as they come,
-      // then the reasoning at the point where nothing newer has arrived. The
-      // loop emits one narration per round before that round's tool calls, so
-      // putting the note above its call IS the chronological order - and a
-      // thought that lands between two calls stays between them instead of
-      // being herded into a separate section.
+      // ONE stream in ARRIVAL ORDER. Each note carries the number of tool calls
+      // that had already run when it arrived (`interim_after`), so note k is
+      // emitted immediately before tool interim_after[k]. Using the NOTE INDEX
+      // for that comparison (the old rule) broke the moment one round issued
+      // several tool calls: the next round's thought landed above tools that had
+      // already run ("新的思考跑到了上一个工具下面").
       size_t interim_at = 0;
       for (size_t i = 0; i < m.tools.size(); ++i) {
-        while (interim_at < m.interim.size() && interim_at <= i) {
+        while (interim_at < m.interim.size()) {
+          size_t after = interim_at < m.interim_after.size()
+                             ? m.interim_after[interim_at]
+                             : interim_at;
+          if (after > i) break;
           if (!m.interim[interim_at].empty()) {
             inner.add(el("div", "work-note").text(m.interim[interim_at]));
           }
@@ -874,6 +878,10 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
     std::string sid = b.subagent_id;
     H btn = el("span", "tb-open");
     btn.text(tr("打开记录"));
+    // The header itself toggles the fold; a press on this button must not also
+    // toggle it (the click used to bubble: it opened the record AND flipped the
+    // fold, over and over).
+    btn.attr("data-no-bubble", "1");
     btn.attr("title", tr("在新标签页打开这个子代理的完整记录"));
     btn.on(EventKind::kClick, [open, sid](const std::string&) { open(sid); });
     head.add(btn);

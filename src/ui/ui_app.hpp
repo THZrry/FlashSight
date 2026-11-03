@@ -251,6 +251,10 @@ struct AppState {
   // on the way in; a first visit starts at the BOTTOM (the latest turn is what
   // you came for, not the beginning of the conversation).
   int hist_scroll = -1;  // -1 = never measured: start at the bottom
+  // The message (uid) that was at the top of the viewport when the position was
+  // saved. Restoring THAT message is stable across a rebuild that changes the
+  // height above the viewport; the pixel offset above is the fallback.
+  int64_t hist_anchor_uid = 0;
   // Is the view pinned to the end? Turned on when the user lands at the bottom,
   // off as soon as they scroll up. New output only follows the end while this is
   // true - yanking the view down while someone reads history is worse than not
@@ -453,9 +457,6 @@ struct AppState {
     // from the tagged stream.delta events, so the panel can show live work
     // instead of just "running".
     std::string live_text;
-    // The steer box's draft. Steering is a typed instruction, not a fixed
-    // "继续" - the button that sent a constant read as doing nothing.
-    std::string steer_draft;
   };
   std::vector<SubagentRow> subagents;
   // Loaded transcripts for subagent TABS, keyed by subagent id. Kept separate
@@ -464,6 +465,10 @@ struct AppState {
   struct SubagentDetail {
     bool loaded = false;
     SubagentRow row;
+    // Draft of the 引导 box, which lives HERE (the detail page), not on the
+    // overview card: a text field inside a card that opens on click was both
+    // misplaced and unreachable (the click bubbled into the card's navigation).
+    std::string steer_draft;
   };
   std::map<std::string, SubagentDetail> subagent_details;
 
@@ -818,6 +823,7 @@ struct SessionView {
   bool history_loading_older = false;
   int history_anchor_from_bottom = -1;
   int hist_scroll = -1;  // chat scroll offset (see AppState::hist_scroll)
+  int64_t hist_anchor_uid = 0;  // top message (see AppState::hist_anchor_uid)
   bool hist_follow = true;  // pinned to the end (see AppState::hist_follow)
   std::string session_input;
   std::string edit_turn_id;  // see AppState::edit_turn_id
@@ -994,8 +1000,9 @@ class UiApp {
   void load_shells();
   // Load subagents for a session.
   void load_subagents(const std::string& sid);
-  // Send the typed guidance to one subagent (the sidebar's steer box).
-  void send_subagent_steer(size_t index);
+  // Send the typed guidance to one subagent (the 引导 box on its DETAIL page).
+  void send_subagent_steer_text(const std::string& id, const std::string& text,
+                                bool running);
   // Workflows: definitions (what can be started) and runs (what is happening).
   void load_workflows(const std::string& sid);
   // Load a file panel's directory (the panel keeps its own path/entries).
@@ -1296,6 +1303,8 @@ class UiApp {
   // view was pinned to the end. Applied right after the patch, before paint.
   bool pending_scroll_apply_ = false;
   int pending_scroll_target_ = -1;
+  // Message to anchor the restore to (see AppState::hist_anchor_uid); 0 = none.
+  int64_t pending_anchor_uid_ = 0;
   bool pending_scroll_follow_ = false;
   // A subagent's live preview changed. Painted from pump(), never per delta:
   // a subagent emits hundreds of deltas per second and repainting each one

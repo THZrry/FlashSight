@@ -889,6 +889,12 @@ bool AgentLoop::persist_failed_turn(const std::string& error,
   asst["streamSummary"] = partial_text;
   asst["toolCalls"] = executed_calls_;
   if (has_interim) asst["interim"] = interim_texts_;
+  if (has_interim && !interim_after_.empty()) {
+    // Where each note belongs relative to the tool calls (see interim_after_).
+    Json afters = Json::array();
+    for (size_t i = 0; i < interim_after_.size(); ++i) afters.push_back(interim_after_[i]);
+    asst["interimAfter"] = afters;
+  }
   asst["startedAt"] = turn_started_ms_ > 0 ? turn_started_ms_ : now;
   asst["ts"] = now;
   asst["error"] = error;
@@ -900,6 +906,7 @@ bool AgentLoop::persist_failed_turn(const std::string& error,
   persist_turn(asst);
   executed_calls_ = Json::array();
   interim_texts_ = Json::array();
+  interim_after_.clear();
   user_turn_persisted_ = false;
   return true;
 }
@@ -1016,13 +1023,22 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     // instead of gluing it onto the answer - and so it survives a reload (only the
     // final text was stored before, so the narration was lost).
     if (!result.text.empty()) {
+      // `tools` is the number of tool calls ALREADY EXECUTED when this narration
+      // arrived. The UI needs it to place the note in the stream: a round can
+      // call several tools, and "before the tool with the same index as the
+      // note" put a later thought above tools that really came earlier.
       emit("assistant.interim", Json{{"sid", opts_.sid}, {"text", result.text},
-                                     {"round", rounds}});
+                                     {"round", rounds},
+                                     {"tools", static_cast<int>(executed_calls_.size())}});
       interim_texts_.push_back(result.text);
+      interim_after_.push_back(static_cast<int>(executed_calls_.size()));
       // Bound it: a model that narrates every round of a very long turn would
       // otherwise grow this (and the turn it is persisted with) without limit.
       // The last few narrations are what a reader actually wants.
-      while (interim_texts_.size() > 40) interim_texts_.erase(interim_texts_.begin());
+      while (interim_texts_.size() > 40) {
+        interim_texts_.erase(interim_texts_.begin());
+        if (!interim_after_.empty()) interim_after_.erase(interim_after_.begin());
+      }
     }
     Json asst = Json::object();
     asst["role"] = "assistant";
@@ -1106,6 +1122,11 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   // simply disappeared when the session was reopened.
   if (interim_texts_.is_array() && !interim_texts_.empty()) {
     asst_turn["interim"] = interim_texts_;
+    if (!interim_after_.empty()) {
+      Json afters = Json::array();
+      for (size_t i = 0; i < interim_after_.size(); ++i) afters.push_back(interim_after_[i]);
+      asst_turn["interimAfter"] = afters;
+    }
   }
   asst_turn["startedAt"] = turn_started_ms_ > 0 ? turn_started_ms_ : ended_ms;
   asst_turn["ts"] = ended_ms;
@@ -1116,6 +1137,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   asst_turn["usage"] = usage;
   executed_calls_ = Json::array();
   interim_texts_ = Json::array();
+  interim_after_.clear();
   if (persist_turn) {
     // The user turn was already written when the turn STARTED (see run_turn);
     // writing it again here would duplicate it in the transcript.

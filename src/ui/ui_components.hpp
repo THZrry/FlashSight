@@ -143,6 +143,12 @@ struct ChatMsg {
   // the model thinking out loud while it works - so it belongs in the work log and
   // used to be dropped entirely (only the final round's text was kept).
   std::vector<std::string> interim;
+  // How many tool calls had already run when each note arrived (parallel to
+  // `interim`). The work stream places note k immediately before tool
+  // interim_after[k]; a round with several tool calls made the old "note index
+  // == tool index" rule put a later thought above earlier tools. Empty (old
+  // stored turns) falls back to the index.
+  std::vector<size_t> interim_after;
   // 工作过程: reasoning + narration + tool calls, ONE continuous stream above the
   // answer - no separate "工具调用" section (splitting them made the same turn read
   // as two unrelated things), and OPEN while the turn runs so you can watch the

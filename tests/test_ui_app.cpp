@@ -4718,3 +4718,113 @@ FS_TEST(uiapp_subagent_transcript_shows_tools_with_text) {
   EXPECT_TRUE(d.find("list_dir") != std::string::npos);
   EXPECT_TRUE(d.find("工具调用") != std::string::npos);
 }
+
+// ---- 第四十六批：过程解说的锚点 / 规划与清单合一 / 卡片内控件不冒泡 ----
+
+// A round can issue SEVERAL tool calls. The note that arrives with that round
+// must sit before the round's FIRST call, not before the call whose index equals
+// the note's index - that put a later thought above tools that had already run
+// ("新的思考跑到了上一个工具下面").
+FS_TEST(uiapp_work_notes_follow_tool_anchors) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "answer";
+    m.work_open = true;
+    const char* names[] = {"tool_a", "tool_b", "tool_c"};
+    for (int i = 0; i < 3; ++i) {
+      comp::ToolBlock tb;
+      tb.name = names[i];
+      tb.summary = "s";
+      m.tools.push_back(tb);
+    }
+    m.interim.push_back("NOTE_ZERO");
+    m.interim_after.push_back(0);  // arrived before any tool ran
+    m.interim.push_back("NOTE_TWO");
+    m.interim_after.push_back(2);  // arrived after tool_a and tool_b
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  size_t n0 = d.find("NOTE_ZERO");
+  size_t a = d.find("tool_a");
+  size_t b = d.find("tool_b");
+  size_t n2 = d.find("NOTE_TWO");
+  size_t c = d.find("tool_c");
+  EXPECT_TRUE(n0 != std::string::npos && a != std::string::npos &&
+              b != std::string::npos && n2 != std::string::npos &&
+              c != std::string::npos);
+  EXPECT_TRUE(n0 < a);
+  EXPECT_TRUE(a < b);
+  EXPECT_TRUE(b < n2);
+  EXPECT_TRUE(n2 < c);
+}
+
+// 规划 and 清单 say the same thing ("what is this turn doing"). A newer one
+// replaces the other: a plan clears the checklist, a checklist closes (and
+// replaces) the plan view.
+FS_TEST(uiapp_plan_and_todo_are_one_checklist) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.on_backend_event_for_test(
+      "todo.updated",
+      Json{{"sid", "sess_a"},
+           {"owner", "sess_a"},
+           {"items", Json::array({Json{{"id", 1}, {"task", "T1"}, {"done", false}}})}});
+  ASSERT_TRUE(app.state().todos.size() == 1u);
+  EXPECT_TRUE(app.state().todo_open);
+  // A plan replaces the checklist.
+  app.on_backend_event_for_test(
+      "plan.update",
+      Json{{"sid", "sess_a"},
+           {"plan", Json{{"goal", "g"},
+                         {"steps", Json::array({Json{{"title", "S1"}, {"status", "pending"}}})}}}});
+  EXPECT_EQ((int)app.state().todos.size(), 0);
+  EXPECT_FALSE(app.state().todo_open);
+  ASSERT_TRUE(app.state().plan_steps.size() == 1u);
+  // ...and a new checklist closes the plan view.
+  app.update([](AppState& s) { s.plan_open = true; });
+  app.on_backend_event_for_test(
+      "todo.updated",
+      Json{{"sid", "sess_a"},
+           {"owner", "sess_a"},
+           {"items", Json::array({Json{{"id", 2}, {"task", "T2"}, {"done", false}}})}});
+  EXPECT_FALSE(app.state().plan_open);
+  // Only one composer control: 清单 while a checklist exists.
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("清单") != std::string::npos);
+  EXPECT_TRUE(d.find("规划") == std::string::npos);
+}
+
+// Controls inside a clickable row carry data-no-bubble: the adapters skip the
+// row's click when the press lands inside them (the tool row's 打开记录 used to
+// open the record AND toggle the fold; a subagent card's controls navigated).
+FS_TEST(uiapp_inner_controls_do_not_bubble) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "answer";
+    m.work_open = true;
+    comp::ToolBlock tb;
+    tb.name = "subagent_spawn";
+    tb.summary = "explore";
+    tb.subagent_id = "sub_1";
+    m.tools.push_back(tb);
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("tb-open") != std::string::npos);
+  EXPECT_TRUE(d.find("data-no-bubble") != std::string::npos);
+}
