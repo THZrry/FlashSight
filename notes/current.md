@@ -2590,3 +2590,48 @@ The process of project: P0 环境搭建 + P1 AppCore
     `project_open_creates_a_first_session`（且重复打开不重复建）、
     `uiapp_per_call_usage_updates_the_panel`；工作过程的两个折叠用例改成"默认展开、
     收起后隐藏"，并断言不再出现"工具调用"分段标题。
+
+<94>(SOLVED): 工作过程"跑着展开、跑完折叠" + 过程解说不再混进答案 + 工作过程滚轮穿透 + 代码预览不换行且行号对齐 + markdown 渲染/源码一键切换 + 图片/二进制预览 + 工具卡死防护（整文件读取无上限、递归 grep 扫生成目录）+ 目录列表上限。
+  - **疑似 `edit_file` 卡死程序和系统**：没有找到 `edit_file` 自身的死循环（行替换是线性的、edit 数也有限），
+    但找到一类**真的能把机器拖进 swap、连桌面一起卡住**的无界工作，而 `edit_file` 正好是最容易被指到的入口：
+    ① `edit_file` / `write_file` / `remove_file` / `regex_replace` 都走 `read_text_file` **整文件读入**，
+    **没有任何大小检查**（`read_file` 有 32MB 硬上限，这几个没有）。模型一次路径写错指到构建产物
+    （几百 MB 的 exe / 上 GB 的 pdb），内存瞬间翻倍 → 系统换页 → 程序和桌面一起冻。
+    ② `find_files` 的 grep 是**整项目递归**，只跳过顶层的 `.git` / `.flashsight`：`build/`、`.xmake/`、
+    `.zcode/`、`node_modules/` 全被读进来并逐个解码。whaleui 的 temp 几百个文件 + build 上千个产物，
+    一个 grep 就是几百 MB 的读 + 解码，CPU 打满、UI 事件被饿死——这同时解释了"temp 文件夹几百个文件，
+    扫描极其卡顿"。
+    现在：`read_text_file` 返回 `ReadStatus{kOk,kMissing,kTooLarge}`，默认 32MB 上限；`edit_file` 超限
+    明确报"文件太大，改用终端或更小的文件"（不再谎报 not found）；write/remove/regex 同样有界。
+    `find_files` 按目录名跳过生成目录（任意深度），单文件 4MB、整次扫描 64MB 预算，结果用
+    `truncated` + `note` 如实说明"跳过了 build/.git/..."。`project_files` 单目录最多 2000 项 +
+    `truncated`，侧栏显示"目录太大，只列出前 2000 项"。
+  - **"正在跑的应该展开工作过程，跑完默认自动折叠"**：上一批把默认改成了"一直展开"，方向过头了。现在
+    `ChatMsg::work_open` 默认 false（历史/重开的回合是折叠的）；本轮**新建消息时置 true**，`turn.done`
+    和 `loop.interrupted` 折叠；渲染层"运行中 = 展开"（`streaming && !work_touched`），用户自己点过折叠
+    后按用户的来，直到本轮结束。折叠头仍然给摘要："工作过程 · 1 步 · 1 段过程说明 完成 5.8s 13:26 ▸"。
+  - **"过程输出的文字还显示在总结里，重开/切页就没了"**：同一轮解说先以 `stream.delta` 进了答案，
+    轮末又作为 `assistant.interim` 到达；UI 只把它 push 进工作日志，**没有从答案里拿掉**。于是实时记录里
+    它出现两遍（还当成了总结），而存储的 turn 只把解说放在 `interim` 里——重载/切页重建后自然"消失"。
+    现在 `assistant.interim` 到达时把这段文字从答案尾部移除（ends-with，退化为最后一次出现），
+    实时和重载看到的是同一份内容。
+  - **"工作过程的小页面鼠标滚动不动，应该整页动"**：`.tb-body` 上的 `overscroll-behavior: contain`，
+    而它纵向根本没有可滚内容——滚轮就"消失"在这个块里，页面不动。去掉；`.work-body .think-body` 也
+    不再限高（原来 10 行小窗），整个工作过程随页面滚。实测（CDP 真实滚轮事件）：指针停在工具结果上
+    滚 320px，`.history` 0 → 759（web）/ 0 → 3501（webview），`tb-body.scrollTop` 保持 0。
+  - **"渲染代码有自动换行，但行号没跳"**：`.file-preview-body` 是 `pre-wrap`，行号列是 `pre`——
+    长行折行后下面的行号全部错位。现在正文 **`white-space: pre`**（不折行，横向滚动），
+    `min-width: max-content` 撑到最长行；行号列 **`position: sticky; left: 0`** 贴住左边。
+    实测：2908px 的行宽在 399px 的面板里横向可滚，行号 1..5 始终对齐。
+  - **markdown 一键切换渲染/源码**：侧栏预览里 `.md` 默认**渲染**（复用聊天的 `markdown_blocks`：
+    标题/列表/代码块/链接/引用都有），头部两个小按钮 `渲染 | 源码`，当前模式是"亮着的标签"而不是按钮。
+    实测：渲染下 h1 = "预览测试文档"，点源码显示 `# 预览测试文档`，再点渲染回来。
+  - **二进制/图片不再按文本打开**：`project_read_file` 先按**内容**用 `stb_image` sniff 认图片
+    （PNG/JPEG/GIF/WebP/BMP…；SVG/ICO/AVIF 按扩展名），返回 `kind=image` + `dataUri`（12MB 上限，
+    浏览器直接画，无额外请求）；含 NUL 且不是 UTF-16（按奇偶校验）的是 `kind=binary`，只给大小；
+    其余才是 `kind=text`。侧栏按 kind 分别渲染 `<img>` / "二进制文件，没有可显示的文字。 (264 B)" /
+    代码视图。实测：`dot.png` → `data:image/png;base64,`，`naturalWidth=1`；`blob.bin` → 二进制提示。
+  - **测试**：413 用例 3889 断言全过；web / webview 双变体编译通过。新增
+    `project_read_file_kinds`（文本/图片/二进制/UTF-16 四态）、`find_files` 跳过 `build/` 并给出 note、
+    `edit_file` 拒绝 33MB 文件、`uiapp_interim_moves_narration_out_of_the_answer`（解说从答案移到工作日志，
+    turn.done 后折叠）；两个工作过程折叠用例改成"运行中展开、结束后折叠、点开可见"。

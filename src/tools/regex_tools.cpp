@@ -46,6 +46,11 @@ void* lre_realloc(void* opaque, void* ptr, size_t size) {
 
 namespace {
 
+// A regex replace rewrites a whole file in memory. Reading a multi-GB artifact
+// here would swap the machine, so the read is bounded like every other whole-
+// file tool (see file_tools.cpp's guard).
+constexpr int64_t kRegexMaxFileBytes = 32LL * 1024 * 1024;
+
 // 二进制守卫（与 file_tools.cpp 一致）
 bool is_binary(const std::string& content) {
   size_t n = content.size() < 4096 ? content.size() : 4096;
@@ -131,6 +136,13 @@ std::string expand_template(const std::string& tmpl, const std::vector<std::stri
 // 对单个文件做一次替换；返回 {changed, count, before, after}；失败返回错误
 FsResult regex_file(const ghc::filesystem::path& p, const std::string& pattern,
                     const std::string& repl, int flags, int* count_out) {
+  std::error_code szec;
+  auto fsz = ghc::filesystem::file_size(p, szec);
+  if (!szec && static_cast<int64_t>(fsz) > kRegexMaxFileBytes) {
+    return FsResult::error(ErrCode::kInvalidArg,
+                           "file is too large for a regex replace (>32MB): " +
+                               p.filename().string());
+  }
   std::string content;
   if (!read_text_file(p, &content)) {
     return FsResult::error(ErrCode::kNotFound, "file not found: " + p.filename().string());

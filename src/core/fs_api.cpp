@@ -11,6 +11,7 @@
 
 #include "core/folder_picker.hpp"
 #include "fs_git.hpp"
+#include "fs_image.hpp"
 #include "fs_path.hpp"
 #include "fs_utf8.hpp"
 #include "provider/balance_probe.hpp"
@@ -795,7 +796,14 @@ FsResult FsApi::project_files(const std::string& pid, const std::string& rel) {
     return FsResult::error(ErrCode::kNotFound, "dir not found: " + rel);
   }
   Json arr = Json::array();
+  // A single directory with hundreds of thousands of entries (a log dump, an
+  // unpacked archive) must not become a JSON array AND a DOM subtree of that
+  // size. The cap is generous for real source trees and the reply says when it
+  // cut the list, so the user knows what they are not seeing.
+  const size_t kMaxEntries = 2000;
+  bool truncated = false;
   for (auto& e : ghc::filesystem::directory_iterator(dir, ec)) {
+    if (arr.size() >= kMaxEntries) { truncated = true; break; }
     std::string name = e.path().filename().string();
     bool isdir = ghc::filesystem::is_directory(e.path(), ec);
     std::error_code ec2;
@@ -815,8 +823,47 @@ FsResult FsApi::project_files(const std::string& pid, const std::string& rel) {
     return jsonutil::get<std::string>(a, "name", "") <
            jsonutil::get<std::string>(b, "name", "");
   });
-  return FsResult::success(Json{{"entries", arr}, {"path", rel}});
+  return FsResult::success(
+      Json{{"entries", arr}, {"path", rel}, {"truncated", truncated}});
 }
+
+namespace {
+
+// A preview tab cannot render raw bytes. NULs are the standard tell (the file
+// tools use the same guard); UTF-16 TEXT is the one NUL-carrying case that is
+// really text, and its NULs sit on ONE parity of the byte pairs.
+bool preview_is_binary(const std::string& raw) {
+  size_t n = std::min(raw.size(), static_cast<size_t>(4096));
+  size_t nul = 0, even_nul = 0, odd_nul = 0;
+  for (size_t i = 0; i < n; ++i) {
+    if (raw[i] != '\0') continue;
+    ++nul;
+    if ((i & 1) == 0) ++even_nul; else ++odd_nul;
+  }
+  if (nul == 0) return false;
+  size_t pairs = n / 2;
+  if (pairs >= 8 && (even_nul >= pairs * 3 / 4 || odd_nul >= pairs * 3 / 4)) {
+    return false;
+  }
+  return true;
+}
+
+// Image types the content sniffer cannot see: SVG is XML text, ICO is a
+// container, and AVIF has no stb decoder. Matched by extension only.
+const char* image_mime_for_name(const std::string& rel) {
+  size_t dot = rel.find_last_of('.');
+  if (dot == std::string::npos) return nullptr;
+  std::string ext = rel.substr(dot + 1);
+  for (size_t i = 0; i < ext.size(); ++i) {
+    ext[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(ext[i])));
+  }
+  if (ext == "svg") return "image/svg+xml";
+  if (ext == "ico") return "image/x-icon";
+  if (ext == "avif") return "image/avif";
+  return nullptr;
+}
+
+}  // namespace
 
 FsResult FsApi::project_read_file(const std::string& pid, const std::string& rel) {
   std::string root = path_for(pid);
@@ -829,17 +876,51 @@ FsResult FsApi::project_read_file(const std::string& pid, const std::string& rel
     return FsResult::error(ErrCode::kNotFound, "file not found: " + rel);
   }
   auto sz = ghc::filesystem::file_size(file, ec);
-  if (!ec && sz > 512 * 1024) {
-    return FsResult::error(ErrCode::kInvalidArg, "file too large to preview (>512KB)");
+  // A hard cap before reading: reading a 2 GB file to see it is not a text is
+  // exactly the kind of "just open it" that hangs the app.
+  if (!ec && sz > 32LL * 1024 * 1024) {
+    return FsResult::error(ErrCode::kInvalidArg, "file too large to preview (>32MB)");
   }
   std::ifstream ifs(file.string(), std::ios::binary);
   if (!ifs) return FsResult::error(ErrCode::kIo, "cannot open file: " + rel);
   std::stringstream ss;
   ss << ifs.rdbuf();
-  // The preview pane renders this text; raw GBK bytes would make the whole
-  // reply unserializable (the side panel then showed "加载失败" for a perfectly
-  // ordinary file).
-  return FsResult::success(Json{{"content", utf8::decode_to_utf8(ss.str())}});
+  std::string bytes = ss.str();
+  // 1) An image is CONTENT, not text, whatever its extension says. The sniffer
+  //    only needs the header, so a PNG called ".dat" still previews.
+  fs::image::Format fmt = fs::image::sniff(bytes);
+  const char* name_mime = image_mime_for_name(rel);
+  bool by_name = name_mime && !preview_is_binary(bytes);
+  if (fmt != fs::image::Format::kUnknown || by_name) {
+    if (bytes.size() > 12LL * 1024 * 1024) {
+      return FsResult::error(ErrCode::kInvalidArg,
+                             "image too large to preview (>12MB)");
+    }
+    std::string mime = fmt != fs::image::Format::kUnknown
+                           ? fs::image::mime_of(fmt)
+                           : std::string(name_mime);
+    return FsResult::success(Json{
+        {"kind", "image"},
+        {"mime", mime},
+        {"dataUri", "data:" + mime + ";base64," + fs::image::base64(bytes)},
+        {"size", static_cast<int64_t>(bytes.size())}});
+  }
+  // 2) Binary (an executable, an object file, an archive): say so. Opening it
+  //    as text produced pages of mojibake and, on a bad decode, an entire
+  //    unreadable preview - the user could not even tell what the file WAS.
+  if (preview_is_binary(bytes)) {
+    return FsResult::success(Json{{"kind", "binary"},
+                                  {"size", static_cast<int64_t>(bytes.size())}});
+  }
+  if (!ec && sz > 512 * 1024) {
+    return FsResult::error(ErrCode::kInvalidArg, "file too large to preview (>512KB)");
+  }
+  // 3) Text. The preview pane renders this text; raw GBK bytes would make the
+  //    whole reply unserializable (the side panel then showed "加载失败" for a
+  //    perfectly ordinary file).
+  return FsResult::success(Json{{"content", utf8::decode_to_utf8(bytes)},
+                                {"kind", "text"},
+                                {"size", static_cast<int64_t>(bytes.size())}});
 }
 
 // 保存聊天附件：写进 <project>/.flashsight/uploads/。放在项目里（而不是临时

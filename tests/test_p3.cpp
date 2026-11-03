@@ -647,6 +647,37 @@ FS_TEST(file_tools_flow) {
   ASSERT_TRUE(gr.ok());
   EXPECT_TRUE(gr.data["results"].size() >= 1);
 
+  // A recursive grep does NOT walk generated trees. Reading and decoding every
+  // file under build/ is what froze the app on a real project ("temp 几百个文件
+  // 扫描极其卡顿"); the skip is reported, not silent.
+  {
+    ghc::filesystem::create_directories(proj / "build");
+    std::ofstream ofs((proj / "build" / "gen.txt").string(), std::ios::binary);
+    ofs << "needle-in-build\n";
+  }
+  Json skargs = Json::object();
+  skargs["pattern"] = "needle-in-build";
+  skargs["grep"] = true;
+  FsResult sk = reg.invoke(ctx, "find_files", skargs);
+  ASSERT_TRUE(sk.ok());
+  EXPECT_EQ((int)sk.data["results"].size(), 0);
+  EXPECT_TRUE(sk.data.contains("note"));
+
+  // edit_file refuses a file it would have to load whole: the unbounded read
+  // was the freeze (a stray path to a build artifact moved the machine into
+  // swap), and "not found" would be a lie about a file that is right there.
+  {
+    std::ofstream ofs((proj / "huge.bin").string(), std::ios::binary);
+    std::string chunk(1 << 20, 'x');
+    for (int i = 0; i < 33; ++i) ofs.write(chunk.data(), chunk.size());
+  }
+  Json hargs = Json::object();
+  hargs["path"] = "huge.bin";
+  hargs["edits"] = Json::array({Json{{"start", 1}, {"newText", "x"}}});
+  FsResult hr = reg.invoke(ctx, "edit_file", hargs);
+  EXPECT_FALSE(hr.ok());
+  EXPECT_TRUE(hr.message.find("too large") != std::string::npos);
+
   // write
   Json wargs = Json::object();
   wargs["path"] = "new.txt";

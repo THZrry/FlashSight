@@ -1535,7 +1535,11 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .work-body .think-body {
   margin: 0;
-  max-height: min(10 * 1.55em, 40vh);
+  /* The reasoning is part of the process, and the process has NO height cap:
+     every inner window made reading a long turn a scroll-inside-a-scroll. The
+     transcript's own scroll moves it now. */
+  max-height: none;
+  overflow: visible;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
@@ -1584,10 +1588,12 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   font-family: var(--mono); font-size: 12px;
   /* No top border when a label sits above it; a lone body keeps one. */
   border-top: 1px solid var(--border);
-  /* Uncapped vertically: the page scrolls. `overscroll-behavior: contain` keeps
-     a sideways swipe inside the block from scrolling the page. */
+  /* Uncapped vertically: the page scrolls. No `overscroll-behavior: contain`
+     here: with nothing to scroll vertically this body swallowed the wheel - the
+     pointer sat over a tool result and NOTHING moved, neither the block nor the
+     page. A wheel over the process must reach the transcript, the only vertical
+     scroller in the layout. */
   max-height: none;
-  overscroll-behavior: contain;
   /* Long single lines (minified JSON, a one-line CSV dump) must be READABLE:
      wrapping makes a 400-column row meaningless, and `overflow: visible` used to
      paint them straight out of the box where the block's `overflow: hidden`
@@ -1761,6 +1767,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .file-preview-lines {
   flex: none;
+  /* Pinned to the left edge while the code scrolls sideways: the numbers are the
+     map, and scrolling them away defeats the purpose of having a gutter. */
+  position: sticky; left: 0; z-index: 1;
   padding: 8px 8px 8px 10px;
   text-align: right;
   font-family: var(--mono); font-size: 12px; line-height: 1.55;
@@ -1772,10 +1781,49 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 }
 .file-preview-body {
   margin: 0; padding: 8px 10px; overflow: visible;
-  flex: 1; min-width: 0;
+  /* `flex: 1` fills the panel for a short file; `min-width: max-content` lets the
+     box grow to its LONGEST line so the outer scroller can scroll instead of the
+     text being clipped. */
+  flex: 1; min-width: max-content;
   background: var(--code-bg); color: var(--code-text);
   font-family: var(--mono); font-size: 12px; line-height: 1.55;
-  white-space: pre-wrap;
+  /* NO wrapping. A wrapped line is still ONE numbered line, so wrapping made the
+     gutter drift out of step with the code below the first long line - the number
+     said 12 next to what was really the tail of line 9. Code keeps its shape;
+     long lines scroll sideways (the gutter stays put, see above). */
+  white-space: pre;
+}
+
+/* markdown preview: 渲染 / 源码. The LIT half is not a button - there is nothing
+   to do by clicking the mode you are already in. */
+.preview-modes { display: flex; gap: 4px; }
+.mini-btn.active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-soft);
+  cursor: default;
+}
+/* An image preview: the picture is the content, so it gets the body area and
+   scales DOWN to the panel's width (a 3000px screenshot must not force the whole
+   sidebar to scroll sideways). */
+.file-preview-media {
+  flex: 1; min-height: 0;
+  display: flex; align-items: flex-start; justify-content: center;
+  overflow: auto; padding: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.file-preview-img {
+  max-width: 100%; height: auto; display: block;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+/* Rendered markdown: prose typography (the .article rules) in the panel body. */
+.file-preview-md {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  padding: 4px 4px 12px;
 }
 
 /* side panel: git - branch header, two change groups, diff, commit box */

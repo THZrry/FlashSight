@@ -1510,6 +1510,32 @@ FS_TEST(uiapp_stream_delta_appends) {
   EXPECT_FALSE(app.state().messages[0].streaming);
 }
 
+// 工具调用前的解说（interim）先以 delta 的形式进了答案；interim 事件到达时必须把
+// 它从答案里移出来、只留在工作过程里。否则实时记录里过程文字显示两遍（还是当成
+// 总结），而存储的 turn 只把它放在 interim 里——重载/切页后它又"消失"了。
+FS_TEST(uiapp_interim_moves_narration_out_of_the_answer) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s); });
+  app.state().messages.clear();
+  const std::string narration = "let me read the config first";
+  app.on_backend_event_for_test("stream.delta", Json{{"text", narration}});
+  app.on_backend_event_for_test("assistant.interim", Json{{"text", narration}});
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  EXPECT_EQ(app.state().messages[0].text, std::string(""));
+  ASSERT_TRUE(app.state().messages[0].interim.size() == 1u);
+  EXPECT_EQ(app.state().messages[0].interim[0], narration);
+  // The answer continues in the LAST round: only that text is the answer.
+  app.on_backend_event_for_test("stream.delta", Json{{"text", "done."}});
+  EXPECT_EQ(app.state().messages[0].text, std::string("done."));
+  app.on_backend_event_for_test("turn.done", Json::object());
+  // Finishing folds the work log; the answer is untouched.
+  EXPECT_FALSE(app.state().messages[0].work_open);
+  EXPECT_EQ(app.state().messages[0].text, std::string("done."));
+}
+
 // 每次 API 调用就更新上下文/缓存，而不是等一轮结束：这些数字正是跑的时候看的。
 FS_TEST(uiapp_per_call_usage_updates_the_panel) {
   NullDom dom;
@@ -3965,17 +3991,29 @@ FS_TEST(uiapp_thinking_block_folds) {
     m.role = "assistant";
     m.text = "answer";
     m.thinking = "let me reason about it";
+    // A turn that is RUNNING shows its work: the process is the only thing
+    // moving, and a folded block made a long tool chain look frozen.
+    m.streaming = true;
     s.messages.push_back(m);
   });
   std::string d = dom.dump();
   EXPECT_TRUE(d.find("work-block") != std::string::npos);
   EXPECT_TRUE(d.find("工作过程") != std::string::npos);
-  // The work process is OPEN by default: the process is the work, and a closed
-  // fold meant a reloaded turn showed none of it ("重新进入不再显示").
   EXPECT_TRUE(d.find("let me reason about it") != std::string::npos);
-  // Collapsing still hides it (the header stays and the click toggles).
-  app.update([](AppState& s) { s.messages[0].work_open = false; });
+  // The turn ends: the shell folds the work log (turn.done does exactly this).
+  app.update([](AppState& s) {
+    s.messages[0].streaming = false;
+    s.messages[0].work_open = false;
+  });
   EXPECT_TRUE(dom.dump().find("let me reason about it") == std::string::npos);
+  // One click reopens it - the process is still there after the turn. (The real
+  // click handler bumps rev so the memoised message node is rebuilt.)
+  app.update([](AppState& s) {
+    s.messages[0].work_open = true;
+    s.messages[0].work_touched = true;
+    s.messages[0].rev = 9001;
+  });
+  EXPECT_TRUE(dom.dump().find("let me reason about it") != std::string::npos);
 }
 
 // A tool call must appear when it STARTS and be completed in place when it
@@ -4116,16 +4154,20 @@ FS_TEST(uiapp_work_group_shows_time_and_folds) {
   EXPECT_TRUE(d.find("工作过程") != std::string::npos);
   EXPECT_TRUE(d.find("1m 20s") != std::string::npos);  // duration
   EXPECT_TRUE(d.find("完成") != std::string::npos);
-  // Open by default: the reasoning and the tool rows are in the tree. The
-  // narration/tool sections are ONE stream now (no "工具调用" heading).
-  EXPECT_TRUE(d.find("reasoning") != std::string::npos);
-  EXPECT_TRUE(d.find("read_file") != std::string::npos);
-  EXPECT_TRUE(d.find("工具调用") == std::string::npos);
-  // Collapsing hides both.
-  app.update([](AppState& s) { s.messages[0].work_open = false; });
+  // A FINISHED turn starts folded: the answer is what you reread, and the
+  // header says what happened ("· 1 步").
+  EXPECT_TRUE(d.find("reasoning") == std::string::npos);
+  EXPECT_TRUE(d.find("read_file") == std::string::npos);
+  // Opening it reveals ONE process stream (no "工具调用" heading).
+  app.update([](AppState& s) {
+    s.messages[0].work_open = true;
+    s.messages[0].work_touched = true;
+    s.messages[0].rev = 9002;
+  });
   std::string o = dom.dump();
-  EXPECT_TRUE(o.find("reasoning") == std::string::npos);
-  EXPECT_TRUE(o.find("read_file") == std::string::npos);
+  EXPECT_TRUE(o.find("reasoning") != std::string::npos);
+  EXPECT_TRUE(o.find("read_file") != std::string::npos);
+  EXPECT_TRUE(o.find("工具调用") == std::string::npos);
 }
 
 // Code blocks carry a language label, a line-number gutter and a copy button.

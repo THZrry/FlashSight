@@ -87,8 +87,20 @@ struct SideTab {
   };
   std::vector<FileEntry> entries;
   bool loaded = false;
+  // The backend caps a listing (a directory can hold hundreds of thousands of
+  // entries); the panel says so instead of silently showing a slice.
+  bool files_truncated = false;
   std::string preview_path;
   std::string preview;
+  // What the file IS decides the renderer: text (code / prose), image (a data
+  // URI the browser paints) or binary (no text to show). Before this, every
+  // file was decoded as text - a PNG opened as mojibake.
+  std::string preview_kind;   // "text" | "image" | "binary"
+  std::string preview_uri;    // data: URI for kind == "image"
+  int64_t preview_size = 0;
+  // Markdown renders as PROSE by default, with 源码 one click away. Other text
+  // files always show the source view.
+  bool preview_source = false;
   // subagents detail panel: which subagent's transcript this panel shows
   // ("" = the list of all subagents). A transcript is long, so it gets its own
   // SIDE PANEL rather than a full-window tab: the sidebar is where subagent
@@ -972,6 +984,10 @@ class UiApp {
                   const std::string& rel);
   // Read one file for a preview panel.
   void preview_file(const std::string& tab_id, const std::string& rel);
+  // Follow a markdown link: the backend decides (http opens the browser, a
+  // project path opens the preview, anything else is refused). Shared by the
+  // transcript's answers and the sidebar's rendered markdown.
+  void open_href(const std::string& href);
   // Open (or focus) a subagent's transcript in the SIDEBAR (a "subagent" panel).
   void open_subagent_tab(const std::string& subagent_id, const std::string& title);
   // Load one subagent's full record into its tab (transcript included).

@@ -694,14 +694,19 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   if (has_work) {
     int nfail = 0;
     for (size_t i = 0; i < m.tools.size(); ++i) if (!m.tools[i].ok) ++nfail;
-    H work = el("div", m.work_open ? "work-block open" : "work-block");
+    // RUNNING IS OPEN. The flag alone was not enough: a message that is streaming
+    // (or a repaint before the shell opened the fold) showed a closed block while
+    // work was happening. An explicit click wins for the rest of the turn;
+    // turn.done folds it again for good.
+    bool work_open = m.work_open || (m.streaming && !m.work_touched);
+    H work = el("div", work_open ? "work-block open" : "work-block");
     H whead = el("div", "work-head");
     if (on_think_toggle) {
       whead.on(EventKind::kClick,
                [on_think_toggle](const std::string&) { on_think_toggle("work"); });
     }
     whead.add(el("i", "fa fa-list-check"));
-    if (m.work_open) {
+    if (work_open) {
       whead.add(el("span").text(tr("工作过程")));
     } else {
       // Collapsed: one line that says what happened, so the fold is informative
@@ -728,9 +733,9 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       }
       whead.add(el("span", "work-time dim").text(fmt_clock(m.ended_at)));
     }
-    whead.add(el("span", "think-caret").text(m.work_open ? "\u25be" : "\u25b8"));
+    whead.add(el("span", "think-caret").text(work_open ? "\u25be" : "\u25b8"));
     work.add(whead);
-    if (m.work_open) {
+    if (work_open) {
       H inner = el("div", "work-body");
       // ONE stream, in the order the work happened: reasoning, then the narration
       // and tool blocks as they come. The old layout had a "工具调用" heading

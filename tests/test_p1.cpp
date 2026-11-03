@@ -297,6 +297,63 @@ FS_TEST(errors_not_found) {
   EXPECT_TRUE(api.session_get("bad-sid").code == ErrCode::kInvalidArg);
 }
 
+// ---------- 文件预览：文本 / 图片 / 二进制三分 ----------
+// A preview tab used to decode EVERY file as text: a PNG opened as mojibake and
+// a .exe as pages of garbage. The reader now says what the file IS.
+FS_TEST(project_read_file_kinds) {
+  fstest::TempDir td("preview");
+  FakeClock clock(1000);
+  FixedRandom rng(21);
+  FsApi api(ghc::filesystem::path(td.path()), &clock, &rng);
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj_dir);
+  std::string pid = api.project_create(proj_dir.string()).data["pid"].get<std::string>();
+  {
+    std::ofstream f((proj_dir / "a.txt").string(), std::ios::binary);
+    f << "hello\nworld\n";
+  }
+  FsResult r = api.project_read_file(pid, "a.txt");
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.data["kind"].get<std::string>(), std::string("text"));
+  EXPECT_TRUE(r.data["content"].get<std::string>().find("hello") != std::string::npos);
+  // A binary: NUL bytes in the head. No text content may be offered for it.
+  {
+    std::ofstream f((proj_dir / "bin.dat").string(), std::ios::binary);
+    std::string bytes("MZ\x90\x00\x03\x00\x00\x00payload", 18);
+    f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  }
+  r = api.project_read_file(pid, "bin.dat");
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.data["kind"].get<std::string>(), std::string("binary"));
+  EXPECT_TRUE(!r.data.contains("content"));
+  // An image is recognised by its CONTENT (the sniffer only reads the header),
+  // and comes back as a data URI the browser can paint.
+  {
+    std::ofstream f((proj_dir / "p.dat").string(), std::ios::binary);
+    const unsigned char hdr[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    f.write(reinterpret_cast<const char*>(hdr), 8);
+    f.write("fake-pixels", 11);
+  }
+  r = api.project_read_file(pid, "p.dat");
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.data["kind"].get<std::string>(), std::string("image"));
+  std::string uri = r.data["dataUri"].get<std::string>();
+  EXPECT_TRUE(uri.compare(0, 22, "data:image/png;base64,") == 0);
+  EXPECT_EQ(r.data["mime"].get<std::string>(), std::string("image/png"));
+  // UTF-16 text has NULs too, but on ONE parity - it is text, not binary.
+  {
+    std::ofstream f((proj_dir / "u16.txt").string(), std::ios::binary);
+    const unsigned char bom[2] = {0xFF, 0xFE};
+    f.write(reinterpret_cast<const char*>(bom), 2);
+    const char txt[] = "h\0e\0l\0l\0o\0 \0w\0o\0r\0l\0d\0";
+    f.write(txt, sizeof(txt) - 1);
+  }
+  r = api.project_read_file(pid, "u16.txt");
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.data["kind"].get<std::string>(), std::string("text"));
+  EXPECT_TRUE(r.data["content"].get<std::string>().find("hello world") != std::string::npos);
+}
+
 // ---------- LockArbiter：同项目单写锁 + full 不设锁 + 超时兜底 ----------
 FS_TEST(lock_arbiter_matrix) {
   FakeClock clock(1000);

@@ -59,6 +59,17 @@ std::string itos(int v) {
   return std::string(buf);
 }
 
+// Cut text for DISPLAY at a UTF-8 character boundary. Half a CJK character is
+// invalid UTF-8, and these strings go straight to the DOM adapter (which
+// re-encodes them), so a cut inside a sequence paints a replacement glyph.
+std::string cut_display(const std::string& s, size_t max_bytes,
+                        const std::string& suffix) {
+  if (s.size() <= max_bytes) return s;
+  size_t cut = max_bytes;
+  while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+  return s.substr(0, cut) + suffix;
+}
+
 // Token counts are read at a glance, not compared digit by digit: 12.4K is
 // more useful in a 360px panel than 12437.
 std::string fmt_tokens(int64_t n) {
@@ -1225,7 +1236,12 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       // result). An empty object carries no information - skip it.
       if (tc[k].contains("args") && tc[k]["args"].is_object() &&
           !tc[k]["args"].empty()) {
-        tb.input = dump_safe(tc[k]["args"], 2);
+        // The stored args are NOT truncated (the model needs them whole), but
+        // the transcript does not: a write_file carries the entire new file as
+        // its input, and building a message node around a 200KB string on every
+        // repaint is pure waste. Display-only cap.
+        tb.input = cut_display(dump_safe(tc[k]["args"], 2), 6000,
+                               "\n… (输入已截断)");
       }
       if (detail.empty()) detail = tb.input;
       tb.detail = detail;
@@ -2513,6 +2529,8 @@ void UiApp::load_files(const std::string& tab_id, const std::string& pid,
       for (size_t i = 0; i < s.side_tabs.size(); ++i) {
         if (s.side_tabs[i].id != tab_id) continue;
         s.side_tabs[i].entries = rows;
+        s.side_tabs[i].files_truncated =
+            r.ok && jsonutil::get<bool>(r.data, "truncated", false);
         s.side_tabs[i].path = rel;
         s.side_tabs[i].loaded = true;
         s.side_tabs[i].preview_path.clear();
@@ -2798,12 +2816,44 @@ void UiApp::preview_file(const std::string& tab_id, const std::string& rel) {
         s.side_tabs[i].path = rel;
         s.side_tabs[i].preview_path = rel;
         s.side_tabs[i].loaded = true;
-        s.side_tabs[i].preview =
-            r.ok ? jsonutil::get<std::string>(r.data, "content", "")
-                 : (tr("（无法预览：") + r.message + "）");
+        if (r.ok) {
+          std::string kind = jsonutil::get<std::string>(r.data, "kind", "text");
+          s.side_tabs[i].preview_kind = kind;
+          s.side_tabs[i].preview_size = jsonutil::get_int(r.data, "size", 0);
+          s.side_tabs[i].preview_uri =
+              kind == "image" ? jsonutil::get<std::string>(r.data, "dataUri", "")
+                              : std::string();
+          s.side_tabs[i].preview =
+              kind == "text"
+                  ? jsonutil::get<std::string>(r.data, "content", "")
+                  : std::string();
+        } else {
+          s.side_tabs[i].preview_kind = "text";
+          s.side_tabs[i].preview_uri.clear();
+          s.side_tabs[i].preview_size = 0;
+          s.side_tabs[i].preview = tr("（无法预览：") + r.message + "）";
+        }
         return;
       }
     });
+  });
+}
+
+// Follow a markdown link. The backend decides where it goes: http(s) opens the
+// browser, a project-relative path opens the side-panel preview (which is what a
+// link to a source file should do), anything else is refused.
+void UiApp::open_href(const std::string& href) {
+  if (href.empty()) return;
+  call_async("link.open", Json{{"sid", active_sid()}, {"href", href}},
+             [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("无法打开链接：") + r.message);
+      return;
+    }
+    std::string opened = jsonutil::get<std::string>(r.data, "opened", "");
+    if (opened == "file") {
+      open_file_preview(jsonutil::get<std::string>(r.data, "path", ""));
+    }
   });
 }
 
@@ -2979,6 +3029,10 @@ static comp::ChatMsg& ensure_turn_message(std::vector<comp::ChatMsg>& m,
   comp::ChatMsg a;
   a.role = "assistant";
   a.streaming = true;
+  // A turn in flight shows its work: the process is the only thing moving, and a
+  // folded block made a long tool chain look like a frozen screen. turn.done
+  // folds it back.
+  a.work_open = true;
   a.rev = (*next_rev)++;
   a.started_at = now;
   a.uid = total + static_cast<int64_t>(m.size());
@@ -3064,24 +3118,13 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // A NEW reply starts a NEW message. Testing only `role != "assistant"` was
     // wrong: the previous turn's answer is also an assistant message (just no
     // longer streaming), so the next turn's text was appended onto it - two
-    // answers fused into one bubble.
-    if (m.empty() || m.back().role != "assistant" || !m.back().streaming) {
-      comp::ChatMsg a;
-      a.role = "assistant";
-      a.streaming = true;
-      a.rev = next_msg_rev_++;
-      // The live timer counts from the moment the first token arrives, which is
-      // the only start time the UI can observe (the request itself is async and
-      // the backend does not report when it was sent).
-      a.started_at = now_ms();
-      // Newest message of this session: a distinct uid no loaded turn can have.
-      a.uid = total + static_cast<int64_t>(m.size());
-      m.push_back(a);
-      ++total;
-    }
-    m.back().text += text;
-    m.back().streaming = true;
-    m.back().rev = next_msg_rev_++;
+    // answers fused into one bubble. ensure_turn_message owns the creation so
+    // every event that can open a turn (delta / tool.start / interim) agrees on
+    // the message's defaults, including the work fold being open while it runs.
+    comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
+    msg.text += text;
+    msg.streaming = true;
+    msg.rev = next_msg_rev_++;
     // PAINT NOW, not on a timer. The SSE frame that delivered this delta is a
     // normal task, so painting from here is not throttled; a timer-driven paint
     // is (Chrome clamps timers in occluded/background pages to ~1 Hz, which made
@@ -3094,7 +3137,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // Stamp the live counter on the same clock that paints it: pump() may be
     // throttled to 1 Hz in an occluded tab, and the elapsed time must still move
     // while deltas keep arriving.
-    m.back().now_ms = now;
+    msg.now_ms = now;
     if (now - last_stream_paint_ms_ >= 25) {
       last_stream_paint_ms_ = now;
       stream_dirty_ = false;
@@ -3125,6 +3168,12 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     if (!m.empty() && m.back().role == "assistant") {
       m.back().streaming = false;
+      // The work is done: fold the process. You watch it while it runs; after
+      // that the answer is what you reread, and a long tool log above it buries
+      // the reply. A reopened transcript starts folded too, so live and stored
+      // now agree. One click reopens it.
+      m.back().work_open = false;
+      m.back().work_touched = false;
       // Prefer the backend's own start/end: it knows when the request went out,
       // while the UI only sees the first delta. Falling back to local times
       // keeps the counter correct if an older backend sends no timestamps.
@@ -3200,6 +3249,21 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     int& total = is_active ? st_.history_total : vp->history_total;
     if (!text.empty()) {
       comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
+      // The same round text ALREADY reached the answer through stream.delta: the
+      // provider streams the narration like any other text, and the loop only
+      // learns at the end of the round that it was narration. Leaving it there
+      // showed the process twice (in the fold AND as the reply), and because a
+      // stored turn keeps narration only in `interim`, reopening the session - or
+      // switching away and back, which rebuilds from the store - made it vanish.
+      // Move it out of the answer so the live transcript matches the saved one.
+      std::string& ans = msg.text;
+      if (ans.size() >= text.size() &&
+          ans.compare(ans.size() - text.size(), text.size(), text) == 0) {
+        ans.erase(ans.size() - text.size());
+      } else {
+        size_t at = ans.rfind(text);
+        if (at != std::string::npos) ans.erase(at, text.size());
+      }
       msg.interim.push_back(text);
       msg.rev = next_msg_rev_++;
       render();
@@ -3229,7 +3293,8 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       // input: `{}` would render as a labelled section holding two braces.
       if (payload.contains("args") && payload["args"].is_object() &&
           !payload["args"].empty()) {
-        tb.input = dump_safe(payload["args"], 2);
+        tb.input = cut_display(dump_safe(payload["args"], 2), 6000,
+                               "\n… (输入已截断)");
       }
       msg.tools.push_back(tb);
       msg.rev = next_msg_rev_++;
@@ -3568,6 +3633,10 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       comp::ChatMsg& m = st_.messages.back();
       m.streaming = false;
       m.now_ms = 0;
+      // An interrupted turn is over too: fold the process the same way turn.done
+      // does, so the error line and the partial answer are what remain visible.
+      m.work_open = false;
+      m.work_touched = false;
       if (m.ended_at <= 0) m.ended_at = now_ms();
       if (m.started_at <= 0) m.started_at = m.ended_at;
       if (!st_.interrupt_reason.empty()) m.error = st_.interrupt_reason;
@@ -5389,8 +5458,14 @@ VNodePtr UiApp::build_session() {
       if (v == "work") {
         update([&](AppState& s) {
           if (i < static_cast<int>(s.messages.size())) {
-            s.messages[i].work_open = !s.messages[i].work_open;
-            s.messages[i].rev = next_msg_rev_++;
+            comp::ChatMsg& m = s.messages[i];
+            // Toggle what is on SCREEN, not the raw flag: while a turn runs the
+            // fold is open even when `work_open` is false (streaming implies
+            // open), so toggling the flag alone made the click look dead.
+            bool shown = m.work_open || (m.streaming && !m.work_touched);
+            m.work_open = !shown;
+            m.work_touched = true;
+            m.rev = next_msg_rev_++;
           }
         });
         return;
@@ -5428,23 +5503,7 @@ VNodePtr UiApp::build_session() {
         s.ctx_label = m.text;
       });
     },
-                               [this](const std::string& href) {
-      // A markdown link. The backend decides where it goes: http(s) opens the
-      // browser, a project-relative path opens the side-panel preview (which is
-      // what a link to a source file should do), anything else is refused.
-      if (href.empty()) return;
-      call_async("link.open", Json{{"sid", active_sid()}, {"href", href}},
-                 [this, href](const BackendResult& r) {
-        if (!r.ok) {
-          toast(tr("无法打开链接：") + r.message);
-          return;
-        }
-        std::string opened = jsonutil::get<std::string>(r.data, "opened", "");
-        if (opened == "file") {
-          open_file_preview(jsonutil::get<std::string>(r.data, "path", ""));
-        }
-      });
-    },
+                               [this](const std::string& href) { open_href(href); },
                                // A subagent tool row's "打开记录": open the
                                // transcript as its own tab.
                                [this](const std::string& subagent_id) {
@@ -6902,6 +6961,9 @@ VNodePtr UiApp::build_side_panel() {
       if (entries.empty()) {
         body.add(comp::empty_state(tr("（空目录）"), "", nullptr));
       }
+      if (panel && panel->files_truncated) {
+        body.add(el("div", "hint").text(tr("目录太大，只列出前 2000 项。")));
+      }
       for (size_t i = 0; i < entries.size(); ++i) {
         const SideTab::FileEntry& e = entries[i];
         H row = el("div", "file-row");
@@ -6929,14 +6991,51 @@ VNodePtr UiApp::build_side_panel() {
       }
     }
   } else if (kind == "preview") {
-    // One file's contents, in its own tab.
+    // One file's contents, in its own tab. WHAT the file is decides the
+    // renderer: an image gets an <img>, a binary says so instead of showing
+    // mojibake, text is source, and markdown renders as prose with 源码 one
+    // click away.
     const std::string& rel = panel ? panel->path : std::string();
     if (rel.empty()) {
       body.add(comp::empty_state(tr("没有选中的文件。"), "", nullptr));
     } else {
+      std::string lang = highlight::lang_for_path(rel);
+      bool is_md = lang == "markdown";
+      std::string pkind = panel->preview_kind.empty() ? "text" : panel->preview_kind;
       H head = el("div", "files-nav");
       head.add(el("span", "files-cwd").text(folder_basename(rel)));
       head.add(el("span", "grow"));
+      // Markdown: 渲染 / 源码. Only the INACTIVE half is a live button - clicking
+      // the mode you are already in would be a no-op with a lit face.
+      if (is_md && panel->loaded && pkind == "text" && !panel->preview.empty()) {
+        bool src = panel->preview_source;
+        H seg = el("div", "preview-modes");
+        EventFn set_src = [this, panel_id](const std::string& v) {
+          bool to_src = v == "1";
+          update([&](AppState& s) {
+            for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+              if (s.side_tabs[i].id == panel_id) s.side_tabs[i].preview_source = to_src;
+            }
+          });
+        };
+        H b_render = el("button", src ? "mini-btn" : "mini-btn active");
+        b_render.attr("type", "button");
+        b_render.text(tr("渲染"));
+        if (src) {
+          b_render.on(EventKind::kClick,
+                      [set_src](const std::string&) { set_src("0"); });
+        }
+        seg.add(b_render);
+        H b_src = el("button", src ? "mini-btn active" : "mini-btn");
+        b_src.attr("type", "button");
+        b_src.text(tr("源码"));
+        if (!src) {
+          b_src.on(EventKind::kClick,
+                   [set_src](const std::string&) { set_src("1"); });
+        }
+        seg.add(b_src);
+        head.add(seg);
+      }
       // Copy the project-relative path: that is the string the model and the
       // terminal both understand ("src/core/a.cpp"), unlike an absolute path.
       head.add(comp::icon_button("copy", tr("复制相对路径"), [this, rel](const std::string&) {
@@ -6947,21 +7046,49 @@ VNodePtr UiApp::build_side_panel() {
         preview_file(panel_id, rel);
       }, "ghost"));
       body.add(head);
-      // Line numbers and content share ONE scroll container, so a number can
-      // never drift away from its line.
-      H box = el("div", "file-preview");
-      H pre = el("pre", "file-preview-body");
       if (!panel->loaded) {
-        pre.text(tr("加载中…"));
-        box.add(pre);
+        body.add(comp::empty_state(tr("加载中…"), "", nullptr));
+      } else if (pkind == "image") {
+        // The backend hands over a data URI, so the browser paints it with no
+        // extra request (and the wasm build has no server to ask).
+        H media = el("div", "file-preview-media");
+        H img = el("img", "file-preview-img");
+        img.attr("src", panel->preview_uri);
+        img.attr("alt", folder_basename(rel));
+        media.add(img);
+        body.add(media);
+      } else if (pkind == "binary") {
+        std::string sz = panel->preview_size > 1024 * 1024
+                             ? itos(static_cast<int>(panel->preview_size / (1024 * 1024))) + " MB"
+                             : (panel->preview_size > 1024
+                                    ? itos(static_cast<int>(panel->preview_size / 1024)) + " KB"
+                                    : itos(static_cast<int>(panel->preview_size)) + " B");
+        body.add(comp::empty_state(tr("二进制文件，没有可显示的文字。") + " (" + sz + ")",
+                                   "", nullptr));
       } else if (panel->preview.empty()) {
-        pre.text(tr("（空文件）"));
-        box.add(pre);
+        body.add(comp::empty_state(tr("（空文件）"), "", nullptr));
+      } else if (is_md && !panel->preview_source) {
+        // Rendered markdown: links open like they do in an answer, and a code
+        // block's copy button copies the block (not the whole document).
+        H md = el("div", "file-preview-md article");
+        md.key("preview-md");
+        std::vector<H> blocks = comp::markdown_blocks(
+            panel->preview,
+            [this](const std::string& t) {
+          dom_.copy_text(t);
+          toast(tr("已复制"));
+        },
+            [this](const std::string& href) { open_href(href); });
+        for (size_t i = 0; i < blocks.size(); ++i) md.add(blocks[i]);
+        body.add(md);
       } else {
+        // Line numbers and content share ONE scroll container, so a number can
+        // never drift away from its line.
+        H box = el("div", "file-preview");
+        H pre = el("pre", "file-preview-body");
         // Guess the language from the FILE NAME, not from a fence label: the
         // preview has no language tag to go on. An unknown extension falls back
         // to plain text, which is the right answer for a config or a log.
-        std::string lang = highlight::lang_for_path(rel);
         if (!lang.empty()) {
           pre.attr("data-lang", lang);
           pre.html(highlight::to_html_cached(panel->preview, lang));
@@ -6982,8 +7109,8 @@ VNodePtr UiApp::build_side_panel() {
         gutter.text(nums);
         box.add(gutter);
         box.add(pre);
+        body.add(box);
       }
-      body.add(box);
     }
   } else if (kind == "git") {
     // ---- Git panel ----
@@ -10492,6 +10619,7 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   mix(m.time.size());
   mix(m.interim.size());
   mix(static_cast<uint64_t>(m.work_open));
+  mix(static_cast<uint64_t>(m.work_touched));
   mix(static_cast<uint64_t>(m.thinking_open));
   mix(static_cast<uint64_t>(m.streaming));
   for (size_t i = 0; i < m.tools.size(); ++i) {

@@ -51,14 +51,27 @@ bool is_binary(const std::string& content) {
   return false;
 }
 
-bool read_text_file(const ghc::filesystem::path& p, std::string* out) {
-  if (!ghc::filesystem::exists(p)) return false;
+// Why a read failed. "Missing" and "too large" need DIFFERENT answers: a model
+// told "not found" about a 2 GB file hunts for a file that is right there.
+enum class ReadStatus { kOk, kMissing, kTooLarge };
+
+// Read a whole file, bounded. Every caller here loads the file ENTIRELY into
+// memory (then maybe decodes a copy of it), and `edit_file` used to do that with
+// NO size check at all: one model path pointing at a build artifact was enough
+// to move the machine into swap - the app and the desktop froze together. A
+// peek at the first bytes is read_file's job, with paging; this one refuses.
+ReadStatus read_text_file(const ghc::filesystem::path& p, std::string* out,
+                          int64_t max_bytes = kHardMaxBytes) {
+  std::error_code ec;
+  if (!ghc::filesystem::exists(p, ec)) return ReadStatus::kMissing;
+  auto sz = ghc::filesystem::file_size(p, ec);
+  if (!ec && static_cast<int64_t>(sz) > max_bytes) return ReadStatus::kTooLarge;
   std::ifstream ifs(p.string(), std::ios::binary);
-  if (!ifs) return false;
+  if (!ifs) return ReadStatus::kMissing;
   std::stringstream ss;
   ss << ifs.rdbuf();
   *out = ss.str();
-  return true;
+  return ReadStatus::kOk;
 }
 
 bool write_text_file(const ghc::filesystem::path& p, const std::string& content) {
@@ -275,7 +288,7 @@ void register_file_tools(ToolRegistry* registry) {
         }
         std::string content;
         std::string encoding;
-        if (!read_text_file(p, &content)) {
+        if (read_text_file(p, &content) != ReadStatus::kOk) {
           return FsResult::error(ErrCode::kNotFound, "file not found: " + rel);
         }
         // Decode BEFORE anything looks at the text: a GBK/UTF-16 file read raw is
@@ -421,23 +434,56 @@ void register_file_tools(ToolRegistry* registry) {
         ghc::filesystem::path base = pathutil::normalize(ctx.cwd);
         Json arr = Json::array();
         std::error_code ec;
+        // A recursive walk must be BOUNDED. It used to read and decode every
+        // file in the tree, including `build/`, `.git/` and `.xmake/`: one grep
+        // then pulled hundreds of MB through memory, saturated a core, and made
+        // the whole app (and the desktop with it) stutter - the "temp has几百
+        // 个文件，扫描变得极其卡顿" report. Generated trees are skipped by name at
+        // any depth, each file is capped, and the WHOLE scan has a byte budget;
+        // the result says when either limit stopped it.
+        static const char* kSkipDirs[] = {
+            ".git", ".flashsight", ".xmake", ".zcode", ".vs", "build",
+            "out", "dist", "node_modules", "cmake-build-debug",
+            "cmake-build-release"};
+        const int64_t kGrepMaxFileBytes = 4LL * 1024 * 1024;
+        const int64_t kGrepMaxTotalBytes = 64LL * 1024 * 1024;
+        int64_t scanned_bytes = 0;
+        bool capped = false;   // a result/byte limit stopped the scan
+        bool skipped = false;  // a generated directory was not walked
         for (auto it = ghc::filesystem::recursive_directory_iterator(base, ec);
              it != ghc::filesystem::recursive_directory_iterator(); ++it) {
-          if ((int)arr.size() >= maxr) break;
-          std::string rel = it->path().lexically_relative(base).string();
-          if (rel.find(".flashsight") == 0 || rel.find(".git") == 0) continue;
-          if (!grep) {
-            if (it->path().filename().string().find(pattern) != std::string::npos) {
-              arr.push_back(rel);
+          if ((int)arr.size() >= maxr) { capped = true; break; }
+          std::error_code dec;
+          std::string name = it->path().filename().string();
+          bool isdir = it->is_directory(dec);
+          if (isdir) {
+            for (size_t k = 0; k < sizeof(kSkipDirs) / sizeof(kSkipDirs[0]); ++k) {
+              if (name == kSkipDirs[k]) {
+                it.disable_recursion_pending();
+                skipped = true;
+                break;
+              }
             }
+          }
+          std::string rel = it->path().lexically_relative(base).string();
+          if (!grep) {
+            if (isdir) continue;
+            if (name.find(pattern) != std::string::npos) { arr.push_back(rel); }
           } else {
-            if (ghc::filesystem::is_directory(it->path(), ec)) continue;
-            // A grep over a huge file would load it whole; skip and say so.
+            if (isdir) continue;
             std::error_code szec;
             auto sz = ghc::filesystem::file_size(it->path(), szec);
-            if (!szec && static_cast<int64_t>(sz) > kHardMaxBytes) continue;
+            if (!szec && static_cast<int64_t>(sz) > kGrepMaxFileBytes) continue;
+            if (!szec && scanned_bytes + static_cast<int64_t>(sz) > kGrepMaxTotalBytes) {
+              capped = true;
+              break;
+            }
             std::string content;
-            if (!read_text_file(it->path(), &content)) continue;
+            if (read_text_file(it->path(), &content, kGrepMaxFileBytes) !=
+                ReadStatus::kOk) {
+              continue;
+            }
+            scanned_bytes += static_cast<int64_t>(content.size());
             // Search the DECODED text: matching raw GBK bytes against a UTF-8
             // pattern silently misses every CJK line, and the matched line goes
             // into the JSON result (where invalid bytes kill the turn).
@@ -460,7 +506,18 @@ void register_file_tools(ToolRegistry* registry) {
             }
           }
         }
-        return FsResult::success(Json{{"results", arr}, {"truncated", false}});
+        Json out = Json{{"results", arr}, {"truncated", capped}};
+        if (skipped) {
+          out["note"] =
+              "generated directories (build/.git/.xmake/.zcode/...) were not "
+              "scanned";
+        }
+        if (capped) {
+          out["note"] = (out.contains("note") ? out["note"].get<std::string>() + "; " : "") +
+                        "scan stopped at " + std::to_string(arr.size()) +
+                        " results or 64MB of file content";
+        }
+        return FsResult::success(out);
       });
   }
 
@@ -494,7 +551,7 @@ void register_file_tools(ToolRegistry* registry) {
         FsResult noise = check_noise(content);
         if (!noise.ok()) return noise;
         std::string before;
-        read_text_file(p, &before);
+        (void)read_text_file(p, &before);
         // A new file defaults to LF (the repo convention on every platform we
         // target); an existing file keeps whatever it already uses unless the
         // caller says otherwise.
@@ -562,12 +619,28 @@ void register_file_tools(ToolRegistry* registry) {
             args["edits"].empty()) {
           return FsResult::error(ErrCode::kInvalidArg, "edits must be a non-empty array");
         }
+        // Each edit rewrites the whole line vector (erase + insert), so a model
+        // that sends thousands of them is quadratic work over the whole file.
+        // Batches of this size are a mistake, not a real edit.
+        if (args["edits"].size() > 200) {
+          return FsResult::error(
+              ErrCode::kInvalidArg,
+              "too many edits in one call (" + std::to_string(args["edits"].size()) +
+                  ", max 200); split it into smaller edit_file calls");
+        }
         FsResult perm = check_write_perm(ctx, ghc::filesystem::path(rel), rel);
         if (!perm.ok()) return perm;
         ghc::filesystem::path p = resolve_by_perm(ctx, rel);
         if (p.empty()) return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
         std::string content;
-        if (!read_text_file(p, &content)) {
+        ReadStatus rs = read_text_file(p, &content);
+        if (rs == ReadStatus::kTooLarge) {
+          return FsResult::error(
+              ErrCode::kInvalidArg,
+              "file is too large to edit (limit " + std::to_string(kHardMaxBytes) +
+                  " bytes); use a terminal command or edit a smaller file: " + rel);
+        }
+        if (rs != ReadStatus::kOk) {
           return FsResult::error(ErrCode::kNotFound, "file not found: " + rel);
         }
         if (is_binary(content)) {
@@ -733,7 +806,9 @@ void register_file_tools(ToolRegistry* registry) {
         }
         std::string before;
         bool was_file = ghc::filesystem::is_regular_file(p, ec);
-        if (was_file) read_text_file(p, &before);
+        // Best-effort capture for undo; a huge file is simply not captured
+        // instead of being slurped into RAM first.
+        if (was_file) (void)read_text_file(p, &before, 2LL * 1024 * 1024);
         ghc::filesystem::remove(p, ec);
         if (ec) return FsResult::error(ErrCode::kIo, "rm failed: " + ec.message());
         Json data = Json::object();

@@ -145,9 +145,16 @@ struct ChatMsg {
   std::vector<std::string> interim;
   // 工作过程: reasoning + narration + tool calls, ONE continuous stream above the
   // answer - no separate "工具调用" section (splitting them made the same turn read
-  // as two unrelated things), and OPEN by default: the process IS the work, and a
-  // collapsed fold meant a reloaded transcript showed none of it.
-  bool work_open = true;
+  // as two unrelated things), and OPEN while the turn runs so you can watch the
+  // work happen. It folds when the turn ends (the answer is what you reread; the
+  // process is one click away), and a finished turn loaded from disk starts
+  // folded.
+  bool work_open = false;
+  // Set by the user's own click on the fold. While a turn is RUNNING the log is
+  // open regardless of `work_open`, which would otherwise re-open a fold the user
+  // had just collapsed on the next repaint; after a click that decision wins
+  // until the turn ends.
+  bool work_touched = false;
   // When the turn ended and how long it took (ms since epoch; 0 = unknown).
   int64_t started_at = 0;
   int64_t ended_at = 0;
