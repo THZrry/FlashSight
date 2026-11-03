@@ -619,30 +619,6 @@ void UiApp::call_async(const std::string& method, const Json& args,
 
 void UiApp::pump() {
   if (backend_) backend_->poll();
-  // Nothing is painted while the window is hidden (minimized, occluded, another
-  // virtual desktop). A turn can stream for hours while nobody watches; every
-  // one of those paints is CPU + DOM churn + raster work whose only outcome is
-  // an unseen frame. Backend events were consumed above, so the state is
-  // current; one paint restores the view when the window returns.
-  if (dom_.hidden()) {
-    hidden_paint_ = true;
-    // Safety valve: an engine that reports "hidden" while the window IS on
-    // screen (or never reports it back) must not leave a frozen UI. One paint
-    // every two seconds keeps the view truthful at 0.5 Hz - still ~30x less
-    // work than a streaming turn at the normal paint floor.
-    int64_t now = now_ms();
-    if (now - last_hidden_paint_ms_ >= 2000) {
-      last_hidden_paint_ms_ = now;
-      render();
-      follow_history_if_pinned();
-    }
-    return;
-  }
-  if (hidden_paint_) {
-    hidden_paint_ = false;
-    render();
-    follow_history_if_pinned();
-  }
   // Flush a delta that the paint floor held back. Deltas normally paint from the
   // SSE frame itself (see apply_session_event) - this is only the tail of a
   // burst, and it is the last paint of a streaming turn.
@@ -1530,11 +1506,16 @@ void UiApp::apply_pending_history_scroll() {
                    pending_scroll_target_, static_cast<int>(pending_scroll_follow_),
                    sh, ch);
     }
-    if (pending_scroll_target_ >= 0) {
-      dom_.set_scroll_top(h->dom, pending_scroll_target_);
-    } else {
+    if (pending_scroll_follow_ || pending_scroll_target_ < 0) {
+      // The user was at the END when they left (or this is a first visit), so
+      // the end is what they must see - not the numeric offset they left,
+      // which is now somewhere in the middle of a longer transcript. This is
+      // the "history 大了进入停在顶上" report: the old code restored the saved
+      // pixel offset even when the view was pinned to the bottom.
       dom_.scroll_to_bottom(h->dom);
-      if (pending_scroll_follow_) st_.hist_follow = true;
+      st_.hist_follow = true;
+    } else {
+      dom_.set_scroll_top(h->dom, pending_scroll_target_);
     }
   }
   // The scroll event this causes is delivered asynchronously; ignore it for a
@@ -3207,15 +3188,11 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // throttled to 1 Hz in an occluded tab, and the elapsed time must still move
     // while deltas keep arriving.
     msg.now_ms = now;
-    // A 60 ms floor (about 16 paints a second) is smooth for text and FOUR
-    // times less DOM/raster churn than the old 25 ms: every paint re-parses the
-    // growing answer and re-rasterises the column, and a long turn kept that
-    // going for hours. A hidden window paints nothing at all (see paint()).
-    if (now - last_stream_paint_ms_ >= 60) {
+    if (now - last_stream_paint_ms_ >= 25) {
       last_stream_paint_ms_ = now;
       stream_dirty_ = false;
-      paint();
-      if (!dom_.hidden()) follow_history_if_pinned();
+      render();
+      follow_history_if_pinned();
     } else {
       stream_dirty_ = true;
     }
@@ -3339,7 +3316,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       }
       msg.interim.push_back(text);
       msg.rev = next_msg_rev_++;
-      paint();
+      render();
     }
   } else if (event == "tool.start") {
     // A tool was invoked. Show it IMMEDIATELY with its arguments: a slow tool
@@ -3371,7 +3348,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       }
       msg.tools.push_back(tb);
       msg.rev = next_msg_rev_++;
-      paint();
+      render();
     }
   } else if (event == "tool.update") {
     std::string name = jsonutil::get<std::string>(payload, "name", "");
@@ -3417,7 +3394,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       if (!detail.empty()) slot->detail = detail;
       if (!subagent_id.empty()) slot->subagent_id = subagent_id;
       msg.rev = next_msg_rev_++;
-      paint();
+      render();
     }
   } else if (event == "subagent.done") {
     std::string id = jsonutil::get<std::string>(payload, "id", "");
@@ -3804,15 +3781,27 @@ void UiApp::toast(const std::string& text) {
   render();
 }
 
-void UiApp::paint() {
-  // A hidden window is not painted. `mount()` is the exception: the first frame
-  // must exist before anything asks whether the window is visible, and a test or
-  // an engine that never reports visibility would otherwise never paint at all.
-  if (render_count_ > 0 && dom_.hidden()) {
-    hidden_paint_ = true;
-    return;
+std::string UiApp::debug_stats() const {
+  size_t tools = 0;
+  for (size_t i = 0; i < st_.messages.size(); ++i) tools += st_.messages[i].tools.size();
+  size_t term_bytes = 0;
+  for (std::map<std::string, std::string>::const_iterator it = st_.term_outputs.begin();
+       it != st_.term_outputs.end(); ++it) {
+    term_bytes += it->second.size();
   }
-  render();
+  char buf[512];
+  std::snprintf(buf, sizeof(buf),
+                "msgs=%d tools=%d msg_nodes=%d views=%d details=%d subagents=%d "
+                "ops=%d todos=%d terms=%d term_bytes=%d",
+                static_cast<int>(st_.messages.size()), static_cast<int>(tools),
+                static_cast<int>(msg_nodes_.size()), static_cast<int>(views_.size()),
+                static_cast<int>(st_.subagent_details.size()),
+                static_cast<int>(st_.subagents.size()),
+                static_cast<int>(st_.session_ops.size()),
+                static_cast<int>(st_.todos.size()),
+                static_cast<int>(st_.terminals.size()),
+                static_cast<int>(term_bytes));
+  return std::string(buf);
 }
 
 void UiApp::render() {

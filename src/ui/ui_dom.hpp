@@ -85,13 +85,6 @@ class IDom {
   // starving its own message loop during a long turn.
   virtual void flush() {}
 
-  // Is the window hidden (minimized / occluded / another virtual desktop)?
-  // A turn can stream for hours while nobody is looking; painting it is pure
-  // work - CPU, DOM churn and GPU raster/animations - and on a laptop that ran
-  // overnight it is the sustained load that matters. The shell defers paints
-  // and pauses CSS animations while this is true.
-  virtual bool hidden() const { return false; }
-
   // --- content / attributes ---
   virtual void set_text(Node node, const std::string& text) = 0;
   // Replace the node's children with parsed markup (element.innerHTML). Used for

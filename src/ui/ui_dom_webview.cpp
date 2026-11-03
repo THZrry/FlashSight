@@ -152,21 +152,6 @@ const char* kGlueJs = R"JS(
     try { fn.apply(null, args); } catch (e) {}
   }
 
-  // Hidden window (minimized / occluded): the shell skips painting the streamed
-  // turn and the CSS pauses every animation, so an unattended long turn costs
-  // no GPU/CPU on the UI side. Reported to C++ so pump() can skip its timers.
-  function fsVisibility() {
-    var hid = !!document.hidden;
-    var root = document.documentElement;
-    if (root) {
-      if (hid) root.classList.add('fs-asleep');
-      else root.classList.remove('fs-asleep');
-    }
-    post('fs_ui_visibility', [hid ? '1' : '0']);
-  }
-  document.addEventListener('visibilitychange', fsVisibility);
-  fsVisibility();
-
   // ONE document-level dismissal dispatcher for ALL popups. The old design put
   // a listener on the document PER POPUP, which could never be removed once the
   // popup node was destroyed - and its closure kept the whole detached popup
@@ -1036,8 +1021,6 @@ class WebViewDom : public IDom {
   }
   bool supports_exit_animations() const override { return true; }
 
-  bool hidden() const override { return hidden_; }
-
   // Ship the buffered DOM writes as ONE script. Called at the end of a render
   // (UiApp::render) and whenever a direct call must observe the patched DOM.
   void flush() override {
@@ -1167,7 +1150,6 @@ class WebViewDom : public IDom {
   void on_global_key(const std::string& key) {
     if (global_key_cb_) global_key_cb_(key);
   }
-  void on_visibility(bool hidden) { hidden_ = hidden; }
 
   // Each JS `post('fs_ui_x', [a,b,c])` arrives as a JSON array.
   void dispatch(const std::string& name, const std::string& json);
@@ -1265,8 +1247,6 @@ class WebViewDom : public IDom {
   std::vector<Slot> slots_;
   // Buffered DOM writes for the current frame (see enqueue/flush).
   std::string batch_;
-  // Reported by the glue's visibilitychange listener (minimized / occluded).
-  bool hidden_ = false;
   uint64_t next_id_ = 2;
   uint64_t focused_ = 0;
   int split_seq_ = 0;
@@ -1463,16 +1443,6 @@ void cb_global_key(const char* /*id*/, const char* req, void* /*arg*/) {
   }
 }
 
-void cb_visibility(const char* /*id*/, const char* req, void* /*arg*/) {
-  WebViewDom* d = WebViewDom::g_dom;
-  if (!d) return;
-  try {
-    Json j = Json::parse(req ? req : "[]");
-    d->on_visibility(arg_str(j, 0) == "1");
-  } catch (...) {
-  }
-}
-
 void WebViewDom::install_bindings() {
   webview_bind(w_, "fs_ui_fire", cb_fire, nullptr);
   webview_bind(w_, "fs_ui_push", cb_push, nullptr);
@@ -1489,7 +1459,6 @@ void WebViewDom::install_bindings() {
   webview_bind(w_, "fs_ui_outside", cb_outside, nullptr);
   webview_bind(w_, "fs_ui_file_pick", cb_file_pick, nullptr);
   webview_bind(w_, "fs_ui_key", cb_global_key, nullptr);
-  webview_bind(w_, "fs_ui_visibility", cb_visibility, nullptr);
 }
 
 }  // namespace

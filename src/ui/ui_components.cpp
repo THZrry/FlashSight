@@ -743,22 +743,8 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       // putting the note above its call IS the chronological order - and a
       // thought that lands between two calls stays between them instead of
       // being herded into a separate section.
-      // While a turn RUNS, only the newest steps are kept in the DOM. A long
-      // unattended turn can reach hundreds of rows, and every repaint then
-      // walks/re-rasters the whole column - the sustained UI load that runs for
-      // hours. The finished turn (streaming == false) renders every step again,
-      // so nothing is lost.
-      const size_t kLiveToolCap = 120;
-      size_t first = 0;
-      if (m.streaming && m.tools.size() > kLiveToolCap) {
-        first = m.tools.size() - kLiveToolCap;
-        inner.add(el("div", "work-note dim").text(
-            tr("更早的 ") + itos(static_cast<int>(first)) +
-            tr(" 步已省略（本轮结束后可展开查看全部）")));
-      }
       size_t interim_at = 0;
-      while (interim_at < m.interim.size() && interim_at < first) ++interim_at;
-      for (size_t i = first; i < m.tools.size(); ++i) {
+      for (size_t i = 0; i < m.tools.size(); ++i) {
         while (interim_at < m.interim.size() && interim_at <= i) {
           if (!m.interim[interim_at].empty()) {
             inner.add(el("div", "work-note").text(m.interim[interim_at]));

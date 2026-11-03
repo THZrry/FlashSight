@@ -19,6 +19,23 @@ namespace {
 thread_local int g_in_backend_call = 0;
 
 constexpr int kMaxWorkers = 4;
+// The UI queue is bounded. The UI thread drains it every 50 ms, but a long
+// tool-heavy turn can emit hundreds of events per second, and if the UI thread
+// is stuck for a while (a big patch, a slow machine, a compositor stall) the
+// queue used to grow without any limit - tool payloads and deltas accumulating
+// in memory for as long as the stall lasts. That is the tool <-> UI seam the
+// user suspected: the backend keeps working, the window is stuck, and memory
+// climbs with every event.
+constexpr size_t kMaxQueuedItems = 20000;
+
+bool droppable_event(const std::string& name) {
+  // Display-only events: the turn itself is persisted by the loop, and the
+  // final state is re-read on turn.done / tab switch. Lifecycle events
+  // (turn.done, loop.interrupted, permission.prompt, ...) are never dropped.
+  return name == "stream.delta" || name == "tool.update" ||
+         name == "assistant.interim" || name == "terminal.output" ||
+         name == "subagent.started";
+}
 }  // namespace
 
 NativeBackend::NativeBackend(FsApi* api) : api_(new UiApi(api)) {
@@ -51,6 +68,19 @@ NativeBackend::~NativeBackend() {
 void NativeBackend::push(Item item) {
   std::lock_guard<std::mutex> lk(mu_);
   queue_.push_back(std::move(item));
+  if (queue_.size() <= kMaxQueuedItems) return;
+  // Over the cap: drop the OLDEST droppable event. Scanning from the front
+  // keeps the newest content (what the user will see when the UI recovers) and
+  // never drops a lifecycle event. O(n) only while overloaded.
+  for (std::deque<Item>::iterator it = queue_.begin(); it != queue_.end(); ++it) {
+    if (it->is_event && droppable_event(it->name)) {
+      queue_.erase(it);
+      return;
+    }
+  }
+  // A flood of lifecycle events: hard drop the oldest so the queue is bounded
+  // no matter what.
+  if (queue_.size() > kMaxQueuedItems + 1024) queue_.pop_front();
 }
 
 BackendResult NativeBackend::call(const std::string& method, const Json& args) {

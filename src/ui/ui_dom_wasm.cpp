@@ -64,17 +64,6 @@ EM_JS(void, fs_dom_boot, (), {
       el.scrollLeft += ev.deltaY;
       ev.preventDefault();
     }, { passive: false });
-    // A hidden tab (background / minimized) must not keep animating: the shell
-    // already defers its own paints (IDom::hidden), and this pauses the CSS
-    // animations that would otherwise raster on the GPU forever.
-    function fsSleep() {
-      var root = document.documentElement;
-      if (!root) return;
-      if (document.hidden) root.classList.add('fs-asleep');
-      else root.classList.remove('fs-asleep');
-    }
-    document.addEventListener('visibilitychange', fsSleep);
-    fsSleep();
   }
 });
 
@@ -1437,16 +1426,6 @@ class WasmDom : public IDom {
   // The browser can animate a leaving subtree; keeping it alive for ~200ms is
   // what lets the old page and the new page coexist during a tab switch.
   bool supports_exit_animations() const override { return true; }
-
-  // document.hidden is true for a background TAB and for a minimized window.
-  // Painting a streamed turn into a tab nobody is looking at is the sustained
-  // load the user's overnight run suffered; the shell defers paints on this.
-  bool hidden() const override {
-    val d = val::global("document");
-    if (d.isNull() || d.isUndefined()) return false;
-    val h = d["hidden"];
-    return !h.isNull() && !h.isUndefined() && h.as<bool>();
-  }
 
   void schedule(int ms, std::function<void()> cb) override {
     if (!cb) return;

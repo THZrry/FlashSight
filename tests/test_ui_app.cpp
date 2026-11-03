@@ -4492,6 +4492,9 @@ FS_TEST(uiapp_scroll_restore_happens_in_the_same_render) {
     ASSERT_TRUE(!hits.empty());
     ASSERT_TRUE(hits[0]->dom.valid());
     dom.set_scroll_top(hits[0]->dom, 400);
+    // Not at the end any more - what the adapter's scroll-edge report says, and
+    // what decides "restore the offset" vs "follow the end" on the way back.
+    app.update([](AppState& s) { s.hist_follow = false; });
   }
   app.show("sess_b");
   EXPECT_EQ(app.state().hist_scroll, -1);  // b was never scrolled

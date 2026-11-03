@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_set>
 
 namespace fs {
 namespace ui {
@@ -425,17 +426,20 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
     }
   }
 
-  // 3) drop nodes no longer wanted
+  // 3) drop nodes no longer wanted.
+  //
+  // MEMBERSHIP BY SET, NOT BY NESTED LOOP. These three checks used to scan the
+  // whole `desired` array for every old child - O(n^2) per render of ANY list,
+  // and it ran three times (drop, subsequence fast path, insertion). A
+  // transcript with a few hundred messages therefore did millions of node
+  // comparisons on every paint: "history 大了进去会卡" was this, not the DOM.
+  std::unordered_set<uint64_t> desired_ids;
+  desired_ids.reserve(desired.size() * 2);
+  for (size_t i = 0; i < desired.size(); ++i) desired_ids.insert(desired[i].id);
+
   std::vector<Node> live;
   for (size_t i = 0; i < cur.size(); ++i) {
-    bool keep = false;
-    for (size_t j = 0; j < desired.size(); ++j) {
-      if (cur[i] == desired[j]) {
-        keep = true;
-        break;
-      }
-    }
-    if (keep) {
+    if (desired_ids.count(cur[i].id)) {
       live.push_back(cur[i]);
     } else {
       // A dropped child plays its exit animation first (see start_exit); the
@@ -443,6 +447,9 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
       start_exit(dom, cur_nodes[i]);
     }
   }
+  std::unordered_set<uint64_t> live_ids;
+  live_ids.reserve(live.size() * 2);
+  for (size_t i = 0; i < live.size(); ++i) live_ids.insert(live[i].id);
 
   // 4) Fast path: the surviving children are already in the right relative
   // order, so only the NEW ones have to be inserted.
@@ -455,15 +462,10 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
   // back to the top and made the sidebar's entrance animation restart forever.
   // The common case - append something - must not touch a single existing node.
   {
-    std::vector<Node> desired_set = desired;
     size_t li = 0;
     bool subsequence = true;
     for (size_t i = 0; i < desired.size() && subsequence; ++i) {
-      bool is_live = false;
-      for (size_t k = 0; k < live.size(); ++k) {
-        if (live[k] == desired[i]) { is_live = true; break; }
-      }
-      if (!is_live) continue;  // a new node: not part of the old order
+      if (!live_ids.count(desired[i].id)) continue;  // a new node: not in the old order
       // the next surviving child in DOM order must be the next live node
       if (li < live.size() && live[li] == desired[i]) {
         ++li;
@@ -471,17 +473,12 @@ void patch_children(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
         subsequence = false;
       }
     }
-    (void)desired_set;
     if (subsequence && li == live.size()) {
       neu->dom = oldv->dom;
       // insert ONLY the newly created nodes, each before its nearest following
       // sibling that is already attached (or append at the end).
       for (size_t i = desired.size(); i-- > 0;) {
-        bool is_live = false;
-        for (size_t k = 0; k < live.size(); ++k) {
-          if (live[k] == desired[i]) { is_live = true; break; }
-        }
-        if (is_live) continue;
+        if (live_ids.count(desired[i].id)) continue;
         Node anchor = (i + 1 < desired.size()) ? desired[i + 1] : Node{0};
         dom.insert_before(neu->dom, desired[i], anchor);
       }
