@@ -3438,6 +3438,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         tb.input = cut_display(dump_safe(payload["args"], 2), 6000,
                                "\n… (输入已截断)");
       }
+      // Identity for tool_block_cached: an unchanged row yields the same VNode
+      // on later renders instead of copying its strings again.
+      tb.rev = next_msg_rev_++;
       msg.tools.push_back(tb);
       msg.rev = next_msg_rev_++;
       render();
@@ -3485,6 +3488,8 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       slot->summary = !summary.empty() ? summary : (ok ? "ok" : "failed");
       if (!detail.empty()) slot->detail = detail;
       if (!subagent_id.empty()) slot->subagent_id = subagent_id;
+      // The row changed -> new cache identity (see tool_block_cached).
+      slot->rev = next_msg_rev_++;
       msg.rev = next_msg_rev_++;
       render();
     }

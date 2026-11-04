@@ -2781,3 +2781,25 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **测试**：421 用例 3939 断言全过；web / webview 双变体编译通过。新增
     `loop_suspend_finishes_round_then_parks`（挂起后本轮工具照跑、不发下一次模型调用）、
     `edit_file_derives_missing_start`（省略 start / start=0 两种写法）；两个"停止生成"用例改用 `interrupt()`。
+
+<100>(SOLVED): 卡死的真因（634 个工具行每帧全量重建 → 记忆化）+ edit_file 的 CRLF 校验与默认 LF + 发送后迟迟看不到内容。
+  - **资源日志抓到了现场**：`[res] … msgs=22 tools=634 msg_nodes=22 … terms=195 handles=≈470-536
+    pump_gap_ms≈60`。也就是**一条消息里 634 个工具块**（WhaleUI 那类任务），而界面在流式输出时每个增量/每个
+    工具事件都会重建整条消息 = 复制 634 行的字符串、新建 634 个子树；一轮下来是 O(N²) 的分配。这正是"发完工具
+    调用就卡、界面卡死但后台还在跑、那一轮最后跑完"的机制——不是显卡驱动。`pump_gap_ms` 一直 ≈60ms 说明发生
+    卡顿时 UI 线程是在做这堆重建，而不是被锁住。
+    修复：新增 `tool_block_cached`，按 `(key, rev, 输入/返回/摘要长度, 展开态, running/ok)` 记忆化工具行——没变
+    的行直接复用同一个 VNode（和聊天消息的 msg_nodes_ 同一思路），缓存上限 4000 条；`ToolBlock::rev` 在
+    tool.start/tool.update 时递增，保证变了的行会重建。每帧成本从"O(工具数) 的字符串拷贝"降为"未变的行 O(1)"。
+  - **edit_file 的 "expected text does not match lines 1797-1798"**：`actual` 用**文件自己的换行**拼出来（CRLF），
+    模型的 `expect` 用的是 `\n` —— 内容一样也判不符。现在两边**都去掉 \r 再比较**；并且按你的要求把
+    `lineEnding` 的默认值从 `preserve` 改成 **`lf`**（编辑/写入后统一成 `\n`，`crlf`/`preserve` 仍可显式指定），
+    原来的 `edit_preserves_crlf` 用例改成 `edit_normalises_crlf_to_lf`。
+  - **"输入后迟迟看不到结果（包括加载中）"**：发送后用户消息与"运行中"都在 UI 线程上，而 UI 线程正卡在上一轮
+    几百行的重建里，所以连"加载中"都出不来。工具行记忆化之后这条路径恢复即时（同样是上面那个根因）。
+  - **两个实例同时跑**（webview 跑 WhaleUI、web 跑 WhaleJS）：它们各自是独立进程，但**共用同一个数据根**时，
+    同一项目/会话的文件会被两个进程同时读写，持久化会互相覆盖（状态"看起来不对"）。建议两个实例用不同的
+    `--root`，或者只开一个。这一条是使用约束，不是代码 bug。
+  - **测试**：423 用例 3946 断言全过；web / webview 双变体编译通过。新增
+    `uiapp_tool_rows_are_memoised`（未变行返回同一 VNode、变了重建）、
+    `edit_file_matches_expect_across_line_endings`（CRLF 文件 + \n expect 能改，且默认写成 LF）。

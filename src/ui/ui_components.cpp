@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <deque>
+#include <map>
+#include <string>
 
 #include "fs_highlight.hpp"
 #include "fs_i18n.hpp"
@@ -765,7 +768,7 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         // expanded body is scrolled to its end, which needs a stable handle.
         comp::ToolBlock tb = m.tools[i];
         if (tb.key.empty()) tb.key = std::to_string(m.uid) + ":" + itos(static_cast<int>(i));
-        inner.add(tool_block(tb, toggle, on_open_subagent));
+        inner.add(tool_block_cached(tb, toggle, on_open_subagent));
       }
       // Anything left (a turn that narrated but called no tool).
       for (; interim_at < m.interim.size(); ++interim_at) {
@@ -938,6 +941,48 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
     }
   }
   return d;
+}
+
+// Memoised tool_block.
+//
+// WHY: a turn can produce hundreds of tool calls, and chat_message is rebuilt
+// whenever the message rev changes - which happens on EVERY streaming delta and
+// every tool event. Rebuilding all N tool rows each time is O(N) string copies
+// per event and O(N^2) over the turn: a 600-call turn spent seconds per frame
+// allocating rows nobody changed. The resource log caught it (tools=634 in 22
+// messages). This cache hands back the SAME VNode for an unchanged row, so the
+// per-frame cost is O(1) per untouched row and the patch reuses the DOM nodes.
+//
+// Bounded like the message cache: a long-lived window must not grow it forever.
+H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
+                    EventFn on_open_subagent) {
+  static std::map<std::string, H> cache;
+  static std::deque<std::string> order;
+  const size_t kMaxCachedBlocks = 4000;
+  // `rev` is authoritative for live rows; stored rows carry 0, so the content
+  // SIZES are folded in as well (two different rows with the same key and rev
+  // must not hand back each other's node - the tests seed uid 0 everywhere).
+  std::string key = b.key + "#" + std::to_string(b.rev) + "#" +
+                    std::to_string(b.name.size()) + ":" +
+                    std::to_string(b.summary.size()) + ":" +
+                    std::to_string(b.detail.size()) + ":" +
+                    std::to_string(b.input.size()) + ":" +
+                    std::to_string(b.subagent_id.size()) + "#" +
+                    (b.expanded ? "1" : "0") + (b.running ? "r" : "") +
+                    (b.ok ? "" : "x");
+  std::map<std::string, H>::iterator it = cache.find(key);
+  if (it != cache.end()) return it->second;
+  H node = tool_block(b, on_toggle, on_open_subagent);
+  // A row is addressed by a stable key; without one the cache would collide
+  // (fall back to an uncached build).
+  if (b.key.empty()) return node;
+  cache.insert(std::make_pair(key, node));
+  order.push_back(key);
+  while (order.size() > kMaxCachedBlocks) {
+    cache.erase(order.front());
+    order.pop_front();
+  }
+  return node;
 }
 
 H turn_summary(const std::string& text) {

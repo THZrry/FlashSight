@@ -273,8 +273,11 @@ FS_TEST(edit_does_not_add_trailing_newline) {
   EXPECT_EQ(f.text(), std::string("ALPHA\nbeta"));
 }
 
-// ---------- CRLF 文件编辑后仍是 CRLF ----------
-FS_TEST(edit_preserves_crlf) {
+// ---------- CRLF 文件编辑后统一成 LF（默认 lineEnding=lf） ----------
+// The user's call: "crlf最好全用\n避免兼容问题" - the model writes \n, and a CRLF
+// file produced a whole class of edit/expect mismatches. "preserve" is still
+// available by asking for it explicitly.
+FS_TEST(edit_normalises_crlf_to_lf) {
   FileFixture f("alpha\r\nbeta\r\n");
   FsResult r = f.read();
   ASSERT_TRUE(r.ok());
@@ -285,7 +288,7 @@ FS_TEST(edit_preserves_crlf) {
                                                       {"expect", "beta"},
                                                       {"newText", "BETA"}}})}})
                   .ok());
-  EXPECT_EQ(f.text(), std::string("alpha\r\nBETA\r\n"));
+  EXPECT_EQ(f.text(), std::string("alpha\nBETA\n"));
 }
 
 // ---------- 多行插入：换行符跟随文件 ----------

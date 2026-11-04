@@ -4828,3 +4828,22 @@ FS_TEST(uiapp_inner_controls_do_not_bubble) {
   EXPECT_TRUE(d.find("tb-open") != std::string::npos);
   EXPECT_TRUE(d.find("data-no-bubble") != std::string::npos);
 }
+
+// 工具行的渲染是按 (key, rev, 尺寸, 展开态) 记忆化的：一轮几百个工具调用时，
+// 每个流式增量都重建所有行是 O(N) 的字符串拷贝/节点分配（整轮 O(N²)），这就是
+// "工具多的回合界面卡住"。未变化的行必须拿回同一个 VNode。
+FS_TEST(uiapp_tool_rows_are_memoised) {
+  comp::ToolBlock tb;
+  tb.key = "memo:1";
+  tb.name = "read_file";
+  tb.summary = "a.cpp";
+  tb.detail = "{\"ok\":true}";
+  H a = comp::tool_block_cached(tb, nullptr, nullptr);
+  H b = comp::tool_block_cached(tb, nullptr, nullptr);
+  EXPECT_TRUE(a.get() == b.get());  // unchanged row -> same node
+  tb.detail = "{\"ok\":false}";
+  tb.ok = false;
+  tb.rev = 7;
+  H c = comp::tool_block_cached(tb, nullptr, nullptr);
+  EXPECT_TRUE(c.get() != a.get());  // changed row -> rebuilt
+}

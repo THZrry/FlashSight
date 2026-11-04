@@ -122,11 +122,20 @@ struct ToolBlock {
   std::string key;
   // For a subagent tool call (subagent_spawn / follow_up), the agent it produced.
   // The row then offers "打开记录": the transcript must stay reachable after the
-  // agent finishes, and the work log is where the user sees the call happened.
+  // agent finished, and the work log is where the user sees the call happened.
   std::string subagent_id;
+  // Bumped whenever any field above changes. `tool_block_cached` reuses the
+  // rendered VNode while this (and the key) is unchanged: a turn with hundreds
+  // of tool calls rebuilt EVERY row's VNode on every streaming delta, which is
+  // seconds of allocation per frame - the "UI freezes during a tool-heavy turn".
+  uint64_t rev = 0;
 };
 H tool_block(const ToolBlock& b, EventFn on_toggle,
              EventFn on_open_subagent = nullptr);
+// tool_block with a bounded memoisation keyed by (key, rev, expanded). The
+// caller MUST keep `b.rev` current for every mutation.
+H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
+                    EventFn on_open_subagent = nullptr);
 
 struct ChatMsg {
   std::string role;      // "user" | "assistant" | "system"

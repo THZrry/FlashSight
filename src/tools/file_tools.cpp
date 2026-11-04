@@ -130,9 +130,10 @@ std::string join_text(const std::vector<std::string>& lines, const std::string& 
   return out;
 }
 
-// Rewrite line endings on request. "preserve" (default) leaves the bytes alone,
-// which is what you want for an existing file; "lf"/"crlf" is for new files and
-// for repos whose convention the model must follow.
+// Rewrite line endings. "lf" is the DEFAULT now: CRLF is the source of a whole
+// class of editor/agent mismatches (the model's `expect` and `newText` use \n,
+// the file may be \r\n), and a repo that really wants CRLF can pass "crlf" or
+// keep its files untouched with "preserve".
 std::string apply_eol(const std::string& text, const std::string& mode,
                       const std::string& fallback_eol) {
   if (mode.empty() || mode == "preserve") return text;
@@ -535,7 +536,7 @@ void register_file_tools(ToolRegistry* registry) {
     props["path"] = Json{{"type", "string"}, {"description", "项目内相对路径"}};
     props["content"] = Json{{"type", "string"}, {"description", "完整内容"}};
     props["lineEnding"] = Json{{"type", "string"},
-                               {"description", "preserve(默认)|lf|crlf"}};
+                               {"description", "lf(默认)|crlf|preserve（保留原样）"}};
     params["properties"] = props;
     params["required"] = Json::array({"path", "content"});
     def.parameters = params;
@@ -543,7 +544,7 @@ void register_file_tools(ToolRegistry* registry) {
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         std::string rel = jsonutil::get<std::string>(args, "path", "");
         std::string content = jsonutil::get<std::string>(args, "content", "");
-        std::string le = jsonutil::get<std::string>(args, "lineEnding", "preserve");
+        std::string le = jsonutil::get<std::string>(args, "lineEnding", "lf");
         FsResult perm = check_write_perm(ctx, ghc::filesystem::path(rel), rel);
         if (!perm.ok()) return perm;
         ghc::filesystem::path p = resolve_by_perm(ctx, rel);
@@ -608,7 +609,7 @@ void register_file_tools(ToolRegistry* registry) {
     props["edits"] = Json{{"type", "array"}, {"items", edit},
                           {"description", "要应用的行替换列表"}};
     props["lineEnding"] = Json{{"type", "string"},
-                               {"description", "preserve(默认)|lf|crlf"}};
+                               {"description", "lf(默认)|crlf|preserve（保留原样）"}};
     params["properties"] = props;
     params["required"] = Json::array({"path", "edits"});
     def.parameters = params;
@@ -616,7 +617,7 @@ void register_file_tools(ToolRegistry* registry) {
       [](const ToolContext& ctx, const Json& args) -> FsResult {
         std::string rel = jsonutil::get<std::string>(args, "path", "");
         std::string want_hash = jsonutil::get<std::string>(args, "hash", "");
-        std::string le = jsonutil::get<std::string>(args, "lineEnding", "preserve");
+        std::string le = jsonutil::get<std::string>(args, "lineEnding", "lf");
         if (rel.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty path");
         if (!args.contains("edits") || !args["edits"].is_array() ||
             args["edits"].empty()) {
@@ -723,7 +724,22 @@ void register_file_tools(ToolRegistry* registry) {
           // Check 2: content of the lines. Catches off-by-one and stale reads
           // even when the hash happens to match (e.g. the model edited twice
           // without re-reading).
-          if (!expect.empty() && expect != actual) {
+          //
+          // COMPARE WITH NORMALISED NEWLINES. `actual` is joined with the FILE's
+          // EOL, while the model's `expect` uses \n - on a CRLF file every edit
+          // was refused with "expected text does not match" even though the
+          // lines were identical. Line endings are not what is being verified.
+          std::string expect_cmp;
+          expect_cmp.reserve(expect.size());
+          for (size_t c = 0; c < expect.size(); ++c) {
+            if (expect[c] != '\r') expect_cmp += expect[c];
+          }
+          std::string actual_cmp;
+          actual_cmp.reserve(actual.size());
+          for (size_t c = 0; c < actual.size(); ++c) {
+            if (actual[c] != '\r') actual_cmp += actual[c];
+          }
+          if (!expect.empty() && expect_cmp != actual_cmp) {
             FsResult r = FsResult::error(
                 ErrCode::kInvalidArg,
                 "expected text does not match lines " + std::to_string(start) + "-" +

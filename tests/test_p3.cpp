@@ -415,6 +415,37 @@ FS_TEST(steering_queue_ops) {
 #include "tools/tool_registry.hpp"
 #include "tools/ask_tool.hpp"
 
+
+// edit_file 的 expect 校验要跨换行风格：CRLF 文件 + 模型写的 \n 不该被判为不符
+// （"expected text does not match"）。写入默认改成 LF，避免这类兼容问题。
+FS_TEST(edit_file_matches_expect_across_line_endings) {
+  fstest::TempDir td("editeol");
+  ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj);
+  {
+    std::ofstream ofs((proj / "crlf.txt").string(), std::ios::binary);
+    ofs << "alpha\r\nbeta\r\ngamma\r\n";
+  }
+  ToolRegistry reg;
+  register_file_tools(&reg);
+  ToolContext ctx;
+  ctx.cwd = proj.string();
+  FsResult rr = reg.invoke(ctx, "read_file", Json{{"path", "crlf.txt"}});
+  ASSERT_TRUE(rr.ok());
+  FsResult er = reg.invoke(
+      ctx, "edit_file",
+      Json{{"path", "crlf.txt"},
+           {"hash", rr.data["hash"]},
+           {"edits", Json::array({Json{{"start", 2}, {"expect", "beta"}, {"newText", "BETA"}}})}});
+  ASSERT_TRUE(er.ok());
+  FsResult r2 = reg.invoke(ctx, "read_file", Json{{"path", "crlf.txt"}});
+  ASSERT_TRUE(r2.ok());
+  std::string out = r2.data["content"].get<std::string>();
+  EXPECT_TRUE(out.find("BETA") != std::string::npos);
+  // Default lineEnding is lf now: the file no longer carries CR.
+  EXPECT_TRUE(out.find('\r') == std::string::npos);
+}
+
 // edit_file 的 start 可以省略：模型经常只给 {end, expect, newText}。以前这被当成
 // start=0 直接拒绝（"bad line range: start=0 end=7051"），模型于是退回用更不安全的
 // file_regex 改文件。现在省略 start 时按 expect 的行数推导起点，没有 expect 就只改
