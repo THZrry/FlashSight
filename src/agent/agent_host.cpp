@@ -587,6 +587,15 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     if (!todos_.check(owner, id, done, now)) {
       return FsResult::error(ErrCode::kNotFound, "todo item not found");
     }
+    // A COMPLETED checklist is deleted, not kept as history: the user's report
+    // was "旧的清单如果没被清掉，只是完成了的话，重新进入还是需要重建的". An
+    // all-done list has served its purpose (pending_count was already the
+    // auto-continue signal, so clearing changes nothing there).
+    if (todos_.pending_count(owner) == 0) {
+      todos_.clear(owner);
+      emit("todo.updated", Json{{"owner", owner}, {"items", Json::array()}});
+      return FsResult::success(Json{{"items", Json::array()}, {"pending", 0}});
+    }
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"items", todos_.to_json(owner)},
                                   {"pending", todos_.pending_count(owner)}});
@@ -596,6 +605,9 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     if (!todos_.erase(owner, id)) {
       return FsResult::error(ErrCode::kNotFound, "todo item not found");
     }
+    // Erasing changes the list too - without this event the panel kept showing
+    // the removed row until something else refreshed it.
+    emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"items", todos_.to_json(owner)}});
   }
   if (op == "clear") {
@@ -752,6 +764,14 @@ FsResult AgentHost::suspend(const std::string& sid) {
   auto it = loops_.find(sid);
   if (it == loops_.end()) return FsResult::success();
   it->second->suspend();
+  return FsResult::success();
+}
+
+FsResult AgentHost::interrupt(const std::string& sid) {
+  std::lock_guard<std::recursive_mutex> host_lock(lock());
+  auto it = loops_.find(sid);
+  if (it == loops_.end()) return FsResult::success();
+  it->second->interrupt();
   return FsResult::success();
 }
 

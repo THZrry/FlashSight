@@ -1356,6 +1356,10 @@ FsResult FsApi::session_suspend(const std::string& sid) {
   return agent_host_->suspend(sid);
 }
 
+FsResult FsApi::session_interrupt(const std::string& sid) {
+  return agent_host_->interrupt(sid);
+}
+
 FsResult FsApi::session_resume(const std::string& sid) {
   return agent_host_->resume(sid);
 }

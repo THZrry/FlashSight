@@ -579,8 +579,10 @@ void register_file_tools(ToolRegistry* registry) {
     def.name = "edit_file";
     def.description =
         "按行号替换（哈希校验；失败不写盘）. Edit by line range with verification. "
-        "Args: path, hash (from read_file), edits:[{start, end?, expect?, newText}]. "
+        "Args: path, hash (from read_file), edits:[{start?, end?, expect?, newText}]. "
         "`start`/`end` are 1-based inclusive line numbers in the file AS READ. "
+        "`start` may be OMITTED: with `expect` the range is end - lines(expect) + 1..end, "
+        "without it `end` alone is that single line (a 0 start means line 1). "
         "`expect` is the exact current text of those lines - if it differs, the "
         "edit is refused and the real text is returned. Multiple edits apply to "
         "the original line numbers (they are applied bottom-up, so they never "
@@ -594,14 +596,15 @@ void register_file_tools(ToolRegistry* registry) {
     Json edit = Json::object();
     edit["type"] = "object";
     edit["properties"] = Json{
-        {"start", Json{{"type", "integer"}, {"description", "起始行（1-based，含）"}}},
+        {"start", Json{{"type", "integer"},
+                       {"description", "起始行（1-based，含；可省略：见 description）"}}},
         {"end", Json{{"type", "integer"}, {"description", "结束行（含；默认=start）"}}},
         {"expect", Json{{"type", "string"},
-                        {"description", "这些行当前的确切内容（不含换行）；不符则拒绝"}}},
+                        {"description", "这些行当前的确切内容（不含换行）；不符则拒绝；省略 start 时用它算起点"}}},
         {"newText", Json{{"type", "string"},
                          {"description", "替换后的内容；空串=删除这些行"}}},
     };
-    edit["required"] = Json::array({"start", "newText"});
+    edit["required"] = Json::array({"newText"});
     props["edits"] = Json{{"type", "array"}, {"items", edit},
                           {"description", "要应用的行替换列表"}};
     props["lineEnding"] = Json{{"type", "string"},
@@ -674,9 +677,32 @@ void register_file_tools(ToolRegistry* registry) {
           if (!e.is_object()) {
             return FsResult::error(ErrCode::kInvalidArg, "each edit must be an object");
           }
-          int start = static_cast<int>(jsonutil::get_int(e, "start", 0));
-          int end = static_cast<int>(jsonutil::get_int(e, "end", start));
-          if (start < 1 || end < start) {
+          // `start` is OPTIONAL in practice: the model regularly sends only
+          // {end, expect, newText} (the line it quoted decides where the block
+          // begins). Requiring start silently turned every such call into
+          // "bad line range: start=0 end=7051", and the model then fell back to
+          // a regex replace - a less safe edit - which is exactly what the user
+          // saw. Derive it:
+          //   * start present: use it; a 0/negative start means line 1.
+          //   * start missing + expect: start = end - lines(expect) + 1.
+          //   * start missing, no expect: end is the single line to replace.
+          const std::string expect = jsonutil::get<std::string>(e, "expect", "");
+          const bool has_start = e.contains("start") && !e["start"].is_null();
+          const bool has_end = e.contains("end") && !e["end"].is_null();
+          int end = has_end ? static_cast<int>(jsonutil::get_int(e, "end", 0)) : 0;
+          int start = has_start ? static_cast<int>(jsonutil::get_int(e, "start", 0)) : 0;
+          if (!has_start) {
+            int expect_lines = 1;
+            for (size_t c = 0; c < expect.size(); ++c) {
+              if (expect[c] == '\n') ++expect_lines;
+            }
+            start = has_end ? end - expect_lines + 1 : 1;
+            if (start < 1) start = 1;
+          } else if (start < 1) {
+            start = 1;
+          }
+          if (!has_end) end = start;
+          if (end < start) {
             return FsResult::error(ErrCode::kInvalidArg,
                                    "bad line range: start=" + std::to_string(start) +
                                        " end=" + std::to_string(end));
@@ -690,7 +716,6 @@ void register_file_tools(ToolRegistry* registry) {
           Edit ed;
           ed.start = start;
           ed.end = end;
-          std::string expect = jsonutil::get<std::string>(e, "expect", "");
           std::string actual = join_text(
               std::vector<std::string>(lines.begin() + (start - 1),
                                        lines.begin() + end),

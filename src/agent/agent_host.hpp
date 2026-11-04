@@ -114,7 +114,9 @@ class AgentHost {
   FsResult approve(const std::string& sid, bool yes);
 
   // ----- 挂起/恢复/取消唤醒 -----
+  // 挂起: finish the current round, then park. 中止: cut the reply in flight.
   FsResult suspend(const std::string& sid);
+  FsResult interrupt(const std::string& sid);
   FsResult resume(const std::string& sid);
   FsResult cancel_wake(const std::string& sid);
 

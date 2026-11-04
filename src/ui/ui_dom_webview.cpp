@@ -220,11 +220,12 @@ const char* kGlueJs = R"JS(
     var evName = (name === 'keyenter') ? 'keydown' : name;
     var listener = function (evt) {
       // A control INSIDE a clickable row (a card, a fold header) must not also
-      // trigger the row: pressing a subagent's 引导 or a tool row's 打开记录 both
-      // ran its own action AND bubbled into the row's handler.
-      if (name === 'click' && evt.target && evt.target.closest &&
-          evt.target.closest('[data-no-bubble]')) {
-        return;
+      // trigger the row. `closest` also matches the element the handler is BOUND
+      // to, so only an ANCESTOR marker may swallow the click - otherwise the
+      // control's own handler never ran (打开记录 became a no-op).
+      if (name === 'click' && evt.target && evt.target.closest) {
+        var marked = evt.target.closest('[data-no-bubble]');
+        if (marked && marked !== el) return;
       }
       if (name === 'keyenter') {
         // Enter-to-send is a per-element choice (data-enter-send).

@@ -1185,6 +1185,11 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   // the moment you look.
   session_seen_ms_[sid] = wall_ms();
   if (session_seen_ms_.size() > 512) session_seen_ms_.clear();
+  // Re-read the rows' status after a switch: which session is RUNNING is a
+  // backend fact, and the snapshot in hand was taken before the switch. Without
+  // this, opening another session made the still-running one's indicator look
+  // gone until some later event happened to refresh the list.
+  mark_sessions_dirty();
   // A returning visit already HAS its transcript in the view, so the render below
   // can position it in the same frame it paints - no flash of the top of the chat
   // while the refresh is in flight. (The refresh then lands and does the same
@@ -1673,7 +1678,11 @@ void UiApp::load_sessions(size_t project_index) {
   if (project_index >= st_.projects.size()) return;
   std::string pid = st_.projects[project_index].pid;
   if (pid.empty()) return;
-  call_async("session.list", Json{{"pid", pid}}, [this, project_index](const BackendResult& r) {
+  // Key the reply by PID, not by the array index: the project list is re-sorted
+  // by activity (a running session changes lastActive), so by the time this
+  // reply lands the index may point at ANOTHER project - its session rows would
+  // be overwritten (a row showing the wrong dots, or losing "running").
+  call_async("session.list", Json{{"pid", pid}}, [this, pid](const BackendResult& r) {
     if (!r.ok || !r.data.is_array()) return;
     std::vector<ProjectCard::SessionRow> rows;
     for (size_t i = 0; i < r.data.size(); ++i) {
@@ -1700,14 +1709,19 @@ void UiApp::load_sessions(size_t project_index) {
       return a.updated_ms > b.updated_ms;
     });
     update([&](AppState& st) {
-      if (project_index < st.projects.size()) {
+      // Locate the project by PID at APPLY time (see the call above).
+      size_t at = st.projects.size();
+      for (size_t i = 0; i < st.projects.size(); ++i) {
+        if (st.projects[i].pid == pid) { at = i; break; }
+      }
+      if (at < st.projects.size()) {
         // Keep an in-progress rename alive: a refresh (which happens after a
         // rename of ANOTHER row, or on any project reload) must not yank the
         // input out from under the user.
         std::string renaming_sid;
         std::string rename_text;
-        for (size_t k = 0; k < st.projects[project_index].sessions.size(); ++k) {
-          const ProjectCard::SessionRow& old = st.projects[project_index].sessions[k];
+        for (size_t k = 0; k < st.projects[at].sessions.size(); ++k) {
+          const ProjectCard::SessionRow& old = st.projects[at].sessions[k];
           if (old.renaming) {
             renaming_sid = old.sid;
             rename_text = old.rename_text;
@@ -1719,9 +1733,9 @@ void UiApp::load_sessions(size_t project_index) {
             rows[k].rename_text = rename_text;
           }
         }
-        st.projects[project_index].sessions = rows;
-        st.projects[project_index].session_count = static_cast<int>(rows.size());
-        st.projects[project_index].sessions_loaded = true;
+        st.projects[at].sessions = rows;
+        st.projects[at].session_count = static_cast<int>(rows.size());
+        st.projects[at].sessions_loaded = true;
       }
     });
   });
@@ -3909,6 +3923,11 @@ void UiApp::render() {
     render_pending_ = true;
     return;
   }
+  // How long a paint takes. On the wasm build this blocks the whole tab, so a
+  // slow one IS the "opening a big history freezes" report - log it (stderr
+  // reaches the browser console, the native build's stderr goes to its console).
+  const int64_t render_t0 = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
   render_in_progress_ = true;
   do {
     render_pending_ = false;
@@ -4232,6 +4251,18 @@ void UiApp::render() {
     sweep_exits(dom_, now_ms());
   } while (render_pending_);
   render_in_progress_ = false;
+  {
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const int64_t dt = now - render_t0;
+    if (dt >= 200) {
+      std::fprintf(stderr,
+                   "[slow] render ms=%lld msgs=%d tab=%s nodes=%d\n",
+                   static_cast<long long>(dt),
+                   static_cast<int>(st_.messages.size()),
+                   st_.active_tab.c_str(), static_cast<int>(msg_nodes_.size()));
+    }
+  }
 }
 
 // ===========================================================================
@@ -6558,7 +6589,7 @@ VNodePtr UiApp::build_session() {
       } else if (is_suspended) {
         suspend.attr("title", tr("当前已挂起；点击恢复（从停下那一步继续）"));
       } else {
-        suspend.attr("title", tr("挂起：当前工具返回后停下，之后可以继续"));
+        suspend.attr("title", tr("挂起：当前回合跑完后停下，不再发起下一次调用"));
       }
       // Wake cancellation: a scheduled wake (a retry after a failure) would
       // otherwise fire while the user is looking at a parked task. It appears only
@@ -6584,16 +6615,15 @@ VNodePtr UiApp::build_session() {
   // the user expects from the primary action - a "send" button that does nothing
   // during a turn hides the only way out of a runaway one.
   //
-  // Stopping uses session.suspend: the loop parks when the CURRENT tool returns
-  // (it cannot cancel a tool mid-flight) and keeps the transcript, so the turn is
-  // resumable. That is exactly "中止本轮" - there is no separate hard-kill that
-  // would be any faster.
+  // 中止 is the HARD stop (session.interrupt): it aborts the reply being
+  // streamed and parks it, keeping the transcript. 挂起 next to it is the
+  // graceful one - finish this round, then wait.
   if (st_.turn_running) {
     H stop = comp::icon_text_button("stop", tr("中止"), [this](const std::string&) {
       std::string sid = active_sid();
       if (sid.empty()) return;
       update([&](AppState& s) { s.suspend_pending = true; });
-      call_async("session.suspend", Json{{"sid", sid}},
+      call_async("session.interrupt", Json{{"sid", sid}},
                  [this, sid](const BackendResult& r) {
         update([&](AppState& s) { s.suspend_pending = false; });
         if (!r.ok) toast(tr("取消失败：") + r.message);
@@ -6601,7 +6631,7 @@ VNodePtr UiApp::build_session() {
       });
     }, "danger");
     stop.key("stop-btn").cls("text-wide");
-    stop.attr("title", tr("中止本轮（已产生的输出会保留，可继续）"));
+    stop.attr("title", tr("中止本轮（立即停止输出，已产生的输出会保留，可继续）"));
     right_tools.add(stop);
   } else {
     // Sending needs a usable model: a session whose remembered model was disabled

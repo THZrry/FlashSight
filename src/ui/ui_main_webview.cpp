@@ -203,17 +203,21 @@ int run_webview_ui(FsApi* api) {
           if (c->alive && !c->alive->load()) return;
           c->app->pump();
           c->app->tick_terminal();
-          // Resource log (opt-in): one line every 30 s with the handle count and
-          // the sizes of everything the UI keeps in memory. A long tool-heavy
-          // turn that "leaks" then names the container that grows, instead of
-          // another round of guessing. FS_RES_LOG=1 writes to %TEMP%.
-          if (std::getenv("FS_RES_LOG")) {
+          // Resource log: one line every 30 s with the handle count and the
+          // sizes of everything the UI keeps in memory. ON BY DEFAULT (a line
+          // every 30 s is nothing) because the freeze this exists for happens
+          // while nobody is watching - an opt-in flag means the next incident
+          // has no evidence again. FS_RES_LOG=0 turns it off. Written to
+          // %TEMP%\flashsight_res.log.
+          {
+            const char* res_env = std::getenv("FS_RES_LOG");
+            const bool res_on = !res_env || std::strcmp(res_env, "0") != 0;
             static int64_t last_log = 0;
             static int64_t last_pump_ms = 0;
             int64_t now = static_cast<int64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
-            if (now - last_log >= 30000) {
+            if (res_on && now - last_log >= 30000) {
               last_log = now;
               DWORD handles = 0;
               ::GetProcessHandleCount(::GetCurrentProcess(), &handles);

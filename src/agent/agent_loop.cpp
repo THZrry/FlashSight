@@ -43,8 +43,19 @@ void AgentLoop::suspend() {
   emit("loop.state", Json{{"state", "suspending"}, {"sid", opts_.sid}});
 }
 
+void AgentLoop::interrupt() {
+  // 中止: the user wants the reply to stop NOW. The cancel predicate aborts the
+  // transfer; the call site parks with the partial text (see call_model_once).
+  abort_requested_ = true;
+  // A suspend that was already pending must not survive the stop: the turn is
+  // about to park either way.
+  suspend_requested_ = false;
+  emit("loop.state", Json{{"state", "suspending"}, {"sid", opts_.sid}});
+}
+
 void AgentLoop::resume() {
   suspend_requested_ = false;
+  abort_requested_ = false;
   parked_ = false;
   emit("loop.state", Json{{"state", "resumed"}, {"sid", opts_.sid}});
 }
@@ -67,6 +78,7 @@ FsResult AgentLoop::resume_task() {
   Json msgs = saved_messages_;
   parked_ = false;
   suspend_requested_ = false;
+  abort_requested_ = false;
   saved_valid_ = false;
   state_ = LoopState::kPlanning;
   emit("loop.resumed", Json{{"sid", opts_.sid}, {"guidance", ""}});
@@ -197,9 +209,10 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
   req.auto_mode = opts_.context.auto_mode;
   req.session_id = opts_.sid;
   req.thinking = opts_.thinking;
-  // 停止生成 reaches the SSE reader through this predicate: the loop itself can
-  // only park between tool batches, which a plain streaming answer never reaches.
-  req.cancel = [this]() { return suspend_requested_.load(); };
+  // 中止 (the hard stop) aborts the transfer; 挂起 does NOT - it lets the round
+  // finish and parks before the next model call (run_tool_group checks
+  // suspend_requested_). One flag could not mean both.
+  req.cancel = [this]() { return abort_requested_.load(); };
 
   bool streamed = false;
   auto on_delta = [this, &streamed](const std::string& piece) {
@@ -452,12 +465,21 @@ FsResult AgentLoop::run_tool_group(const Json& calls, Json* messages) {
     }
     pending_tool_results_ = Json::array();
 
-    if (suspend_requested_) {
+    // Round boundary: the model call and all of its tools are done. A pending
+    // 挂起 (or 中止) parks HERE, so the next model call is never issued.
+    if (suspend_requested_ || abort_requested_) {
       suspend_requested_ = false;
+      abort_requested_ = false;
       saved_messages_ = *messages;
       saved_valid_ = true;
+      saved_user_text_ = last_user_text_;
       parked_ = true;
       state_ = LoopState::kIdle;
+      {
+        std::lock_guard<std::mutex> lk(live_mu_);
+        live_running_ = false;
+      }
+      if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
       emit("loop.state", Json{{"state", "suspended"}, {"sid", opts_.sid}});
       return FsResult::success();
     }
@@ -924,10 +946,14 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   }
   ModelCallResult result;
   FsResult r = call_model_once(messages, tools, &result);
-  // 停止生成 during the reply: the transfer was aborted on purpose, so this is a
+  // 中止 during the reply: the transfer was aborted on purpose, so this is a
   // PARK, not a failure. Keep what the model already said as context (otherwise
   // the resumed turn re-answers from scratch) and let the UI show 恢复.
-  if (suspend_requested_.load()) {
+  //
+  // NOTE: this is abort_requested_, NOT suspend_requested_. 挂起 lets the round
+  // finish and parks before the next model call instead.
+  if (abort_requested_.load()) {
+    abort_requested_ = false;
     if (!result.text.empty()) {
       messages.push_back(Json{{"role", "assistant"},
                               {"content", result.text + "\n\n[stopped by user]"}});
@@ -942,6 +968,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
       std::lock_guard<std::mutex> lk(live_mu_);
       live_running_ = false;
     }
+    if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
     emit("loop.state", Json{{"state", "suspended"}, {"sid", opts_.sid}});
     return FsResult::success();
   }

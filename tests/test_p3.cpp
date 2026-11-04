@@ -214,6 +214,48 @@ FS_TEST(loop_suspend_stops) {
   loop.resume();
 }
 
+// 挂起 = GRACEFUL. Pressed while a model call is in flight, it must NOT cut the
+// round: the reply finishes, the tools it asked for run, and the loop parks
+// before the next model call. (0.46: the old code aborted the transfer here,
+// which is why it looked like the turn was interrupted.)
+FS_TEST(loop_suspend_finishes_round_then_parks) {
+  AgentLoop::Options opts;
+  opts.sid = "s_g";
+  AgentLoop loop(std::move(opts));
+  AgentLoop* lp = &loop;
+  int calls = 0;
+  int tools = 0;
+  loop.call_model = [lp, &calls](const ModelCallRequest&, ModelCallResult* out,
+                                 const std::function<void(const std::string&)>&) -> FsResult {
+    ++calls;
+    if (calls == 1) {
+      out->text = "round one";
+      Json call = Json::object();
+      call["name"] = "read_file";
+      call["id"] = "call_g1";
+      call["args"] = Json{{"path", "a.txt"}};
+      out->tool_calls = Json::array({call});
+      lp->suspend();  // user pressed 挂起 while this call was running
+      return FsResult::success();
+    }
+    out->text = "second round";
+    return FsResult::success();
+  };
+  loop.invoke_tool = [&tools](const ToolContext&, const std::string&,
+                              const Json&) {
+    ++tools;
+    return FsResult::success(Json{{"ok", true}});
+  };
+  EXPECT_TRUE(loop.send("go").ok());
+  EXPECT_EQ(calls, 1);   // no second model call
+  EXPECT_EQ(tools, 1);   // but this round's tool DID run
+  EXPECT_TRUE(loop.parked());
+  // Resume continues without re-asking the same question.
+  EXPECT_TRUE(loop.resume_task().ok());
+  EXPECT_EQ(calls, 2);
+  EXPECT_FALSE(loop.parked());
+}
+
 // ---------- Loop：停止生成必须真的停住，并且"恢复"必须真的继续 ----------
 //
 // Two things used to be missing. (1) suspend only took effect between tool
@@ -236,10 +278,11 @@ FS_TEST(loop_resume_task_continues_parked_turn) {
       -> FsResult {
     ++calls;
     if (calls == 1) {
-      // The model is mid-answer when the user presses 停止生成.
+      // The model is mid-answer when the user presses 中止 (the HARD stop -
+      // 挂起 is graceful and would let this round finish instead).
       out->text = "half an ans";
       if (on_delta) on_delta("half an ans");
-      lp->suspend();
+      lp->interrupt();
       return FsResult::error(ErrCode::kCancelled, "stopped by user");
     }
     // The resumed call must still carry what the model already said, otherwise the
@@ -285,7 +328,7 @@ FS_TEST(loop_send_while_parked_continues) {
     if (calls == 1) {
       out->text = "working";
       if (on_delta) on_delta("working");
-      lp->suspend();
+      lp->interrupt();  // 中止 (hard stop); 挂起 would finish the round first
       return FsResult::error(ErrCode::kCancelled, "stopped by user");
     }
     for (size_t i = 0; i < req.messages.size(); ++i) {
@@ -306,6 +349,7 @@ FS_TEST(loop_send_while_parked_continues) {
   EXPECT_TRUE(guidance_seen);
   EXPECT_FALSE(loop.parked());
 }
+
 
 // ---------- WakeScheduler：定时唤醒 + 取消 ----------
 FS_TEST(wake_scheduler_timer) {
@@ -370,6 +414,61 @@ FS_TEST(steering_queue_ops) {
 #include "tools/file_tools.hpp"
 #include "tools/tool_registry.hpp"
 #include "tools/ask_tool.hpp"
+
+// edit_file 的 start 可以省略：模型经常只给 {end, expect, newText}。以前这被当成
+// start=0 直接拒绝（"bad line range: start=0 end=7051"），模型于是退回用更不安全的
+// file_regex 改文件。现在省略 start 时按 expect 的行数推导起点，没有 expect 就只改
+// end 那一行；start=0 视为第 1 行。
+FS_TEST(edit_file_derives_missing_start) {
+  fstest::TempDir td("editnostart");
+  ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj);
+  {
+    std::ofstream ofs((proj / "a.txt").string(), std::ios::binary);
+    ofs << "alpha\nbeta\ngamma\ndelta\n";
+  }
+  ToolRegistry reg;
+  register_file_tools(&reg);
+  ToolContext ctx;
+  ctx.cwd = proj.string();
+  FsResult rr = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(rr.ok());
+  std::string hash = rr.data["hash"].get<std::string>();
+  // Multi-line block ending at 3, start omitted: the two lines of `expect`
+  // decide the range (2..3).
+  FsResult er = reg.invoke(
+      ctx, "edit_file",
+      Json{{"path", "a.txt"},
+           {"hash", hash},
+           {"edits", Json::array({Json{{"end", 3},
+                                       {"expect", "beta\ngamma"},
+                                       {"newText", "BETA\nGAMMA"}}})}});
+  ASSERT_TRUE(er.ok());
+  EXPECT_EQ(er.data["changes"][0]["start"].get<int64_t>(), int64_t(2));
+  FsResult r2 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(r2.ok());
+  EXPECT_TRUE(r2.data["content"].get<std::string>().find("BETA\nGAMMA") !=
+              std::string::npos);
+  // Single line, start omitted, no expect: end is that line.
+  FsResult er2 = reg.invoke(
+      ctx, "edit_file",
+      Json{{"path", "a.txt"},
+           {"hash", r2.data["hash"]},
+           {"edits", Json::array({Json{{"end", 1}, {"newText", "ALPHA"}}})}});
+  ASSERT_TRUE(er2.ok());
+  EXPECT_EQ(er2.data["changes"][0]["start"].get<int64_t>(), int64_t(1));
+  // start: 0 means "from the beginning", not an error.
+  FsResult r3 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(r3.ok());
+  FsResult er3 = reg.invoke(
+      ctx, "edit_file",
+      Json{{"path", "a.txt"},
+           {"hash", r3.data["hash"]},
+           {"edits", Json::array({Json{{"start", 0}, {"end", 1}, {"newText", "ALPHA2"}}})}});
+  ASSERT_TRUE(er3.ok());
+  EXPECT_EQ(er3.data["changes"][0]["start"].get<int64_t>(), int64_t(1));
+}
+
 
 // ---------- ask：手动模式发事件；自动模式拒绝 ----------
 FS_TEST(ask_tool_modes) {

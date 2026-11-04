@@ -2754,3 +2754,30 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **测试**：419 用例 3922 断言全过；web / webview 双变体编译通过。新增
     `uiapp_work_notes_follow_tool_anchors`（3 个工具 + 锚点 0/2 的解说位置）、`uiapp_plan_and_todo_are_one_checklist`、
     `uiapp_inner_controls_do_not_bubble`。
+
+<99>(SOLVED): 卡片内控件穿透的二次修正 + 挂起改成"跑完当前回合再停"（中止才是硬停）+ edit_file 允许省略 start（不再退回 file_regex）+ 完成的清单直接删掉 + 会话行按 pid 刷、切会话补一次状态刷新 + 慢渲染日志、资源日志默认开启。
+  - **子代理记录又点不开**：上一批的 `data-no-bubble` 守卫用了 `closest()`，而 `closest` **也匹配监听绑定的那个元素
+    自己**，于是"打开记录"按钮自己的点击被自己吞掉（既没穿透也没动作）。现在只有"祖先带有标记"时才拦截
+    （`marked !== el`），按钮自己的处理器正常执行，折叠也不会被连带翻转。
+  - **挂起语义**：按你的定义改成分开的两件事——**挂起 = 优雅**：正在进行的那次模型调用照常跑完，它请求的工具照常
+    执行，然后在**下一次模型调用之前**停下（`loop.state suspended`，可以恢复）；**中止 = 硬停**：新增
+    `session.interrupt`（`AgentLoop::abort_requested_`），它通过 cancel 谓词真正中断流式回复并把已产生的部分
+    停车。之前两者用同一个 suspend 标志，所以点挂起看起来像"中断了当前轮"。
+  - **edit_file 总是失败**：模型发的是 `{"end":7051,"expect":...,"newText":...}`（**没有 start**），旧校验把缺省
+    当成 0 直接拒绝（`bad line range: start=0 end=7051`），模型于是退回用不一定安全的 `file_regex` 改文件。
+    现在：省略 start 时按 `expect` 的行数把起点推出来（start = end - lines(expect) + 1；没有 expect 就只改 end
+    那一行），`start: 0` 视为第 1 行；schema 里 start 不再是必填，描述写清了这三种情形。
+  - **完成的清单**：全部打勾后清单**直接从宿主里删掉**（`todo_op` 检查后 pending==0 就 clear 并广播空列表），
+    重进会话不会再把它重建出来；`erase` 之前漏发事件，顺手补上。
+  - **"打开别的会话，这个会话的运行中标识就没了"**：切会话后补一次 `mark_sessions_dirty()`，让侧栏立刻按后端的
+    `running` 重读（之前要等某个事件碰巧触发刷新）。同时把 `load_sessions` 的回包**按 pid 定位项目**：项目列表按
+    活跃度重排过，用旧下标写回会把 A 项目的会话行写到 B 项目上（行上的圆点/运行状态错位）。
+  - **卡死取证**：`%TEMP%\flashsight_res.log` 之前只有我测试时的那几行——你那轮没有开 `FS_RES_LOG`，所以没有数据。
+    现在原生版**默认就写**这个日志（`FS_RES_LOG=0` 可关）：每 30 秒一行容器大小/handles/pump_gap；并新增
+    **慢渲染日志**——任何一次 `render()` 超过 200ms 打印 `[slow] render ms=… msgs=… tab=…`（wasm 里进浏览器
+    控制台，原生进 stderr）。下次"点一下卡几秒"，日志会直接说是哪个渲染、多少条消息。
+    另外这次针对 600 回合的大会话实测：打开一页（30 条）渲染没有出现 >200ms 的条目，说明 <97> 的 O(n²) 修复
+    之后单页渲染是快的；真正需要取证的是你那次的具体现场。
+  - **测试**：421 用例 3939 断言全过；web / webview 双变体编译通过。新增
+    `loop_suspend_finishes_round_then_parks`（挂起后本轮工具照跑、不发下一次模型调用）、
+    `edit_file_derives_missing_start`（省略 start / start=0 两种写法）；两个"停止生成"用例改用 `interrupt()`。

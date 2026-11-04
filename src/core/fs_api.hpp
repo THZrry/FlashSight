@@ -136,6 +136,9 @@ class FsApi {
                         const std::string& thinking = "");
   FsResult session_append(const std::string& sid, const std::string& text);
   FsResult session_suspend(const std::string& sid);
+  // 中止: abort the reply being streamed and park it (resumable). 挂起 is
+  // session_suspend, which lets the current round finish first.
+  FsResult session_interrupt(const std::string& sid);
   FsResult session_resume(const std::string& sid);
   FsResult session_cancel_wake(const std::string& sid);
   // 定时任务（用户可设的"稍后自动再跑一轮"）：delay_ms 后触发一次唤醒。

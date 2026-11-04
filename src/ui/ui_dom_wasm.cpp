@@ -117,12 +117,12 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
     // A control INSIDE a clickable row (a card, a fold header) must not also
-    // trigger the row: without this, pressing a subagent's 引导 or a tool row's
-    // 打开记录 both ran its own action AND bubbled into the row's handler -
-    // navigation on top of the action, or a fold toggling on every click.
-    if (name === 'click' && evt.target && evt.target.closest &&
-        evt.target.closest('[data-no-bubble]')) {
-      return;
+    // trigger the row. `closest` also matches the element the handler is BOUND
+    // to, so the guard must skip only an ANCESTOR marker: otherwise the control's
+    // own click was swallowed too (the tool row's 打开记录 did nothing).
+    if (name === 'click' && evt.target && evt.target.closest) {
+      var marked = evt.target.closest('[data-no-bubble]');
+      if (marked && marked !== el) return;
     }
     // Enter behaviour is a PER-ELEMENT choice, not a global constant: the
     // composer's "Enter 行为" setting says whether plain Enter sends or only

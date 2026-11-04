@@ -165,7 +165,15 @@ class AgentLoop {
   int auto_round() const { return current_auto_round_.load(); }
 
   // 挂起/恢复/取消唤醒
+  //
+  // 挂起 is GRACEFUL: the model call in flight finishes, its tools run, and the
+  // loop parks before starting another round. Nothing is cut, so the transcript
+  // stays consistent and 恢复 simply continues.
   void suspend();
+  // 中止 is the hard stop: abort the reply being streamed and park with what
+  // arrived. Separate flag on purpose - one "stop" cannot mean both "let this
+  // round finish" and "cut it now".
+  void interrupt();
   void resume();
   // Continue a turn that the suspend parked. `resume()` alone only clears the
   // request flag for a turn that is STILL running; once the loop actually parked
@@ -233,6 +241,9 @@ class AgentLoop {
   // data race, and it is the one place a torn value would actually show.
   std::atomic<LoopState> state_{LoopState::kIdle};
   std::atomic<bool> suspend_requested_{false};
+  // Hard stop (中止): aborts the streaming reply itself. Kept apart from
+  // suspend_requested_ so 挂起 can mean "finish this round, then wait".
+  std::atomic<bool> abort_requested_{false};
   // Set when the loop parks because of a suspend (it returned at a tool-batch
   // boundary with the transcript saved). Distinguishes "parked by the user from
   // a still-running turn" - only the former needs resume_task to continue.

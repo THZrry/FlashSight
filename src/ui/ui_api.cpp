@@ -98,6 +98,9 @@ UiApi::UiApi(FsApi* api) : api_(api) {
     return api->session_append(s(a, "sid"), s(a, "text"));
   });
   reg("session.suspend", [api](const Json& a) { return api->session_suspend(s(a, "sid")); });
+  reg("session.interrupt", [api](const Json& a) {
+    return api->session_interrupt(s(a, "sid"));
+  });
   reg("session.resume", [api](const Json& a) { return api->session_resume(s(a, "sid")); });
   reg("session.cancelWake", [api](const Json& a) {
     return api->session_cancel_wake(s(a, "sid"));
