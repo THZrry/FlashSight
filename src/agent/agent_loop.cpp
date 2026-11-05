@@ -244,6 +244,7 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
                             {"in", out->in_tokens},
                             {"out", out->out_tokens},
                             {"cached", out->cache_tokens},
+                            {"cacheKnown", out->cache_known},
                             {"model", req.model}});
     // 防过拟合：只提示，不截断（agent-loop.md §5）。
     if (overfit_.enabled() && !out->text.empty() && overfit_.push(out->text)) {
@@ -1162,6 +1163,10 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   usage["in"] = last_in_tokens_;
   usage["out"] = last_out_tokens_;
   asst_turn["usage"] = usage;
+  // Did this turn actually DO anything? An auto round that ends without a single
+  // tool call has nothing to continue from - continuing is how auto mode spun
+  // five "模型输出当前没有新的指令，到此结束" rounds in a row.
+  bool turn_had_tools = executed_calls_.is_array() && !executed_calls_.empty();
   executed_calls_ = Json::array();
   interim_texts_ = Json::array();
   interim_after_.clear();
@@ -1197,6 +1202,17 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   } else if (stop_code == "round-limit") {
     auto_continue = true;
     auto_why = zh ? "工具调用达到上限，开新一轮继续" : "tool-call limit reached; continuing";
+  }
+  // EMPTY-ROUND GUARD: an automatic round that executed no tool call produced
+  // nothing to build on (the model said "到此结束" but a plan document was still
+  // active). One such round is a signal to stop, not to ask again.
+  if (auto_continue && this_auto_round > 0 && !turn_had_tools) {
+    auto_continue = false;
+    auto_why.clear();
+    emit("auto.halted", Json{{"sid", opts_.sid},
+                             {"reason", zh ? "自动轮没有执行任何工具，已停止"
+                                           : "auto round ran no tools; stopped"},
+                             {"rounds", auto_continues_}});
   }
 
   // ---- auto mode: continue while the plan is still open ----
@@ -1263,37 +1279,34 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   return FsResult::success();
 }
 
-// 自动模式：规划/清单未闭合则继续（有上限，防止无人值守地烧钱）
+// 自动模式：未完成的工作还在就继续（有上限，防止无人值守地烧钱）
 bool AgentLoop::should_auto_continue(std::string* why) {
   if (!opts_.context.auto_mode) return false;
   if (!runtime_state) return false;
   RuntimeState st = runtime_state();
-  // The CHECKLIST outranks the plan when one exists: a plan left over from a
-  // different approach kept auto mode spinning ("模型输出当前没有新的指令，到此
-  // 结束" five times in a row). A checklist that is present and complete means
-  // the turn is done; continuing then is the model's call, not the loop's.
-  if (st.todos.is_array() && !st.todos.empty()) {
-    int open_todos = 0;
+  // LAYER 1 - the task list (todo): the per-turn process. Open items mean the
+  // current work is not finished, so the next round has something to do.
+  int open_todos = 0;
+  if (st.todos.is_array()) {
     for (auto& t : st.todos) {
       if (t.is_object() && !jsonutil::get<bool>(t, "done", false)) ++open_todos;
     }
-    if (open_todos > 0) {
-      if (why) *why = std::to_string(open_todos) + " unfinished checklist item(s)";
+  }
+  if (open_todos > 0) {
+    if (why) *why = std::to_string(open_todos) + " unfinished checklist item(s)";
+    return true;
+  }
+  // LAYER 2 - the plan DOCUMENT. An active document means the whole job is not
+  // done and the model still owes the next task list. It is NOT a competing view
+  // of the checklist: no priority, no "newer replaces the other" - both exist at
+  // the same time by design.
+  if (st.plan.is_object() && jsonutil::get<bool>(st.plan, "exists", false)) {
+    std::string status = jsonutil::get<std::string>(st.plan, "status", "");
+    std::string content = jsonutil::get<std::string>(st.plan, "content", "");
+    if (!content.empty() && status != "done") {
+      if (why) *why = "plan document is still active";
       return true;
     }
-    return false;
-  }
-  int open_plan = 0;
-  if (st.plan.is_object() && st.plan.contains("steps") && st.plan["steps"].is_array()) {
-    for (auto& s : st.plan["steps"]) {
-      if (!s.is_object()) continue;
-      std::string status = jsonutil::get<std::string>(s, "status", "pending");
-      if (status != "done" && status != "skipped") ++open_plan;
-    }
-  }
-  if (open_plan > 0) {
-    if (why) *why = "plan has " + std::to_string(open_plan) + " open step(s)";
-    return true;
   }
   return false;
 }

@@ -1199,3 +1199,29 @@ The process of project: P0 环境搭建
     改成 `["newText"]`（`start` 可选，缺省时按 `expect` 行数推导），模型不必再退回不安全的 `file_regex`。
   - **测试**：424 用例 3957 断言全过；web / webview 双变体编译通过。新增 `loop_continue_with_empty_guidance`（出错后
     空指令继续、不插空 user 消息）、更新 `uiapp_tool_rows_are_memoised`（缓存带折叠代）等 3 个受占位消息/缓存影响的用例。
+
+<102>(SOLVED): 事件归属改为框架级 + 规划=文档（三层：任务列表/规划/工作流）+ 首字读秒 + 中转重试 + 缓存命中 + 补全/回底。
+  - **事件穿透改成框架规则**：适配器里每个元素自己的 click/dblclick/contextmenu 处理完就 `stopPropagation()`——
+    事件属于**最内层**的 handler，外层行不再收到。删掉了所有 `data-no-bubble` 标记和两处 `closest` 补丁：以后任何
+    新控件都不需要记得加属性。真实浏览器里工作过程连续开/关 4 次：open/closed/open/closed。
+  - **删掉规划小窗**：没有 `plan-float`、没有输入框里的"规划"按钮、没有 `ui:plan` 命令、没有 plan 步骤解析和评审面板。
+    唯一进度视图是任务清单悬浮窗（右侧）。
+  - **规划重新定义为文档（addon2 三层）**：任务列表(todo，本轮) - 规划(plan，**文档** `<project>/.flashsight/plans/<sid>.md`)
+    - 工作流(workflow，流水线，用户批准)。`plan_update` 写整篇 markdown（`content`）或只改状态（`status: active|done`）；
+    `plan_get` 返回 {exists,status,content,path}。模型每轮从文档拆出 todo，全部做完必须 `status="done"`；运行时提示块
+    只报"文档存在/路径/状态"，正文让模型用 plan_get 读（文档上限 64KB）。删掉了"清单优先于规划""新的清单清空规划"
+    这类概念混淆的逻辑——两者是不同层，不是同一个东西的两个视图。
+  - **自动轮**：有未完成 todo → 继续；否则规划文档仍 active（且正文非空）→ 继续；都没有 → 停。另加空转保护：
+    **自动轮如果一次工具都没执行，就不再继续**（这正是"连续 5 次模型输出当前没有新的指令"的机制）。
+  - **首字等待**：删掉"正在请求模型…"这行新提示；发送时立刻插入 streaming 占位消息，消息自带的 spinner+读秒
+    立即出现（`turn-live`，每秒刷新）。回车发送后强制贴底（`hist_follow=true` + send 后 scroll_to_bottom）。
+  - **中转断联重试**：`RetryPolicy` 默认改为 3 次重试、1s/2s/4s 退避（网络/超时/5xx）；**已经吐出内容的那次不重试**
+    （重放会把屏幕上已有的半截回答再打一遍）。流式 usage 的缓存字段补全：DeepSeek `prompt_cache_hit_tokens`、
+    OpenAI `prompt_tokens_details.cached_tokens`、Anthropic `cache_read_input_tokens`；只有 miss 时用
+    prompt - miss 推导。新增 `cacheKnown` 区分"命中 0%"和"供应商没报"—；命中率 = 缓存输入 / 总输入。
+  - **路径补全**：无匹配就关闭（空菜单不再挡在输入框上）；回包只在"当前仍在输入同一个片段"时生效，写完路径去编辑
+    别的文字时迟到的回包不会再把它弹出来。
+  - **测试**：426 用例 3954 断言全过；web / webview 双变体编译通过。新增
+    `provider_stream_usage_reports_cache_hit`（DeepSeek/OpenAI 两种字段）、`provider_retries_a_dropped_relay`（3 次内
+    成功）、`provider_does_not_retry_after_partial_output`（已输出不重试）、`loop_auto_stops_after_empty_round`；
+    规划用例改为文档形态（写入/只改状态/驳回删文件）。

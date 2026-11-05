@@ -116,13 +116,13 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
-    // A control INSIDE a clickable row (a card, a fold header) must not also
-    // trigger the row. `closest` also matches the element the handler is BOUND
-    // to, so the guard must skip only an ANCESTOR marker: otherwise the control's
-    // own click was swallowed too (the tool row's 打开记录 did nothing).
-    if (name === 'click' && evt.target && evt.target.closest) {
-      var marked = evt.target.closest('[data-no-bubble]');
-      if (marked && marked !== el) return;
+    // FRAMEWORK RULE: an activation event belongs to the INNERMOST element that
+    // handles it. A button inside a clickable row (a card, a fold header) runs
+    // its own handler and stops the event there; the row never sees the press.
+    // This is the general contract - per-control data-no-bubble marks were a
+    // patch that every new nested control had to remember.
+    if (name === 'click' || name === 'dblclick' || name === 'contextmenu') {
+      evt.stopPropagation();
     }
     // Enter behaviour is a PER-ELEMENT choice, not a global constant: the
     // composer's "Enter 行为" setting says whether plain Enter sends or only

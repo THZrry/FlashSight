@@ -40,6 +40,12 @@ struct ProjectStore {
   ghc::filesystem::path patch(const std::string& sid, const std::string& turn_id) const;
   ghc::filesystem::path terminals_dir(const std::string& sid) const;
   ghc::filesystem::path terminal_log(const std::string& sid, const std::string& tid) const;
+  // 规划文档：<project>/.flashsight/plans/<sid>.md
+  // The plan is a DOCUMENT (addon2 长任务-计划), not a JSON step tree: the model
+  // writes it, re-reads it each round, derives the task list from it, and marks
+  // it complete when the work is done.
+  ghc::filesystem::path plans_dir() const;
+  ghc::filesystem::path plan_file(const std::string& sid) const;
 
   static ProjectStore of(const ghc::filesystem::path& project_root);
 };

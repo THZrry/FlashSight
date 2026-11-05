@@ -48,6 +48,46 @@ std::string http_error_text(const HttpResponse& resp) {
   return text + ": " + flat;
 }
 
+// Apply a `usage` object to the response. ONE place reads these numbers, so the
+// streamed tail chunk, the final content chunk and the plain JSON body cannot
+// disagree - the streamed path used to read only `prompt_tokens_cached`, which
+// no real provider sends, so the cache-hit rate stayed empty forever.
+void apply_usage(const Json& u, ChatResponse* out) {
+  if (!out || !u.is_object()) return;
+  int64_t pin = jsonutil::get_int(u, "prompt_tokens", 0);
+  int64_t pout = jsonutil::get_int(u, "completion_tokens", 0);
+  if (pin > 0) out->in_tokens = pin;
+  if (pout > 0) out->out_tokens = pout;
+  // Any of these keys means the endpoint reports caching at all. The flag is
+  // what separates "0% cached" from "the provider never said".
+  bool any_cache_field = u.contains("prompt_tokens_cached") ||
+                         u.contains("prompt_cache_hit_tokens") ||
+                         u.contains("prompt_cache_miss_tokens") ||
+                         u.contains("cache_read_input_tokens") ||
+                         (u.contains("prompt_tokens_details") &&
+                          u["prompt_tokens_details"].is_object() &&
+                          u["prompt_tokens_details"].contains("cached_tokens"));
+  if (any_cache_field) out->cache_known = true;
+  int64_t pcache = jsonutil::get_int(u, "prompt_tokens_cached", 0);
+  if (pcache == 0 && u.contains("prompt_cache_hit_tokens")) {
+    pcache = jsonutil::get_int(u, "prompt_cache_hit_tokens", 0);  // DeepSeek
+  }
+  if (pcache == 0 && u.contains("prompt_tokens_details") &&
+      u["prompt_tokens_details"].is_object()) {
+    pcache = jsonutil::get_int(u["prompt_tokens_details"], "cached_tokens", 0);
+  }
+  if (pcache == 0 && u.contains("cache_read_input_tokens")) {  // Anthropic
+    pcache = jsonutil::get_int(u, "cache_read_input_tokens", 0);
+  }
+  if (pcache > 0) out->cache_tokens = pcache;
+  // "Cached input / total input" is the only honest hit rate. When a provider
+  // reports a MISS count but no hit count, derive the hit side.
+  if (pcache == 0 && pin > 0 && u.contains("prompt_cache_miss_tokens")) {
+    int64_t miss = jsonutil::get_int(u, "prompt_cache_miss_tokens", 0);
+    if (miss > 0 && miss < pin) out->cache_tokens = pin - miss;
+  }
+}
+
 }  // namespace
 
 std::string mask_secret(const std::string& s) {
@@ -254,27 +294,13 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
             // A usage-only tail chunk (stream_options.include_usage, or a
             // provider that appends it after [DONE]). This is the ONLY place a
             // streamed reply reports prompt tokens, so it feeds the context
-            // water level.
-            if (d.contains("usage") && d["usage"].is_object()) {
-              const Json& u = d["usage"];
-              int64_t pin = jsonutil::get_int(u, "prompt_tokens", 0);
-              int64_t pout = jsonutil::get_int(u, "completion_tokens", 0);
-              if (pin > 0) out->in_tokens = pin;
-              if (pout > 0) out->out_tokens = pout;
-              int64_t pcache = jsonutil::get_int(u, "prompt_tokens_cached", 0);
-              if (pcache > 0) out->cache_tokens = pcache;
-            }
+            // water level AND the cache-hit rate.
+            if (d.contains("usage")) apply_usage(d["usage"], out);
             continue;
           }
           const Json& ch = choices[0];
           // Some endpoints attach usage to the final content chunk instead.
-          if (d.contains("usage") && d["usage"].is_object()) {
-            const Json& u = d["usage"];
-            int64_t pin = jsonutil::get_int(u, "prompt_tokens", 0);
-            int64_t pout = jsonutil::get_int(u, "completion_tokens", 0);
-            if (pin > 0) out->in_tokens = pin;
-            if (pout > 0) out->out_tokens = pout;
-          }
+          if (d.contains("usage")) apply_usage(d["usage"], out);
           Json delta = ch.contains("delta") && ch["delta"].is_object()
                            ? ch["delta"] : Json::object();
           std::string piece = jsonutil::get<std::string>(delta, "content", "");
@@ -340,22 +366,10 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
         out->tool_calls = msg["tool_calls"];
       }
     }
-    // usage
+    // usage (also fills the cache-hit side: prompt_cache_hit_tokens,
+    // prompt_tokens_details.cached_tokens, cache_read_input_tokens)
     Json u = j.contains("usage") && j["usage"].is_object() ? j["usage"] : Json::object();
-    out->in_tokens = jsonutil::get_int(u, "prompt_tokens", 0);
-    out->out_tokens = jsonutil::get_int(u, "completion_tokens", 0);
-    out->cache_tokens = jsonutil::get_int(u, "prompt_tokens_cached", 0);
-    if (out->cache_tokens == 0) {
-      // [OI] spells the same number two ways; DeepSeek and OpenRouter use the
-      // nested form, and missing it made the cache-hit rate read 0%.
-      if (u.contains("prompt_cache_hit_tokens")) {
-        out->cache_tokens = jsonutil::get_int(u, "prompt_cache_hit_tokens", 0);
-      } else if (u.contains("prompt_tokens_details") &&
-                 u["prompt_tokens_details"].is_object()) {
-        out->cache_tokens =
-            jsonutil::get_int(u["prompt_tokens_details"], "cached_tokens", 0);
-      }
-    }
+    apply_usage(u, out);
     // Cost. Only what the ENDPOINT reports is shown: a number computed from
     // hard-coded list prices looks exactly like a bill, and reconciling it
     // against a real invoice is a losing game (prices change, discounts exist,

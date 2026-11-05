@@ -29,22 +29,26 @@ void register_orchestration_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "plan_update";
     def.description =
-        "更新规划树（左侧规划栏）. Update the plan tree. "
-        "steps[].status: pending|running|done|skipped|blocked. "
-        "未闭合的规划会让自动模式继续 / an open plan keeps auto mode going.";
+        "写规划文档（.flashsight/plans/<sid>.md）。The plan is ONE markdown "
+        "document you own: write the whole task plan into it once (goal, approach, "
+        "acceptance), then each round derive the next 任务列表 (todo_add) from it. "
+        "Update the document when the approach changes. When EVERYTHING in it is "
+        "done, call this with status=\"done\" - an active document is what keeps "
+        "auto mode going. content replaces the document; omit it to only change "
+        "the status.";
     Json params = Json::object();
     params["type"] = "object";
     params["properties"] = obj({
-        {"goal", obj({{"type", "string"}, {"description", "本轮总目标 overall goal"}})},
-        {"steps", obj({{"type", "array"},
-                       {"description", "[{title, status, note?}]"},
-                       {"items", obj({{"type", "object"},
-                                      {"properties", obj({
-                                          {"title", obj({{"type", "string"}})},
-                                          {"status", obj({{"type", "string"}})},
-                                          {"note", obj({{"type", "string"}})}})}})}})},
+        {"content", obj({{"type", "string"},
+                         {"description",
+                          "整篇规划文档（markdown，全量替换）. The full document; "
+                          "omit to keep the current body."}})},
+        {"status", obj({{"type", "string"},
+                        {"enum", Json::array({"active", "done"})},
+                        {"description",
+                         "active=还在做（默认，会让自动模式继续）；"
+                         "done=规划完成（自动模式停止）. active is the default."}})},
     });
-    params["required"] = Json::array({"steps"});
     def.parameters = params;
     registry->register_tool("plan_update", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
@@ -56,7 +60,10 @@ void register_orchestration_tools(ToolRegistry* registry) {
   {
     ToolDef def;
     def.name = "plan_get";
-    def.description = "读取当前规划树. Read the current plan tree.";
+    def.description =
+        "读取规划文档（.flashsight/plans/<sid>.md）. Read the plan document: "
+        "{exists, status, content, path}. Re-read it before deciding the next "
+        "task list.";
     Json params = Json::object();
     params["type"] = "object";
     params["properties"] = Json::object();

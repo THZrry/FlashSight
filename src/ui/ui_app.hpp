@@ -769,22 +769,9 @@ struct AppState {
   std::string ctx_kind;       // "message" | "tab" | "session" | "composer" | ""
   std::string ctx_id;         // turnId / tab id / session id
   std::string ctx_label;      // what the menu header shows
-  bool plan_open = false;
-  // The plan is model-authored state with a STATUS per step, mirroring the
-  // backend's plan tree ({title,status,note?}). A flat vector<string> could not
-  // show progress, and progress is the whole point of the panel - it is also
-  // what the loop reads to decide whether auto mode continues.
-  struct PlanStep {
-    std::string title;
-    std::string status = "pending";  // pending|running|done|skipped|blocked
-    std::string note;
-  };
-  std::vector<PlanStep> plan_steps;
-  std::string plan_goal;
-  // The model's own checklist (todo_add / todo_check). A different thing from
-  // the plan: the plan is a step tree the loop reads, a todo is the agent's
-  // working list. It gets a floating panel of its own - the backend could
-  // already add items while the UI dropped every update into a toast.
+  // The model's own checklist (todo_add / todo_check): the ONLY progress view.
+  // The plan is a document the model maintains (.flashsight/plans/<sid>.md) -
+  // there is no plan panel and no plan step tree in the UI.
   struct TodoItem {
     int64_t id = 0;
     std::string task;
@@ -792,11 +779,6 @@ struct AppState {
   };
   std::vector<TodoItem> todos;
   bool todo_open = false;
-  // Inline plan editing: -1 = no step being edited. The plan is user-editable,
-  // not just model output, so the panel needs an edit path.
-  int plan_editing = -1;
-  std::string plan_edit_text;
-  std::string plan_review_text;
   std::string toast;
   int64_t toast_deadline_ms = 0;  // pump() clears the toast after this
 
@@ -929,20 +911,10 @@ struct SessionView {
 
   std::vector<AppState::SubagentRow> subagents;
 
-  bool plan_open = false;
-  // Same shape as AppState::plan_steps (see the note there): status is what the
-  // panel displays and what the loop reads.
-  std::vector<AppState::PlanStep> plan_steps;
-  std::string plan_goal;
   // The model's checklist travels with the session view (a background session's
   // todo.updated must land there, not on whatever tab is active).
   std::vector<AppState::TodoItem> todos;
   bool todo_open = false;
-  // Inline plan editing: -1 = no step being edited. The plan is user-editable,
-  // not just model output, so the panel needs an edit path.
-  int plan_editing = -1;
-  std::string plan_edit_text;
-  std::string plan_review_text;
 };
 
 // UiApp: owns the render loop. backend_ is the transport to the core

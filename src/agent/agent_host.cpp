@@ -456,11 +456,11 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
       if (!deps_.plan_update) {
         return FsResult::error(ErrCode::kNotSupported, "plan store not wired");
       }
+      // The plan is a DOCUMENT. `content` replaces it; `status` is the one
+      // machine-readable fact (active|done) that auto mode follows.
       Json plan = Json::object();
-      plan["goal"] = jsonutil::get<std::string>(args, "goal", "");
-      plan["steps"] = args.contains("steps") && args["steps"].is_array()
-                          ? args["steps"] : Json::array();
-      plan["updatedAt"] = deps_.clock ? deps_.clock->now_ms() : 0;
+      plan["content"] = jsonutil::get<std::string>(args, "content", "");
+      plan["status"] = jsonutil::get<std::string>(args, "status", "");
       FsResult r = deps_.plan_update(sid, plan);
       if (r.ok()) emit("plan.update", Json{{"sid", sid}, {"plan", r.data}});
       if (out) *out = r.data;
@@ -574,19 +574,10 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     std::string task = jsonutil::get<std::string>(args, "task", "");
     if (task.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty task");
     int id = todos_.add(owner, task);
-    // A checklist REPLACES the plan: they describe the same work, and keeping
-    // both is how auto mode spun five empty rounds on a plan nobody was
-    // following ("清单空了还继续"). The checklist is now the only driver.
-    if (deps_.plan_get && deps_.plan_update) {
-      Json plan = deps_.plan_get(owner);
-      bool has_steps = plan.is_object() && plan.contains("steps") &&
-                       plan["steps"].is_array() && !plan["steps"].empty();
-      if (has_steps) {
-        deps_.plan_update(owner, Json{{"goal", ""}, {"steps", Json::array()}});
-        emit("plan.update", Json{{"sid", owner},
-                                 {"plan", Json{{"goal", ""}, {"steps", Json::array()}}}});
-      }
-    }
+    // A checklist does NOT touch the plan: they are different layers now. The
+    // plan is the document that says what the whole job is; the list is this
+    // round's tasks derived from it. (Batch 49 cleared the plan here, which was
+    // the "same thing, newer wins" confusion - the user rejected it.)
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"id", id}, {"items", todos_.to_json(owner)}});
   }

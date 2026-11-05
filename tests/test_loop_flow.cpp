@@ -332,11 +332,10 @@ FS_TEST(loop_auto_mode_continues_on_open_plan) {
   loop.runtime_state = [&step]() {
     RuntimeState st;
     st.now_ms = 1700000000000LL;
-    st.plan = Json{{"goal", "two steps"},
-                   {"steps", Json::array({
-                       Json{{"title", "a"}, {"status", step >= 1 ? "done" : "pending"}},
-                       Json{{"title", "b"}, {"status", step >= 2 ? "done" : "pending"}},
-                   })}};
+    // The plan is a DOCUMENT now; auto mode follows its status.
+    st.plan = Json{{"exists", true},
+                   {"status", step >= 2 ? "done" : "active"},
+                   {"content", "# plan\n- a\n- b"}};
     return st;
   };
   ScriptedModel model;
@@ -379,8 +378,9 @@ FS_TEST(loop_auto_mode_stops_when_plan_done) {
   loop.runtime_state = []() {
     RuntimeState st;
     st.now_ms = 1700000000000LL;
-    st.plan = Json{{"goal", "done"},
-                   {"steps", Json::array({Json{{"title", "a"}, {"status", "done"}}})}};
+    st.plan = Json{{"exists", true},
+                   {"status", "done"},
+                   {"content", "# plan\n- everything done"}};
     return st;
   };
   ScriptedModel model;
@@ -392,6 +392,38 @@ FS_TEST(loop_auto_mode_stops_when_plan_done) {
   EXPECT_EQ((int)model.seen_messages.size(), 1);
   EXPECT_FALSE(rec.saw("auto.next"));
   EXPECT_EQ(rec.count("turn.done"), 1);
+}
+
+// ---------- 自动模式：空转一轮就停（清单/规划都没让它再动） ----------
+// The real report: five consecutive "模型输出当前没有新的指令，到此结束" rounds on
+// an active plan document. An auto round that executes NO tool has nothing to
+// build on; one continuation is enough to prove that, then stop.
+FS_TEST(loop_auto_stops_after_empty_round) {
+  AgentLoop::Options opts;
+  opts.sid = "s_auto_empty";
+  opts.permission = "full";
+  opts.context.auto_mode = true;
+  opts.max_auto_continues = 5;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;
+    st.plan = Json{{"exists", true}, {"status", "active"}, {"content", "# plan"}};
+    return st;
+  };
+  ScriptedModel model;
+  loop.call_model = model.fn();  // pure text, no tool calls, every time
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json::object());
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  // First turn + exactly one auto round; the second auto round is refused.
+  EXPECT_EQ((int)model.seen_messages.size(), 2);
+  EXPECT_EQ(rec.count("turn.done"), 2);
+  EXPECT_TRUE(rec.saw("auto.halted"));
+  EXPECT_EQ(rec.count("auto.next"), 1);
 }
 
 // ---------- 宿主接线：请求里必须真的有工具表和非空系统提示 ----------
@@ -514,9 +546,9 @@ FS_TEST(loop_auto_continue_keeps_last_answer) {
   loop.runtime_state = [&calls]() {
     RuntimeState st;
     st.now_ms = 1700000000000LL;
-    st.plan = Json{{"steps", Json::array({Json{{"title", "a"},
-                                               {"status", calls >= 2 ? "done"
-                                                                     : "pending"}}})}};
+    st.plan = Json{{"exists", true},
+                   {"status", calls >= 2 ? "done" : "active"},
+                   {"content", "# plan\n- a"}};
     return st;
   };
   std::vector<Json> seen;

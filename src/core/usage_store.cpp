@@ -18,7 +18,9 @@ Json usage_row_to_json(const UsageRow& r) {
   if (!r.model.empty()) j["model"] = r.model;
   if (r.in) j["in"] = r.in;
   if (r.out) j["out"] = r.out;
-  if (r.cache) j["cache"] = r.cache;
+  // A reported 0 must be written: "the endpoint said 0 cached" is a fact, and the
+  // hit-rate denominator needs it. Absent = no cache figure was reported.
+  if (r.cache_known || r.cache) j["cache"] = r.cache;
   if (r.cost) j["cost"] = r.cost;
   j["cost_kind"] = r.cost_kind.empty() ? "unknown" : r.cost_kind;
   if (r.latency_ms) j["latency"] = r.latency_ms;
@@ -36,6 +38,7 @@ UsageRow usage_row_from_json(const Json& j) {
   r.in = jsonutil::get_int(j, "in", 0);
   r.out = jsonutil::get_int(j, "out", 0);
   r.cache = jsonutil::get_int(j, "cache", 0);
+  r.cache_known = j.contains("cache") && !j["cache"].is_null();
   r.cost = jsonutil::get_number(j, "cost", 0.0);
   r.cost_kind = jsonutil::get<std::string>(j, "cost_kind", "unknown");
   r.latency_ms = jsonutil::get_int(j, "latency", 0);

@@ -162,7 +162,7 @@ FS_TEST(wiring_command_list_has_builtins_and_no_mcp) {
     if (name == "browser-control") browser = true;
     if (name == "lsp") lsp = true;
   }
-  EXPECT_TRUE(plan);
+  EXPECT_FALSE(plan);  // the plan is a document now; no panel command exists
   EXPECT_TRUE(suspend);
   EXPECT_FALSE(browser);  // built-in MCP: model-invoked only
   EXPECT_FALSE(lsp);

@@ -30,6 +30,10 @@ struct UsageRow {
   std::string provider;
   std::string model;
   int64_t in = 0, out = 0, cache = 0;
+  // Whether the endpoint reported a cache figure at all. Without it a row with
+  // cache=0 is indistinguishable from a provider that never reports caching, and
+  // the hit-rate denominator would silently drop real misses.
+  bool cache_known = false;
   double cost = 0;
   std::string cost_kind;  // "money"|"quota"|"unknown"
   int64_t latency_ms = 0;

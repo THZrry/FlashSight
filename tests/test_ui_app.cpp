@@ -1428,58 +1428,28 @@ FS_TEST(uiapp_toast_has_deadline) {
   EXPECT_FALSE(dump_has(dom, "hello"));
 }
 
-FS_TEST(uiapp_plan_toggle) {
+// The plan is a DOCUMENT (.flashsight/plans/<sid>.md), not a panel: there is no
+// plan float, no step tree and no composer 规划 button. The task list is the only
+// progress view. (The user's verdict: the small window was useless - delete it.)
+FS_TEST(uiapp_plan_is_a_document_not_a_panel) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.update([](AppState& s) {
-    seed_session(s);
-    AppState::PlanStep p;
-    p.title = "重写 DOM Adapter";
-    p.status = "running";
-    AppState::PlanStep q;
-    q.title = "补测试";
-    q.status = "done";
-    s.plan_steps.push_back(p);
-    s.plan_steps.push_back(q);
-    s.plan_goal = "把适配器重写完";
-  });
+  app.update([](AppState& s) { seed_session(s); });
   EXPECT_FALSE(dump_has(dom, "任务规划"));
-  app.update([](AppState& s) { s.plan_open = true; });
-  EXPECT_TRUE(dump_has(dom, "任务规划"));
-  EXPECT_TRUE(dump_has(dom, "重写 DOM Adapter"));
-  EXPECT_TRUE(dump_has(dom, "把适配器重写完"));
-  // The panel shows PROGRESS, which is what the loop reads to continue.
-  EXPECT_TRUE(dump_has(dom, "1 / 2"));
-  // ...and the status is in the markup so the stylesheet can colour it.
-  EXPECT_TRUE(dump_has(dom, "st-running"));
-  EXPECT_TRUE(dump_has(dom, "st-done"));
-}
-
-// A plan the MODEL writes appears in the panel without the user toggling it: the
-// host emitted plan.update and nothing listened, so a mid-turn plan was invisible.
-FS_TEST(uiapp_plan_event_updates_panel_live) {
-  NullDom dom;
-  AppState st = AppState::make();
-  UiApp app(dom, st, nullptr);
-  app.mount();
-  app.update([](AppState& s) {
-    seed_session(s, "sess_a");
-    s.plan_open = true;
-  });
-  EXPECT_TRUE(dump_has(dom, "暂无规划步骤"));
-  Json tree = Json::object();
-  tree["goal"] = "ship the parser";
-  tree["steps"] = Json::array({Json{{"title", "write lexer"}, {"status", "done"}},
-                               Json{{"title", "write parser"}, {"status", "running"}}});
+  EXPECT_FALSE(dump_has(dom, "规划"));
+  // A plan.update event carries the DOCUMENT ({exists,status,content,path}); it
+  // must not create a second progress panel beside the checklist.
   app.on_backend_event_for_test(
-      "plan.update", Json{{"sid", "sess_a"}, {"plan", tree}});
+      "plan.update",
+      Json{{"sid", "sess_a"},
+           {"plan", Json{{"exists", true},
+                         {"status", "active"},
+                         {"content", "# ship the parser\n- write lexer\n- write parser"}}}});
   std::string d = dom.dump();
-  EXPECT_TRUE(d.find("write lexer") != std::string::npos);
-  EXPECT_TRUE(d.find("write parser") != std::string::npos);
-  EXPECT_TRUE(d.find("ship the parser") != std::string::npos);
-  EXPECT_TRUE(d.find("1 / 2") != std::string::npos);
+  EXPECT_TRUE(d.find("ship the parser") == std::string::npos);
+  EXPECT_TRUE(d.find("write lexer") == std::string::npos);
 }
 FS_TEST(uiapp_modal) {
   NullDom dom;
@@ -1550,7 +1520,8 @@ FS_TEST(uiapp_per_call_usage_updates_the_panel) {
   });
   app.on_backend_event_for_test(
       "loop.usage",
-      Json{{"sid", "sess_a"}, {"in", 25000}, {"out", 400}, {"cached", 20000}});
+      Json{{"sid", "sess_a"}, {"in", 25000}, {"out", 400}, {"cached", 20000},
+           {"cacheKnown", true}});
   // Context level, cache and this-turn numbers move immediately...
   EXPECT_EQ(app.state().context_tokens, int64_t(25000));
   EXPECT_EQ(app.state().context_pct, 25);
@@ -1562,7 +1533,8 @@ FS_TEST(uiapp_per_call_usage_updates_the_panel) {
   // ...and the next round keeps accumulating.
   app.on_backend_event_for_test(
       "loop.usage",
-      Json{{"sid", "sess_a"}, {"in", 40000}, {"out", 500}, {"cached", 10000}});
+      Json{{"sid", "sess_a"}, {"in", 40000}, {"out", 500}, {"cached", 10000},
+           {"cacheKnown", true}});
   EXPECT_EQ(app.state().context_tokens, int64_t(40000));
   EXPECT_EQ(app.state().session_tokens_in, int64_t(65000));
   EXPECT_EQ(app.state().cache_hit_pct, 25);
@@ -3279,8 +3251,8 @@ FS_TEST(uiapp_command_menu_is_backend_driven) {
       r.ok = true;
       if (method == "command.list") {
         r.data = Json{{"commands", Json::array(
-            {Json{{"name", "plan"}, {"title", "规划面板"},
-                  {"description", "打开/关闭任务规划"}, {"action", "ui:plan"},
+            {Json{{"name", "new"}, {"title", "新建会话"},
+                  {"description", "在当前项目新建一个会话"}, {"action", "ui:new-session"},
                   {"group", "builtin"}},
              Json{{"name", "my-skill"}, {"title", "My Skill"},
                   {"description", "does a thing"}, {"action", "skill:my-skill"},
@@ -3301,10 +3273,10 @@ FS_TEST(uiapp_command_menu_is_backend_driven) {
   app.update([](AppState& s) { s.command_menu.clear(); });
   app.update([&](AppState& s) {
     AppState::CommandRow a;
-    a.name = "plan";
-    a.title = "规划面板";
-    a.description = "打开/关闭任务规划";
-    a.action = "ui:plan";
+    a.name = "new";
+    a.title = "新建会话";
+    a.description = "在当前项目新建一个会话";
+    a.action = "ui:new-session";
     s.command_menu.push_back(a);
     AppState::CommandRow b;
     b.name = "my-skill";
@@ -3314,18 +3286,17 @@ FS_TEST(uiapp_command_menu_is_backend_driven) {
     s.command_menu.push_back(b);
   });
   std::string d = dom.dump();
-  EXPECT_TRUE(d.find("/plan") != std::string::npos);
-  EXPECT_TRUE(d.find("规划面板") != std::string::npos);
+  EXPECT_TRUE(d.find("/new") != std::string::npos);
+  EXPECT_TRUE(d.find("新建会话") != std::string::npos);
   EXPECT_TRUE(d.find("/my-skill") != std::string::npos);
   EXPECT_TRUE(d.find("does a thing") != std::string::npos);
 
   // a skill command goes to the BACKEND by name
   app.run_command(app.state().command_menu[1]);
   EXPECT_EQ(backend.ran, std::string("my-skill"));
-  // a ui: action is handled locally (plan toggles) and never sent as a command
-  bool before = app.state().plan_open;
+  // a ui: action is handled locally (new-session) and never sent as a command
   app.run_command(app.state().command_menu[0]);
-  EXPECT_TRUE(app.state().plan_open != before);
+  EXPECT_EQ(backend.ran, std::string("my-skill"));
 }
 
 // The workflow panel is a view over workflow.runs: per-step state plus the
@@ -3376,31 +3347,19 @@ FS_TEST(uiapp_workflow_panel_shows_runs) {
   EXPECT_TRUE(d.find("跳过") != std::string::npos);
 }
 
-// The plan panel is a READ view of the model's plan plus the review actions.
-// Manual add/edit of steps was removed on purpose: the loop reads those
-// statuses to decide whether to continue, so hand-editing them writes a tree the
-// model never agreed to. What the panel must offer is the review path.
+// The plan review is NOT a panel any more. The document is the plan; approval
+// belongs to the ask flow (addon2: plan ≈ ask). The UI must not render review
+// buttons floating over the transcript.
 FS_TEST(uiapp_plan_review_actions_only) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
-  app.update([](AppState& s) {
-    seed_session(s, "sess_a");
-    s.plan_open = true;
-    AppState::PlanStep p;
-    p.title = "first";
-    p.status = "pending";
-    s.plan_steps.push_back(p);
-  });
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
   std::string d = dom.dump();
-  // No authoring controls any more.
-  EXPECT_TRUE(d.find("plan-add") == std::string::npos);
-  EXPECT_TRUE(d.find("plan-no") == std::string::npos);
-  // Review stays: approving/revising is how the user steers a plan.
-  EXPECT_TRUE(d.find("plan-review") != std::string::npos);
-  EXPECT_TRUE(d.find("通过") != std::string::npos);
-  EXPECT_TRUE(d.find("驳回") != std::string::npos);
+  EXPECT_TRUE(d.find("plan-review") == std::string::npos);
+  EXPECT_TRUE(d.find("通过") == std::string::npos);
+  EXPECT_TRUE(d.find("驳回") == std::string::npos);
 }
 
 // Enter-to-send is a real setting: the textarea carries it so the DOM adapter's
@@ -4273,46 +4232,9 @@ FS_TEST(uiapp_history_is_not_rebuilt) {
   }
 }
 
-// The plan is a floating OVERLAY, but it is a sibling of the history rather
-// than a child of it: opening it must not rebuild the transcript or its scroll
-// state, and it must not take width away from the conversation (a column read
-// like a second side panel).
-FS_TEST(uiapp_plan_floats_without_touching_history) {
-  NullDom dom;
-  AppState st = AppState::make();
-  UiApp app(dom, st, nullptr);
-  app.mount();
-  app.update([](AppState& s) {
-    seed_session(s, "sess_a");
-    comp::ChatMsg m;
-    m.role = "assistant";
-    m.text = "hello";
-    s.messages.push_back(m);
-  });
-  std::string before = dom.dump();
-  EXPECT_TRUE(before.find("plan-float") == std::string::npos);
-  std::vector<VNodePtr> msgs_before;
-  collect_msg_nodes(app.tree_for_test(), "msg:", &msgs_before);
-  ASSERT_TRUE(msgs_before.size() == 1);
-
-  app.update([](AppState& s) {
-    s.plan_open = true;
-    AppState::PlanStep p;
-    p.title = "step one";
-    s.plan_steps.push_back(p);
-  });
-  std::string d = dom.dump();
-  EXPECT_TRUE(d.find("plan-float") != std::string::npos);
-  EXPECT_TRUE(d.find("step one") != std::string::npos);
-  // it is a floating overlay, not a column that takes width
-  EXPECT_TRUE(d.find("plan-col") == std::string::npos);
-  // ...and it is NOT inside the history subtree: the message node is the same
-  // object, so opening the plan rebuilt nothing.
-  std::vector<VNodePtr> msgs_after;
-  collect_msg_nodes(app.tree_for_test(), "msg:", &msgs_after);
-  ASSERT_TRUE(msgs_after.size() == 1);
-  EXPECT_TRUE(msgs_after[0].get() == msgs_before[0].get());
-}
+// (There used to be a test here that opened a plan FLOAT and checked it did not
+// touch the history. The float is gone: the plan is a document now, so there is
+// nothing to float and nothing to rebuild.)
 
 // The chat is scrolled to the bottom when its history arrives (a first visit
 // must show the latest turn, not the top of the conversation). NullDom has no
@@ -4771,10 +4693,11 @@ FS_TEST(uiapp_work_notes_follow_tool_anchors) {
   EXPECT_TRUE(n2 < c);
 }
 
-// 规划 and 清单 say the same thing ("what is this turn doing"). A newer one
-// replaces the other: a plan clears the checklist, a checklist closes (and
-// replaces) the plan view.
-FS_TEST(uiapp_plan_and_todo_are_one_checklist) {
+// 任务列表 and 规划 are DIFFERENT LAYERS, not two views of one thing: the
+// checklist is this round's work, the plan is the document the model keeps. A
+// plan.update must leave the checklist alone (no "newer replaces the other"),
+// and the composer has no 规划 control at all.
+FS_TEST(uiapp_plan_and_todo_are_separate_layers) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
@@ -4787,32 +4710,30 @@ FS_TEST(uiapp_plan_and_todo_are_one_checklist) {
            {"items", Json::array({Json{{"id", 1}, {"task", "T1"}, {"done", false}}})}});
   ASSERT_TRUE(app.state().todos.size() == 1u);
   EXPECT_TRUE(app.state().todo_open);
-  // A plan replaces the checklist.
+  // A plan document update does NOT touch the checklist.
   app.on_backend_event_for_test(
       "plan.update",
       Json{{"sid", "sess_a"},
-           {"plan", Json{{"goal", "g"},
-                         {"steps", Json::array({Json{{"title", "S1"}, {"status", "pending"}}})}}}});
-  EXPECT_EQ((int)app.state().todos.size(), 0);
-  EXPECT_FALSE(app.state().todo_open);
-  ASSERT_TRUE(app.state().plan_steps.size() == 1u);
-  // ...and a new checklist closes the plan view.
-  app.update([](AppState& s) { s.plan_open = true; });
+           {"plan", Json{{"exists", true},
+                         {"status", "active"},
+                         {"content", "# goal\n- step"}}}});
+  EXPECT_EQ((int)app.state().todos.size(), 1);
+  EXPECT_TRUE(app.state().todo_open);
+  // ...and a later checklist update does not need to "close" anything.
   app.on_backend_event_for_test(
       "todo.updated",
       Json{{"sid", "sess_a"},
            {"owner", "sess_a"},
            {"items", Json::array({Json{{"id", 2}, {"task", "T2"}, {"done", false}}})}});
-  EXPECT_FALSE(app.state().plan_open);
-  // Only one composer control: 清单 while a checklist exists.
   std::string d = dom.dump();
   EXPECT_TRUE(d.find("清单") != std::string::npos);
   EXPECT_TRUE(d.find("规划") == std::string::npos);
 }
 
-// Controls inside a clickable row carry data-no-bubble: the adapters skip the
-// row's click when the press lands inside them (the tool row's 打开记录 used to
-// open the record AND toggle the fold; a subagent card's controls navigated).
+// An inner control (the tool row's 打开记录, a card's action row) owns its click:
+// both adapters stop the event at the innermost handler, so the row's own click
+// never runs. That is a framework rule, not a per-control marker - no element
+// should need data-no-bubble any more.
 FS_TEST(uiapp_inner_controls_do_not_bubble) {
   NullDom dom;
   AppState st = AppState::make();
@@ -4833,7 +4754,7 @@ FS_TEST(uiapp_inner_controls_do_not_bubble) {
   });
   std::string d = dom.dump();
   EXPECT_TRUE(d.find("tb-open") != std::string::npos);
-  EXPECT_TRUE(d.find("data-no-bubble") != std::string::npos);
+  EXPECT_TRUE(d.find("data-no-bubble") == std::string::npos);
 }
 
 // 工具行的渲染是按 (key, rev, 尺寸, 展开态) 记忆化的：一轮几百个工具调用时，

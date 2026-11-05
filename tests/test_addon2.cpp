@@ -269,11 +269,33 @@ FS_TEST(addon2_plan_review) {
   ASSERT_TRUE(sr.ok());
   std::string sid = sr.data["sid"].get<std::string>();
 
-  // 写入计划
+  // 写入规划文档（不是步骤树）：正文 + 状态
   Json plan = Json::object();
-  plan["goal"] = "build feature X";
-  plan["steps"] = Json::array({"a", "b"});
-  EXPECT_TRUE(api.plan_update(sid, plan).ok());
+  plan["content"] = "# build feature X\n\n1. a\n2. b\n";
+  plan["status"] = "active";
+  FsResult pu = api.plan_update(sid, plan);
+  ASSERT_TRUE(pu.ok());
+  EXPECT_TRUE(pu.data["exists"].get<bool>());
+  EXPECT_EQ(pu.data["status"].get<std::string>(), std::string("active"));
+  std::string path = pu.data["path"].get<std::string>();
+  // It is a real document inside the project, not a field of full.json.
+  EXPECT_TRUE(path.find(".flashsight") != std::string::npos);
+  EXPECT_TRUE(path.find("plans") != std::string::npos);
+  EXPECT_TRUE(ghc::filesystem::exists(ghc::filesystem::path(path)));
+
+  // Status-only update keeps the body: that is how the model marks the plan
+  // complete without re-sending the whole document.
+  Json done = Json::object();
+  done["status"] = "done";
+  FsResult pd = api.plan_update(sid, done);
+  ASSERT_TRUE(pd.ok());
+  EXPECT_EQ(pd.data["status"].get<std::string>(), std::string("done"));
+  EXPECT_TRUE(pd.data["content"].get<std::string>().find("build feature X") !=
+              std::string::npos);
+  // ...and an active status can be restored the same way.
+  Json again = Json::object();
+  again["status"] = "active";
+  EXPECT_TRUE(api.plan_update(sid, again).ok());
 
   // revise：保留计划并附 review 评价
   FsResult rv = api.plan_review(sid, "revise", "add a test step please");
@@ -289,11 +311,12 @@ FS_TEST(addon2_plan_review) {
   // 非法 verdict 拒绝
   EXPECT_FALSE(api.plan_review(sid, "maybe", "").ok());
 
-  // reject：清掉计划
+  // reject：清掉规划文档
   EXPECT_TRUE(api.plan_review(sid, "reject", "not now").ok());
   FsResult pg = api.plan_get(sid);
   ASSERT_TRUE(pg.ok());
-  EXPECT_TRUE(pg.data.is_null() || pg.data.empty() || !pg.data.contains("goal"));
+  EXPECT_FALSE(pg.data["exists"].get<bool>());
+  EXPECT_FALSE(ghc::filesystem::exists(ghc::filesystem::path(pg.data["path"].get<std::string>())));
 }
 
 // ---------- 工作流：定义/启动/图结构/步骤重试跳过 ----------

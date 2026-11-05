@@ -1,6 +1,18 @@
-// plan_store.hpp - PlanStore (agent-loop.md §7)
+// plan_store.hpp - the PLAN as a DOCUMENT (addon2 长任务-计划)
+//
+// Three layers, named by the user (batch 50):
+//   * 任务列表 todo   - the lightest process: the tasks of this turn, ticked off;
+//   * 规划 plan       - ONE markdown document the model writes and keeps true:
+//                       .flashsight/plans/<sid>.md. Each round the model derives
+//                       the next todo list from it, and marks the document
+//                       complete when the work is. Auto mode follows it.
+//   * 工作流 workflow - the heaviest: a pipeline of subagent steps.
+//
+// The store therefore holds no step tree. It reads/writes the document and
+// parses the one machine-readable fact the loop needs: its STATUS.
 #pragma once
 
+#include <functional>
 #include <map>
 #include <string>
 
@@ -11,30 +23,38 @@
 
 namespace fs {
 
-// 规划树（PlanStore）：goal → subtargets → status；每 turn planDelta 落库。
-// full.json 里直接落位 plan 字段（会话级），用 map<sid, plan>，内存缓存。
 class PlanStore {
  public:
-  explicit PlanStore() = default;
+  // Where this session's document lives. Injected by FsApi (it owns the
+  // session -> project mapping); tests set a temp path.
+  typedef std::function<ghc::filesystem::path(const std::string& sid)> PathFn;
+  PlanStore() = default;
 
-  // full.json 里存取 plan（会话级）
+  void set_path_fn(PathFn fn) { path_fn_ = std::move(fn); }
+
+  // {exists, path, status, content, updatedAt}
+  // status: "active" | "done" | "" (no document).
   Json get(const std::string& sid) const;
-  Json update(const std::string& sid, const Json& plan_tree);
-  // plan delta 记为一行 → 覆盖整棵树（v1 规划树整体替换；delta 合并简单合并）
+
+  // Replace the document body. `status` empty = keep the current status.
+  // The machine-readable header is written by the store, so the model never has
+  // to reproduce it (it says "done" through the tool argument instead).
+  FsResult update(const std::string& sid, const std::string& content,
+                  const std::string& status);
+
   bool del(const std::string& sid);
 
-  // 计划评审（addon2 长任务-计划）：不只是"批准/拒绝"，允许用户输入评价与建议，
-  // 模型据此微调计划。verdict: approve|reject|revise；comment 为评价/建议。
-  // 返回评审后的 plan（含 review 字段）。
+  // Review is still a separate fact (addon2: approve / reject / revise + a
+  // comment). It no longer renders a panel; the verdict is returned to the
+  // caller and can be shown as a message/toast.
   Json review(const std::string& sid, const std::string& verdict,
               const std::string& comment, int64_t now_ms);
 
-  // 内存管理（由 SessionManager 读写 full.json 时经外部喂入）
-  void set_for_sid(const std::string& sid, const Json& plan);
-  Json get_cached(const std::string& sid) const;
+  // The parsed status of a document body ("done"/"active"/"").
+  static std::string parse_status(const std::string& text);
 
  private:
-  std::map<std::string, Json> plans_;
+  PathFn path_fn_;
   std::map<std::string, Json> reviews_;  // sid -> {verdict, comment, at}
 };
 

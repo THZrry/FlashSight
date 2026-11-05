@@ -59,6 +59,15 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   });
   deny_list_.reset(new DenyList());
   plans_.reset(new PlanStore());
+  {
+    // The plan DOCUMENT lives in the project, next to the session data:
+    // <project>/.flashsight/plans/<sid>.md. The store is path-injected because
+    // only FsApi knows which project a session belongs to.
+    SessionManager* sm = sessions_.get();
+    plans_->set_path_fn([sm](const std::string& sid) {
+      return sm->project_store_of(sid).plan_file(sid);
+    });
+  }
   workflows_.reset(new WorkflowStore(clock_));
   // P2: provider 层
   providers_.reset(new ProviderStore(root_ / "providers.json"));
@@ -160,6 +169,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     out->in_tokens = cresp.in_tokens;
     out->out_tokens = cresp.out_tokens;
     out->cache_tokens = cresp.cache_tokens;
+    out->cache_known = cresp.cache_known;
     out->error = "";
     return FsResult::success();
   };
@@ -380,8 +390,10 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     return sum.has_last ? sum.last.in : 0;
   };
   deps.plan_update = [plans2](const std::string& sid, const Json& plan) -> FsResult {
-    Json stored = plans2->update(sid, plan);
-    return FsResult::success(stored);
+    // The document is written to disk; `plan` carries {content, status}.
+    std::string content = jsonutil::get<std::string>(plan, "content", "");
+    std::string status = jsonutil::get<std::string>(plan, "status", "");
+    return plans2->update(sid, content, status);
   };
   // Crash-safe live snapshot. Stored as runtime.json's `live` field: runtime.json
   // is explicitly "cache, may be deleted", which is exactly the right lifetime for
@@ -2492,7 +2504,6 @@ FsResult FsApi::command_list(const std::string& sid) {
                        {"action", action}, {"group", group}});
   };
   // Built-in commands. `action` is the contract the UI executes.
-  add("plan", "规划面板", "打开/关闭任务规划", "ui:plan", "builtin");
   add("new", "新建会话", "在当前项目新建一个会话", "ui:new-session", "builtin");
   add("files", "文件面板", "打开项目文件树", "ui:panel:files", "builtin");
   add("git", "Git 面板", "打开 Git 状态与变更", "ui:panel:git", "builtin");
@@ -2739,9 +2750,11 @@ FsResult FsApi::plan_get(const std::string& sid) {
   return FsResult::success(plans_->get(sid));
 }
 FsResult FsApi::plan_update(const std::string& sid, const Json& planTree) {
-  // v1：整体替换；delta 合并留 P3（agent-loop.md §7 planDelta）
-  plans_->update(sid, planTree);
-  return FsResult::success(planTree);
+  // API-compatible shape: {content, status}. The response is the stored document
+  // ({exists, path, status, content, updatedAt}).
+  std::string content = jsonutil::get<std::string>(planTree, "content", "");
+  std::string status = jsonutil::get<std::string>(planTree, "status", "");
+  return plans_->update(sid, content, status);
 }
 
 // addon2 长任务-计划：评审（approve/reject/revise + 评价建议）

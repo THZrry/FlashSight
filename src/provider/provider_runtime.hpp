@@ -22,8 +22,11 @@ struct FailCounters {
 
 // 超时/重试策略（定死可测；roadmap: 策略定死并单测）
 struct RetryPolicy {
-  int max_retries = 1;        // 首次 + 1 次重试
-  int64_t backoff_ms = 1000;  // 退避基数（指数：1000, 2000, ...）
+  // A flaky relay is the normal case this exists for: three retries, 1s/2s/4s.
+  // Attempts that already emitted text are NOT retried (the visible half would
+  // be duplicated) - see ProviderRuntime::call.
+  int max_retries = 3;        // 首次 + 3 次重试
+  int64_t backoff_ms = 1000;  // 退避基数（指数：1000, 2000, 4000）
   int64_t timeout_ms = 120000;
   bool retry_on_timeout = true;
   bool retry_on_network = true;

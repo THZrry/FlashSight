@@ -82,15 +82,24 @@ FS_TEST(context_runtime_block_is_separate) {
   ContextInput in = make_ctx(ContextLang::kEn);
   RuntimeState st;
   st.now_ms = 1700000000000LL;  // 2023-11-14
-  st.plan = Json{{"goal", "ship it"},
-                 {"steps", Json::array({Json{{"title", "a"}, {"status", "done"}},
-                                        Json{{"title", "b"}, {"status", "running"}}})}};
+  st.plan = Json{{"exists", true},
+                 {"status", "active"},
+                 {"path", ".flashsight/plans/s_x.md"},
+                 {"content", "# ship it\n- a\n- b"}};
   st.todos = Json::array({Json{{"id", 1}, {"task", "write test"}, {"done", false}}});
   std::string rt = AgentContext::build_runtime(in, st);
-  EXPECT_TRUE(rt.find("ship it") != std::string::npos);
+  // The plan is a document: the runtime says it exists / where / its status, and
+  // does not dump the body (the model reads it with plan_get).
+  EXPECT_TRUE(rt.find("plan document") != std::string::npos);
+  EXPECT_TRUE(rt.find("active") != std::string::npos);
+  EXPECT_TRUE(rt.find("plans/s_x.md") != std::string::npos);
   EXPECT_TRUE(rt.find("write test") != std::string::npos);
   EXPECT_TRUE(rt.find("2023-11-14") != std::string::npos);
   EXPECT_TRUE(rt.find("1 open") != std::string::npos);
+  // A done document says the turn can wrap up.
+  RuntimeState done = st;
+  done.plan["status"] = "done";
+  EXPECT_TRUE(AgentContext::build_runtime(in, done).find("wrap up") != std::string::npos);
 
   std::string wrapped = AgentContext::wrap_user_turn(rt, "do the thing");
   EXPECT_TRUE(wrapped.find("<runtime>") != std::string::npos);

@@ -42,6 +42,9 @@ struct ChatResponse {
   int64_t in_tokens = 0;
   int64_t out_tokens = 0;
   int64_t cache_tokens = 0;
+  // Whether the endpoint actually REPORTED a cache figure. 0 without this flag
+  // means "unknown", not "nothing was cached" - the UI shows "—" for unknown.
+  bool cache_known = false;
   double cost = 0.0;
   std::string cost_kind = "unknown";  // "money"|"quota"|"unknown"
   int64_t latency_ms = 0;

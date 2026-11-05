@@ -219,13 +219,12 @@ const char* kGlueJs = R"JS(
     var name = NAMES[kind] || 'click';
     var evName = (name === 'keyenter') ? 'keydown' : name;
     var listener = function (evt) {
-      // A control INSIDE a clickable row (a card, a fold header) must not also
-      // trigger the row. `closest` also matches the element the handler is BOUND
-      // to, so only an ANCESTOR marker may swallow the click - otherwise the
-      // control's own handler never ran (打开记录 became a no-op).
-      if (name === 'click' && evt.target && evt.target.closest) {
-        var marked = evt.target.closest('[data-no-bubble]');
-        if (marked && marked !== el) return;
+      // FRAMEWORK RULE: an activation event belongs to the INNERMOST element
+      // that handles it. A button inside a clickable row (a card, a fold header)
+      // runs its own handler and stops the event there; the row never sees the
+      // press. This replaced per-control data-no-bubble marks.
+      if (name === 'click' || name === 'dblclick' || name === 'contextmenu') {
+        evt.stopPropagation();
       }
       if (name === 'keyenter') {
         // Enter-to-send is a per-element choice (data-enter-send).

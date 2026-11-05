@@ -67,6 +67,7 @@ struct ModelCallResult {
   int64_t in_tokens = 0;
   int64_t out_tokens = 0;
   int64_t cache_tokens = 0;
+  bool cache_known = false;  // false = the endpoint reported no cache figure
 };
 
 class AgentLoop {

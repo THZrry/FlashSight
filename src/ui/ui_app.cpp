@@ -1000,10 +1000,6 @@ void UiApp::save_session_view(const std::string& sid) {
   v.term_order = st_.term_order;
   v.term_hidden = st_.term_hidden;
   v.subagents = st_.subagents;
-  v.plan_open = st_.plan_open;
-  v.plan_steps = st_.plan_steps;
-  v.plan_goal = st_.plan_goal;
-  v.plan_editing = -1;  // a transient edit does not survive a tab switch
   v.todos = st_.todos;
   v.todo_open = st_.todo_open;
 }
@@ -1104,10 +1100,6 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.term_order = v.term_order;
   st_.term_hidden = v.term_hidden;
   st_.subagents = v.subagents;
-  st_.plan_open = v.plan_open;
-  st_.plan_steps = v.plan_steps;
-  st_.plan_goal = v.plan_goal;
-  st_.plan_editing = -1;
   st_.todos = v.todos;
   st_.todo_open = v.todo_open;
 }
@@ -2302,45 +2294,6 @@ void UiApp::load_shells() {
   });
 }
 
-// Turn a plan tree (the shape PlanStore holds and `plan.update`/`plan.get`
-// carry) into the panel's steps. Accepts both the object form
-// {goal, steps:[{title,status,note}]} and a bare array of steps, so a plan
-// written by an older build still renders.
-std::vector<AppState::PlanStep> parse_plan_steps(const Json& tree,
-                                                 std::string* goal) {
-  std::vector<AppState::PlanStep> out;
-  const Json* arr = &tree;
-  if (tree.is_object()) {
-    if (goal) *goal = jsonutil::get<std::string>(tree, "goal", "");
-    if (tree.contains("steps") && tree["steps"].is_array()) arr = &tree["steps"];
-    else return out;
-  }
-  if (!arr->is_array()) return out;
-  for (size_t i = 0; i < arr->size(); ++i) {
-    const Json& e = (*arr)[i];
-    AppState::PlanStep s;
-    if (e.is_string()) {
-      s.title = e.get<std::string>();
-    } else {
-      s.title = jsonutil::get<std::string>(e, "title", "");
-      s.status = jsonutil::get<std::string>(e, "status", "pending");
-      s.note = jsonutil::get<std::string>(e, "note", "");
-      // A step that only carries the legacy `done` boolean still shows right.
-      if (s.status == "pending" && jsonutil::get<bool>(e, "done", false)) {
-        s.status = "done";
-      }
-    }
-    // Normalise: an unknown status must not produce a CSS class the stylesheet
-    // does not have (the row then renders with no marker colour).
-    if (s.status != "pending" && s.status != "running" && s.status != "done" &&
-        s.status != "skipped" && s.status != "blocked") {
-      s.status = "pending";
-    }
-    if (!s.title.empty()) out.push_back(s);
-  }
-  return out;
-}
-
 // The model's checklist items ({id, task, done}) as the floating panel shows
 // them. Shared by the live `todo.updated` event and the on-open fetch, so the
 // two paths cannot disagree about the shape.
@@ -2489,6 +2442,20 @@ void UiApp::update_complete_from_input(const std::string& text) {
   std::string sid = active_sid();
   call_async("complete.path", Json{{"sid", sid}, {"typed", typed}},
              [this, typed](const BackendResult& r) {
+    // A reply is only valid while the SAME fragment is still being typed. Without
+    // this an answer arriving after the user finished the path (and went on to
+    // edit other text) re-opened the popup over what they were doing.
+    {
+      const std::string& cur = st_.session_input;
+      size_t s2 = cur.find_last_of('/');
+      bool still = s2 != std::string::npos && s2 != 0;
+      if (still) {
+        size_t w2 = s2;
+        while (w2 > 0 && cur[w2 - 1] != ' ' && cur[w2 - 1] != '\n') --w2;
+        still = cur.substr(w2) == typed;
+      }
+      if (!still) return;
+    }
     if (!r.ok) return;
     std::vector<std::pair<std::string, bool> > items;
     const Json& arr = r.data.contains("entries") ? r.data["entries"] : Json::array();
@@ -2499,6 +2466,14 @@ void UiApp::update_complete_from_input(const std::string& text) {
         items.push_back(std::make_pair(
             nm, jsonutil::get<bool>(arr[i], "isDir", false)));
       }
+    }
+    if (items.empty()) {
+      // NO MATCHES = NO POPUP. An empty menu still floats above the composer and
+      // blocks what is underneath, which is the "它一直呆在那里挡着" report.
+      if (st_.complete_kind == AppState::CompleteKind::kPath) {
+        update([&](AppState& s) { s.complete_kind = AppState::CompleteKind::kNone; });
+      }
+      return;
     }
     update([&](AppState& s) {
       s.complete_kind = AppState::CompleteKind::kPath;
@@ -3352,6 +3327,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     int64_t in = jsonutil::get_int(payload, "in", -1);
     int64_t out = jsonutil::get_int(payload, "out", -1);
     int64_t cached = jsonutil::get_int(payload, "cached", -1);
+    bool cache_known = jsonutil::get<bool>(payload, "cacheKnown", false);
     double cost = jsonutil::get_number(payload, "cost", 0.0);
     std::string cost_kind = jsonutil::get<std::string>(payload, "costKind", "");
     update([&](AppState& s) {
@@ -3367,7 +3343,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         if (s.session_tokens_in >= 0) s.session_tokens_in += in;
         if (out >= 0 && s.session_tokens_out >= 0) s.session_tokens_out += out;
       }
-      if (cached >= 0 && in > 0) {
+      // Cache hit = cached input / total input. Only shown when the endpoint
+      // actually reported a cache figure; a provider that says nothing is "—",
+      // not "0%".
+      if (cache_known && cached >= 0 && in > 0) {
         s.cache_reported = true;
         s.session_cache_tokens = cached;
         s.cache_hit_pct = static_cast<int>(cached * 100 / in);
@@ -3718,10 +3697,8 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "todo.updated") {
     // The model's own checklist (todo_add/todo_check, one owner per session).
-    // It used to end in a toast and nothing else: the backend could add items
-    // while the UI kept no list, so the panel the user expected had nothing to
-    // show. It is a DIFFERENT thing from the plan tree (the plan is what the
-    // loop reads to decide auto-continue), and both are shown separately.
+    // It is the ONLY progress view in the composer: the plan is a document the
+    // model maintains, not a step tree to render.
     std::vector<AppState::TodoItem> list =
         parse_todo_items(payload.contains("items") ? payload["items"] : Json::array());
     // The host tags the list with its OWNER: a session id for the main agent, a
@@ -3737,50 +3714,17 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       // about to do, and that is exactly the moment the user wants to see it. A
       // list the user has closed stays closed on later updates.
       if (!list.empty() && was_empty) st_.todo_open = true;
-      // The newer checklist replaces the plan view (they say the same thing;
-      // showing both duplicated every row).
-      if (!list.empty()) st_.plan_open = false;
     } else {
       SessionView& v = views_.get_or_create(sid);
       bool was_empty = v.todos.empty();
       v.todos = list;
       if (!list.empty() && was_empty) v.todo_open = true;
-      if (!list.empty()) v.plan_open = false;
     }
     render();
   } else if (event == "plan.update") {
-    // The model wrote a plan. The panel used to update ONLY when the user clicked
-    // the 规划 button, so a plan produced mid-turn was invisible until the panel
-    // was toggled - the "面板没有显示规划" report. The event carries the tree, so
-    // the panel can track the model as it works.
-    //
-    // A plan for a BACKGROUND session lands in that session's stashed view (the
-    // same rule every other session-scoped event follows).
-    const Json& tree = payload.contains("plan") ? payload["plan"] : payload;
-    std::string goal;
-    std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
-    // `sid` is empty or the active session for events this handler sees (a
-    // background session's events were routed into its view by the caller).
-    //
-    // The plan and the todo checklist are TWO VIEWS OF THE SAME THING ("what is
-    // this turn doing"): showing both duplicates every row. A new plan clears
-    // the checklist; a new checklist hides the plan (see todo.updated).
-    if (sid.empty() || sid == st_.active_tab) {
-      st_.plan_steps = steps;
-      st_.plan_goal = goal;
-      if (!steps.empty()) {
-        st_.todos.clear();
-        st_.todo_open = false;
-      }
-    } else {
-      SessionView& v = views_.get_or_create(sid);
-      v.plan_steps = steps;
-      v.plan_goal = goal;
-      if (!steps.empty()) {
-        v.todos.clear();
-        v.todo_open = false;
-      }
-    }
+    // `plan.update` carries the DOCUMENT (path/status/content), not a step tree
+    // to draw. There is no plan panel: the file is the plan, and progress is the
+    // task list. Nothing to do here - the event is informational.
   } else if (event == "loop.paused") {
     // A guard tripped (tool-call limit / repeated call). The turn still produced
     // output, so this is a notice, not the "interrupted, continue?" bar: that bar
@@ -5781,103 +5725,11 @@ VNodePtr UiApp::build_session() {
   hist.add(hist_inner);
   center.add(hist);
 
-  // plan panel: a floating overlay that is a SIBLING of the history, not a
-  // child of it and not a column. Two constraints, both from feedback:
-  //   * it must not live inside the transcript subtree, or opening it would
-  //     rebuild/relayout the chat and lose the reading position;
-  //   * it must not be a column, because then it reads like a second side panel.
-  // Absolute inside .session-center (its positioned ancestor) gives exactly the
-  // old floating behaviour while keeping it out of the history's subtree.
-  // One checklist at a time: while the model keeps a todo list, that IS the
-  // progress view and the plan float stays closed (both show the same steps).
-  if (st_.plan_open && st_.todos.empty()) {
-    H plan = el("div", "plan-float");
-    plan.key("plan-float");
-    plan.anim(anim::kPop);
-    H phead = el("div", "plan-head");
-    phead.add(el("span", "plan-title").text(tr("任务规划")));
-    phead.add(el("span", "grow"));
-    // Manual step add/edit was removed: the plan is the MODEL's working state
-    // (the loop reads its statuses to decide whether to continue), so editing it
-    // by hand wrote a tree the model never agreed to - and the panel is for
-    // SEEING progress, not authoring it.
-    phead.add(comp::icon_button("\u2715", tr("收起"), [this](const std::string&) {
-      update([&](AppState& s) { s.plan_open = false; });
-    }));
-    plan.add(phead);
-    if (!st_.plan_goal.empty()) {
-      plan.add(el("div", "plan-goal").text(st_.plan_goal));
-    }
-    if (st_.plan_steps.empty()) {
-      plan.add(el("div", "plan-empty dim").text(tr("暂无规划步骤")));
-    }
-    int done = 0;
-    for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
-      if (st_.plan_steps[i].status == "done" || st_.plan_steps[i].status == "skipped") {
-        ++done;
-      }
-    }
-    if (!st_.plan_steps.empty()) {
-      // The progress line is the reason this panel exists: it is the same
-      // condition auto mode uses to decide whether to keep going.
-      plan.add(el("div", "plan-progress dim").text(
-          itos(done) + " / " + itos(static_cast<int>(st_.plan_steps.size())) +
-          tr(" 已完成")));
-    }
-    for (size_t i = 0; i < st_.plan_steps.size(); ++i) {
-      const AppState::PlanStep& s = st_.plan_steps[i];
-      std::string st_cls = "plan-step st-" + (s.status.empty() ? "pending" : s.status);
-      H step = el("div", st_cls);
-      const char* mark = "--";
-      if (s.status == "done") mark = "\u2713";
-      else if (s.status == "running") mark = "\u25b6";
-      else if (s.status == "skipped") mark = "\u2013";
-      else if (s.status == "blocked") mark = "!";
-      step.add(el("span", "plan-status").text(mark));
-      step.add(el("span", "plan-text").text(s.title));
-      if (!s.note.empty()) {
-        step.add(el("span", "plan-note dim").attr("title", s.note).text(s.note));
-      }
-      plan.add(step);
-    }
-    // Review: approve / reject / revise. "revise" feeds the comment back to the
-    // model as guidance, which is the whole point of reviewing a plan.
-    if (!st_.plan_steps.empty()) {
-      H rev = el("div", "plan-review");
-      H comment = comp::text_input(st_.plan_review_text, tr("评审意见…"),
-                                   [this](const std::string& v) {
-        st_.plan_review_text = v;
-      });
-      comment.key("plan-review-input");
-      rev.add(comment);
-      auto send_review = [this](const std::string& verdict) {
-        std::string sid = active_sid();
-        if (sid.empty()) return;
-        call_async("plan.review",
-                   Json{{"sid", sid}, {"verdict", verdict}, {"comment", st_.plan_review_text}},
-                   [this, verdict](const BackendResult& r) {
-          if (!r.ok) {
-            toast(tr("评审失败：") + r.message);
-            return;
-          }
-          toast(verdict == "approve" ? tr("已通过")
-                : verdict == "reject" ? tr("已驳回") : tr("已提交修改意见"));
-          update([&](AppState& s) { s.plan_review_text.clear(); });
-        });
-      };
-      rev.add(comp::icon_button("\u2713", tr("通过"), [send_review](const std::string&) {
-        send_review("approve");
-      }));
-      rev.add(comp::icon_button("xmark", tr("驳回"), [send_review](const std::string&) {
-        send_review("reject");
-      }));
-      rev.add(comp::icon_button("pen-to-square", tr("按意见修改"), [send_review](const std::string&) {
-        send_review("revise");
-      }));
-      plan.add(rev);
-    }
-    center.add(plan);
-  }
+  // There is NO plan float any more. The plan is not a progress widget you stare
+  // at: it is a DOCUMENT (.flashsight/plans/<sid>.md) that the model writes and
+  // keeps in step, and the per-round work is the task list (todo_float below).
+  // Showing a second step tree beside the checklist duplicated the same progress
+  // and was never actionable - the user's verdict was "删掉这个窗口".
 
   // The model's own checklist (todo_add / todo_check), floating like the plan
   // but on the RIGHT so the two never cover each other. It exists because the
@@ -6300,28 +6152,8 @@ VNodePtr UiApp::build_session() {
       });
     });
   }, "ghost"));
-  // 规划 and 清单 are the same "what is in progress" view, so only one control is
-  // shown: the checklist when the model keeps one, the plan otherwise.
-  if (st_.todos.empty()) {
-    left_tools.add(comp::icon_text_button("diagram-project", tr("规划"),
-                                          [this](const std::string&) {
-      bool open = !st_.plan_open;
-      std::string sid = active_sid();
-      update([&](AppState& s) { s.plan_open = open; });
-      if (open && !sid.empty()) {
-        call_async("plan.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
-          if (!r.ok) return;
-          const Json& tree = r.data.contains("plan") ? r.data["plan"] : r.data;
-          std::string goal;
-          std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
-          update([&](AppState& s) {
-            s.plan_steps = steps;
-            s.plan_goal = goal;
-          });
-        });
-      }
-    }, "ghost"));
-  }
+  // The plan has NO composer control: it is a document, not a panel. The task
+  // list below is the only progress view in the composer.
   // The model's checklist, only while it HAS one: the composer row is already
   // tight, and a session without todos gets no extra control.
   if (!st_.todos.empty()) {
@@ -7230,9 +7062,6 @@ VNodePtr UiApp::build_side_panel() {
       // text field here could not even be clicked into: the click bubbled and
       // opened the record instead). Only 取消 stays here.
       H acts = el("div", "sa-actions");
-      // The card itself opens the record on click; the action row must not
-      // trigger that as well.
-      acts.attr("data-no-bubble", "1");
       acts.add(comp::button(tr("取消"), [this, i](const std::string&) {
         if (i >= st_.subagents.size()) return;
         std::string id = st_.subagents[i].id;
@@ -8489,24 +8318,6 @@ void UiApp::run_command(const AppState::CommandRow& cmd) {
   const std::string& action = cmd.action;
   if (action.compare(0, 3, "ui:") == 0) {
     std::string what = action.substr(3);
-    if (what == "plan") {
-      bool open = !st_.plan_open;
-      std::string sid = active_sid();
-      update([&](AppState& s) { s.plan_open = open; });
-      if (open && !sid.empty()) {
-        call_async("plan.get", Json{{"sid", sid}}, [this](const BackendResult& r) {
-          if (!r.ok) return;
-          const Json& tree = r.data.contains("plan") ? r.data["plan"] : r.data;
-          std::string goal;
-          std::vector<AppState::PlanStep> steps = parse_plan_steps(tree, &goal);
-          update([&](AppState& s) {
-            s.plan_steps = steps;
-            s.plan_goal = goal;
-          });
-        });
-      }
-      return;
-    }
     if (what == "new-session") {
       open_new_session();
       return;
@@ -10904,10 +10715,13 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   if (!st_.thinking.empty()) args["thinking"] = st_.thinking;
   // SHOW THE WAIT IMMEDIATELY. The first token can take seconds (a reasoning
   // model, a cold endpoint); until then the assistant message did not exist, so
-  // the screen looked exactly like a dead app. An empty streaming message renders
-  // a "正在请求模型…" row (see chat_message), replaced the moment text or a tool
-  // arrives.
+  // the screen looked exactly like a dead app. The message's own live timer
+  // (spinner + counting seconds) is what shows the wait - no extra sentence.
   update([&](AppState& s) {
+    // Sending from the composer means the user is at the END of the transcript;
+    // pin the view there so the question and the answer are visible without a
+    // manual scroll.
+    s.hist_follow = true;
     if (!s.messages.empty() && s.messages.back().role == "assistant" &&
         s.messages.back().streaming) {
       return;
@@ -10921,6 +10735,7 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
     a.uid = s.history_total + static_cast<int64_t>(s.messages.size());
     s.messages.push_back(a);
   });
+  follow_history_if_pinned();
   call_async("session.send", args,
              [this](const BackendResult& r) {
     if (!r.ok) toast(tr("发送失败：") + r.message);

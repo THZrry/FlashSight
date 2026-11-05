@@ -42,6 +42,7 @@ void ProviderRuntime::record_usage(const ChatRequest& req, const ChatResponse& r
   row.in = resp.in_tokens;
   row.out = resp.out_tokens;
   row.cache = resp.cache_tokens;
+  row.cache_known = resp.cache_known;
   row.cost = resp.cost;
   row.cost_kind = resp.cost_kind;
   row.latency_ms = resp.latency_ms;
@@ -71,7 +72,20 @@ FsResult ProviderRuntime::call(const ChatRequest& req, ChatResponse* out,
   ++failures_.total_calls;
   for (int attempt = 0;; ++attempt) {
     ChatResponse attempt_out;
-    FsResult r = client.chat(req, &attempt_out, on_delta);
+    // Has this attempt already shown the user something? A relay that dies
+    // MID-STREAM leaves those bytes on screen, and replaying the reply from the
+    // start would duplicate the visible half of the answer. Retry only while
+    // nothing has been emitted.
+    bool emitted = false;
+    StreamDeltaFn attempt_delta;
+    if (on_delta) {
+      const StreamDeltaFn& cb = on_delta;
+      attempt_delta = [&emitted, cb](const std::string& piece) {
+        emitted = true;
+        cb(piece);
+      };
+    }
+    FsResult r = client.chat(req, &attempt_out, attempt_delta);
     record_usage(req, attempt_out, r.ok() && attempt_out.error.empty());
     if (r.ok() && attempt_out.error.empty()) {
       failures_.consecutive_failures = 0;
@@ -79,12 +93,13 @@ FsResult ProviderRuntime::call(const ChatRequest& req, ChatResponse* out,
       return r;
     }
     ++failures_.consecutive_failures;
-    if (!should_retry(r, attempt_out, attempt)) {
+    if (!should_retry(r, attempt_out, attempt) || emitted) {
       out->error = attempt_out.error.empty() ? r.message : attempt_out.error;
       return r.ok() ? r : FsResult::error(r.code, out->error);
     }
-    // exponential backoff (only sleeps when attempt>0; tests use FakeClock and small retries)
-    if (attempt > 0) sleep_ms(policy_.backoff_ms * (1 << (attempt - 1)));
+    // exponential backoff (1000, 2000, 4000 ms by default). A flaky relay is
+    // exactly the case this exists for; the wait happens on the turn thread.
+    sleep_ms(policy_.backoff_ms * (1 << attempt));
   }
 }
 

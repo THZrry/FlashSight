@@ -930,6 +930,7 @@ FS_TEST(file_tools_flow) {
 #include "core/project_manager.hpp"
 #include "core/settings_store.hpp"
 #include "provider/provider_client.hpp"
+#include "provider/provider_runtime.hpp"
 #include "provider/provider_types.hpp"
 
 namespace {
@@ -1460,4 +1461,134 @@ FS_TEST(loop_permission_levels) {
     for (auto& e : ev) if (e == "permission.prompt") prompt = true;
     EXPECT_FALSE(prompt);
   }
+}
+
+// ---------- 流式 usage：缓存命中必须从真实字段解析出来 ----------
+// The streamed path used to read only "prompt_tokens_cached" (a key no provider
+// sends), so the cache-hit rate stayed empty. DeepSeek spells it
+// prompt_cache_hit_tokens; OpenAI nests it under prompt_tokens_details.
+FS_TEST(provider_stream_usage_reports_cache_hit) {
+  ProviderConn conn;
+  conn.id = "p1";
+  conn.base_url = "http://127.0.0.1:1/v1";
+  conn.api_key = "k";
+  ChatRequest req;
+  req.model = "m";
+  req.messages = Json::array();
+  req.stream = true;
+
+  {
+    FakeNet3 net;
+    HttpResponse resp;
+    resp.status = 200;
+    resp.body =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,"
+        "\"completion_tokens\":12,\"prompt_cache_hit_tokens\":800}}\n\n"
+        "data: [DONE]\n\n";
+    net.responses.push_back(resp);
+    ProviderClient client(conn, &net);
+    ChatResponse out;
+    FsResult r = client.chat(req, &out);
+    EXPECT_TRUE(r.ok());
+    EXPECT_EQ(out.text, std::string("hi"));
+    EXPECT_EQ(out.in_tokens, int64_t(1000));
+    EXPECT_EQ(out.cache_tokens, int64_t(800));
+    EXPECT_TRUE(out.cache_known);
+  }
+  {
+    FakeNet3 net;
+    HttpResponse resp;
+    resp.status = 200;
+    resp.body =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"yo\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":500,"
+        "\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":200}}}\n\n"
+        "data: [DONE]\n\n";
+    net.responses.push_back(resp);
+    ProviderClient client(conn, &net);
+    ChatResponse out;
+    FsResult r = client.chat(req, &out);
+    EXPECT_TRUE(r.ok());
+    EXPECT_EQ(out.cache_tokens, int64_t(200));
+    EXPECT_TRUE(out.cache_known);
+    // 200 / 500 = 40% - the ratio the panel shows.
+    EXPECT_EQ(out.cache_tokens * 100 / out.in_tokens, int64_t(40));
+  }
+}
+
+// ---------- 重试：无输出才重试；已经有半截回答就不重试 ----------
+namespace {
+class RetryNet : public NetClient {
+ public:
+  mutable int calls = 0;
+  // 0 = fail twice then succeed; 1 = always fail after emitting a piece.
+  int mode = 0;
+  FsResult request(const HttpRequest&, HttpResponse* out) const override {
+    out->status = 500;
+    return FsResult::error(ErrCode::kRemote, "no plain requests expected");
+  }
+  FsResult request_stream(
+      const HttpRequest&, const std::function<bool(const char*, size_t)>& on_chunk,
+      HttpResponse* out) const override {
+    ++calls;
+    if (mode == 1) {
+      // A REAL partial answer: a valid SSE delta, then the connection drops.
+      std::string half = "data: {\"choices\":[{\"delta\":{\"content\":\"half\"}}]}\n\n";
+      if (on_chunk) on_chunk(half.data(), half.size());
+      return FsResult::error(ErrCode::kNetwork, "relay dropped mid-stream");
+    }
+    if (calls < 3) return FsResult::error(ErrCode::kNetwork, "relay dropped");
+    out->status = 200;
+    std::string body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+                       "data: [DONE]\n\n";
+    if (on_chunk) on_chunk(body.data(), body.size());
+    return FsResult::success();
+  }
+};
+}  // namespace
+
+FS_TEST(provider_retries_a_dropped_relay) {
+  ProviderConn conn;
+  conn.id = "p2";
+  conn.base_url = "http://127.0.0.1:1/v1";
+  conn.api_key = "k";
+  RetryNet net;
+  ProviderRuntime rt(conn, &net, nullptr, nullptr);
+  rt.retry_policy().max_retries = 3;
+  rt.retry_policy().backoff_ms = 0;  // no sleeping in the test
+  ChatRequest req;
+  req.model = "m";
+  req.messages = Json::array();
+  req.stream = true;
+  std::string seen;
+  ChatResponse out;
+  FsResult r = rt.call(req, &out, [&seen](const std::string& d) { seen += d; });
+  EXPECT_TRUE(r.ok());
+  EXPECT_EQ(net.calls, 3);
+  EXPECT_EQ(out.text, std::string("ok"));
+  EXPECT_EQ(seen, std::string("ok"));
+}
+
+FS_TEST(provider_does_not_retry_after_partial_output) {
+  ProviderConn conn;
+  conn.id = "p3";
+  conn.base_url = "http://127.0.0.1:1/v1";
+  conn.api_key = "k";
+  RetryNet net;
+  net.mode = 1;
+  ProviderRuntime rt(conn, &net, nullptr, nullptr);
+  rt.retry_policy().max_retries = 3;
+  rt.retry_policy().backoff_ms = 0;
+  ChatRequest req;
+  req.model = "m";
+  req.messages = Json::array();
+  req.stream = true;
+  std::string seen;
+  ChatResponse out;
+  FsResult r = rt.call(req, &out, [&seen](const std::string& d) { seen += d; });
+  // A retry would replay "half" from the start and duplicate it on screen.
+  EXPECT_FALSE(r.ok());
+  EXPECT_EQ(net.calls, 1);
+  EXPECT_EQ(seen, std::string("half"));
 }

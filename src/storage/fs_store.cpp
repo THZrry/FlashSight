@@ -58,5 +58,11 @@ ghc::filesystem::path ProjectStore::terminal_log(const std::string& sid,
                                                  const std::string& tid) const {
   return terminals_dir(sid) / (tid + ".log");
 }
+ghc::filesystem::path ProjectStore::plans_dir() const {
+  return data_dir / "plans";
+}
+ghc::filesystem::path ProjectStore::plan_file(const std::string& sid) const {
+  return plans_dir() / (sid + ".md");
+}
 
 }  // namespace fs

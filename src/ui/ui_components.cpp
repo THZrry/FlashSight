@@ -790,16 +790,10 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     }
     wrap.add(work);
   }
-  // A turn that has not produced anything yet: say so. Waiting for the first
-  // token (a reasoning model, a cold endpoint) used to look exactly like a dead
-  // app - the assistant message existed but was empty.
-  if (m.streaming && m.text.empty() && m.tools.empty() && m.thinking.empty() &&
-      m.interim.empty() && m.error.empty()) {
-    H waiting = el("div", "turn-waiting");
-    waiting.add(spinner());
-    waiting.add(el("span", "tw-text").text(tr("正在请求模型…")));
-    wrap.add(waiting);
-  }
+  // The wait is shown by the turn's own live timer (spinner + counting seconds,
+  // see the meta row below): the placeholder message exists from the moment the
+  // request is sent, so that counter is already running. No extra "waiting"
+  // sentence - the user asked for the counter, not a new hint.
   // assistant: article-like, no bubble, no name
   H body = el("div", "article");
   std::vector<H> blocks = markdown_blocks(m.text, on_copy, on_link);
@@ -895,10 +889,9 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
     std::string sid = b.subagent_id;
     H btn = el("span", "tb-open");
     btn.text(tr("打开记录"));
-    // The header itself toggles the fold; a press on this button must not also
-    // toggle it (the click used to bubble: it opened the record AND flipped the
-    // fold, over and over).
-    btn.attr("data-no-bubble", "1");
+    // The header toggles the fold; this button has its OWN click handler, and
+    // the adapter stops the event at the innermost handler - so pressing it does
+    // not also toggle the fold. No per-control marker needed (framework rule).
     btn.attr("title", tr("在新标签页打开这个子代理的完整记录"));
     btn.on(EventKind::kClick, [open, sid](const std::string&) { open(sid); });
     head.add(btn);

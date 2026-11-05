@@ -3462,14 +3462,6 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
   animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-/* The turn has been sent but nothing has arrived yet. Without this the answer
-   area was blank while waiting for the first token, which reads as a freeze. */
-.turn-waiting {
-  display: flex; align-items: center; gap: 8px;
-  padding: 2px 2px 6px;
-  font-size: 12.5px; color: var(--text-faint);
-}
-.turn-waiting .tw-text { color: var(--text-dim); }
 .progress {
   height: 8px; border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--panel); overflow: hidden;
@@ -3605,26 +3597,8 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
 .menu-item { padding: 6px 12px; cursor: pointer; font-size: 13px; }
 .menu-item:hover { background: var(--sel); }
 
-/* plan panel: a floating overlay, NOT a column.
-   It is a SIBLING of .history (not a child), so opening it does not touch the
-   transcript subtree or its scroll position; it is absolutely positioned, so it
-   also does not take width away from the conversation. (It was briefly a real
-   column, which read like a second side panel - not what was asked for.) */
-.plan-float {
-  position: absolute;
-  left: 14px; top: 14px;
-  width: 240px; max-height: 70%;
-  overflow: auto;
-  z-index: 5;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--panel-2);
-  box-shadow: var(--pop);
-  padding: 10px 12px;
-}
-/* The agent's checklist: same floating language as the plan, mirrored to the
-   RIGHT edge so the two panels can be open together without covering each
-   other. */
+/* The agent's checklist: the ONLY floating progress panel. The plan is a
+   document (.flashsight/plans/<sid>.md), so there is no plan float any more. */
 .todo-float {
   position: absolute;
   right: 14px; top: 14px;
@@ -3641,11 +3615,10 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
 .plan-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .plan-head .plan-title { flex: 1; margin-bottom: 0; }
 .plan-head .icon-btn { width: 20px; height: 20px; font-size: 12px; }
-.plan-empty { font-size: 12.5px; }
 .plan-title { font-weight: 600; font-size: 12.5px; color: var(--text-dim); margin-bottom: 6px; }
 .plan-step { display: flex; gap: 8px; padding: 3px 0; font-size: 13px; align-items: center; }
 .plan-text { flex: 1; min-width: 0; }
-/* Status marker: the plan panel exists to show PROGRESS, so the state has to be
+/* Status marker: the checklist exists to show PROGRESS, so the state has to be
    visible at a glance, not only by reading the text. */
 .plan-status {
   width: 16px; flex: none; text-align: center;
@@ -3653,29 +3626,8 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
   color: var(--text-faint);
 }
 .plan-step.st-done .plan-status { color: var(--ok, #3fb950); }
-.plan-step.st-running .plan-status { color: var(--accent); }
-.plan-step.st-blocked .plan-status { color: var(--err); }
-.plan-step.st-skipped { opacity: .55; }
 .plan-step.st-done .plan-text { color: var(--text-dim); }
 .plan-step.st-done .plan-text { text-decoration: line-through; text-decoration-color: var(--border-strong); }
-.plan-note {
-  font-size: 11.5px; max-width: 45%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.plan-goal {
-  font-size: 12px; color: var(--text-dim);
-  margin: -2px 0 6px; line-height: 1.4;
-}
-.plan-progress {
-  font-size: 11.5px; margin: 4px 0 2px;
-  padding-top: 4px; border-top: 1px solid var(--border);
-}
-.plan-review {
-  display: flex; align-items: center; gap: 4px;
-  margin-top: 8px; padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-.plan-review .text-input { flex: 1; min-width: 0; }
 
 /* scrollbars (desktop-ish, subtle) */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

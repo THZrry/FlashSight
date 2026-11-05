@@ -146,8 +146,13 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
     out.push_back(
         "- 单步能做完的小事不要建清单；清单本身也是 token。");
     out.push_back(
-        "- 规划树（左侧规划栏）由你通过 plan.update 更新：目标 + 子目标 + 状态。"
-        "每轮结束前把状态改成真实状态，未闭合的规划是自动模式继续的依据。");
+        "- 三层任务，不要混：① 任务列表（todo_add/todo_check）是**本轮**的活；"
+        "② 规划（plan_update）是一篇你负责的文档 `.flashsight/plans/<sid>.md`："
+        "整个任务需要多轮时，先把目标/做法/验收写进文档，然后**每轮从文档里拆出"
+        "当轮 todo**；做法变了就更新文档。文档没标记完成（plan_update status=done）"
+        "就是工作没完，自动模式会继续；全部做完必须显式标记 done。"
+        "③ 工作流（workflow_plan）是真正的大型流水线，要用户批准。"
+        "规划不是另一个进度窗口，不要把它拆成 todo 之外的一套状态。");
     out.push_back(
         "- 先调查再动手：不确定的事实用 read_file / find_files / terminal 去确认，"
         "不要用\"应该\"\"通常\"代替验证。");
@@ -176,9 +181,16 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
     out.push_back(
         "- Do not create a list for a one-step task; the list itself costs tokens.");
     out.push_back(
-        "- The plan tree (left panel) is yours to update: goal + subgoals + status. "
-        "Before finishing a turn, set statuses to what is actually true - an "
-        "unclosed plan is what makes auto mode continue.");
+        "- Three layers, never mixed: (1) the TASK LIST (todo_add/todo_check) is "
+        "the work of THIS round; (2) the PLAN (plan_update) is a DOCUMENT you own "
+        "at `.flashsight/plans/<sid>.md`: for a job that needs several rounds, "
+        "write goal/approach/acceptance into it once, then derive each round's "
+        "todo list from it; update the document when the approach changes. While "
+        "it is not marked done (plan_update status=done) the job is unfinished and "
+        "auto mode continues - so mark it done explicitly when everything is "
+        "complete; (3) a WORKFLOW (workflow_plan) is a large pipeline and needs "
+        "user approval. The plan is not a second progress widget: do not keep a "
+        "step tree beside the checklist.");
     out.push_back(
         "- Investigate before acting. Confirm facts with read_file / find_files / "
         "terminal instead of substituting \"should be\" or \"usually\" for evidence.");
@@ -554,27 +566,31 @@ std::string AgentContext::build_runtime(const ContextInput& in, const RuntimeSta
     lines.push_back(std::string(zh(in) ? "时间: " : "time: ") + buf);
   }
 
-  if (st.plan.is_object() && !st.plan.empty()) {
-    std::string goal = jsonutil::get<std::string>(st.plan, "goal", "");
-    if (!goal.empty()) lines.push_back((zh(in) ? "规划目标: " : "plan goal: ") + goal);
-    Json steps = st.plan.contains("steps") && st.plan["steps"].is_array()
-                     ? st.plan["steps"] : Json::array();
-    int open = 0;
-    std::vector<std::string> sl;
-    for (auto& s : steps) {
-      if (!s.is_object()) continue;
-      std::string title = jsonutil::get<std::string>(s, "title", "");
-      std::string status = jsonutil::get<std::string>(s, "status", "pending");
-      if (status != "done" && status != "skipped") ++open;
-      sl.push_back("- [" + status + "] " + title);
-    }
-    if (!sl.empty()) {
-      lines.push_back(zh(in) ? "规划状态（未闭合会让自动模式继续）:"
-                             : "plan state (an open plan keeps auto mode going):");
-      for (auto& x : sl) lines.push_back(x);
-    }
-    if (open == 0 && !steps.empty()) {
-      lines.push_back(zh(in) ? "规划已全部完成，本轮可以收尾。" : "All plan steps are done; wrap up this turn.");
+  // The plan is a DOCUMENT. The model does not need it re-printed every round
+  // (it can be long) - what it needs is the fact that it exists, where it is,
+  // and whether it is done, because that status is what auto mode follows.
+  if (st.plan.is_object() && jsonutil::get<bool>(st.plan, "exists", false)) {
+    std::string status = jsonutil::get<std::string>(st.plan, "status", "active");
+    std::string path = jsonutil::get<std::string>(st.plan, "path", "");
+    std::string content = jsonutil::get<std::string>(st.plan, "content", "");
+    std::string where = path.empty() ? std::string(".flashsight/plans/<sid>.md") : path;
+    if (zh(in)) {
+      lines.push_back("规划文档: " + status + " (" + std::to_string(content.size()) +
+                      " 字节) " + where);
+      lines.push_back(status == "done"
+                          ? "规划已标记完成，本轮可以收尾。"
+                          : "规划未完成：用 plan_get 读全文，按文档拆出本轮 todo；"
+                            "全部做完时 plan_update(status=\"done\")，"
+                            "否则自动模式会继续。");
+    } else {
+      lines.push_back("plan document: " + status + " (" +
+                      std::to_string(content.size()) + " bytes) " + where);
+      lines.push_back(status == "done"
+                          ? "The plan is marked done; wrap up this turn."
+                          : "The plan is NOT done: read it (plan_get), derive this "
+                            "round's todo list from it, and call "
+                            "plan_update(status=\"done\") when everything is "
+                            "complete - an active document keeps auto mode going.");
     }
   }
 
