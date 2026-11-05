@@ -426,6 +426,39 @@ FS_TEST(loop_auto_stops_after_empty_round) {
   EXPECT_EQ(rec.count("auto.next"), 1);
 }
 
+// ---------- 自动模式：清单没清空就必须继续（空转保护不能压掉它） ----------
+// The guard above once suppressed a TODO-driven continuation after a text-only
+// round, which looked like "清单没清空，自动轮却不继续". Open items are an
+// explicit instruction to keep going; only plan-document-only continuation is
+// stopped by the empty-round guard.
+FS_TEST(loop_auto_continues_with_open_todos_after_empty_round) {
+  AgentLoop::Options opts;
+  opts.sid = "s_auto_todos";
+  opts.permission = "full";
+  opts.context.auto_mode = true;
+  opts.max_auto_continues = 2;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;
+    st.todos = Json::array({Json{{"id", 1}, {"task", "unfinished"}, {"done", false}}});
+    return st;
+  };
+  ScriptedModel model;
+  loop.call_model = model.fn();  // text only, no tools
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json::object());
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  // First turn + 2 auto rounds (the cap), all because the checklist is open.
+  EXPECT_EQ((int)model.seen_messages.size(), 3);
+  EXPECT_EQ(rec.count("auto.next"), 2);
+  // The halt is the CAP, not the empty-round guard: 3 calls happened.
+  EXPECT_TRUE(rec.saw("auto.halted"));
+}
+
 // ---------- 宿主接线：请求里必须真的有工具表和非空系统提示 ----------
 // This is the end-to-end shape check for the wiring bug that made the agent
 // useless: AgentLoop was created with no tools and no system prompt, so the

@@ -108,6 +108,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     std::vector<ProviderConn> conns = ps->list();
     ProviderConn conn;
     bool found = false;
+    ModelEntry picked;  // the model's own settings (retry) when it was matched
     if (!req.model.empty()) {
       for (auto& c : conns) {
         if (!c.enabled) continue;
@@ -115,6 +116,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
         for (size_t i = 0; i < models.size(); ++i) {
           if (models[i].id == req.model) {
             conn = c;
+            picked = models[i];
             found = true;
             break;
           }
@@ -158,6 +160,15 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     creq.session_id = req.session_id;  // kPlan: x-opencode-session 亲和 id
     creq.cancel = req.cancel;          // 停止生成 -> abort the SSE transfer
     ProviderRuntime runtime(conn, net, us, clk);
+    // PER-MODEL retry settings (Settings > model > advanced). 0 = the global
+    // default. Without this the fields were written and never read: a flaky
+    // relay behaved the same for a model configured for 5 retries and one for 0.
+    if (found) {
+      if (picked.retry.max > 0) runtime.retry_policy().max_retries = picked.retry.max;
+      if (picked.retry.backoff_ms > 0) {
+        runtime.retry_policy().backoff_ms = picked.retry.backoff_ms;
+      }
+    }
     ChatResponse cresp;
     FsResult r = runtime.call(creq, &cresp, on_delta);
     if (!r.ok()) {
@@ -1416,6 +1427,16 @@ FsResult FsApi::session_interrupt(const std::string& sid) {
 }
 
 FsResult FsApi::session_resume(const std::string& sid) {
+  // Same rule as 继续: a resumed turn uses the model the session has NOW.
+  {
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    Json full;
+    if (sessions_->load_full(sid, &full).ok()) {
+      Json ss = full.value("sessionSettings", Json::object());
+      std::string model = jsonutil::get<std::string>(ss, "model", "");
+      if (!model.empty()) agent_host_->set_session_model(sid, model);
+    }
+  }
   return agent_host_->resume(sid);
 }
 
@@ -1466,6 +1487,19 @@ FsResult FsApi::session_todos(const std::string& sid) {
 
 // addon2 任务健壮性：打断后续接
 FsResult FsApi::session_continue(const std::string& sid, const std::string& guidance) {
+  // A continuation is a NEW turn: pick up the model the session is set to now.
+  // Continuing with the model captured at send time ignored a model switch made
+  // while the task was parked.
+  {
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    Json full;
+    if (sessions_->load_full(sid, &full).ok()) {
+      Json ss = full.value("sessionSettings", Json::object());
+      std::string model = jsonutil::get<std::string>(ss, "model", "");
+      if (!model.empty()) agent_host_->set_session_model(sid, model);
+    }
+  }
+  // AgentHost::continue_task releases the host lock for the turn, like send().
   return agent_host_->continue_task(sid, guidance);
 }
 

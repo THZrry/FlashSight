@@ -1215,14 +1215,31 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   }
   // EMPTY-ROUND GUARD: an automatic round that executed no tool call produced
   // nothing to build on (the model said "到此结束" but a plan document was still
-  // active). One such round is a signal to stop, not to ask again.
+  // active). One such round is a signal to stop, not to ask again - BUT only
+  // when no checklist item is still open. An open checklist is an explicit
+  // instruction to keep going ("清单没清空，自动轮却不继续" was this guard
+  // suppressing a todo-driven continuation after a text-only round).
   if (auto_continue && this_auto_round > 0 && !turn_had_tools) {
-    auto_continue = false;
-    auto_why.clear();
-    emit("auto.halted", Json{{"sid", opts_.sid},
-                             {"reason", zh ? "自动轮没有执行任何工具，已停止"
-                                           : "auto round ran no tools; stopped"},
-                             {"rounds", auto_continues_}});
+    bool open_todos = false;
+    if (runtime_state) {
+      RuntimeState st = runtime_state();
+      if (st.todos.is_array()) {
+        for (auto& t : st.todos) {
+          if (t.is_object() && !jsonutil::get<bool>(t, "done", false)) {
+            open_todos = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!open_todos) {
+      auto_continue = false;
+      auto_why.clear();
+      emit("auto.halted", Json{{"sid", opts_.sid},
+                               {"reason", zh ? "自动轮没有执行任何工具，已停止"
+                                             : "auto round ran no tools; stopped"},
+                               {"rounds", auto_continues_}});
+    }
   }
 
   // ---- auto mode: continue while the plan is still open ----

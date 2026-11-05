@@ -1313,3 +1313,23 @@ The process of project: P0 环境搭建
     现在 `.proj-session { flex: 0 0 32px; min-height:32px }`，`.projects/.proj-card/.proj-sessions/.proj-right-head`
     都是 `flex:none`。实测 18 个会话：列表 clientHeight 360、scrollHeight 576、每行 32px（正常滚动，不压缩）。
   - **测试**：427 用例 3995 断言全过；web / webview 双变体编译通过。
+
+<108>(FIXED/AUDIT): 清单未清空自动轮却停 + 自动轮状态残留（一直显示在跑）+ 模型级重试落地 + 继续/恢复的后端锁与模型同步。
+  - **"清单没清空，自动轮却不继续"**：两个原因都修了。
+    1. 批次 50 加的"空转保护"（自动轮没执行工具就停）把**清单未完成**驱动的续跑也压掉了。现在只有清单里没有未完成项
+       （即仅靠规划文档续跑）时才应用该保护；有未完成 todo 就继续。新增用例
+       `loop_auto_continues_with_open_todos_after_empty_round`（3 次模型调用 / 2 个自动轮）。
+    2. 前端同步：清单以前只在打开会话时读一次，漏一个 `todo.updated` 就会显示"清单没清空"而宿主里已经完成——正是
+       你怀疑的"状态没跟上"。现在 pump 里在回合运行中或清单面板打开时，每 2 秒重读 `session.todos`，UI 与循环看到
+       的是同一份清单。
+  - **"一直显示在跑，输入框却不在跑"**：自动轮的 `auto.next` 以前不设置 `turn_running`（输入框显示发送），而 `turn.done`
+    又不清 `auto_round`——最后一个自动轮结束后圆点仍按 auto_round>0 一直转。现在：`auto.next` 置 `turn_running=true`；
+    `turn.done` 清 `auto_round`（若还有下一轮，紧随其后的 auto.next 会重新置位）。`auto.halted` 的提示也改成显示真实原因
+    （轮数上限 / 空转停止），不再统一写"达到轮数上限"。
+  - **模型级重试**：`Settings > 模型 > 高级` 的 `retry.max` / `retry.backoffMs` 以前只是存下来，从未被读。现在 FsApi 解析
+    出实际使用的 ModelEntry 后，把这两个值写进 ProviderRuntime 的 RetryPolicy（0 = 用全局默认）。
+  - **后端锁审计**：`AgentHost::continue_task` 原来整轮都持有 host 递归锁，导致这一轮里 `todos_for` / `is_running` /
+    session.list 富化全部被堵——正是前端状态同步要用的调用。现在和 `send()` 一样：锁只包住查 loop，回合在锁外跑。
+  - **继续/恢复的模型同步**：以前续跑沿用 send 时捕获的模型，挂起期间换过的模型不生效。`session.continue` /
+    `session.resume` 现在先读会话当前的 `sessionSettings.model` 再续跑。
+  - **测试**：428 用例 3999 断言全过；web / webview 双变体编译通过。

@@ -747,6 +747,17 @@ void UiApp::pump() {
       }
     }
   }
+  // Checklist sync: while a turn runs or the task list is on screen, re-read the
+  // HOST's list every 2 s. Auto-continue is decided from that list, so the UI
+  // must not keep a stale "still open" checklist after a lost todo.updated.
+  if ((st_.todo_open || st_.turn_running) && !st_.active_tab.empty() &&
+      st_.active_tab != "home") {
+    int64_t now = now_ms();
+    if (now - todos_poll_ms_ >= 2000) {
+      todos_poll_ms_ = now;
+      refresh_session_todos(st_.active_tab);
+    }
+  }
   // The 操作记录 panel must follow the log while it is on screen. Coarse (2 s):
   // it is a log, and each refresh is a session.info round trip.
   {
@@ -1474,22 +1485,10 @@ void UiApp::load_session(const std::string& sid) {
   });
   // The model's checklist is host memory, not part of the stored turns: read it
   // when the session opens so the floating todo panel still shows a list written
-  // before the app was started.
-  call_async("session.todos", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
-    if (!r.ok) return;
-    std::vector<AppState::TodoItem> list =
-        parse_todo_items(r.data.contains("items") ? r.data["items"] : Json::array());
-    if (st_.active_tab == sid) {
-      bool was_empty = st_.todos.empty();
-      st_.todos = list;
-      if (!list.empty() && was_empty) st_.todo_open = true;
-      render();
-    } else {
-      SessionView& v = views_.get_or_create(sid);
-      if (v.todos.empty() && !list.empty()) v.todo_open = true;
-      v.todos = list;
-    }
-  });
+  // before the app was started. pump() re-reads it while a turn runs / the panel
+  // is open, so a missed todo.updated event cannot leave a stale checklist that
+  // disagrees with the loop's auto-continue decision.
+  refresh_session_todos(sid);
   call_async("session.turns", Json{{"sid", sid}, {"before", -1}, {"limit", kHistoryPage}},
              [this, sid](const BackendResult& r) {
     if (!r.ok) return;
@@ -1569,8 +1568,30 @@ void UiApp::load_session(const std::string& sid) {
   });
 }
 
-// Ask the NEXT render to position the transcript at the remembered offset before
-// the browser paints it.
+// Re-read the model's checklist. The panel and the loop must agree: the loop's
+// auto-continue asks the HOST for open items, so a checklist the UI only believes
+// is open (a missed todo.updated) would show "清单没清空" while auto mode stops.
+// Sharing this one function between session-open and the pump keeps them in step.
+void UiApp::refresh_session_todos(const std::string& sid) {
+  if (!backend_ || sid.empty()) return;
+  call_async("session.todos", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    std::vector<AppState::TodoItem> list =
+        parse_todo_items(r.data.contains("items") ? r.data["items"] : Json::array());
+    if (st_.active_tab == sid) {
+      bool was_empty = st_.todos.empty();
+      st_.todos = list;
+      if (!list.empty() && was_empty) st_.todo_open = true;
+      render();
+    } else {
+      SessionView& v = views_.get_or_create(sid);
+      if (v.todos.empty() && !list.empty()) v.todo_open = true;
+      v.todos = list;
+    }
+  });
+}
+
+// Ask the NEXT render to position the transcript at the remembered offset before// the browser paints it.
 //
 // Two earlier attempts both failed the same way: they set scrollTop in a LATER
 // tick. By then the new page had already been painted at scrollTop 0, so a return
@@ -3362,9 +3383,16 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // The turn is over: the primary button goes back to 发送. Derived from the
     // event, not from a click, so it cannot drift from the backend.
     if (is_active) {
-      update([&](AppState& s) { s.turn_running = false; });
+      update([&](AppState& s) {
+        s.turn_running = false;
+        // The auto round that just ENDED is over. If another one follows,
+        // auto.next (emitted right after turn.done) sets this again; leaving it
+        // set made the session dot spin forever after the last auto round.
+        s.auto_round = 0;
+      });
     } else {
       vp->turn_running = false;
+      st_.auto_round = 0;
     }
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     if (!m.empty() && m.back().role == "assistant") {
@@ -3757,6 +3785,11 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // appeared under the previous one and the session looked stuck.
     int round = static_cast<int>(jsonutil::get_int(payload, "round", 1));
     st_.auto_round = round;
+    // An auto round runs WITHOUT turn.started, so without this the composer
+    // showed 发送 (not 中止) for a task that was visibly working - the "输入框
+    // 显示不在跑" half of the earlier report.
+    st_.turn_running = true;
+    st_.suspended = false;
     std::string reason = jsonutil::get<std::string>(payload, "reason", "");
     st_.toast = "自动继续（第 " + itos(round) + " 轮）" +
                 (reason.empty() ? "" : "：" + reason);
@@ -3770,7 +3803,12 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     }
   } else if (event == "auto.halted") {
     st_.auto_round = 0;
-    st_.toast = "自动继续已停止（达到轮数上限）";
+    st_.turn_running = false;  // the last auto round has ended
+    // Report the ACTUAL reason: the round cap and "the auto round ran no tools"
+    // both land here, and claiming "轮数上限" for the latter was misleading.
+    std::string reason = jsonutil::get<std::string>(payload, "reason", "");
+    st_.toast = reason.empty() ? tr("自动继续已停止")
+                               : (tr("自动继续已停止：") + reason);
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "context.compressed") {
     int dropped = static_cast<int>(jsonutil::get_int(payload, "droppedTurns", 0));

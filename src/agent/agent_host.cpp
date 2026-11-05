@@ -751,12 +751,27 @@ FsResult AgentHost::append(const std::string& sid, const std::string& text) {
 
 // addon2 任务健壮性：打断后续接（给原任务发引导，从断点续跑）
 FsResult AgentHost::continue_task(const std::string& sid, const std::string& guidance) {
+  // Same rule as send(): look the loop up under the lock, then RUN the turn
+  // outside it. Holding the host lock across a whole continuation blocked every
+  // other call (todos_for, is_running, session.list enrichment) for its entire
+  // duration - the UI then looked frozen and its checklist read stale.
+  AgentLoop* loop = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> host_lock(lock());
+    auto it = loops_.find(sid);
+    if (it == loops_.end()) {
+      return FsResult::error(ErrCode::kNotFound, "no loop for session: " + sid);
+    }
+    loop = it->second.get();
+  }
+  return loop->continue_task(guidance);
+}
+
+void AgentHost::set_session_model(const std::string& sid, const std::string& model) {
+  if (model.empty()) return;
   std::lock_guard<std::recursive_mutex> host_lock(lock());
   auto it = loops_.find(sid);
-  if (it == loops_.end()) {
-    return FsResult::error(ErrCode::kNotFound, "no loop for session: " + sid);
-  }
-  return it->second->continue_task(guidance);
+  if (it != loops_.end() && it->second) it->second->set_model(model);
 }
 
 // addon2：子代理引导（子代理没有轮的概念，只需当前引导）

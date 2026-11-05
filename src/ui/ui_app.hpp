@@ -1070,6 +1070,9 @@ class UiApp {
   // not reliable (a dropped terminal event left a session "running" forever
   // after its turn had errored out).
   int64_t status_poll_ms_ = 0;
+  // The checklist is host state; re-read it while a turn runs or its panel is
+  // open so a missed todo.updated cannot leave the UI and the loop disagreeing.
+  int64_t todos_poll_ms_ = 0;
   // Terminals whose REPLAY (a record from a previous run) has been fetched: it is
   // static, so once is enough - and without this the drawer showed 暂无输出.
   std::set<std::string> term_replay_done_;
@@ -1382,6 +1385,8 @@ class UiApp {
   void switch_tab(const std::string& id, int dir = 0);
   // pull a session's info + its NEWEST page of history into its view
   void load_session(const std::string& sid);
+  // Re-read the host's checklist (session-open + the periodic sync in pump()).
+  void refresh_session_todos(const std::string& sid);
   // Ask the NEXT render to position the transcript at the remembered offset in
   // the same frame it patches the content (see the definition for why a deferred
   // restore is wrong).
