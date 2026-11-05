@@ -1036,7 +1036,9 @@ html, body {
    vendor (and what the user would have to fix if the query failed). */
 .usage-balances {
   display: flex; flex-direction: column; gap: 8px;
-  padding: 12px;
+  /* NO horizontal/vertical padding: the cards must line up with the table above
+     (the 12px inset made the whole block look "小一圈"). */
+  padding: 12px 0 0;
   border-top: 1px solid var(--border);
 }
 .usage-balances .chart-head { margin-bottom: 2px; }
@@ -1231,6 +1233,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   display: flex; align-items: center; gap: 8px;
   margin-top: 4px;
   min-height: 18px;
+  /* Status/timing chips are chrome, not prose: a drag across the row must not
+     select "12s 14:32" into the transcript copy. */
+  user-select: none;
 }
 /* The row itself stays visible: the end clock and the total duration are facts
    you want at a glance. Only the ACTIONS (copy / fork / rollback / forget) and
@@ -1729,6 +1734,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   flex: none;
+  /* Dragging a tab must not paint a text selection over the strip: mousedown is
+     preventDefault()ed too, this is the belt-and-braces for touch/engine quirks. */
+  user-select: none;
 }
 .ptab {
   display: flex; align-items: center; gap: 5px;

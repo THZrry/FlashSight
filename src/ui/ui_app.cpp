@@ -1359,6 +1359,22 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
 // then behave exactly like the first page - frozen, cached, never re-parsed.
 void UiApp::load_session(const std::string& sid) {
   if (sid.empty()) return;
+  // A tab/page switch tore this session's DOM down. The cached message nodes and
+  // memoised tool rows still point at those removed elements, so handing them
+  // back leaves rows that CANNOT be clicked ("切页面后工具调用点不开"). Drop both
+  // caches before the new page is built; re-rendering is the cost of correctness.
+  {
+    const std::string prefix = "msg:" + sid + ":";
+    for (std::map<std::string, MsgNode>::iterator it = msg_nodes_.begin();
+         it != msg_nodes_.end();) {
+      if (it->first.compare(0, prefix.size(), prefix) == 0) {
+        it = msg_nodes_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  comp::tool_block_cache_clear();
   // Without a backend there is nothing to fetch (UI tests, the demo shell). The
   // transcript is whatever the view already holds, so the scroll restore still has
   // to be applied - otherwise the "remembered position" path is exercised only in
@@ -1804,7 +1820,12 @@ void UiApp::refresh_session_ops() {
 // looking; this override makes it immediate, and the refresh catches the rest.
 ProjectCard::SessionRow UiApp::live_session_row(ProjectCard::SessionRow row) const {
   if (row.sid.empty() || row.sid != st_.active_tab) return row;
-  row.running = st_.turn_running || st_.auto_round > 0;
+  // LIVE states can only ADD information, never erase a backend fact. The old
+  // `row.running = st_.turn_running` overwrote "the backend says this session is
+  // running" with a UI-local flag that is false when the turn was started before
+  // this view existed (opening a running session from the project list made its
+  // 运行中 dot disappear - pure coupling, as the user put it).
+  if (st_.turn_running || st_.auto_round > 0) row.running = true;
   if (st_.auto_round > 0) row.auto_round = st_.auto_round;
   // Terminal count from the LIVE list: opening one shows immediately, and a
   // closed one stops counting even before the next refresh.
@@ -3229,16 +3250,38 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   if (!is_active) vp = &views_.get_or_create(sid);
   if (event == "turn.started") {
     // The turn is in flight now: the composer's primary button becomes 中止, and
-    // any parked state is stale (a new turn is running).
+    // any parked state is stale (a new turn is running). The interrupt bar must
+    // disappear NOW - a new turn means the task is no longer parked.
     if (is_active) {
       update([&](AppState& s) {
         s.turn_running = true;
         s.suspended = false;
+        s.interrupted = false;
+        s.interrupt_reason.clear();
       });
     } else {
       vp->turn_running = true;
       vp->suspended = false;
+      vp->interrupted = false;
+      vp->interrupt_reason.clear();
     }
+  } else if (event == "loop.resumed") {
+    // 继续 starts a turn WITHOUT turn.started, so the interrupt bar used to stay
+    // on screen for the whole continuation and every further click started
+    // another continue. Clear it (and show the turn as running) the moment the
+    // backend confirms the continuation.
+    if (is_active) {
+      update([&](AppState& s) {
+        s.interrupted = false;
+        s.interrupt_reason.clear();
+        s.turn_running = true;
+      });
+    } else {
+      vp->interrupted = false;
+      vp->interrupt_reason.clear();
+      vp->turn_running = true;
+    }
+    render();
   } else if (event == "stream.delta") {
     std::string text = jsonutil::get<std::string>(payload, "text", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
@@ -3284,6 +3327,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       session_seen_ms_[sid] = wall_ms();
       call_async("session.markSeen", Json{{"sid", sid}, {"ms", session_seen_ms_[sid]}});
     }
+    // A turn just spent credit: refresh the provider balances (the usage page and
+    // the sidebar show them). Throttled inside load_balances.
+    load_balances(true);
     // The turn is over: the primary button goes back to 发送. Derived from the
     // event, not from a click, so it cannot drift from the backend.
     if (is_active) {
@@ -5205,6 +5251,7 @@ VNodePtr UiApp::build_home_usage() {
   tot.on(EventKind::kClick, [this](const std::string&) {
     update([&](AppState& s) { s.usage_scope.clear(); });
     load_usage();
+    load_balances(false);  // a different scope = a different provider
   });
   tot.add(el("span").text(tr("总计")));
   left.add(tot);
@@ -5216,6 +5263,7 @@ VNodePtr UiApp::build_home_usage() {
     it.on(EventKind::kClick, [this, pid](const std::string&) {
       update([&](AppState& s) { s.usage_scope = pid; });
       load_usage();
+      load_balances(false);  // a different scope = a different provider
     });
     it.add(el("span").text(p.name.empty() ? p.id : p.name));
     left.add(it);
@@ -5535,9 +5583,75 @@ VNodePtr UiApp::build_home_usage() {
     tbl.add(tr);
   }
   panel.add(tbl);
-  // 余额 / 额度 is gone on purpose: it was a second, inset list that duplicated
-  // nothing useful on this page (the user's screenshot marked it for deletion).
-  // Token totals and cost are the questions this page answers.
+  // ---- 余额 / 额度（放在最后：它是"还剩多少"，先看用量再看余额）----
+  // Per provider, by its ENDPOINT (the only thing that identifies a vendor
+  // reliably). Three states, all honest: the number, 不支持 (no public balance
+  // API), or 获取失败 WITH the reason. Asked on entering this page, after every
+  // finished turn and when the provider filter changes.
+  load_balances(false);
+  {
+    H bal = el("div", "usage-balances");
+    H bh = el("div", "chart-head");
+    bh.add(el("div", "chart-title").text(tr("余额 / 额度")));
+    bh.add(el("span", "grow"));
+    if (st_.balances_loading) {
+      bh.add(el("span", "bal-loading dim").text(tr("查询中…")));
+    } else {
+      bh.add(comp::button(tr("刷新"), [this](const std::string&) {
+        load_balances(true);
+      }, "ghost"));
+    }
+    bal.add(bh);
+    auto money = [](const std::string& cur, const std::string& v) {
+      if (v.empty()) return std::string("—");
+      if (cur == "CNY") return "¥" + v;
+      if (cur == "USD") return "$" + v;
+      return cur.empty() ? v : (cur + " " + v);
+    };
+    if (st_.balances.empty()) {
+      bal.add(el("div", "hint").text(
+          st_.balances_loading ? tr("正在查询各供应商的余额…")
+                               : tr("还没有供应商。在设置-供应商里添加一家之后这里会显示余额。")));
+    }
+    for (size_t i = 0; i < st_.balances.size(); ++i) {
+      const AppState::BalanceRow& b = st_.balances[i];
+      H row = el("div", "bal-row");
+      row.style("animation-delay", itos(static_cast<int>(i) * 30) + "ms");
+      H nm = el("div", "bal-name");
+      nm.add(el("span", "bal-pname").text(b.name.empty() ? b.pid : b.name));
+      if (!b.enabled) nm.add(el("span", "bal-off dim").text(tr("已停用")));
+      row.add(nm);
+      H val = el("div", "bal-val");
+      std::string cls = "bal-amount";
+      std::string text;
+      if (b.status == "ok") {
+        text = money(b.currency, b.balance);
+        if (!b.used.empty() || !b.limit.empty()) {
+          text += "  ";
+          if (!b.used.empty()) text += tr("已用 ") + money(b.currency, b.used);
+          if (!b.limit.empty()) {
+            text += tr(" / 额度 ") + money(b.currency, b.limit);
+          }
+        }
+      } else if (b.status == "unsupported") {
+        cls += " dim";
+        text = tr("不支持");
+        if (!b.note.empty()) text += " · " + tr(b.note.c_str());
+      } else {
+        cls += " bad";
+        // The backend already wrote "获取失败：HTTP 401"; show it verbatim - a
+        // silent dash would hide that the key or the endpoint is wrong.
+        text = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
+      }
+      val.add(el("span", cls).text(text));
+      row.add(val);
+      if (!b.endpoint.empty()) {
+        row.add(el("div", "bal-ep dim").text(b.endpoint));
+      }
+      bal.add(row);
+    }
+    panel.add(bal);
+  }
   wrap.add(panel);
   return wrap.get();
 }
@@ -5861,19 +5975,26 @@ VNodePtr UiApp::build_session() {
       bar.add(el("span", "ib-reason dim").text(st_.interrupt_reason));
     }
     bar.add(el("span", "grow"));
-    bar.add(comp::button(tr("继续"), [this](const std::string&) {
+    bar.add(comp::button(tr("继续"), [this, reason = st_.interrupt_reason](const std::string&) {
       std::string sid = active_sid();
       if (sid.empty()) return;
+      // Optimistic: hide the bar NOW. The request runs the continuation turn and
+      // only answers when it ENDS, so waiting for the callback kept the bar on
+      // screen for the whole turn - clicking again started yet another continue
+      // ("点很多次才好"). A failure puts it back with the original reason.
+      update([&](AppState& s) {
+        s.interrupted = false;
+        s.interrupt_reason.clear();
+      });
       call_async("session.continue", Json{{"sid", sid}, {"guidance", ""}},
-                 [this](const BackendResult& r) {
+                 [this, reason](const BackendResult& r) {
         if (!r.ok) {
+          update([&](AppState& s) {
+            s.interrupted = true;
+            s.interrupt_reason = reason;
+          });
           toast(tr("继续失败：") + r.message);
-          return;
         }
-        update([&](AppState& s) {
-          s.interrupted = false;
-          s.interrupt_reason.clear();
-        });
       });
     }, "primary"));
     bar.add(comp::button(tr("忽略"), [this](const std::string&) {
@@ -6818,8 +6939,50 @@ VNodePtr UiApp::build_side_panel() {
     if (st_.usage_calls > 0) {
       body.add(comp::key_value(tr("调用次数"), itos(static_cast<int>(st_.usage_calls))));
     }
-    // No 余额 / 额度 block: the feature was removed from the UI (both here and on
-    // the usage page). Balance probing no longer runs on its own either.
+    // ---- 余额 / 额度 ----
+    // The same provider.balances rows the usage page shows, in the sidebar: this
+    // is where "how much is left" is usually asked (while working, not while
+    // reading a report). Asked when the panel is opened and after every turn.
+    load_balances(false);
+    body.add(el("div", "side-sep"));
+    H bhead = el("div", "side-section");
+    bhead.add(el("span").text(tr("余额 / 额度")));
+    bhead.add(el("span", "grow"));
+    if (!st_.balances_loading) {
+      bhead.add(comp::icon_button("rotate", tr("重新查询"), [this](const std::string&) {
+        load_balances(true);
+      }));
+    }
+    body.add(bhead);
+    auto money = [](const std::string& cur, const std::string& v) {
+      if (v.empty()) return std::string("—");
+      if (cur == "CNY") return "¥" + v;
+      if (cur == "USD") return "$" + v;
+      return cur.empty() ? v : (cur + " " + v);
+    };
+    if (st_.balances.empty()) {
+      body.add(el("div", "hint").text(st_.balances_loading ? tr("正在查询…")
+                                                           : tr("还没有供应商")));
+    }
+    for (size_t i = 0; i < st_.balances.size(); ++i) {
+      const AppState::BalanceRow& b = st_.balances[i];
+      std::string right;
+      std::string cls = "sb-bal";
+      if (b.status == "ok") {
+        right = money(b.currency, b.balance);
+      } else if (b.status == "unsupported") {
+        right = tr("不支持");
+        cls += " dim";
+      } else {
+        right = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
+        cls += " bad";
+      }
+      H row = el("div", "sb-bal-row");
+      row.add(el("span", "sb-bal-name").text(b.name.empty() ? b.pid : b.name));
+      row.add(el("span", cls).text(right));
+      if (!b.endpoint.empty()) row.attr("title", b.endpoint);
+      body.add(row);
+    }
   } else if (kind == "subagent") {
     // One subagent's full transcript, in the SIDEBAR (see open_subagent_tab).
     // The id comes from THIS panel, so two agents can be open side by side.
@@ -11500,6 +11663,8 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
         // The context window follows the model, so the water level must be
         // recomputed (the old percentage belongs to the old window).
         load_session_usage(sid);
+        // A different model is usually a different PROVIDER: the balance is stale.
+        load_balances(false);
       });
     }
     toast(tr("已切换到 ") + model_id);
@@ -12452,6 +12617,8 @@ void UiApp::load_side_tab(const std::string& id) {
   if (kind == "workflow") load_workflows(active_sid());
   if (kind == "usage") {
     load_session_usage(active_sid());
+    // Opening the panel is a deliberate "what is left?" moment.
+    load_balances(true);
   }
 }
 // 侧栏标签拖拽排序：把 from 放到 to 的左半边（before）或右半边（after）。

@@ -522,6 +522,8 @@ const char* kGlueJs = R"JS(
             var t = ev.target;
             if (!isTab(t)) return;
             if (t.classList.contains('add')) return;
+            // No text selection while dragging (see the wasm adapter).
+            ev.preventDefault();
             fromEl = t;
           });
           el.addEventListener('mousemove', function (ev) {

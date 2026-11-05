@@ -601,15 +601,11 @@ H file_icon(const std::string& name, bool is_dir) {
 
 // ---------- chat ----------
 
-// "1.2s" / "1m 20s" / "1h 04m" - short enough for a row of metadata.
+// "1s" / "1m 20s" / "1h 04m" - short enough for a row of metadata. Whole
+// seconds only: a tenth of a second in a transcript is noise, not information.
 std::string fmt_duration(int64_t ms) {
   if (ms < 0) ms = 0;
   int64_t sec = ms / 1000;
-  if (sec < 10) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.1fs", static_cast<double>(ms) / 1000.0);
-    return std::string(buf);
-  }
   if (sec < 60) return itos(static_cast<int>(sec)) + "s";
   int64_t min = sec / 60;
   int64_t rem = sec % 60;
@@ -819,7 +815,12 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   }
   if (!m.summary.empty()) wrap.add(turn_summary(m.summary));
   H meta = el("div", "meta");
-  if (!m.time.empty()) meta.add(el("span", "time").text(m.time));
+  // A USER message carries the time it was sent. An ASSISTANT message does NOT
+  // reuse the start time: the clock below is the END time, which is the fact that
+  // belongs at the end of the answer (the start is visible in the tool rows).
+  if (!m.time.empty() && m.role != "assistant") {
+    meta.add(el("span", "time").text(m.time));
+  }
   // Turn timing, always visible (not hover-only): "how long did this take" is
   // the question you ask while waiting and right after it lands.
   //   * streaming: elapsed so far, refreshed by the UI timer
@@ -969,10 +970,24 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
 // per-frame cost is O(1) per untouched row and the patch reuses the DOM nodes.
 //
 // Bounded like the message cache: a long-lived window must not grow it forever.
+namespace {
+// Memo for tool_block_cached. File-scoped (not function-static) so a page switch
+// can DROP it: a cached VNode is only valid while its DOM stays attached, and a
+// tab switch detaches every node - reusing them leaves rows whose handlers can
+// never fire ("切页面后工具调用点不开").
+std::map<std::string, H> g_tool_block_cache;
+std::deque<std::string> g_tool_block_order;
+}  // namespace
+
+void tool_block_cache_clear() {
+  g_tool_block_cache.clear();
+  g_tool_block_order.clear();
+}
+
 H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
                     EventFn on_open_subagent, const std::string& gen) {
-  static std::map<std::string, H> cache;
-  static std::deque<std::string> order;
+  std::map<std::string, H>& cache = g_tool_block_cache;
+  std::deque<std::string>& order = g_tool_block_order;
   const size_t kMaxCachedBlocks = 4000;
   // `gen` is part of the identity: a cached VNode may only be reused while the
   // surrounding rows are CONTINUOUSLY attached. When the work fold closes, the

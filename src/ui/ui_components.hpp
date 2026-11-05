@@ -140,6 +140,11 @@ H tool_block(const ToolBlock& b, EventFn on_toggle,
 // the fold then opens exactly once and every later toggle renders nothing.
 H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
                     EventFn on_open_subagent, const std::string& gen);
+// Drop every memoised tool row. MUST be called when the page they belong to is
+// torn down (tab switch/open): the cached VNodes' elements are gone, and handing
+// them back leaves rows with no attached DOM - clicks silently do nothing.
+// The same applies to the message-node cache, which the shell prunes per session.
+void tool_block_cache_clear();
 
 struct ChatMsg {
   std::string role;      // "user" | "assistant" | "system"

@@ -487,6 +487,9 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
     if (!t || t === strip) return;
     if (t.classList.contains('add')) return;      // the "+" is not a tab
     if (down.target.closest && down.target.closest('.tab-close')) return;
+    // No text selection while dragging (a selection made mouseup unreliable and
+    // the whole interaction look broken).
+    down.preventDefault();
     fromEl = t;
     started = false;
     startX = down.clientX;

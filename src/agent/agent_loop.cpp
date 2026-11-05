@@ -469,6 +469,7 @@ FsResult AgentLoop::run_tool_group(const Json& calls, Json* messages) {
     // Round boundary: the model call and all of its tools are done. A pending
     // 挂起 (or 中止) parks HERE, so the next model call is never issued.
     if (suspend_requested_ || abort_requested_) {
+      bool aborted = abort_requested_;
       suspend_requested_ = false;
       abort_requested_ = false;
       saved_messages_ = *messages;
@@ -481,7 +482,16 @@ FsResult AgentLoop::run_tool_group(const Json& calls, Json* messages) {
         live_running_ = false;
       }
       if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
-      emit("loop.state", Json{{"state", "suspended"}, {"sid", opts_.sid}});
+      // 中止 and 挂起 are different outcomes: 中止 must surface the persistent
+      // "任务已中断 / 继续" bar, 挂起 the 恢复 control. Emitting "suspended" for
+      // both made 中止 look like a suspend whenever it landed between rounds -
+      // the bar then never appeared and 继续 could not be found.
+      if (aborted) {
+        emit("loop.interrupted", Json{{"sid", opts_.sid}, {"resumable", true},
+                                      {"error", "stopped by user"}});
+      } else {
+        emit("loop.state", Json{{"state", "suspended"}, {"sid", opts_.sid}});
+      }
       return FsResult::success();
     }
   }

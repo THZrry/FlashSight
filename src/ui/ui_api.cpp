@@ -490,9 +490,11 @@ FsResult UiApi::call(const std::string& method, const Json& args) {
   //
   // The lock is recursive because routes call each other.
   //
-  // Three routes are EXCLUDED because they BLOCK for a long time:
-  //   * session.send     - the whole turn (provider round trip + every tool call).
-  //     It takes the lock itself around its short prelude only.
+  // These routes are EXCLUDED because they BLOCK for a long time:
+  //   * session.send / continue / resume - a whole turn (provider round trip +
+  //     every tool call). They take the lock themselves around the short prelude
+  //     only. Leaving continue/resume locked made the UI freeze for the entire
+  //     continuation (the 继续 button appeared dead / needed many clicks).
   //   * tool.invoke      - arbitrary tool code (a terminal command can take a
   //     minute) and must not hold the backend lock while it runs.
   //   * provider.balances- probes every endpoint over the network (up to the
@@ -502,7 +504,8 @@ FsResult UiApi::call(const std::string& method, const Json& args) {
   //     lock itself only to snapshot the provider list.
   // Holding the lock for these would stall every other call, which is the freeze
   // this design exists to prevent.
-  if (!api_ || method == "session.send" || method == "tool.invoke" ||
+  if (!api_ || method == "session.send" || method == "session.continue" ||
+      method == "session.resume" || method == "tool.invoke" ||
       method == "provider.balances") {
     return it->second(args);
   }
