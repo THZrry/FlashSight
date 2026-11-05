@@ -3665,6 +3665,10 @@ FS_TEST(uiapp_history_pages_backwards) {
 
   // scrolling to the top asks for the page before the OLDEST LOADED turn (45,
   // not the message count: the first page was the newest 30 of 75)
+  // The initial restore ignores scroll-edge echoes until its two scheduled ticks
+  // have passed (a real user scroll can only happen after that); flush them.
+  dom.run_scheduled_for_test();
+  dom.run_scheduled_for_test();
   dom.fire_scroll_edges_for_test(true, false);
   EXPECT_EQ(backend.requested_before.size(), size_t(2));
   EXPECT_EQ(backend.requested_before[1], 45);

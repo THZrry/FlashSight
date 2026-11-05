@@ -747,17 +747,8 @@ void UiApp::pump() {
       }
     }
   }
-  // Checklist sync: while a turn runs or the task list is on screen, re-read the
-  // HOST's list every 2 s. Auto-continue is decided from that list, so the UI
-  // must not keep a stale "still open" checklist after a lost todo.updated.
-  if ((st_.todo_open || st_.turn_running) && !st_.active_tab.empty() &&
-      st_.active_tab != "home") {
-    int64_t now = now_ms();
-    if (now - todos_poll_ms_ >= 2000) {
-      todos_poll_ms_ = now;
-      refresh_session_todos(st_.active_tab);
-    }
-  }
+  // Checklist: updates arrive as `todo.updated` broadcasts; opening the session
+  // or its panel forces a read (see the 清单 button). No polling loop here.
   // The 操作记录 panel must follow the log while it is on screen. Coarse (2 s):
   // it is a log, and each refresh is a session.info round trip.
   {
@@ -1227,6 +1218,11 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   // again with the final content; that is idempotent.)
   request_history_scroll_restore();
   render();
+  // The composer textarea is FOCUSED while the user types, and the diff
+  // deliberately never writes `value` into a focused control (caret safety).
+  // On a tab switch that left the PREVIOUS session's text visible in the new
+  // one ("会把我在别的会话的输入渲染出来"). Write the restored value through.
+  sync_composer_textarea();
   // Scroll restore is NOT done here. The transcript has not been fetched yet, so
   // the container is empty: a programmatic scroll to the saved offset is clamped
   // to 0, and the scroll handler then wrote that 0 back over the saved position -
@@ -1252,6 +1248,11 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   // last visit. Re-read whatever it shows: "切标签页还是旧数据" was the restored
   // usage/ops/files/git panel never asking the backend again.
   if (!st_.side_collapsed && !st_.active_side.empty()) load_side_tab(st_.active_side);
+}
+
+void UiApp::sync_composer_textarea() {
+  VNodePtr ta = find_by_key(tree_, "session-input");
+  if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", st_.session_input);
 }
 
 void UiApp::open_session(const std::string& sid, const std::string& title) {
@@ -3380,6 +3381,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // A turn just spent credit: refresh the provider balances (the usage page and
     // the sidebar show them). Throttled inside load_balances.
     load_balances(true);
+    // The turn's LAST checklist edit may have raced its event: force one read at
+    // the authoritative end-of-turn moment (the loop used the host's list to
+    // decide whether to continue).
+    if (!sid.empty()) refresh_session_todos(sid);
     // The turn is over: the primary button goes back to 发送. Derived from the
     // event, not from a click, so it cannot drift from the backend.
     if (is_active) {
@@ -4066,15 +4071,17 @@ void UiApp::render() {
       VNodePtr hist = find_by_key(tree_, "chat-history");
       if (hist && hist->dom.valid()) {
         dom_.bind_scroll_edges(hist->dom, [this](bool at_top, bool at_bottom) {
+          // While a restore drives the DOM, its own scroll event reports the
+          // CLAMPED position (a short page reads as top AND bottom). Believing it
+          // flipped `hist_follow` (the top-then-bottom jump on a return visit) and
+          // could even trigger a spurious older-page load. The restore sets follow
+          // explicitly on the branch it takes; ignore its echo entirely.
+          if (restoring_scroll_) return;
           if (at_bottom) st_.hist_follow = true;
           else st_.hist_follow = false;
-          // Keep the remembered offset CURRENT on every scroll, but NOT while a
-          // restore is in flight: the restore's own scroll event reports the
-          // clamped position and would overwrite the offset we are restoring to.
-          if (!restoring_scroll_) {
-            VNodePtr h = find_by_key(tree_, "chat-history");
-            if (h && h->dom.valid()) st_.hist_scroll = dom_.scroll_top(h->dom);
-          }
+          // Keep the remembered offset CURRENT on every real user scroll.
+          VNodePtr h = find_by_key(tree_, "chat-history");
+          if (h && h->dom.valid()) st_.hist_scroll = dom_.scroll_top(h->dom);
           if (at_top && st_.history_has_more && !st_.history_loading_older) {
             load_older_history();
           }
@@ -6365,6 +6372,9 @@ VNodePtr UiApp::build_session() {
                                         [this](const std::string&) {
     bool open = !st_.todo_open;
     update([&](AppState& s) { s.todo_open = open; });
+    // Opening the panel is an explicit "show me the current list" moment: force
+    // a read instead of trusting the last broadcast.
+    if (open && !active_sid().empty()) refresh_session_todos(active_sid());
   }, "ghost"));
   // 自动挡: a toggle button, not a select - it is one bit and it is switched
   // often. The label says which mode is active.
@@ -11059,6 +11069,8 @@ void UiApp::new_session_in_project(const std::string& pid) {
       s.messages.clear();
       s.session_input.clear();
     });
+    // The cleared input must reach a focused textarea too (see switch_tab).
+    sync_composer_textarea();
     // A brand-new session has no terminals; the drawer loads its list on open.
     // The card's list must show the new session (and its count), so re-read the
     // project's sessions rather than waiting for the next full refresh.
