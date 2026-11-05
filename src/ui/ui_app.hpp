@@ -44,7 +44,7 @@ struct ProjectCard {
   // The session list is always rendered (CSS picks the layout: wide shows it
   // directly, narrow collapses it behind the header), so it is always loaded.
   bool sessions_loaded = false;
-  bool expanded = false;            // narrow layout: list revealed?
+  bool expanded = true;            // narrow layout: list revealed? (wide ignores it)
   // A session row carries more than a title: the card shows WHEN it last
   // changed and WHETHER it is running, and both have to be deletable.
   struct SessionRow {
@@ -1065,6 +1065,11 @@ class UiApp {
   bool provider_auto_opened_ = false;
   bool sessions_dirty_ = false;
   int64_t sessions_refresh_ms_ = 0;
+  // Watchdog for the "running" state: while anything LOOKS busy, re-read the
+  // authoritative session rows every couple of seconds. Event edges alone are
+  // not reliable (a dropped terminal event left a session "running" forever
+  // after its turn had errored out).
+  int64_t status_poll_ms_ = 0;
   // Terminals whose REPLAY (a record from a previous run) has been fetched: it is
   // static, so once is enough - and without this the drawer showed 暂无输出.
   std::set<std::string> term_replay_done_;

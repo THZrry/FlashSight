@@ -97,6 +97,10 @@ class TerminalManager {
   static Json screen_json(const Proc& p, int from = 0);
   // 读走当前可用输出（非阻塞），追加到 proc.out
   static void drain(Proc& p);
+  // A foreground MODEL command that finished quickly is noise, not a record: its
+  // transcript is deleted on exit. Kept: user terminals, background terminals,
+  // labelled ("marked") ones, and anything that ran longer than a minute.
+  void maybe_prune_log(const std::string& tid);
 };
 
 }  // namespace fs

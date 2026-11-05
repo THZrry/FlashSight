@@ -2127,6 +2127,13 @@ FsResult FsApi::terminal_list(const std::string& sid) {
     bool has_log = !e.log_path.empty() &&
                    ghc::filesystem::is_regular_file(e.log_path, lec);
     if (!live && !has_log) continue;
+    // Only MEANINGFUL records: user terminals, background/labelled ("marked")
+    // ones, and commands that ran for a long time. A model `terminal_exec` that
+    // finished in two seconds is not a transcript anyone will reopen.
+    bool marked = e.kind == TermKind::kUser || e.kind == TermKind::kModelBg ||
+                  !e.label.empty();
+    int64_t dur = e.ended_at > e.started_at ? e.ended_at - e.started_at : 0;
+    if (!live && !marked && dur < 60 * 1000) continue;
     Json j = e.to_json();
     j["logExists"] = has_log;
     real.push_back(j);

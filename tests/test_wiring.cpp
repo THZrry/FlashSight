@@ -482,6 +482,9 @@ FS_TEST(terminal_spawn_defaults_to_the_project_root) {
   args["command"] = "echo cwd-probe";
   args["background"] = false;
   args["timeoutMs"] = 15000;
+  // A label marks the terminal as worth keeping; an unlabelled quick model
+  // command is deliberately pruned from the list (batch 54).
+  args["label"] = "cwd-probe";
   Json out;
   FsResult r = api.spawn_terminal(args, &out);
   ASSERT_TRUE(r.ok());
@@ -496,6 +499,21 @@ FS_TEST(terminal_spawn_defaults_to_the_project_root) {
   // It must be the session's project, not wherever the app was started from.
   std::string tail = cwd.substr(cwd.size() >= 4 ? cwd.size() - 4 : 0);
   EXPECT_EQ(tail, std::string("proj"));
+
+  // An UNLABELLED quick foreground command is pruned: the list stays at one
+  // record (the marked probe above). It is tool noise, not a transcript.
+  Json quick = Json::object();
+  quick["sid"] = sid;
+  quick["command"] = "echo quick";
+  quick["background"] = false;
+  quick["timeoutMs"] = 15000;
+  Json qout;
+  FsResult qr = api.spawn_terminal(quick, &qout);
+  ASSERT_TRUE(qr.ok());
+  FsResult list2 = api.terminal_list(sid);
+  ASSERT_TRUE(list2.ok());
+  ASSERT_TRUE(list2.data.is_array());
+  EXPECT_EQ((int)list2.data.size(), 1);
 }
 
 // ---------- 终端的记录必须活过重启 ----------

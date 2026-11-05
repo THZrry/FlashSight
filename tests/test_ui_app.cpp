@@ -427,10 +427,13 @@ FS_TEST(uiapp_project_card_actions) {
   EXPECT_TRUE(dump_has(dom, "移出列表"));
   // the sessions area is present even when collapsed (dominant card area)
   EXPECT_TRUE(dump_has(dom, "会话"));
+  // STACKED layout starts EXPANDED (batch 54): the list is visible and the header
+  // offers 收起, which collapses the whole block.
+  EXPECT_TRUE(dump_has(dom, "收起"));
+  app.update([](AppState& s) { s.projects[0].expanded = false; });
   EXPECT_TRUE(dump_has(dom, "展开"));
   app.update([](AppState& s) { s.projects[0].expanded = true; });
   EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
-  EXPECT_TRUE(dump_has(dom, "收起"));
 }
 
 FS_TEST(uiapp_splitter_bound) {

@@ -59,6 +59,9 @@ class TerminalRegistry {
 
   // 编码切换
   FsResult set_encoding(const std::string& tid, const std::string& enc);
+  // Drop the transcript association (and any further writes) after the file was
+  // pruned: a short foreground command must not leave a list entry.
+  void detach_log(const std::string& tid);
 
   // 改用户给的名字（终端跑着也能改）
   FsResult set_label(const std::string& tid, const std::string& label);

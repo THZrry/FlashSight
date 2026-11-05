@@ -721,6 +721,32 @@ void UiApp::pump() {
       refresh_session_rows();
     }
   }
+  // ---- status watchdog: "running" must never get stuck ----
+  // The backend is the authority. If the snapshot (or this view) says something
+  // is still running, re-read the rows every 2 s; when the turn has really ended
+  // (a provider error, a parked loop, a missed event) the dot clears on its own.
+  // Polling ONLY while something looks busy keeps the cost at zero when idle.
+  {
+    bool looks_running = st_.turn_running || st_.auto_round > 0;
+    if (!looks_running) {
+      for (size_t i = 0; i < st_.projects.size() && !looks_running; ++i) {
+        for (size_t k = 0; k < st_.projects[i].sessions.size(); ++k) {
+          if (st_.projects[i].sessions[k].running) {
+            looks_running = true;
+            break;
+          }
+        }
+      }
+    }
+    int64_t now = now_ms();
+    if (looks_running && now - status_poll_ms_ >= 2000) {
+      status_poll_ms_ = now;
+      refresh_session_rows();
+      if (!st_.active_tab.empty() && st_.active_tab != "home") {
+        refresh_loop_state(st_.active_tab);
+      }
+    }
+  }
   // The 操作记录 panel must follow the log while it is on screen. Coarse (2 s):
   // it is a log, and each refresh is a session.info round trip.
   {
@@ -1536,7 +1562,10 @@ void UiApp::load_session(const std::string& sid) {
       request_history_scroll_restore();
       render();
     }
-    load_terminals(sid);
+    // Terminals are NOT fetched here: the list can be long, and the session page
+    // does not show it until the terminal drawer is opened. `load_terminals` runs
+    // when that drawer opens (or after a spawn), which also keeps reopening a
+    // session cheap.
   });
 }
 
@@ -10992,7 +11021,7 @@ void UiApp::new_session_in_project(const std::string& pid) {
       s.messages.clear();
       s.session_input.clear();
     });
-    load_terminals(sid);
+    // A brand-new session has no terminals; the drawer loads its list on open.
     // The card's list must show the new session (and its count), so re-read the
     // project's sessions rather than waiting for the next full refresh.
     for (size_t i = 0; i < st_.projects.size(); ++i) {

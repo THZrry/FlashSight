@@ -146,6 +146,13 @@ FsResult TerminalRegistry::set_label(const std::string& tid, const std::string& 
   return FsResult::success(Json{{"tid", tid}, {"label", label}});
 }
 
+void TerminalRegistry::detach_log(const std::string& tid) {
+  TermEntry* e = find(tid);
+  if (!e) return;
+  e->log_path.clear();
+  e->log_attached = false;
+}
+
 std::vector<TermEntry> TerminalRegistry::list_for_session(const std::string& sid) const {
   std::vector<TermEntry> out;
   for (auto& kv : entries_) {

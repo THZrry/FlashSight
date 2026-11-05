@@ -519,9 +519,15 @@ const char* kGlueJs = R"JS(
                    (t.classList.contains('tab') || t.classList.contains('ptab'));
           }
           el.addEventListener('mousedown', function (ev) {
+            // The press usually lands on the tab's TEXT span, not the tab div.
+            // The old `isTab(ev.target)` check rejected that and drag never
+            // started ("鼠标放文字上甚至都拖不了"). Climb to the tab like the
+            // wasm adapter does.
             var t = ev.target;
-            if (!isTab(t)) return;
+            while (t && t !== el && !isTab(t)) t = t.parentElement;
+            if (!t || t === el || !isTab(t)) return;
             if (t.classList.contains('add')) return;
+            if (ev.target.closest && ev.target.closest('.tab-close')) return;
             // No text selection while dragging (see the wasm adapter).
             ev.preventDefault();
             fromEl = t;

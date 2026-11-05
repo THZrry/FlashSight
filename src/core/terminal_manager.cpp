@@ -2,9 +2,12 @@
 #include "terminal_manager.hpp"
 
 #include <cstring>
+#include <system_error>
 #include <vector>
 
 #include <reproc/reproc.h>
+
+#include <ghc/filesystem.hpp>
 
 #include "fs_encoding.hpp"
 
@@ -280,6 +283,7 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
     pr.exited = true;
     pr.exit_code = w;
     reg_->mark_exited(tid, w, clock_->now_ms());
+    maybe_prune_log(tid);
     Json o = Json::object();
     o["tid"] = tid;
     o["status"] = "exited";
@@ -387,6 +391,7 @@ FsResult TerminalManager::poll(const Json& args, Json* out) {
         p.exited = true;
         p.exit_code = code;
         reg_->mark_exited(tid, code, clock_->now_ms());
+        maybe_prune_log(tid);
       }
     } else if (p.h) {
       int w = reproc_wait(p.h, 0);  // 非阻塞检查
@@ -394,6 +399,7 @@ FsResult TerminalManager::poll(const Json& args, Json* out) {
         p.exited = true;
         p.exit_code = w;
         reg_->mark_exited(tid, w, clock_->now_ms());
+        maybe_prune_log(tid);
       }
     }
   }
@@ -596,6 +602,25 @@ FsResult TerminalManager::grid(const Json& args, Json* out) {
   o["exitCode"] = p.exit_code;
   if (out) *out = o;
   return FsResult::success(o);
+}
+
+// A foreground MODEL command that finished quickly is noise, not a record. Its
+// transcript is deleted on exit so the terminal list stays meaningful ("只需要
+// 记录标记了的和运行时长非常长的"). Kept: user terminals, background terminals,
+// labelled (marked) ones, and anything that ran at least a minute.
+void TerminalManager::maybe_prune_log(const std::string& tid) {
+  if (!reg_) return;
+  const TermEntry* e = reg_->find(tid);
+  if (!e || e->log_path.empty()) return;
+  bool marked = e->kind == TermKind::kUser || e->kind == TermKind::kModelBg ||
+                !e->label.empty();
+  if (marked) return;
+  const int64_t kKeepMs = 60 * 1000;
+  int64_t dur = e->ended_at > e->started_at ? e->ended_at - e->started_at : 0;
+  if (dur >= kKeepMs) return;
+  std::error_code ec;
+  ghc::filesystem::remove(e->log_path, ec);
+  reg_->detach_log(tid);
 }
 
 }  // namespace fs

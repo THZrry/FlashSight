@@ -877,22 +877,25 @@ html, body {
    specificity (a min-width query plus a base collapse rule did exactly that). */
 .projects { container-type: inline-size; }
 
-.proj-right .proj-sessions {
-  display: flex;
-  max-height: 300px;
-  overflow-y: auto;
-}
+.proj-right .proj-sessions { display: flex; }
 
 @container (max-width: 699px) {
+  /* STACKED layout: the list is EXPANDED and shows every session - no inner
+     scroll. The header collapses the whole block instead ("上下两栏保持展开并允许
+     整体折叠"). */
   .proj-right:not(.open) .proj-sessions { display: none; }
   .proj-right:not(.open) { min-height: 0; }
-  .proj-right.open { min-height: 150px; }
+  .proj-right.open { min-height: 0; }
+  .proj-right .proj-sessions { max-height: none; overflow: visible; }
   /* in the narrow layout the header IS the control, so keep it clickable */
   .proj-right-head { cursor: pointer; }
   .proj-right-head:hover { background: var(--hover); color: var(--text); }
 }
 
 @container (min-width: 700px) {
+  /* SIDE-BY-SIDE layout: a fixed maximum height with its own scroll, so a
+     project with 40 sessions does not push the card into a wall of rows. */
+  .proj-right .proj-sessions { max-height: 360px; overflow-y: auto; }
   /* the list is always shown, so the header is a label, not a control */
   .proj-right .prh-toggle { display: none; }
   .proj-right-head { cursor: default; }
