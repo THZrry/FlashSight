@@ -66,9 +66,19 @@ class TerminalManager {
   // TerminalManager (the unit test) then called into a destroyed object.
   void set_output_sink(OutputSink fn) { output_sink_ = std::move(fn); }
 
+  // Where this terminal's transcript lives. Called RIGHT AFTER the registry
+  // entry is created and BEFORE the child starts, so a FOREGROUND command's
+  // output is logged too: the path used to be assigned only after spawn()
+  // returned, by which time the whole run had already been drained - that is why
+  // model `terminal_exec` runs left hundreds of records with no log file.
+  typedef std::function<std::string(const std::string& sid,
+                                    const std::string& tid)> LogPathFn;
+  void set_log_path_fn(LogPathFn fn) { log_path_fn_ = std::move(fn); }
+
  private:
   struct Proc;
   OutputSink output_sink_;
+  LogPathFn log_path_fn_;
   TerminalRegistry* reg_;
   const Clock* clock_;
   std::map<std::string, std::unique_ptr<Proc> > procs_;

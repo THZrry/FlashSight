@@ -233,6 +233,19 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
                       : (background ? TermKind::kModelBg : TermKind::kModelFg);
   TermEntry e = reg_->create(sid, kind, sh.name, cwd, encoding, wake_on_exit,
                              clock_->now_ms(), label);
+  // Bind the transcript BEFORE the child starts: a foreground command's whole
+  // output is drained inside this call, and the sink can only log to a path it
+  // knows. (Assigning it afterwards left every model `terminal_exec` run with a
+  // record but no log file - the "227 records, one log" session.)
+  if (log_path_fn_) {
+    std::string lp = log_path_fn_(sid, e.tid);
+    if (!lp.empty()) {
+      if (TermEntry* saved = reg_->find(e.tid)) {
+        saved->log_path = lp;
+        saved->log_attached = true;
+      }
+    }
+  }
 
   std::unique_ptr<Proc> p(new Proc());
   p->h = h;

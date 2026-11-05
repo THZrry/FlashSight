@@ -132,10 +132,14 @@ struct ToolBlock {
 };
 H tool_block(const ToolBlock& b, EventFn on_toggle,
              EventFn on_open_subagent = nullptr);
-// tool_block with a bounded memoisation keyed by (key, rev, expanded). The
-// caller MUST keep `b.rev` current for every mutation.
+// tool_block with a bounded memoisation keyed by (key, rev, sizes, expanded,
+// `gen`). The caller MUST keep `b.rev` current for every mutation, and MUST pass
+// a `gen` token that changes whenever the surrounding structure can remove and
+// re-add these rows (e.g. the work fold opening/closing). Reusing a VNode whose
+// element was exit-animated away leaves the diff convinced it is still attached:
+// the fold then opens exactly once and every later toggle renders nothing.
 H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
-                    EventFn on_open_subagent = nullptr);
+                    EventFn on_open_subagent, const std::string& gen);
 
 struct ChatMsg {
   std::string role;      // "user" | "assistant" | "system"
@@ -170,6 +174,11 @@ struct ChatMsg {
   // had just collapsed on the next repaint; after a click that decision wins
   // until the turn ends.
   bool work_touched = false;
+  // Bumped on every fold TRANSITION (open→closed or closed→open). The tool rows
+  // are memoised; a cached row may not be reused after the fold was closed,
+  // because closing removes the row elements and a reused VNode would make the
+  // diff believe they were still attached ("工作过程只能点开一次").
+  uint64_t work_seq = 0;
   // When the turn ended and how long it took (ms since epoch; 0 = unknown).
   int64_t started_at = 0;
   int64_t ended_at = 0;

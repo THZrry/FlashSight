@@ -1268,6 +1268,21 @@ bool AgentLoop::should_auto_continue(std::string* why) {
   if (!opts_.context.auto_mode) return false;
   if (!runtime_state) return false;
   RuntimeState st = runtime_state();
+  // The CHECKLIST outranks the plan when one exists: a plan left over from a
+  // different approach kept auto mode spinning ("模型输出当前没有新的指令，到此
+  // 结束" five times in a row). A checklist that is present and complete means
+  // the turn is done; continuing then is the model's call, not the loop's.
+  if (st.todos.is_array() && !st.todos.empty()) {
+    int open_todos = 0;
+    for (auto& t : st.todos) {
+      if (t.is_object() && !jsonutil::get<bool>(t, "done", false)) ++open_todos;
+    }
+    if (open_todos > 0) {
+      if (why) *why = std::to_string(open_todos) + " unfinished checklist item(s)";
+      return true;
+    }
+    return false;
+  }
   int open_plan = 0;
   if (st.plan.is_object() && st.plan.contains("steps") && st.plan["steps"].is_array()) {
     for (auto& s : st.plan["steps"]) {
@@ -1278,16 +1293,6 @@ bool AgentLoop::should_auto_continue(std::string* why) {
   }
   if (open_plan > 0) {
     if (why) *why = "plan has " + std::to_string(open_plan) + " open step(s)";
-    return true;
-  }
-  int open_todos = 0;
-  if (st.todos.is_array()) {
-    for (auto& t : st.todos) {
-      if (t.is_object() && !jsonutil::get<bool>(t, "done", false)) ++open_todos;
-    }
-  }
-  if (open_todos > 0) {
-    if (why) *why = std::to_string(open_todos) + " unfinished checklist item(s)";
     return true;
   }
   return false;
@@ -1353,23 +1358,32 @@ void AgentLoop::maybe_persist_live() {
 // addon2 任务健壮性：打断后续接
 FsResult AgentLoop::continue_task(const std::string& guidance) {
   if (!saved_valid_) {
+    if (guidance.empty()) {
+      // Nothing saved and nothing typed: there is nothing to continue. The UI's
+      // 继续 button sends an empty guidance on purpose - it used to reach send("")
+      // and look dead.
+      return FsResult::error(ErrCode::kInvalidArg, "nothing to continue");
+    }
     return send(guidance);
   }
-  if (state_ == LoopState::kWaiting) {
-    state_ = LoopState::kPlanning;
-  }
   Json msgs = saved_messages_;
-  Json g = Json::object();
-  g["role"] = "user";
-  g["content"] = guidance;
-  msgs.push_back(g);
-  last_user_text_ = guidance;
+  if (!guidance.empty()) {
+    // Guidance (the user's own words) becomes the next user message; an EMPTY
+    // guidance continues the SAME task without putting an empty question in
+    // front of the model.
+    Json g = Json::object();
+    g["role"] = "user";
+    g["content"] = guidance;
+    msgs.push_back(g);
+    last_user_text_ = guidance;
+  }
   turn_started_ms_ = WallClock().now_ms();
   saved_valid_ = false;
   // The turn is running again: leaving these set would keep loop_state()
   // reporting "suspended" for a task that is visibly working.
   parked_ = false;
   suspend_requested_ = false;
+  abort_requested_ = false;
   state_ = LoopState::kPlanning;
   emit("loop.resumed", Json{{"sid", opts_.sid}, {"guidance", guidance}});
   return run_loop(msgs, opts_.model, active_tools());

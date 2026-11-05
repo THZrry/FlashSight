@@ -574,6 +574,19 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     std::string task = jsonutil::get<std::string>(args, "task", "");
     if (task.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty task");
     int id = todos_.add(owner, task);
+    // A checklist REPLACES the plan: they describe the same work, and keeping
+    // both is how auto mode spun five empty rounds on a plan nobody was
+    // following ("清单空了还继续"). The checklist is now the only driver.
+    if (deps_.plan_get && deps_.plan_update) {
+      Json plan = deps_.plan_get(owner);
+      bool has_steps = plan.is_object() && plan.contains("steps") &&
+                       plan["steps"].is_array() && !plan["steps"].empty();
+      if (has_steps) {
+        deps_.plan_update(owner, Json{{"goal", ""}, {"steps", Json::array()}});
+        emit("plan.update", Json{{"sid", owner},
+                                 {"plan", Json{{"goal", ""}, {"steps", Json::array()}}}});
+      }
+    }
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"id", id}, {"items", todos_.to_json(owner)}});
   }

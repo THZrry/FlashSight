@@ -416,6 +416,41 @@ FS_TEST(steering_queue_ops) {
 #include "tools/ask_tool.hpp"
 
 
+// 继续 (empty guidance) re-runs the SAVED transcript without inserting an empty
+// user message. The UI's 继续 button sends an empty guidance on purpose; the old
+// code appended "" as a user turn, which made the button look dead.
+FS_TEST(loop_continue_with_empty_guidance) {
+  AgentLoop::Options opts;
+  opts.sid = "s_cont";
+  AgentLoop loop(std::move(opts));
+  int calls = 0;
+  bool saw_empty_user = false;
+  loop.call_model = [&calls, &saw_empty_user](
+                        const ModelCallRequest& req, ModelCallResult* out,
+                        const std::function<void(const std::string&)>&) -> FsResult {
+    ++calls;
+    for (size_t i = 0; i < req.messages.size(); ++i) {
+      if (jsonutil::get<std::string>(req.messages[i], "role", "") == "user" &&
+          jsonutil::get<std::string>(req.messages[i], "content", "").empty()) {
+        saw_empty_user = true;
+      }
+    }
+    if (calls == 1) {
+      out->error = "provider blew up";
+      return FsResult::success();
+    }
+    out->text = "recovered";
+    return FsResult::success();
+  };
+  loop.send("go");
+  EXPECT_EQ(std::string(loop_state_str(loop.state())), std::string("turnDone"));
+  EXPECT_TRUE(loop.continue_task("").ok());
+  EXPECT_EQ(calls, 2);
+  EXPECT_FALSE(saw_empty_user);
+  EXPECT_TRUE(std::string(loop_state_str(loop.state())) == std::string("turnDone"));
+}
+
+
 // edit_file 的 expect 校验要跨换行风格：CRLF 文件 + 模型写的 \n 不该被判为不符
 // （"expected text does not match"）。写入默认改成 LF，避免这类兼容问题。
 FS_TEST(edit_file_matches_expect_across_line_endings) {

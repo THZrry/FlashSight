@@ -41,6 +41,22 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
                                         const std::string& text) {
     append_terminal_log(tid, text);
   });
+  // Where each terminal's transcript lives, resolved AT CREATE TIME - a
+  // foreground command drains all of its output before spawn() returns, so a
+  // path assigned afterwards never sees a byte.
+  terminal_mgr_->set_log_path_fn([this](const std::string& sid,
+                                        const std::string& tid) -> std::string {
+    try {
+      std::string path = sessions_->make_store(sid).terminal_log_path(sid, tid).string();
+      if (!path.empty()) {
+        std::lock_guard<std::mutex> lk(term_log_mu_);
+        term_log_paths_[tid] = path;
+      }
+      return path;
+    } catch (...) {
+      return std::string();
+    }
+  });
   deny_list_.reset(new DenyList());
   plans_.reset(new PlanStore());
   workflows_.reset(new WorkflowStore(clock_));
@@ -1932,9 +1948,24 @@ void FsApi::append_terminal_log(const std::string& tid, const std::string& text)
   {
     std::lock_guard<std::mutex> lk(term_log_mu_);
     std::map<std::string, std::string>::const_iterator it = term_log_paths_.find(tid);
-    if (it == term_log_paths_.end()) return;
-    path = it->second;
+    if (it != term_log_paths_.end()) path = it->second;
+    if (!path.empty()) {
+      // fall through to the append below with the path we found
+    }
   }
+  if (path.empty() && terminals_) {
+    // The manager binds the path at CREATE time now (before a foreground
+    // command's output is drained), so the registry is the other half of the
+    // lookup. Keep the registry call OUTSIDE term_log_mu_: the manager calls the
+    // sink while holding its own mutex, and nested locks are how deadlocks start.
+    const TermEntry* e = terminals_->find(tid);
+    if (e && !e->log_path.empty()) {
+      path = e->log_path;
+      std::lock_guard<std::mutex> lk(term_log_mu_);
+      term_log_paths_[tid] = path;
+    }
+  }
+  if (path.empty()) return;
   try {
     // 4 MB per file, then rotate. Never drop: the chain keeps everything.
     append_with_rotate(path, text, 4u * 1024 * 1024);
@@ -2045,7 +2076,28 @@ FsResult FsApi::terminal_list(const std::string& sid) {
   } catch (...) {
   }
   Json arr = Json::array();
-  for (auto& e : terminals_->list_for_session(sid)) arr.push_back(e.to_json());
+  // A record is only LISTED when it can be opened. The WhaleUI project ended up
+  // with 227 saved records and ONE log file: every model `terminal_exec` wrote a
+  // record but no transcript, so the sidebar showed a couple of hundred "terminals"
+  // that were empty shells - and clicking one looked like a crash for no reason.
+  // Records with a live process or a readable log are real; the rest are noise.
+  std::vector<Json> real;
+  for (auto& e : terminals_->list_for_session(sid)) {
+    std::error_code lec;
+    bool live = e.status == TermStatus::kRunning;
+    bool has_log = !e.log_path.empty() &&
+                   ghc::filesystem::is_regular_file(e.log_path, lec);
+    if (!live && !has_log) continue;
+    Json j = e.to_json();
+    j["logExists"] = has_log;
+    real.push_back(j);
+  }
+  // Newest first, bounded: a long session accumulates one record per command.
+  std::sort(real.begin(), real.end(), [](const Json& a, const Json& b) {
+    return jsonutil::get_int(a, "startedAt", 0) > jsonutil::get_int(b, "startedAt", 0);
+  });
+  const size_t kMaxListed = 50;
+  for (size_t i = 0; i < real.size() && i < kMaxListed; ++i) arr.push_back(real[i]);
   return FsResult::success(arr);
 }
 FsResult FsApi::terminal_show(const std::string& tid) {

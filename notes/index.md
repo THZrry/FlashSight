@@ -1173,3 +1173,29 @@ The process of project: P0 环境搭建
   - **测试**：423 用例 3946 断言全过；web / webview 双变体编译通过。新增
     `uiapp_tool_rows_are_memoised`（未变行返回同一 VNode、变了重建）、
     `edit_file_matches_expect_across_line_endings`（CRLF 文件 + \n expect 能改，且默认写成 LF）。
+
+<101>(SOLVED): 工作过程第二次点不开 / 继续按钮失效（缓存 VNode 复用已销毁的子树）+ 假终端 / 空转 / 首字等待 / 清单与规划。
+  - **工作过程只能点开一次**：`tool_block_cached` 记忆化的行在收起时，退场动画会把 DOM 节点从页面移除，而缓存仍持有
+    那些 VNode —— diff 以为它们还挂在树上。第二次展开时 patch 的目标已经不在文档里，事件与可见性都失效。修复：新增
+    `ChatMsg::work_seq` 作"折叠代"，收起/展开以及 `turn.done`/`loop.interrupted` 都递增；缓存键带代，外层行节点也
+    key 成 `"tb:<gen>:<key>"`，旧代的节点不再被复用。**对已移除节点做 patch/绑定在适配器里是未定义行为，这也是闪退的
+    候选机制**（闪退本身没复现，这次一并消除该来源；原生版仍默认写资源日志，下次能直接抓现场）。
+  - **"任务出错"里的继续点不动**：`continue_task("")` 之前会追加一条空 user 消息、或要求 loop 处于 parked。现在空指令
+    直接接着已保存的 transcript 继续（不插空消息），并清掉中止/挂起标志；什么都没保存时才报 "nothing to continue"。
+  - **任务规划与清单重复**：新增 todo 时宿主清空 plan（`plan_get`/`plan_update` 写空 + 广播 `plan.update` 空）；界面只
+    在没有清单时显示规划浮窗，输入框只留一个控件（有清单显示"清单"，否则"规划"）。完成全部勾选后清单本身也从宿主删掉。
+  - **侧栏/清单不响应式**：切标签页后补一次 `load_side_tab(active_side)`（之前只重载会话，侧栏停在旧数据）；
+    `mark_sessions_dirty()` 让会话行按后端 `running` 立刻重读；`load_sessions` 回包**按 pid 定位项目**（项目按活跃度
+    重排，用旧下标写回会把 A 的会话行写到 B 上）。
+  - **自动轮 5 次空转**：`should_auto_continue` 现在清单优先于规划——有未完成项才继续，全完成就停；清单为空时只有模型
+    显式要求继续才继续。状态提示跟着循环状态实时刷新。
+  - **首字延时像卡死**：发送时立刻插入一条 streaming 占位消息，正文渲染 `.turn-waiting`（spinner + "正在请求模型…"），
+    不再等第一个 token 才有反馈；文案入 i18n 表。
+  - **WhaleUI 的 195 个假终端**：227 条记录里只有 1 个日志文件。前台命令的输出在 `spawn` 之后立刻被 drain，而日志路径
+    是稍后才绑定的，那段输出没有落盘。现在 `TerminalManager::set_log_path_fn` 在 `create` 时就绑定（子进程启动前），
+    `append_terminal_log` 在映射里找不到时回查注册表；`terminal_list` 只列活着或日志确实存在的记录（带 `logExists`），
+    最多 50 条、新的在前。点进去不会再是空文件。
+  - **edit_file 的 "expected text does not match"**：`expect` 两侧去 `\r` 已在 <100> 做了；这批把 schema 的 `required`
+    改成 `["newText"]`（`start` 可选，缺省时按 `expect` 行数推导），模型不必再退回不安全的 `file_regex`。
+  - **测试**：424 用例 3957 断言全过；web / webview 双变体编译通过。新增 `loop_continue_with_empty_guidance`（出错后
+    空指令继续、不插空 user 消息）、更新 `uiapp_tool_rows_are_memoised`（缓存带折叠代）等 3 个受占位消息/缓存影响的用例。

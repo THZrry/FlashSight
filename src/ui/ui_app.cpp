@@ -1217,6 +1217,10 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   (void)had_view;
   (void)loaded;
   load_session(sid);
+  // The side panel was restored from the stashed view, which is as old as the
+  // last visit. Re-read whatever it shows: "切标签页还是旧数据" was the restored
+  // usage/ops/files/git panel never asking the backend again.
+  if (!st_.side_collapsed && !st_.active_side.empty()) load_side_tab(st_.active_side);
 }
 
 void UiApp::open_session(const std::string& sid, const std::string& title) {
@@ -3312,6 +3316,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       // now agree. One click reopens it.
       m.back().work_open = false;
       m.back().work_touched = false;
+      m.back().work_seq = next_msg_rev_++;  // fold transition (see work_seq)
       // Prefer the backend's own start/end: it knows when the request went out,
       // while the UI only sees the first delta. Falling back to local times
       // keeps the counter correct if an older backend sends no timestamps.
@@ -3824,6 +3829,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       // does, so the error line and the partial answer are what remain visible.
       m.work_open = false;
       m.work_touched = false;
+      m.work_seq = next_msg_rev_++;  // fold transition (see work_seq)
       if (m.ended_at <= 0) m.ended_at = now_ms();
       if (m.started_at <= 0) m.started_at = m.ended_at;
       if (!st_.interrupt_reason.empty()) m.error = st_.interrupt_reason;
@@ -5697,6 +5703,9 @@ VNodePtr UiApp::build_session() {
             bool shown = m.work_open || (m.streaming && !m.work_touched);
             m.work_open = !shown;
             m.work_touched = true;
+            // New fold generation: rows cached for the old state must not be
+            // reused (see ChatMsg::work_seq).
+            m.work_seq = next_msg_rev_++;
             m.rev = next_msg_rev_++;
           }
         });
@@ -10893,6 +10902,25 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   Json args = Json{{"sid", sid}, {"text", text}, {"attachments", attachments}};
   if (!st_.model.empty()) args["model"] = st_.model;
   if (!st_.thinking.empty()) args["thinking"] = st_.thinking;
+  // SHOW THE WAIT IMMEDIATELY. The first token can take seconds (a reasoning
+  // model, a cold endpoint); until then the assistant message did not exist, so
+  // the screen looked exactly like a dead app. An empty streaming message renders
+  // a "正在请求模型…" row (see chat_message), replaced the moment text or a tool
+  // arrives.
+  update([&](AppState& s) {
+    if (!s.messages.empty() && s.messages.back().role == "assistant" &&
+        s.messages.back().streaming) {
+      return;
+    }
+    comp::ChatMsg a;
+    a.role = "assistant";
+    a.streaming = true;
+    a.work_open = true;
+    a.rev = next_msg_rev_++;
+    a.started_at = now_ms();
+    a.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+    s.messages.push_back(a);
+  });
   call_async("session.send", args,
              [this](const BackendResult& r) {
     if (!r.ok) toast(tr("发送失败：") + r.message);

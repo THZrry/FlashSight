@@ -1708,9 +1708,13 @@ FS_TEST(uiapp_turns_reply_keeps_live_messages) {
   ASSERT_TRUE(app.state().messages.size() == 1);
   app.update([](AppState& s) { s.session_input = "new q"; });
   app.send_message();
-  // The optimistic message is on screen now...
-  ASSERT_TRUE(app.state().messages.size() == 2);
-  EXPECT_EQ(app.state().messages.back().text, std::string("new q"));
+  // The optimistic user message is on screen now, followed by the live
+  // "waiting for the model" placeholder (nothing streams until the first token).
+  ASSERT_TRUE(app.state().messages.size() == 3);
+  EXPECT_EQ(app.state().messages[1].text, std::string("new q"));
+  EXPECT_EQ(app.state().messages[2].role, std::string("assistant"));
+  EXPECT_TRUE(app.state().messages[2].streaming);
+  EXPECT_TRUE(app.state().messages[2].text.empty());
   // ...and a stale reload must not erase it.
   app.show("home");
   app.show("sess_a");
@@ -3253,10 +3257,13 @@ FS_TEST(uiapp_last_user_message_is_editable) {
   EXPECT_EQ(jsonutil::get<std::string>(backend.args_for("session.send"), "text", ""),
             std::string("second q"));
   EXPECT_TRUE(app.state().edit_turn_id.empty());
-  ASSERT_TRUE(app.state().messages.size() == 3);
+  // user turn + the live "waiting for the model" placeholder (see dispatch_message)
+  ASSERT_TRUE(app.state().messages.size() == 4);
   EXPECT_EQ(app.state().messages[1].text, std::string("first a"));
   EXPECT_EQ(app.state().messages[2].role, std::string("user"));
   EXPECT_EQ(app.state().messages[2].text, std::string("second q"));
+  EXPECT_EQ(app.state().messages[3].role, std::string("assistant"));
+  EXPECT_TRUE(app.state().messages[3].streaming);
 }
 
 // The command menu renders whatever the backend listed - title, description and
@@ -4838,12 +4845,17 @@ FS_TEST(uiapp_tool_rows_are_memoised) {
   tb.name = "read_file";
   tb.summary = "a.cpp";
   tb.detail = "{\"ok\":true}";
-  H a = comp::tool_block_cached(tb, nullptr, nullptr);
-  H b = comp::tool_block_cached(tb, nullptr, nullptr);
+  H a = comp::tool_block_cached(tb, nullptr, nullptr, "g1");
+  H b = comp::tool_block_cached(tb, nullptr, nullptr, "g1");
   EXPECT_TRUE(a.get() == b.get());  // unchanged row -> same node
   tb.detail = "{\"ok\":false}";
   tb.ok = false;
   tb.rev = 7;
-  H c = comp::tool_block_cached(tb, nullptr, nullptr);
+  H c = comp::tool_block_cached(tb, nullptr, nullptr, "g1");
   EXPECT_TRUE(c.get() != a.get());  // changed row -> rebuilt
+  // A NEW fold generation must not reuse rows: closing the fold removes their
+  // elements, and a reused VNode made the diff think they were still attached
+  // ("工作过程只能点开一次").
+  H d = comp::tool_block_cached(tb, nullptr, nullptr, "g2");
+  EXPECT_TRUE(d.get() != c.get());
 }

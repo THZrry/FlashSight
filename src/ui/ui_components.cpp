@@ -768,7 +768,11 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         // expanded body is scrolled to its end, which needs a stable handle.
         comp::ToolBlock tb = m.tools[i];
         if (tb.key.empty()) tb.key = std::to_string(m.uid) + ":" + itos(static_cast<int>(i));
-        inner.add(tool_block_cached(tb, toggle, on_open_subagent));
+        // The fold generation: a cached row is only valid while this fold has
+        // stayed in one piece (see ChatMsg::work_seq).
+        std::string gen = std::to_string(m.uid) + ":" + std::to_string(m.work_seq) +
+                          (work_open ? ":o" : ":c");
+        inner.add(tool_block_cached(tb, toggle, on_open_subagent, gen));
       }
       // Anything left (a turn that narrated but called no tool).
       for (; interim_at < m.interim.size(); ++interim_at) {
@@ -785,6 +789,16 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       work.add(inner);
     }
     wrap.add(work);
+  }
+  // A turn that has not produced anything yet: say so. Waiting for the first
+  // token (a reasoning model, a cold endpoint) used to look exactly like a dead
+  // app - the assistant message existed but was empty.
+  if (m.streaming && m.text.empty() && m.tools.empty() && m.thinking.empty() &&
+      m.interim.empty() && m.error.empty()) {
+    H waiting = el("div", "turn-waiting");
+    waiting.add(spinner());
+    waiting.add(el("span", "tw-text").text(tr("正在请求模型…")));
+    wrap.add(waiting);
   }
   // assistant: article-like, no bubble, no name
   H body = el("div", "article");
@@ -955,14 +969,16 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
 //
 // Bounded like the message cache: a long-lived window must not grow it forever.
 H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
-                    EventFn on_open_subagent) {
+                    EventFn on_open_subagent, const std::string& gen) {
   static std::map<std::string, H> cache;
   static std::deque<std::string> order;
   const size_t kMaxCachedBlocks = 4000;
-  // `rev` is authoritative for live rows; stored rows carry 0, so the content
-  // SIZES are folded in as well (two different rows with the same key and rev
-  // must not hand back each other's node - the tests seed uid 0 everywhere).
-  std::string key = b.key + "#" + std::to_string(b.rev) + "#" +
+  // `gen` is part of the identity: a cached VNode may only be reused while the
+  // surrounding rows are CONTINUOUSLY attached. When the work fold closes, the
+  // rows are exit-animated and removed; handing the same VNode back on reopen
+  // made the diff think it was still in the tree, so the fold opened once and
+  // never again ("工作过程只能点开一次").
+  std::string key = gen + "#" + b.key + "#" + std::to_string(b.rev) + "#" +
                     std::to_string(b.name.size()) + ":" +
                     std::to_string(b.summary.size()) + ":" +
                     std::to_string(b.detail.size()) + ":" +
@@ -976,6 +992,9 @@ H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
   // A row is addressed by a stable key; without one the cache would collide
   // (fall back to an uncached build).
   if (b.key.empty()) return node;
+  // Key the OUTER node too: keyed matching is what makes handing the same
+  // VNode back safe (the diff pairs it with itself and skips the subtree).
+  node.key("tb:" + gen + ":" + b.key);
   cache.insert(std::make_pair(key, node));
   order.push_back(key);
   while (order.size() > kMaxCachedBlocks) {

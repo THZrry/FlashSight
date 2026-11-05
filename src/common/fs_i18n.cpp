@@ -32,6 +32,7 @@ const Entry kEnTable[] = {
     {"项目", "Projects"},
     {"用量统计", "Usage"},
     {"会话", "Session"},
+    {"正在请求模型…", "Waiting for the model…"},
     {"开始新的对话。输入消息后 Enter 发送。",
      "Start a new conversation. Type a message and press Enter to send."},
     {"打开文件夹", "Open folder"},

@@ -3462,6 +3462,14 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
   animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* The turn has been sent but nothing has arrived yet. Without this the answer
+   area was blank while waiting for the first token, which reads as a freeze. */
+.turn-waiting {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 2px 6px;
+  font-size: 12.5px; color: var(--text-faint);
+}
+.turn-waiting .tw-text { color: var(--text-dim); }
 .progress {
   height: 8px; border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--panel); overflow: hidden;
