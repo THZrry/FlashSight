@@ -179,7 +179,7 @@ const char* kGlueJs = R"JS(
 
   var NAMES = ['click', 'input', 'change', 'keydown', 'keyenter', 'submit',
                'dblclick', 'contextmenu', 'scroll', 'mouseenter', 'mouseleave',
-               'blur'];
+               'blur', 'auxclick'];
 
   function eventValue(kind, el, evt) {
     var name = NAMES[kind] || 'click';
@@ -223,9 +223,11 @@ const char* kGlueJs = R"JS(
       // that handles it. A button inside a clickable row (a card, a fold header)
       // runs its own handler and stops the event there; the row never sees the
       // press. This replaced per-control data-no-bubble marks.
-      if (name === 'click' || name === 'dblclick' || name === 'contextmenu') {
+      if (name === 'click' || name === 'dblclick' || name === 'contextmenu' ||
+          name === 'auxclick') {
         evt.stopPropagation();
       }
+      if (name === 'auxclick' && evt.button !== 1) return;
       if (name === 'keyenter') {
         // Enter-to-send is a per-element choice (data-enter-send).
         if (evt.key !== 'Enter') return;
@@ -511,7 +513,7 @@ const char* kGlueJs = R"JS(
         if (el.__fsTabInit) return;
         el.__fsTabInit = 1;
         (function () {
-          var fromEl = null, ghost = null, lastTarget = null;
+          var fromEl = null, ghost = null, lastTarget = null, dropAfter = 0;
           function isTab(t) {
             return t && t.classList &&
                    (t.classList.contains('tab') || t.classList.contains('ptab'));
@@ -544,6 +546,10 @@ const char* kGlueJs = R"JS(
               if (t) t.classList.add('drop-target');
               lastTarget = t;
             }
+            if (lastTarget) {
+              var tr = lastTarget.getBoundingClientRect();
+              dropAfter = ev.clientX > tr.left + tr.width / 2 ? 1 : 0;
+            }
           });
           function finish() {
             if (ghost) { ghost.remove(); ghost = null; }
@@ -552,10 +558,12 @@ const char* kGlueJs = R"JS(
                 el.__fsTabCb) {
               var f = fromEl.getAttribute('data-key');
               var t = lastTarget.getAttribute('data-key');
-              if (f && t) post('fs_ui_tab_drag', [el.__fsTabCb, f + '\t' + t]);
+              if (f && t) {
+                post('fs_ui_tab_drag', [el.__fsTabCb, f + '\t' + t + '\t' + dropAfter]);
+              }
             }
             if (fromEl) fromEl.classList.remove('dragging');
-            fromEl = null; lastTarget = null;
+            fromEl = null; lastTarget = null; dropAfter = 0;
           }
           el.addEventListener('mouseup', finish);
           document.addEventListener('mouseup', finish);

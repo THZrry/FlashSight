@@ -112,7 +112,7 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   if (store[kind]) el.removeEventListener(store[kind][0], store[kind][1], false);
   var names = ['click', 'input', 'change', 'keydown', 'keyenter', 'submit',
                'dblclick', 'contextmenu', 'scroll', 'mouseenter', 'mouseleave',
-               'blur'];
+               'blur', 'auxclick'];
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
@@ -121,9 +121,12 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
     // its own handler and stops the event there; the row never sees the press.
     // This is the general contract - per-control data-no-bubble marks were a
     // patch that every new nested control had to remember.
-    if (name === 'click' || name === 'dblclick' || name === 'contextmenu') {
+    if (name === 'click' || name === 'dblclick' || name === 'contextmenu' ||
+        name === 'auxclick') {
       evt.stopPropagation();
     }
+    // Middle click only (button 1); Chromium fires auxclick for every button.
+    if (name === 'auxclick' && evt.button !== 1) return;
     // Enter behaviour is a PER-ELEMENT choice, not a global constant: the
     // composer's "Enter 行为" setting says whether plain Enter sends or only
     // Ctrl/Cmd+Enter does. Without reading it here the setting could never take
@@ -450,7 +453,14 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
   function up(ev) {
     if (!fromEl) return;
     var from = fromEl.getAttribute('data-key');
-    var to = started && lastTarget ? lastTarget.getAttribute('data-key') : null;
+    // Capture the drop facts BEFORE cleanup(): cleanup clears lastTarget.
+    var targetEl = started ? lastTarget : null;
+    var to = targetEl ? targetEl.getAttribute('data-key') : null;
+    var after = 0;
+    if (targetEl) {
+      var tr = targetEl.getBoundingClientRect();
+      after = ev.clientX > tr.left + tr.width / 2 ? 1 : 0;
+    }
     var wasDrag = started;
     cleanup();
     if (!wasDrag) return;
@@ -459,8 +469,11 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
     document.addEventListener('click', swallow, true);
     setTimeout(function () { document.removeEventListener('click', swallow, true); }, 0);
     if (!from || !to || from === to) return;
+    // WHICH SIDE of the target the pointer was on decides before/after. Without
+    // it, dropping onto the adjacent tab computed the same index back and the
+    // drag looked like it did nothing.
     if (strip.__fsTabDragCb && Module._fs_ui_tab_drag) {
-      var payload = from + '\t' + to;
+      var payload = from + '\t' + to + '\t' + after;
       var len = Module.lengthBytesUTF8(payload) + 1;
       var ptr = Module._malloc(len);
       Module.stringToUTF8(payload, ptr, len);

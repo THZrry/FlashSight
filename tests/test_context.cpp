@@ -47,8 +47,9 @@ ContextInput make_ctx(ContextLang lang) {
 FS_TEST(context_planning_and_workflow_guidance_present) {
   ContextInput in = make_ctx(ContextLang::kEn);
   std::string sys = AgentContext::build_system(in);
-  // Planning advice: when to use it, how to keep it true.
-  EXPECT_TRUE(sys.find("Planning") != std::string::npos);
+  // Planning advice: when to use it, how to keep it true. The section carries a
+  // stable marker the runtime nudge can refer to ("Remember the [RULES] above").
+  EXPECT_TRUE(sys.find("[RULES]") != std::string::npos);
   EXPECT_TRUE(sys.find("todo_add") != std::string::npos);
   EXPECT_TRUE(sys.find("3+ steps") != std::string::npos);
   // Workflow advice: when NOT to use it (the important half).

@@ -39,6 +39,23 @@ bool TodoStore::erase(const std::string& owner, int id) {
 
 void TodoStore::clear(const std::string& owner) { items_.erase(owner); }
 
+void TodoStore::restore(const std::string& owner, const Json& items) {
+  if (!items.is_array()) return;
+  std::vector<TodoItem>& dst = items_[owner];
+  for (size_t i = 0; i < items.size(); ++i) {
+    const Json& e = items[i];
+    if (!e.is_object()) continue;
+    TodoItem t;
+    t.id = static_cast<int>(jsonutil::get_int(e, "id", 0));
+    t.task = jsonutil::get<std::string>(e, "task", "");
+    t.done = jsonutil::get<bool>(e, "done", false);
+    t.done_at = jsonutil::get_int(e, "doneAt", 0);
+    if (t.id <= 0 || t.task.empty()) continue;
+    if (t.id > next_id_[owner]) next_id_[owner] = t.id;
+    dst.push_back(t);
+  }
+}
+
 std::vector<TodoItem> TodoStore::list(const std::string& owner) const {
   auto it = items_.find(owner);
   return it == items_.end() ? std::vector<TodoItem>() : it->second;

@@ -45,6 +45,8 @@ enum class EventKind {
   kMouseEnter = 9,
   kMouseLeave = 10,
   kBlur = 11,
+  // Middle click (auxclick with button 1). Browser-like tab closing.
+  kAuxClick = 12,
 };
 
 const char* event_kind_name(EventKind k);

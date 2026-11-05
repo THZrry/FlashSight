@@ -137,7 +137,7 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
   std::vector<std::string> out;
 
   if (zh(in)) {
-    out.push_back("## 规划：什么时候用、怎么用");
+    out.push_back("## 【准则】任务列表 · 规划 · 工作流");
     out.push_back(
         "- 任何需要 3 步以上、或要改多个文件的任务，先把步骤写进 todo（todo_add），"
         "每完成一项就 todo_check。清单对用户可见，是进度条而不是形式。");
@@ -170,7 +170,7 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
           "互不依赖的可以一次并行派出。");
     }
   } else {
-    out.push_back("## Planning: when and how");
+    out.push_back("## [RULES] task list · plan · workflow");
     out.push_back(
         "- For any task needing 3+ steps or touching several files, put the steps "
         "into todo (todo_add) and tick them off (todo_check) as you go. The list is "
@@ -641,15 +641,12 @@ std::string AgentContext::build_runtime(const ContextInput& in, const RuntimeSta
 
   if (!st.turn_note.empty()) lines.push_back(st.turn_note);
 
-  // A VERY short nudge, every round. Long system prompts drift out of the
-  // model's attention on long contexts ("上下文过长导致的遗忘") and the model stops
-  // using the checklist - which is what makes auto mode end after one round.
-  lines.push_back(zh(in)
-                      ? "记住以上准则：多步任务先用 todo_add 记步骤，完成一项就 todo_check；"
-                        "长任务维护规划文档。"
-                      : "Remember the rules above: list multi-step work with todo_add "
-                        "and tick items off with todo_check; keep the plan document "
-                        "for a long job.");
+  // A VERY short nudge, every round. It REFERS to the rules section in the system
+  // prompt instead of restating it (long contexts make the model forget; a
+  // duplicated summary would drift from the real rules). The SYSTEM: prefix makes
+  // it identifiable as a tool notice, not something the user typed.
+  lines.push_back(zh(in) ? "SYSTEM: 记住上面的【准则】。"
+                         : "SYSTEM: Remember the [RULES] above.");
 
   if (lines.empty()) return std::string();
   return sanitize_utf8(join_lines(lines));

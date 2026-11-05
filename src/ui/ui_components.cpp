@@ -235,6 +235,10 @@ H tab_strip(const std::vector<TabSpec>& tabs, const std::string& active_key,
     tab.attr("data-key", t.key);
     std::string k = t.key;
     tab.on(EventKind::kClick, [on_select, k](const std::string&) { on_select(k); });
+    // Middle click closes (browser convention); the × remains.
+    if (t.closable && on_close) {
+      tab.on(EventKind::kAuxClick, [on_close, k](const std::string&) { on_close(k); });
+    }
     // Right-click a tab: rename / close. The browser's own menu is suppressed
     // globally, so without this a right-click on a tab did nothing at all.
     // The tab key is prepended because one callback serves every tab and the
@@ -298,6 +302,10 @@ H panel_tabs(const std::vector<TabSpec>& tabs, const std::string& active_key,
     tab.attr("data-key", t.key);
     std::string k = t.key;
     tab.on(EventKind::kClick, [on_select, k](const std::string&) { on_select(k); });
+    // Browser-like: middle click closes the tab. The × stays for discoverability.
+    if (t.closable && on_close) {
+      tab.on(EventKind::kAuxClick, [on_close, k](const std::string&) { on_close(k); });
+    }
     tab.add(el("span", "ptab-title").text(t.title));
     if (t.badge >= 0) tab.add(badge(itos(t.badge), "tab-badge"));
     if (t.closable) {

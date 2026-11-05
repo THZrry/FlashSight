@@ -196,9 +196,21 @@ FsResult SessionManager::list_sessions(const std::string& pid) const {
       std::string err = jsonutil::get<std::string>(last, "error", "");
       if (!err.empty()) meta["lastError"] = err;
     }
+    int64_t seen = store.read_seen_ms(sid);
+    if (seen > 0) meta["seenAt"] = seen;
     arr.push_back(meta);
   }
   return FsResult::success(arr);
+}
+
+FsResult SessionManager::mark_seen(const std::string& sid, int64_t ms) const {
+  if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty sid");
+  if (ms <= 0) ms = clock_->now_ms();
+  SessionFileStore store = make_store(sid);
+  if (!store.mark_seen(sid, ms)) {
+    return FsResult::error(ErrCode::kIo, "cannot record seen marker");
+  }
+  return FsResult::success(Json{{"sid", sid}, {"seenAt", ms}});
 }
 
 FsResult SessionManager::close_session(const std::string& sid) {

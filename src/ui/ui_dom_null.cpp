@@ -22,6 +22,7 @@ const char* event_kind_name(EventKind k) {
     case EventKind::kMouseEnter: return "mouseenter";
     case EventKind::kMouseLeave: return "mouseleave";
     case EventKind::kBlur: return "blur";
+    case EventKind::kAuxClick: return "auxclick";
   }  return "?";
 }
 

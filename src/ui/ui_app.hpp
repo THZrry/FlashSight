@@ -1153,7 +1153,7 @@ class UiApp {
   void close_tab(const std::string& id);
   // reorder a tab by dropping it onto another (keys, not indices: the strip is
   // keyed by tab id)
-  void move_tab(const std::string& from, const std::string& to);
+  void move_tab(const std::string& from, const std::string& to, bool after);
   // re-apply the persisted tab order (ui.tabOrder) to the open tabs
   void apply_saved_tab_order();
   // 顶层 "+"：打开"新建"页面（不是标签页）
@@ -1166,7 +1166,7 @@ class UiApp {
   void open_side_tab(const std::string& kind);
   void close_side_tab(const std::string& id);
   // reorder a side panel by dropping it onto another
-  void move_side_tab(const std::string& from, const std::string& to);
+  void move_side_tab(const std::string& from, const std::string& to, bool after);
   // activate the existing tab of `kind`, or create one. Singleton kinds focus;
   // multi kinds (files, git) always add.
   void open_or_focus_side_tab(const std::string& kind);

@@ -395,6 +395,30 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     std::string status = jsonutil::get<std::string>(plan, "status", "");
     return plans2->update(sid, content, status);
   };
+  // The task list lives with the session (todos.json), not only in the host's
+  // memory: reopening a session - or the app - must start from the checklist the
+  // task already had, including finished items.
+  SessionManager* sm_todo = sessions_.get();
+  deps.todo_load = [sm_todo](const std::string& owner) -> Json {
+    if (owner.empty()) return Json::array();
+    SessionFileStore st = sm_todo->make_store(owner);
+    if (!st.exists(owner)) return Json::array();  // subagent owner: not a session
+    std::ifstream in(st.todos_path(owner).string(), std::ios::binary);
+    if (!in) return Json::array();
+    try {
+      Json j = Json::parse(in);
+      return j.is_array() ? j : Json::array();
+    } catch (...) {
+      return Json::array();
+    }
+  };
+  deps.todo_save = [sm_todo](const std::string& owner, const Json& items) {
+    if (owner.empty()) return;
+    SessionFileStore st = sm_todo->make_store(owner);
+    if (!st.exists(owner)) return;  // subagent owner: not a session
+    std::string err;
+    jsonutil::write_atomic(st.todos_path(owner).string(), items, &err);
+  };
   // Crash-safe live snapshot. Stored as runtime.json's `live` field: runtime.json
   // is explicitly "cache, may be deleted", which is exactly the right lifetime for
   // an in-flight turn (it is cleared when the turn lands).
@@ -1071,6 +1095,9 @@ FsResult FsApi::session_list(const std::string& pid) {
 }
 FsResult FsApi::session_delete(const std::string& sid) {
   return sessions_->delete_session(sid);
+}
+FsResult FsApi::session_mark_seen(const std::string& sid, int64_t ms) {
+  return sessions_->mark_seen(sid, ms);
 }
 FsResult FsApi::session_rename(const std::string& sid, const std::string& title) {
   // A rename from the UI is a USER decision: mark it so the automatic title

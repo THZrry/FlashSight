@@ -28,6 +28,9 @@ class TodoStore {
 
   std::vector<TodoItem> list(const std::string& owner) const;
   Json to_json(const std::string& owner) const;
+  // Load a persisted list (session reopen / app restart). Ids are preserved and
+  // next_id advances past them, so a restored item cannot collide with a new one.
+  void restore(const std::string& owner, const Json& items);
   // 未完成数（"只要未完成，自动开启下一轮"判定用）
   int pending_count(const std::string& owner) const;
   // 全部 owner（落库用）

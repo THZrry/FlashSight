@@ -362,6 +362,43 @@ ghc::filesystem::path SessionFileStore::terminal_log_path(const std::string& sid
   return ps_.terminal_log(sid, tid);
 }
 
+bool SessionFileStore::mark_seen(const std::string& sid, int64_t ms) const {
+  if (sid.empty() || ms <= 0) return false;
+  ghc::filesystem::path p = ps_.session_dir(sid) / "seen.at";
+  std::error_code ec;
+  ghc::filesystem::create_directories(p.parent_path(), ec);
+  ghc::filesystem::path tmp = p;
+  tmp += ".tmp";
+  {
+    std::ofstream out(tmp.string(), std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << ms << "\n";
+    out.flush();
+    if (!out) return false;
+  }
+  ghc::filesystem::rename(tmp, p, ec);
+  if (ec) {
+    ghc::filesystem::remove(p, ec);
+    ec.clear();
+    ghc::filesystem::rename(tmp, p, ec);
+  }
+  return !ec;
+}
+
+int64_t SessionFileStore::read_seen_ms(const std::string& sid) const {
+  if (sid.empty()) return 0;
+  std::ifstream in((ps_.session_dir(sid) / "seen.at").string(), std::ios::binary);
+  if (!in) return 0;
+  int64_t ms = 0;
+  in >> ms;
+  if (!in || ms <= 0) return 0;
+  return ms;
+}
+
+ghc::filesystem::path SessionFileStore::todos_path(const std::string& sid) const {
+  return ps_.session_dir(sid) / "todos.json";
+}
+
 std::vector<std::string> SessionFileStore::list_terminal_logs(const std::string& sid) const {
   std::vector<std::string> out;
   ghc::filesystem::path d = ps_.terminals_dir(sid);

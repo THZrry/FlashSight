@@ -319,6 +319,45 @@ FS_TEST(addon2_plan_review) {
   EXPECT_FALSE(ghc::filesystem::exists(ghc::filesystem::path(pg.data["path"].get<std::string>())));
 }
 
+// ---------- 已读标记：失败红点看过之后重启也不回来 ----------
+FS_TEST(addon2_session_seen_survives_restart) {
+  fstest::TempDir td("a2seen");
+  FakeClockA2 clock(1000);
+  FsApi api(ghc::filesystem::path(td.path()), &clock, nullptr);
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj_dir);
+  FsResult pr = api.project_create(proj_dir.string());
+  ASSERT_TRUE(pr.ok());
+  std::string pid = pr.data["pid"].get<std::string>();
+  FsResult sr = api.session_new(pid, proj_dir.string());
+  ASSERT_TRUE(sr.ok());
+  std::string sid = sr.data["sid"].get<std::string>();
+
+  int64_t updated_before = 0;
+  {
+    FsResult r = api.session_list(pid);
+    ASSERT_TRUE(r.ok());
+    for (auto& row : r.data) {
+      if (row["sid"].get<std::string>() == sid) {
+        updated_before = jsonutil::get_int(row, "updatedAt", 0);
+      }
+    }
+  }
+  EXPECT_TRUE(api.session_mark_seen(sid, 424242).ok());
+  FsResult r2 = api.session_list(pid);
+  ASSERT_TRUE(r2.ok());
+  bool found = false;
+  for (auto& row : r2.data) {
+    if (row["sid"].get<std::string>() != sid) continue;
+    found = true;
+    EXPECT_EQ(jsonutil::get_int(row, "seenAt", 0), int64_t(424242));
+    // Writing the marker must NOT touch full.json's mtime: the dot compares that
+    // mtime with seenAt, so bumping it would make the dot reappear immediately.
+    EXPECT_EQ(jsonutil::get_int(row, "updatedAt", 0), updated_before);
+  }
+  EXPECT_TRUE(found);
+}
+
 // ---------- 工作流：定义/启动/图结构/步骤重试跳过 ----------
 FS_TEST(addon2_workflow_backend) {
   FakeClockA2 clock(2000);
@@ -434,6 +473,13 @@ FS_TEST(addon2_todo_tool_layer) {
   FsResult add = host.tools().invoke(ctx, "todo_add", Json{{"task", "write tests"}});
   ASSERT_TRUE(add.ok());
   EXPECT_EQ((int)add.data["items"].size(), 1);
+  // Completing the last item does NOT delete the list: the backend keeps the
+  // task list for the whole task, and the next round starts from it.
+  int id = static_cast<int>(add.data["id"].get<int>());
+  FsResult chk = host.tools().invoke(ctx, "todo_check", Json{{"id", id}});
+  ASSERT_TRUE(chk.ok());
+  EXPECT_EQ((int)chk.data["items"].size(), 1);
+  EXPECT_TRUE(chk.data["items"][0]["done"].get<bool>());
   FsResult lst = host.tools().invoke(ctx, "todo_list", Json::object());
   ASSERT_TRUE(lst.ok());
   EXPECT_EQ((int)lst.data["items"].size(), 1);

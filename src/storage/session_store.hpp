@@ -62,6 +62,16 @@ class SessionFileStore {
   // 列出某会话的终端日志文件（已有日志才列出；缺失不报错）
   std::vector<std::string> list_terminal_logs(const std::string& sid) const;
 
+  // ----- seen.at：该会话最后一次被用户查看的时刻 -----
+  // A tiny side file, NOT a field of full.json: marking a session seen must not
+  // touch full.json's mtime, because the status dot compares that mtime with
+  // this timestamp ("anything newer than when you last looked").
+  bool mark_seen(const std::string& sid, int64_t ms) const;
+  int64_t read_seen_ms(const std::string& sid) const;
+  // The task list (todo) of this session, persisted as its own small file so a
+  // reopen/restart starts from the checklist the task already had.
+  ghc::filesystem::path todos_path(const std::string& sid) const;
+
  private:
   ProjectStore ps_;
   ghc::filesystem::path full_path(const std::string& sid) const {

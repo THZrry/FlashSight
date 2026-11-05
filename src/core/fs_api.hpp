@@ -92,6 +92,9 @@ class FsApi {
   FsResult session_trim_history(const std::string& sid, const std::string& turnId);
   FsResult session_forget(const std::string& sid, const std::string& scope);
   FsResult session_list(const std::string& pid);
+  // Persist "the user has looked at this session" so the failed-turn red dot
+  // stays gone after a restart.
+  FsResult session_mark_seen(const std::string& sid, int64_t ms);
   // 删除会话（连同 patches/terminals）；不可恢复，UI 负责确认
   FsResult session_delete(const std::string& sid);
   // 重命名会话（写 meta.title）

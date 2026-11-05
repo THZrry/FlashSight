@@ -1177,6 +1177,8 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   // the moment you look.
   session_seen_ms_[sid] = wall_ms();
   if (session_seen_ms_.size() > 512) session_seen_ms_.clear();
+  // ...and persist it: the red failed dot must not return after a restart.
+  call_async("session.markSeen", Json{{"sid", sid}, {"ms", session_seen_ms_[sid]}});
   // Re-read the rows' status after a switch: which session is RUNNING is a
   // backend fact, and the snapshot in hand was taken before the switch. Without
   // this, opening another session made the still-running one's indicator look
@@ -1694,6 +1696,15 @@ void UiApp::load_sessions(size_t project_index) {
       row.terminal_count = static_cast<int>(jsonutil::get_int(s, "terminalCount", 0));
       row.auto_round = static_cast<int>(jsonutil::get_int(s, "autoRound", 0));
       if (row.auto_round > 0) row.running = true;  // background work → purple dot
+      // "Seen" is a BACKEND fact now: the red failed dot must stay gone after the
+      // app restarts (it used to live only in this process's map).
+      int64_t seen_at = jsonutil::get_int(s, "seenAt", 0);
+      if (!row.sid.empty() && seen_at > 0) {
+        std::map<std::string, int64_t>::iterator sit = session_seen_ms_.find(row.sid);
+        if (sit == session_seen_ms_.end() || sit->second < seen_at) {
+          session_seen_ms_[row.sid] = seen_at;
+        }
+      }
       if (!row.sid.empty()) rows.push_back(row);
     }
     // Most recently touched first: the list is a history, and the thing you want
@@ -3269,12 +3280,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // A turn that finished while you were looking at it is NOT news: mark the
     // session as seen, or its blue "done" dot would appear on a transcript you
     // just watched finish.
-    if (is_active && !sid.empty()) session_seen_ms_[sid] = wall_ms();
-    // A turn just spent credit: refresh the provider balances (the usage page
-    // shows them, and "how much is left" is the question right after a run).
-    // Throttled inside load_balances so a burst of short turns cannot hammer the
-    // vendor's balance endpoint.
-    load_balances(true);
+    if (is_active && !sid.empty()) {
+      session_seen_ms_[sid] = wall_ms();
+      call_async("session.markSeen", Json{{"sid", sid}, {"ms", session_seen_ms_[sid]}});
+    }
     // The turn is over: the primary button goes back to 发送. Derived from the
     // event, not from a click, so it cannot drift from the backend.
     if (is_active) {
@@ -3745,6 +3754,8 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // looked at (the error line is in the transcript right here).
     if (!st_.active_tab.empty() && st_.active_tab != "home") {
       session_seen_ms_[st_.active_tab] = wall_ms();
+      call_async("session.markSeen",
+                 Json{{"sid", st_.active_tab}, {"ms", session_seen_ms_[st_.active_tab]}});
     }
     // The turn ends mid-stream here too (no turn.done), so the last message has
     // to be closed by hand: it kept its "streaming" flag and the transcript
@@ -3997,9 +4008,17 @@ void UiApp::render() {
     VNodePtr tabstrip = find_by_key(tree_, "top-tabs");
     if (tabstrip && tabstrip->dom.valid()) {
       dom_.bind_tab_drag(tabstrip->dom, [this](const std::string& payload) {
-        size_t tab = payload.find('\t');
-        if (tab == std::string::npos) return;
-        move_tab(payload.substr(0, tab), payload.substr(tab + 1));
+        // "from\tto\tafter" - `after` says which half of the target was under
+        // the pointer (1 = drop after it).
+        size_t a = payload.find('\t');
+        if (a == std::string::npos) return;
+        size_t b = payload.find('\t', a + 1);
+        std::string from = payload.substr(0, a);
+        std::string to = b == std::string::npos ? payload.substr(a + 1)
+                                                : payload.substr(a + 1, b - a - 1);
+        bool after = b != std::string::npos && b + 1 < payload.size() &&
+                     payload[b + 1] == '1';
+        move_tab(from, to, after);
       });
     }
     // Every open model picker: anchor it to its button (flip down when there is
@@ -4078,9 +4097,15 @@ void UiApp::render() {
     VNodePtr sidetabs = find_by_key(tree_, "side-tabs");
     if (sidetabs && sidetabs->dom.valid()) {
       dom_.bind_tab_drag(sidetabs->dom, [this](const std::string& payload) {
-        size_t tab = payload.find('\t');
-        if (tab == std::string::npos) return;
-        move_side_tab(payload.substr(0, tab), payload.substr(tab + 1));
+        size_t a = payload.find('\t');
+        if (a == std::string::npos) return;
+        size_t b = payload.find('\t', a + 1);
+        std::string from = payload.substr(0, a);
+        std::string to = b == std::string::npos ? payload.substr(a + 1)
+                                                : payload.substr(a + 1, b - a - 1);
+        bool after = b != std::string::npos && b + 1 < payload.size() &&
+                     payload[b + 1] == '1';
+        move_side_tab(from, to, after);
       });
     }
     // Project nav rail divider (left mode): its own binding, so dragging it
@@ -5180,7 +5205,6 @@ VNodePtr UiApp::build_home_usage() {
   tot.on(EventKind::kClick, [this](const std::string&) {
     update([&](AppState& s) { s.usage_scope.clear(); });
     load_usage();
-    load_balances(false);  // a different scope = a different provider
   });
   tot.add(el("span").text(tr("总计")));
   left.add(tot);
@@ -5192,7 +5216,6 @@ VNodePtr UiApp::build_home_usage() {
     it.on(EventKind::kClick, [this, pid](const std::string&) {
       update([&](AppState& s) { s.usage_scope = pid; });
       load_usage();
-      load_balances(false);  // a different scope = a different provider
     });
     it.add(el("span").text(p.name.empty() ? p.id : p.name));
     left.add(it);
@@ -5512,75 +5535,9 @@ VNodePtr UiApp::build_home_usage() {
     tbl.add(tr);
   }
   panel.add(tbl);
-  // ---- 余额 / 额度（放在最后：它是"还剩多少"，先看用量再看余额）----
-  // Per provider, by its ENDPOINT (the only thing that identifies a vendor
-  // reliably). Three states, all honest: the number, 不支持 (no public balance
-  // API), or 获取失败 WITH the reason. Asked on entering this page, after every
-  // finished turn and when the provider filter changes.
-  load_balances(false);
-  {
-    H bal = el("div", "usage-balances");
-    H bh = el("div", "chart-head");
-    bh.add(el("div", "chart-title").text(tr("余额 / 额度")));
-    bh.add(el("span", "grow"));
-    if (st_.balances_loading) {
-      bh.add(el("span", "bal-loading dim").text(tr("查询中…")));
-    } else {
-      bh.add(comp::button(tr("刷新"), [this](const std::string&) {
-        load_balances(true);
-      }, "ghost"));
-    }
-    bal.add(bh);
-    auto money = [](const std::string& cur, const std::string& v) {
-      if (v.empty()) return std::string("—");
-      if (cur == "CNY") return "¥" + v;
-      if (cur == "USD") return "$" + v;
-      return cur.empty() ? v : (cur + " " + v);
-    };
-    if (st_.balances.empty()) {
-      bal.add(el("div", "hint").text(
-          st_.balances_loading ? tr("正在查询各供应商的余额…")
-                               : tr("还没有供应商。在设置-供应商里添加一家之后这里会显示余额。")));
-    }
-    for (size_t i = 0; i < st_.balances.size(); ++i) {
-      const AppState::BalanceRow& b = st_.balances[i];
-      H row = el("div", "bal-row");
-      row.style("animation-delay", itos(static_cast<int>(i) * 30) + "ms");
-      H nm = el("div", "bal-name");
-      nm.add(el("span", "bal-pname").text(b.name.empty() ? b.pid : b.name));
-      if (!b.enabled) nm.add(el("span", "bal-off dim").text(tr("已停用")));
-      row.add(nm);
-      H val = el("div", "bal-val");
-      std::string cls = "bal-amount";
-      std::string text;
-      if (b.status == "ok") {
-        text = money(b.currency, b.balance);
-        if (!b.used.empty() || !b.limit.empty()) {
-          text += "  ";
-          if (!b.used.empty()) text += tr("已用 ") + money(b.currency, b.used);
-          if (!b.limit.empty()) {
-            text += tr(" / 额度 ") + money(b.currency, b.limit);
-          }
-        }
-      } else if (b.status == "unsupported") {
-        cls += " dim";
-        text = tr("不支持");
-        if (!b.note.empty()) text += " · " + tr(b.note.c_str());
-      } else {
-        cls += " bad";
-        // The backend already wrote "获取失败：HTTP 401"; show it verbatim - a
-        // silent dash would hide that the key or the endpoint is wrong.
-        text = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
-      }
-      val.add(el("span", cls).text(text));
-      row.add(val);
-      if (!b.endpoint.empty()) {
-        row.add(el("div", "bal-ep dim").text(b.endpoint));
-      }
-      bal.add(row);
-    }
-    panel.add(bal);
-  }
+  // 余额 / 额度 is gone on purpose: it was a second, inset list that duplicated
+  // nothing useful on this page (the user's screenshot marked it for deletion).
+  // Token totals and cost are the questions this page answers.
   wrap.add(panel);
   return wrap.get();
 }
@@ -6861,50 +6818,8 @@ VNodePtr UiApp::build_side_panel() {
     if (st_.usage_calls > 0) {
       body.add(comp::key_value(tr("调用次数"), itos(static_cast<int>(st_.usage_calls))));
     }
-    // ---- 余额 / 额度 ----
-    // The same provider.balances rows the usage page shows, in the sidebar: this
-    // is where "how much is left" is usually asked (while working, not while
-    // reading a report). Asked when the panel is opened and after every turn.
-    load_balances(false);
-    body.add(el("div", "side-sep"));
-    H bhead = el("div", "side-section");
-    bhead.add(el("span").text(tr("余额 / 额度")));
-    bhead.add(el("span", "grow"));
-    if (!st_.balances_loading) {
-      bhead.add(comp::icon_button("rotate", tr("重新查询"), [this](const std::string&) {
-        load_balances(true);
-      }));
-    }
-    body.add(bhead);
-    auto money = [](const std::string& cur, const std::string& v) {
-      if (v.empty()) return std::string("—");
-      if (cur == "CNY") return "¥" + v;
-      if (cur == "USD") return "$" + v;
-      return cur.empty() ? v : (cur + " " + v);
-    };
-    if (st_.balances.empty()) {
-      body.add(el("div", "hint").text(st_.balances_loading ? tr("正在查询…")
-                                                           : tr("还没有供应商")));
-    }
-    for (size_t i = 0; i < st_.balances.size(); ++i) {
-      const AppState::BalanceRow& b = st_.balances[i];
-      std::string right;
-      std::string cls = "sb-bal";
-      if (b.status == "ok") {
-        right = money(b.currency, b.balance);
-      } else if (b.status == "unsupported") {
-        right = tr("不支持");
-        cls += " dim";
-      } else {
-        right = b.note.empty() ? tr("获取失败") : tr(b.note.c_str());
-        cls += " bad";
-      }
-      H row = el("div", "sb-bal-row");
-      row.add(el("span", "sb-bal-name").text(b.name.empty() ? b.pid : b.name));
-      row.add(el("span", cls).text(right));
-      if (!b.endpoint.empty()) row.attr("title", b.endpoint);
-      body.add(row);
-    }
+    // No 余额 / 额度 block: the feature was removed from the UI (both here and on
+    // the usage page). Balance probing no longer runs on its own either.
   } else if (kind == "subagent") {
     // One subagent's full transcript, in the SIDEBAR (see open_subagent_tab).
     // The id comes from THIS panel, so two agents can be open side by side.
@@ -11585,9 +11500,6 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
         // The context window follows the model, so the water level must be
         // recomputed (the old percentage belongs to the old window).
         load_session_usage(sid);
-        // A different model is usually a different PROVIDER: the balance shown on
-        // the usage page is then stale.
-        load_balances(false);
       });
     }
     toast(tr("已切换到 ") + model_id);
@@ -12449,7 +12361,7 @@ void UiApp::apply_saved_tab_order() {
   }
 }
 
-void UiApp::move_tab(const std::string& from, const std::string& to) {
+void UiApp::move_tab(const std::string& from, const std::string& to, bool after) {
   if (from.empty() || to.empty() || from == to) return;
   if (from == "home" || to == "home") return;
   update([&](AppState& s) {
@@ -12461,9 +12373,15 @@ void UiApp::move_tab(const std::string& from, const std::string& to) {
     if (fi < 0 || ti < 0) return;
     std::string moved = s.tab_ids[fi];
     s.tab_ids.erase(s.tab_ids.begin() + fi);
-    // recompute after the erase: indices shift when moving left -> right
-    int insert = ti;
-    if (fi < ti) insert = ti - 1;
+    // The target is still in the list; its index after the erase is the base.
+    // BEFORE = its index, AFTER = one past it. (The old "ti - 1" rule made a
+    // drop on the adjacent tab a no-op, so dragging looked broken.)
+    ti = -1;
+    for (size_t i = 0; i < s.tab_ids.size(); ++i) {
+      if (s.tab_ids[i] == to) ti = static_cast<int>(i);
+    }
+    if (ti < 0) return;
+    int insert = after ? ti + 1 : ti;
     if (insert < 0) insert = 0;
     if (insert > static_cast<int>(s.tab_ids.size())) insert = static_cast<int>(s.tab_ids.size());
     s.tab_ids.insert(s.tab_ids.begin() + insert, moved);
@@ -12534,24 +12452,25 @@ void UiApp::load_side_tab(const std::string& id) {
   if (kind == "workflow") load_workflows(active_sid());
   if (kind == "usage") {
     load_session_usage(active_sid());
-    // Opening the panel is a deliberate "what is left?" moment: refresh the
-    // balances even if the last query was recent (the 8s floor still applies).
-    load_balances(true);
   }
 }
-// 侧栏标签拖拽排序：把 from 移到 to 的位置（其余保持相对顺序）。
-void UiApp::move_side_tab(const std::string& from, const std::string& to) {
+// 侧栏标签拖拽排序：把 from 放到 to 的左半边（before）或右半边（after）。
+void UiApp::move_side_tab(const std::string& from, const std::string& to, bool after) {
   if (from.empty() || to.empty() || from == to) return;
   update([&](AppState& s) {
-    int fi = -1, ti = -1;
+    int fi = -1;
     for (size_t i = 0; i < s.side_tabs.size(); ++i) {
       if (s.side_tabs[i].id == from) fi = static_cast<int>(i);
-      if (s.side_tabs[i].id == to) ti = static_cast<int>(i);
     }
-    if (fi < 0 || ti < 0) return;
+    if (fi < 0) return;
     SideTab moved = s.side_tabs[fi];
     s.side_tabs.erase(s.side_tabs.begin() + fi);
-    int insert = fi < ti ? ti - 1 : ti;
+    int ti = -1;
+    for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+      if (s.side_tabs[i].id == to) ti = static_cast<int>(i);
+    }
+    if (ti < 0) return;
+    int insert = after ? ti + 1 : ti;
     if (insert < 0) insert = 0;
     if (insert > static_cast<int>(s.side_tabs.size())) {
       insert = static_cast<int>(s.side_tabs.size());

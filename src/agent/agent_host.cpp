@@ -374,6 +374,7 @@ RuntimeState AgentHost::collect_runtime(const std::string& sid) {
     Json p = deps_.plan_get(sid);
     if (p.is_object()) st.plan = p;
   }
+  hydrate_todos(sid);
   st.todos = todos_.to_json(sid);
   for (auto& r : subagents_.list_for_sid(sid)) {
     if (r.status != SubagentStatus::kRunning) continue;  // finished ones already reported
@@ -568,6 +569,7 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
 // 进程（todo）操作：owner 为会话 sid 或子代理 id（addon2：子代理独立进程树）
 FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
   std::lock_guard<std::recursive_mutex> host_lock(lock());
+  hydrate_todos(owner);
   std::string op = jsonutil::get<std::string>(args, "op", "");
   int64_t now = deps_.clock ? deps_.clock->now_ms() : 0;
   if (op == "add") {
@@ -578,6 +580,7 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     // plan is the document that says what the whole job is; the list is this
     // round's tasks derived from it. (Batch 49 cleared the plan here, which was
     // the "same thing, newer wins" confusion - the user rejected it.)
+    save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"id", id}, {"items", todos_.to_json(owner)}});
   }
@@ -591,15 +594,10 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     if (!todos_.check(owner, id, done, now)) {
       return FsResult::error(ErrCode::kNotFound, "todo item not found");
     }
-    // A COMPLETED checklist is deleted, not kept as history: the user's report
-    // was "旧的清单如果没被清掉，只是完成了的话，重新进入还是需要重建的". An
-    // all-done list has served its purpose (pending_count was already the
-    // auto-continue signal, so clearing changes nothing there).
-    if (todos_.pending_count(owner) == 0) {
-      todos_.clear(owner);
-      emit("todo.updated", Json{{"owner", owner}, {"items", Json::array()}});
-      return FsResult::success(Json{{"items", Json::array()}, {"pending", 0}});
-    }
+    // A completed list STAYS: the backend keeps the task list for the whole
+    // task, and the next round starts from it (all-done is still useful context
+    // and the user can see what was done). It is only removed by `erase`/`clear`.
+    save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"items", todos_.to_json(owner)},
                                   {"pending", todos_.pending_count(owner)}});
@@ -611,15 +609,31 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     }
     // Erasing changes the list too - without this event the panel kept showing
     // the removed row until something else refreshed it.
+    save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"items", todos_.to_json(owner)}});
   }
   if (op == "clear") {
     todos_.clear(owner);
+    save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", Json::array()}});
     return FsResult::success(Json{{"items", Json::array()}});
   }
   return FsResult::error(ErrCode::kInvalidArg, "unknown todo op: " + op);
+}
+
+void AgentHost::hydrate_todos(const std::string& owner) {
+  std::lock_guard<std::recursive_mutex> host_lock(lock());
+  if (owner.empty() || todos_hydrated_.count(owner)) return;
+  // Mark first: an owner with no saved list must not re-read on every call.
+  todos_hydrated_.insert(owner);
+  if (!deps_.todo_load) return;
+  Json items = deps_.todo_load(owner);
+  if (items.is_array() && !items.empty()) todos_.restore(owner, items);
+}
+
+void AgentHost::save_todos(const std::string& owner) {
+  if (deps_.todo_save) deps_.todo_save(owner, todos_.to_json(owner));
 }
 
 int AgentHost::todo_pending(const std::string& owner) const {
@@ -1213,6 +1227,7 @@ std::string AgentHost::loop_state(const std::string& sid) const {
 
 Json AgentHost::todos_for(const std::string& sid) {
   std::lock_guard<std::recursive_mutex> host_lock(lock());
+  hydrate_todos(sid);
   return todos_.to_json(sid);
 }
 

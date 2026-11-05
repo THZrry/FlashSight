@@ -33,6 +33,10 @@ class SessionManager {
   FsResult open_session(const std::string& sid);
   FsResult get_session(const std::string& sid) const;
   FsResult list_sessions(const std::string& pid) const;
+  // Record that the user has looked at this session. Persisted next to the
+  // session (seen.at), so a failed-turn red dot does not come back after a
+  // restart. Returns an error only when the file cannot be written.
+  FsResult mark_seen(const std::string& sid, int64_t ms) const;
   FsResult close_session(const std::string& sid);
   // 删除会话（连同 patches/terminals 一起移除）。不可恢复：UI 负责先确认。
   // 会先释放锁，否则删完还留着一条锁记录，下次同名 sid 会被误判为占用。

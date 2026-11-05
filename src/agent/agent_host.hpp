@@ -75,6 +75,12 @@ struct AgentHostDeps {
   std::function<void(const std::string& sid, const std::string& id, const Json& rec)>
       write_subagent;
   std::function<FsResult(const std::string& sid, const Json& plan)> plan_update;
+  // The task list (todo) is part of the session, not scratch memory: load it on
+  // first use and save it after every change, so reopening a session (or the app)
+  // starts from the checklist the task already had. Subagent owners have no
+  // session file; the FsApi side ignores them.
+  std::function<Json(const std::string& owner)> todo_load;
+  std::function<void(const std::string& owner, const Json& items)> todo_save;
   // 工作流（WorkflowStore）。工具层只转发 {op, sid, ...}
   std::function<FsResult(const Json&, Json*)> workflow_op;
   const Clock* clock = nullptr;
@@ -162,6 +168,9 @@ class AgentHost {
   FsResult todo_op(const std::string& owner, const Json& args);
   int todo_pending(const std::string& owner) const;
   TodoStore& todos() { return todos_; }
+  // Load this owner's persisted checklist once (no-op after that).
+  void hydrate_todos(const std::string& owner);
+  void save_todos(const std::string& owner);
 
   // ----- skill（addon2：中英双语，按需加载）-----
   SkillRegistry& skills() { return skills_; }
@@ -235,6 +244,9 @@ class AgentHost {
   SubagentManager subagents_;
   WakeScheduler wakes_;
   TodoStore todos_;
+  // Owners whose persisted checklist has been loaded (or found empty) already.
+  // TodoStore has no "loaded" bit of its own.
+  std::set<std::string> todos_hydrated_;
   SkillRegistry skills_;
   std::string thinking_lang_ = "auto";
   std::map<std::string, std::unique_ptr<AgentLoop>> loops_;
