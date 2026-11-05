@@ -2855,3 +2855,23 @@ The process of project: P0 环境搭建 + P1 AppCore
     `provider_stream_usage_reports_cache_hit`（DeepSeek/OpenAI 两种字段）、`provider_retries_a_dropped_relay`（3 次内
     成功）、`provider_does_not_retry_after_partial_output`（已输出不重试）、`loop_auto_stops_after_empty_round`；
     规划用例改为文档形态（写入/只改状态/驳回删文件）。
+
+<103>(SOLVED): 工具行展开/折叠后点不开 + todo 按钮常驻 + 会话打开被余额探测锁住 + 模型用 todo 的短提醒 + 用量环形图/总 token + 供应商面板去壳。
+  - **工具行第二次点不开**：工作过程本身已经用折叠代修好了，但**单个工具块**的展开体是另一处：`tool_block_cached`
+    把"展开态"的节点缓存起来，折叠时详细体被移出 DOM，再展开又命中那个旧节点，diff 以为 body 还在——于是点不动。
+    修复：每次展开/折叠都把该工具行的 `rev` 递增（它本来就是缓存键的一部分，`ToolBlock::rev` 的契约是"每次变更都
+    递增"）。浏览器里对同一行连续点 4 次：open/closed/open/closed。
+  - **todo 按钮**：之前只在有清单时出现，删掉规划按钮后就彻底找不到了。现在"清单"按钮**常驻**输入框工具栏；空列表
+    点开显示"暂无任务（模型会在这里记录本轮步骤）"。
+  - **进入会话很久才加载**：真因是后端锁。`UiApi::call` 给除 `session.send`/`tool.invoke` 外的所有方法都套了全局
+    递归锁，而 `provider.balances` 会并行探测每个供应商、最长 5 秒——这段时间里 `session.info`/`session.turns`
+    全被堵住，界面先显示空会话。修复：`provider.balances` 也从全局锁排除，它只在**快照供应商列表**的瞬间取锁，
+    网络探测在锁外跑。实测：余额探测进行中（1.26s），`session.turns` 34ms 返回。
+  - **模型不积极建 todo**：长上下文里系统提示会被"遗忘"。运行时块**每轮**追加一行极短提醒：
+    "记住以上准则：多步任务先用 todo_add 记步骤，完成一项就 todo_check；长任务维护规划文档。"（中英双语）
+  - **用量统计**：按模型从条形改成**环状图**（conic-gradient 圆环 + 中心总 tokens + 右侧图例和百分比，超过 7 个
+    模型合并为"其他"）；顶部指标新增"总 tokens"；表格的"缓存"列换成"总 tokens"（输入+输出）。
+  - **供应商页**：模型列表外面那层带边框/背景/内边距的卡片 div 和小标题"模型"都去掉了，列表现在和表单/其他表格
+    同一宽度、同一基线，不再"小一圈"。
+  - **测试**：426 用例 3971 断言全过；web / webview 双变体编译通过。浏览器验证：工具行 4 次开合、清单按钮存在、
+    环形图 1 个 + 2 条图例 + 中心 4.0K、表头为 模型/输入/输出/总 tokens/成本（无缓存列）。

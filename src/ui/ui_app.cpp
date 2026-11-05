@@ -5251,10 +5251,14 @@ VNodePtr UiApp::build_home_usage() {
   std::string cost = "—";
   std::string in_tok = "0";
   std::string out_tok = "0";
+  std::string all_tok = "0";
   if (st_.usage_loaded) {
     calls = std::to_string(jsonutil::get_int(st_.usage, "calls", 0));
-    in_tok = std::to_string(jsonutil::get_int(st_.usage, "totalIn", 0));
-    out_tok = std::to_string(jsonutil::get_int(st_.usage, "totalOut", 0));
+    int64_t tin = jsonutil::get_int(st_.usage, "totalIn", 0);
+    int64_t tout = jsonutil::get_int(st_.usage, "totalOut", 0);
+    in_tok = fmt_tokens(tin);
+    out_tok = fmt_tokens(tout);
+    all_tok = fmt_tokens(tin + tout);
     std::string kind = jsonutil::get<std::string>(st_.usage, "costKind", "");
     double c = jsonutil::get_number(st_.usage, "totalCost", 0.0);
     char buf[64];
@@ -5268,13 +5272,14 @@ VNodePtr UiApp::build_home_usage() {
     }
   }
   head.add(comp::key_value(tr("调用次数"), calls));
+  head.add(comp::key_value(tr("总 tokens"), all_tok));
   head.add(comp::key_value(tr("输入 tokens"), in_tok));
   head.add(comp::key_value(tr("输出 tokens"), out_tok));
   head.add(comp::key_value(tr("总成本"), cost));
   panel.add(head);
 
 
-  // ---- by model: a proportional bar per model (the pie could not show values) ----
+  // ---- by model: a DONUT (the user asked for 饼/环状图, not bars) ----
   Json pm = st_.usage_loaded && st_.usage.contains("byProviderModel") &&
                     st_.usage["byProviderModel"].is_object()
                 ? st_.usage["byProviderModel"]
@@ -5415,28 +5420,72 @@ VNodePtr UiApp::build_home_usage() {
   if (rows.empty()) {
     bymodel.add(el("div", "hint").text(tr("暂无用量记录")));
   } else {
-    for (size_t i = 0; i < rows.size() && i < 8; ++i) {
-      int pct = total_tok > 0 ? static_cast<int>(rows[i].second * 100 / total_tok) : 0;
-      H r = el("div", "ub-row");
-      r.style("animation-delay", itos(static_cast<int>(i) * 30) + "ms");
-      r.add(el("span", "ub-name").text(rows[i].first));
-      H track = el("div", "ub-track");
-      H fill = el("div", "ub-fill");
-      // 从 0 长出来：--grow 是终值，动画从 width:0 走到它
-      fill.style("--grow", itos(pct) + "%");
-      fill.style("animation-delay", itos(120 + static_cast<int>(i) * 55) + "ms");
-      track.add(fill);
-      r.add(track);
-      r.add(el("span", "ub-val dim").text(itos(pct) + "%"));
-      bymodel.add(r);
+    // Keep the ring readable: the top 7 models + 其他. A 40-slice ring is noise.
+    static const char* kDonutColors[] = {"#4f8cff", "#58c98b", "#e0a44a",
+                                         "#b47cff", "#e05d7b", "#3fb6c9",
+                                         "#9aa4b2", "#c9b46a"};
+    const int kMaxSlices = 8;
+    std::vector<std::pair<std::string, int64_t> > top;
+    int64_t other = 0;
+    for (size_t i = 0; i < rows.size(); ++i) {
+      if (static_cast<int>(i) < kMaxSlices - 1) {
+        top.push_back(rows[i]);
+      } else {
+        other += rows[i].second;
+      }
     }
+    if (other > 0) top.push_back(std::make_pair(tr("其他"), other));
+
+    H wrap = el("div", "donut-wrap");
+    H pie = el("div", "donut-pie");
+    H ring = el("div", "donut-ring");
+    std::string grad = "conic-gradient(";
+    int64_t acc = 0;
+    for (size_t i = 0; i < top.size(); ++i) {
+      double from = total_tok > 0 ? acc * 100.0 / total_tok : 0.0;
+      acc += top[i].second;
+      double to = total_tok > 0 ? acc * 100.0 / total_tok : 0.0;
+      char seg[64];
+      std::snprintf(seg, sizeof(seg), "%s %.2f%% %.2f%%%s",
+                    kDonutColors[i % 8], from, to,
+                    i + 1 == top.size() ? "" : ", ");
+      grad += seg;
+    }
+    grad += ")";
+    ring.style("background", grad);
+    ring.attr("title", tr("按模型的总 token 占比"));
+    pie.add(ring);
+    H hole = el("div", "donut-hole");
+    hole.add(el("div", "donut-total").text(fmt_tokens(total_tok)));
+    hole.add(el("div", "donut-label dim").text(tr("总 tokens")));
+    pie.add(hole);
+    wrap.add(pie);
+
+    H legend = el("div", "donut-legend");
+    for (size_t i = 0; i < top.size(); ++i) {
+      int pct = total_tok > 0
+                    ? static_cast<int>(top[i].second * 100 / total_tok)
+                    : 0;
+      H lr = el("div", "donut-item");
+      lr.style("animation-delay", itos(30 + static_cast<int>(i) * 25) + "ms");
+      H sw = el("span", "donut-swatch");
+      sw.style("background", kDonutColors[i % 8]);
+      lr.add(sw);
+      lr.add(el("span", "donut-name").attr("title", top[i].first).text(top[i].first));
+      lr.add(el("span", "donut-val dim").text(itos(pct) + "%"));
+      legend.add(lr);
+    }
+    wrap.add(legend);
+    bymodel.add(wrap);
   }
   panel.add(bymodel);
 
   // ---- table: real byProviderModel rows, else an explicit empty state ----
+  // Total tokens (in + out) is what the user watches; it replaces the cache
+  // column, which was a per-row detail nobody read in this table.
   H tbl = el("table", "stat-table");
   H thead = el("tr");
-  const char* hd[5] = {"模型", "输入", "输出", "缓存", "成本"};
+  const char* hd[5] = {"模型", "输入", "输出", "总 tokens", "成本"};
   for (int i = 0; i < 5; ++i) thead.add(el("th").text(tr(hd[i])));
   tbl.add(thead);
   bool any = false;
@@ -5445,10 +5494,12 @@ VNodePtr UiApp::build_home_usage() {
     H tr = el("tr");
     std::string model = jsonutil::get<std::string>(e, "model", "");
     std::string prov = jsonutil::get<std::string>(e, "provider", "");
+    int64_t tin = jsonutil::get_int(e, "in", 0);
+    int64_t tout = jsonutil::get_int(e, "out", 0);
     tr.add(el("td").text(prov.empty() ? model : (prov + " / " + model)));
-    tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "in", 0))));
-    tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "out", 0))));
-    tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "cache", 0))));
+    tr.add(el("td").text(fmt_tokens(tin)));
+    tr.add(el("td").text(fmt_tokens(tout)));
+    tr.add(el("td").text(fmt_tokens(tin + tout)));
     tr.add(el("td").text(std::to_string(jsonutil::get_int(e, "cost", 0))));
     tbl.add(tr);
     any = true;
@@ -5618,6 +5669,11 @@ VNodePtr UiApp::build_session() {
             block < static_cast<int>(s.messages[i].tools.size())) {
           bool open = !s.messages[i].tools[block].expanded;
           s.messages[i].tools[block].expanded = open;
+          // The memoised row is keyed on its OWN rev as well as `expanded`: a
+          // collapsed row's cached node must never be reused after the expanded
+          // body was removed from the DOM, or reopening has nothing to re-add
+          // ("展开再折叠后点不开"). Bump rev on every toggle.
+          s.messages[i].tools[block].rev = next_msg_rev_++;
           s.messages[i].rev = next_msg_rev_++;  // only this message is rebuilt
           // Opening a tool's JSON is almost always to read its END (a result, an
           // error). Scroll the body to the bottom on the next frame, once the
@@ -5735,7 +5791,7 @@ VNodePtr UiApp::build_session() {
   // but on the RIGHT so the two never cover each other. It exists because the
   // backend could already add items while the UI dropped every update into a
   // toast - "todo 可以设置但悬浮窗口不显示".
-  if (st_.todo_open && !st_.todos.empty()) {
+  if (st_.todo_open) {
     H todo = el("div", "todo-float");
     todo.key("todo-float");
     todo.anim(anim::kPop);
@@ -5752,6 +5808,9 @@ VNodePtr UiApp::build_session() {
       update([&](AppState& s) { s.todo_open = false; });
     }));
     todo.add(thead);
+    if (st_.todos.empty()) {
+      todo.add(el("div", "plan-empty dim").text(tr("暂无任务（模型会在这里记录本轮步骤）")));
+    }
     for (size_t i = 0; i < st_.todos.size(); ++i) {
       const AppState::TodoItem& it = st_.todos[i];
       H row = el("div", it.done ? "plan-step st-done" : "plan-step");
@@ -6152,17 +6211,16 @@ VNodePtr UiApp::build_session() {
       });
     });
   }, "ghost"));
-  // The plan has NO composer control: it is a document, not a panel. The task
-  // list below is the only progress view in the composer.
-  // The model's checklist, only while it HAS one: the composer row is already
-  // tight, and a session without todos gets no extra control.
-  if (!st_.todos.empty()) {
-    left_tools.add(comp::icon_text_button("list-check", tr("清单"),
-                                          [this](const std::string&) {
-      bool open = !st_.todo_open;
-      update([&](AppState& s) { s.todo_open = open; });
-    }, "ghost"));
-  }
+  // The plan has NO composer control: it is a document, not a panel.
+  // The task list button is ALWAYS here: it is the only progress view, and a
+  // control that appears only after the model remembers to add an item is a
+  // control the user cannot find ("把 todo 的按钮搞哪去了"). The panel itself
+  // says 暂无任务 when the list is empty.
+  left_tools.add(comp::icon_text_button("list-check", tr("清单"),
+                                        [this](const std::string&) {
+    bool open = !st_.todo_open;
+    update([&](AppState& s) { s.todo_open = open; });
+  }, "ghost"));
   // 自动挡: a toggle button, not a select - it is one bit and it is switched
   // often. The label says which mode is active.
   // 顺序：自动挡 在 批准模式 前面。先决定"谁来做"（人/AI），再决定"做到什么
@@ -8928,7 +8986,8 @@ VNodePtr UiApp::build_settings() {
       // confusing, so only the list scrolls.
       H mpanel = el("div", "pv-models-panel");
       H mhead = el("div", "md-head");
-      mhead.add(el("span", "md-title").text(tr("模型")));
+      // No "模型" sub-title: other tables in the app have none, and this panel is
+      // not a card any more. The two icon actions are the only controls needed.
       mhead.add(el("span", "grow"));
       if (!sel.empty()) {
         mhead.add(comp::icon_button("\u21bb", tr("获取模型列表"), [this, sel](const std::string&) {

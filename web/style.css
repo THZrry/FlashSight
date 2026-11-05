@@ -1088,6 +1088,36 @@ html, body {
 }
 .ub-val { width: 40px; flex: none; text-align: right; font-size: 11.5px;
   animation: fade-in .4s ease-out backwards; }
+/* Per-model share as a DONUT (the user asked for a pie/ring, not bars). The ring
+   is a conic-gradient on a round div; the hole is a separate circle so the total
+   can sit in the middle without SVG. */
+.donut-wrap { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+.donut-pie { position: relative; width: 132px; height: 132px; flex: none; }
+.donut-ring {
+  width: 100%; height: 100%; border-radius: 50%;
+  animation: donut-in .5s cubic-bezier(.22,.61,.36,1) backwards;
+}
+.donut-hole {
+  position: absolute; inset: 26%;
+  border-radius: 50%;
+  background: var(--panel-2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 1px;
+}
+.donut-total { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.donut-label { font-size: 10px; }
+.donut-legend { flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 4px; }
+.donut-item {
+  display: flex; align-items: center; gap: 8px;
+  animation: anim-list .16s cubic-bezier(.22,.61,.36,1) backwards;
+}
+.donut-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.donut-name {
+  flex: 1; min-width: 0; font-size: 12px; font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.donut-val { font-size: 11.5px; flex: none; }
+@keyframes donut-in { from { transform: scale(.85); opacity: 0; } to { transform: none; opacity: 1; } }
 table.stat-table { border-collapse: collapse; width: 100%; background: var(--panel-2); }
 table.stat-table th, table.stat-table td {
   border: 1px solid var(--border); padding: 5px 10px; text-align: left;
@@ -2957,13 +2987,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
    useful instead of empty. */
 .pv-detail-cols { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
 .pv-form { flex: 1 1 340px; min-width: 0; }
-.pv-models-panel {
-  flex: 1 1 380px; min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
-  padding: 12px 14px;
-}
+/* No card here. The bordered/padded wrapper made this column look "小一圈" next
+   to the form, and other tables in the app have no panel chrome or sub-title. */
+.pv-models-panel { flex: 1 1 380px; min-width: 0; }
 
 /* ---- 模型面板：上=可滚动列表，下=该模型的高级设置 ---- */
 .md-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
@@ -3615,6 +3641,7 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
 .plan-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .plan-head .plan-title { flex: 1; margin-bottom: 0; }
 .plan-head .icon-btn { width: 20px; height: 20px; font-size: 12px; }
+.plan-empty { font-size: 12.5px; }
 .plan-title { font-weight: 600; font-size: 12.5px; color: var(--text-dim); margin-bottom: 6px; }
 .plan-step { display: flex; gap: 8px; padding: 3px 0; font-size: 13px; align-items: center; }
 .plan-text { flex: 1; min-width: 0; }

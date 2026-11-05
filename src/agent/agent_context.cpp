@@ -641,6 +641,16 @@ std::string AgentContext::build_runtime(const ContextInput& in, const RuntimeSta
 
   if (!st.turn_note.empty()) lines.push_back(st.turn_note);
 
+  // A VERY short nudge, every round. Long system prompts drift out of the
+  // model's attention on long contexts ("上下文过长导致的遗忘") and the model stops
+  // using the checklist - which is what makes auto mode end after one round.
+  lines.push_back(zh(in)
+                      ? "记住以上准则：多步任务先用 todo_add 记步骤，完成一项就 todo_check；"
+                        "长任务维护规划文档。"
+                      : "Remember the rules above: list multi-step work with todo_add "
+                        "and tick items off with todo_check; keep the plan document "
+                        "for a long job.");
+
   if (lines.empty()) return std::string();
   return sanitize_utf8(join_lines(lines));
 }

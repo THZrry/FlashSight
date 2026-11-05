@@ -3254,7 +3254,15 @@ FsResult FsApi::provider_test_connection(const std::string& providerId) {
 FsResult FsApi::provider_balances() {
   Json rows = Json::array();
   if (!providers_ || !net_) return FsResult::success(Json{{"providers", rows}});
-  std::vector<ProviderConn> all = providers_->list();
+  std::vector<ProviderConn> all;
+  {
+    // Snapshot under the backend lock, then probe WITHOUT it: the UI route is
+    // excluded from the global lock precisely so a slow provider cannot stall
+    // session loads. Providers can be edited while probes run; the copy keeps
+    // this function from reading a half-updated store.
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    all = providers_->list();
+  }
   // IN PARALLEL. One unreachable endpoint used to make the whole request take
   // N x 8 s while the UI waited for its rows ("打开时迟迟不更新"); now the total
   // is the SLOWEST single probe. Each request builds its own client, so probing

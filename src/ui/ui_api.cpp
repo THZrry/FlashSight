@@ -487,14 +487,20 @@ FsResult UiApi::call(const std::string& method, const Json& args) {
   //
   // The lock is recursive because routes call each other.
   //
-  // Two routes are EXCLUDED because they BLOCK for a long time:
-  //   * session.send  - the whole turn (provider round trip + every tool call).
+  // Three routes are EXCLUDED because they BLOCK for a long time:
+  //   * session.send     - the whole turn (provider round trip + every tool call).
   //     It takes the lock itself around its short prelude only.
-  //   * tool.invoke   - arbitrary tool code (a terminal command can take a
+  //   * tool.invoke      - arbitrary tool code (a terminal command can take a
   //     minute) and must not hold the backend lock while it runs.
-  // Holding the lock for either would stall every other call for minutes, which
-  // is the freeze this design exists to prevent.
-  if (!api_ || method == "session.send" || method == "tool.invoke") {
+  //   * provider.balances- probes every endpoint over the network (up to the
+  //     request timeout). Holding the global lock during it stalled
+  //     session.info/session.turns behind an unreachable provider, which is why
+  //     opening a session showed an empty transcript for seconds. It takes the
+  //     lock itself only to snapshot the provider list.
+  // Holding the lock for these would stall every other call, which is the freeze
+  // this design exists to prevent.
+  if (!api_ || method == "session.send" || method == "tool.invoke" ||
+      method == "provider.balances") {
     return it->second(args);
   }
   std::lock_guard<std::recursive_mutex> lk(api_->mutex());
