@@ -700,8 +700,12 @@ html, body {
      * narrow  : identity row on top, session list stacked below (compact)
      * wide    : info column left ~1/3, session list right ~2/3 (default) */
 .projects { display: flex; flex-direction: column; gap: 14px; padding: 10px 18px 18px; }
+/* The projects page scrolls as a whole; cards must keep their content height
+   instead of being compressed to fit the viewport ("内容多的时候会挤起来"). */
+.projects { flex: none; }
 .proj-card {
   display: grid;
+  flex: none;
   grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
   grid-template-areas: "info sessions";
   border: 1px solid var(--border);
@@ -786,6 +790,7 @@ html, body {
   padding: 9px 16px;
   cursor: pointer;
   color: var(--text-dim);
+  flex: none;
 }
 .proj-right-head:hover { background: var(--hover); color: var(--text); }
 .prh-title {
@@ -805,6 +810,10 @@ html, body {
      and letting them set the row height made the card grow by a few pixels the
      moment the pointer entered it - the "hover changes the height" glitch. */
   height: 32px;
+  /* flex: none - inside the scrolling session list a shrinkable row got squashed
+     to a few pixels when the list had many entries ("列表项没有高度会挤压"). */
+  flex: 0 0 32px;
+  min-height: 32px;
   padding: 0 14px;
   border-top: 1px solid var(--border);
   cursor: pointer;
@@ -877,7 +886,7 @@ html, body {
    specificity (a min-width query plus a base collapse rule did exactly that). */
 .projects { container-type: inline-size; }
 
-.proj-right .proj-sessions { display: flex; }
+.proj-right .proj-sessions { display: flex; flex: none; }
 
 @container (max-width: 699px) {
   /* STACKED layout: the list is EXPANDED and shows every session - no inner

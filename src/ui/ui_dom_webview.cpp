@@ -919,8 +919,15 @@ class WebViewDom : public IDom {
     bind_drag("navsplit", splitter, nav, on_resize, nav_split_cbs_);
   }
   void bind_tab_drag(Node strip, std::function<void(const std::string&)> cb) override {
-    tab_drag_cb_ = cb;
-    call("tabDrag", idx(strip), 0, "", "");
+    // Keyed by the STRIP node: two strips (top tabs, side panel) bind every
+    // render, and a per-call sequence would grow the map forever. The old code
+    // passed 0 as the callback id and kept one callback slot, so JS saw an empty
+    // id, never posted the drop, and a second strip overwrote the first.
+    int node_id = idx(strip);
+    tab_drag_cbs_[node_id] = cb;
+    // The glue reads the id from the STRING argument (`parseInt(a)`), exactly
+    // like the splitter bindings.
+    call("tabDrag", node_id, 0, std::to_string(node_id), "");
   }
   void place_popup(Node popup, Node anchor) override {
     call("placePopup", idx(popup), idx(anchor), "", "");
@@ -1166,8 +1173,10 @@ class WebViewDom : public IDom {
         nav_split_cbs_.find(cb_id);
     if (it != nav_split_cbs_.end() && it->second) it->second(size);
   }
-  void on_tab_drag(const std::string& pair) {
-    if (tab_drag_cb_) tab_drag_cb_(pair);
+  void on_tab_drag(int cb_id, const std::string& pair) {
+    std::map<int, std::function<void(const std::string&)> >::iterator it =
+        tab_drag_cbs_.find(cb_id);
+    if (it != tab_drag_cbs_.end() && it->second) it->second(pair);
   }
   void on_outside(int cb_id) {
     std::map<int, std::function<void()> >::iterator it = outside_cbs_.find(cb_id);
@@ -1289,6 +1298,7 @@ class WebViewDom : public IDom {
   std::map<int, std::function<void(int)> > split_cbs_;
   std::map<int, std::function<void(int)> > vsplit_cbs_;
   std::map<int, std::function<void(int)> > nav_split_cbs_;
+  std::map<int, std::function<void(const std::string&)> > tab_drag_cbs_;
   std::map<int, std::function<void()> > sched_cbs_;
   std::function<void(const std::string&, const std::string&)> drop_cb_;
   std::function<void(const std::string&)> global_key_cb_;
@@ -1296,7 +1306,6 @@ class WebViewDom : public IDom {
   std::function<void(int, int)> cell_cb_;
   std::function<void(bool)> scroll_pin_cb_;
   std::function<void(bool, bool)> scroll_edges_cb_;
-  std::function<void(const std::string&)> tab_drag_cb_;
   // Outside-click dismissal, one entry per live popup (see bind_outside_click).
   std::map<int, std::function<void()> > outside_cbs_;
   std::map<uint64_t, int> outside_by_node_;  // popup node id -> callback id
@@ -1443,7 +1452,7 @@ void cb_tab_drag(const char* /*id*/, const char* req, void* /*arg*/) {
   if (!d) return;
   try {
     Json j = Json::parse(req ? req : "[]");
-    d->on_tab_drag(arg_str(j, 1));
+    d->on_tab_drag(arg_int(j, 0), arg_str(j, 1));
   } catch (...) {
   }
 }

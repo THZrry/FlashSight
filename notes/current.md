@@ -2931,3 +2931,15 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **主页项目卡片**：左右两栏模式给会话列表固定最大高度（360px）内部滚动；上下两栏（窄容器）保持**展开**显示全部、
     由标题行整体折叠（默认展开）。浏览器实测：宽 360px/auto、窄 none/visible、窄下点头部整块收起、切回宽仍显示。
   - **测试**：427 用例 3995 断言全过（新增：未标记的快速命令不进列表）；web / webview 双变体编译通过。
+
+<107>(FIXED): 标签拖出幽灵但松手不挪（webview 回调 id 传错）+ 项目卡片行被 flex 压缩。
+  - **拖出来了、松手不挪**：和 span 不响应是两件事，都已修。webview 适配器的 `bind_tab_drag` 把回调 id 以 **int 0**
+    传给 JS，而胶水层是从**字符串参数**里 `parseInt(a)` 取 id，于是 `el.__fsTabCb` 为空，`if (el.__fsTabCb)` 直接
+    跳过了 drop 上报——所以幽灵跟着走、松手什么也不发生。另外它只有一个回调槽，第二个标签条（侧栏）会覆盖第一个
+    （顶栏）的回调。现在按**标签条节点 id** 建回调表、id 走字符串参数、按 id 分发，两条标签条互不干扰。
+    原生 WebView2 + CDP 实测：按在标签**文字**上拖动 → 幽灵出现 → 松手后 `[用量, 子代理]` 变为 `[子代理, 用量]`。
+  - **span 不响应**（上一批）：mousedown 只认 target 本身是标签，现在向上爬到 `.tab/.ptab`；与上面的 drop 问题独立。
+  - **项目卡片挤压**：会话行是 flex 子项，默认 `flex-shrink:1`，列表一多就被压扁（不是没设高度，是高度被 flex 压缩）。
+    现在 `.proj-session { flex: 0 0 32px; min-height:32px }`，`.projects/.proj-card/.proj-sessions/.proj-right-head`
+    都是 `flex:none`。实测 18 个会话：列表 clientHeight 360、scrollHeight 576、每行 32px（正常滚动，不压缩）。
+  - **测试**：427 用例 3995 断言全过；web / webview 双变体编译通过。
