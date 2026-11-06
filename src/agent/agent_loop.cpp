@@ -766,31 +766,29 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
     messages = hist.messages;
     if (!messages.is_array()) messages = Json::array();
     if (hist.compressed) {
-      emit("context.compressed", Json{{"sid", opts_.sid},
-                                      {"from", hist.compressed_from},
-                                      {"to", hist.compressed_to},
-                                      {"droppedTurns", hist.dropped_turns},
-                                      {"reason", dec.reason},
-                                      {"waterPct", dec.pct},
-                                      {"promptTokens", dec.prompt_tokens},
-                                      {"contextLimit", dec.context_limit}});
-    } else if (dec.compress &&
-               (hopts.compact_action == "shortView" || hopts.force_compress)) {
-      // Short view / manual compress was requested but there is nothing to drop
-      // (a single huge turn). Say so instead of silently doing nothing.
+      int64_t total_turns = full.contains("turns") && full["turns"].is_array()
+                                ? static_cast<int64_t>(full["turns"].size())
+                                : 0;
+      emit("context.compressed", Json{
+              {"sid", opts_.sid},
+              {"mode", hist.mode},
+              {"from", hist.compressed_from},
+              {"to", hist.compressed_to},
+              {"droppedTurns", hist.dropped_turns},
+              {"keptTurns", total_turns - hist.dropped_turns},
+              {"reason", hist.mode == "short-view" ? "window-too-small"
+                                                   : dec.reason},
+              {"waterPct", dec.pct},
+              {"promptTokens", dec.prompt_tokens},
+              {"contextLimit", dec.context_limit}});
+    } else if (dec.compress || hopts.force_compress) {
+      // Wanted to compress but there was nothing to drop (a single huge turn).
+      // Say so instead of silently doing nothing.
       emit("context.compressSkipped", Json{{"sid", opts_.sid},
                                            {"reason", dec.reason},
                                            {"turns", full.contains("turns")
                                                          ? full["turns"].size()
                                                          : 0}});
-    } else if (dec.compress) {
-      // The threshold is a SIGNAL. With the default "warn" strategy the full
-      // history still goes out unchanged; the user decides whether to compact.
-      emit("context.compactSuggested", Json{{"sid", opts_.sid},
-                                            {"reason", dec.reason},
-                                            {"waterPct", dec.pct},
-                                            {"promptTokens", dec.prompt_tokens},
-                                            {"contextLimit", dec.context_limit}});
     }
   }
   if (messages.empty()) {

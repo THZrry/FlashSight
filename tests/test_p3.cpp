@@ -1335,11 +1335,9 @@ FS_TEST(settings_new_keys_defaults) {
   // by the context water level (history.compressAtPct). 32000 keeps a large
   // window usable instead of compacting at ~8k tokens.
   EXPECT_EQ(s.get(kKeyHistoryTokenBudget).value.get<int64_t>(), 32000);
-  // Auto-compaction is OFF by default; a threshold alone must not imply the
-  // short-view strategy.
-  EXPECT_EQ(s.get(kKeyHistoryCompressAtPct).value.get<int64_t>(), 0);
-  EXPECT_EQ(s.get(kKeyHistoryCompactAction).value.get<std::string>(),
-            std::string("warn"));
+  // The threshold triggers a FULL compression. There is no separate strategy
+  // setting; short view is only the too-small-window fallback.
+  EXPECT_EQ(s.get(kKeyHistoryCompressAtPct).value.get<int64_t>(), 80);
   EXPECT_EQ(s.get(kKeyHistoryKeepTurns).value.get<int64_t>(), 8);
   EXPECT_EQ(s.get(kKeyOverfitEnabled).value.get<bool>(), false);
   EXPECT_EQ(s.get(kKeySubagentMaxParallel).value.get<int64_t>(), 4);

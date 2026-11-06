@@ -81,13 +81,10 @@ constexpr char kKeyUsageRetainDays[] = "usage.retainDays";
 constexpr char kKeyHistoryRecentTurns[] = "history.recentTurns";  // 默认 20
 constexpr char kKeyHistoryTokenBudget[] = "history.tokenBudget";  // 默认 32000
 // 压缩阈值：上下文水位（上一次请求的 prompt tokens / 模型窗口）达到该百分比
-// 就折叠旧轮。默认 0 = 关闭：压缩改写提示前缀，会让 provider 的前缀缓存失效
-// （通常更贵），并且旧轮不再原样进入上下文；只有用户显式开启才允许。
-constexpr char kKeyHistoryCompressAtPct[] = "history.compressAtPct";  // 默认 0
-// 达到阈值后的动作（与阈值本身解耦）："warn" 只提醒、历史原样发送（默认）；
-// "shortView" 才折叠旧轮。阈值 != 短视图。
-constexpr char kKeyHistoryCompactAction[] = "history.compactAction";  // 默认 warn
-// 显式开启压缩时保留的最近轮数。压缩不是清空，最近几轮必须全量保留。
+// 就**全量压缩**（所有旧轮折成摘要）。短视图不是阈值的一部分：只有当前窗口
+// 装不下（例如换到小窗模型）才自动短视图并提醒。
+constexpr char kKeyHistoryCompressAtPct[] = "history.compressAtPct";  // 默认 80
+// 短视图回退时保留的最近轮数。
 constexpr char kKeyHistoryKeepTurns[] = "history.keepTurns";  // 默认 8
 // 防过拟合开关（agent-loop.md 5；默认关）
 constexpr char kKeyOverfitEnabled[] = "session.overfitEnabled";

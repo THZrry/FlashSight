@@ -22,6 +22,12 @@ struct HistoryResult {
   int64_t compressed_to = 0;
   int64_t dropped_turns = 0;       // 被折叠的 turn 数
   int64_t est_tokens = 0;          // 估算的对话 token（不含 system）
+  // How history was compacted this turn:
+  //   "full"       - threshold/forced: EVERY stored turn folded into a summary
+  //   "short-view" - the current window cannot hold the prompt (e.g. the user
+  //                  switched to a smaller model): keep the newest turns and
+  //                  fold the rest. The UI must tell the user this happened.
+  std::string mode;
 };
 
 // 提示词前缀装配（session-history.md 3 定稿顺序）：
@@ -50,16 +56,10 @@ class HistoryBuilder {
     int64_t last_prompt_tokens = 0;
     // 模型上下文窗口（0 = 未知）。未知时水位触发不可用，只有显式"立即压缩"。
     int64_t context_limit = 0;
-    // 水位阈值（百分比）。<=0 关闭水位触发。
-    // DEFAULT OFF. This is ONLY a trigger/signal; it says nothing about HOW to
-    // compact. The user's point: "阈值是某次调用完以后发现窗口已经到 80% 了触发
-    // 压缩，凭什么设置了阈值就一定要开短视图？" Trigger and strategy are separate.
-    int compress_at_pct = 0;
-    // What reaching the threshold DOES:
-    //   "warn"      - report "water level reached", keep the full history (default)
-    //   "shortView" - fold old turns (only this explicit choice drops history)
-    // force_compress (the manual action) still folds regardless.
-    std::string compact_action = "warn";
+    // 水位阈值（百分比）。到达后**全量压缩**：所有旧轮折成摘要，不再保留最近几轮
+    // 的原文。短视图不是这个阈值的一部分——只有当前窗口装不下（例如换到小窗模型）
+    // 才自动退到短视图并提醒。<=0 关闭水位触发。
+    int compress_at_pct = 80;
     // 压缩后至少保留的最近轮数：压缩不等于清空，最近几轮必须全量在。
     int keep_turns = 8;
     // 强制压缩（用户点"压缩"/UI 提示时）。
@@ -122,7 +122,8 @@ class HistoryBuilder {
   static void turn_to_neutral(const Json& turn, Json* out);
   // 生成折叠摘要（含 keyPoints）
   static std::string make_fold(const Json& turns, size_t from, size_t to,
-                               const std::string& prior, int max_points);
+                               const std::string& prior, int max_points,
+                               size_t max_digest_bytes = 32000);
   // 装配前缀（legacy：直接用 system_prefix + env/tools/mcp 拼接）
   Json build_system() const;
 };

@@ -293,16 +293,14 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
       opts.thinking = jsonutil::get<std::string>(ss, "thinking", "");
     }
   }
-  // Compaction settings. THREE independent facts: WHEN to look (threshold),
-  // WHAT to do when it fires (compactAction: warn by default / shortView), and
-  // how much stays verbatim if folding is chosen.
+  // Compaction: the threshold triggers a FULL compression. keepTurns is only
+  // the automatic short-view fallback when the current window cannot hold the
+  // prompt (e.g. the user switched to a smaller-window model).
   if (deps_.setting) {
-    Json cp = deps_.setting(opts.pid, "history.compressAtPct", Json(0));
+    Json cp = deps_.setting(opts.pid, "history.compressAtPct", Json(80));
     Json kt = deps_.setting(opts.pid, "history.keepTurns", Json(8));
-    Json ca = deps_.setting(opts.pid, "history.compactAction", Json("warn"));
     if (cp.is_number()) opts.history.compress_at_pct = static_cast<int>(cp.get<int64_t>());
     if (kt.is_number()) opts.history.keep_turns = static_cast<int>(kt.get<int64_t>());
-    if (ca.is_string()) opts.history.compact_action = ca.get<std::string>();
   }
   opts.event = [this](const std::string& e, const Json& p) { emit(e, p); };
   auto loop = std::unique_ptr<AgentLoop>(new AgentLoop(std::move(opts)));
@@ -804,7 +802,7 @@ FsResult AgentHost::context_status(const std::string& sid) {
     prompt = it->second->last_prompt_tokens();
   }
   if (deps_.setting) {
-    Json v = deps_.setting("", "history.compressAtPct", Json(0));
+    Json v = deps_.setting("", "history.compressAtPct", Json(80));
     if (v.is_number()) at = static_cast<int>(v.get<int64_t>());
   }
   if (limit > 0 && prompt > 0) {
@@ -873,12 +871,10 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
     // did nothing until the app restarted - "the options have no effect".
     if (deps_.setting) {
       HistoryBuilder::Options hopts = loop->history_options();
-      Json cp = deps_.setting(ctx.pid, "history.compressAtPct", Json(0));
+      Json cp = deps_.setting(ctx.pid, "history.compressAtPct", Json(80));
       Json kt = deps_.setting(ctx.pid, "history.keepTurns", Json(8));
-      Json ca = deps_.setting(ctx.pid, "history.compactAction", Json("warn"));
       if (cp.is_number()) hopts.compress_at_pct = static_cast<int>(cp.get<int64_t>());
       if (kt.is_number()) hopts.keep_turns = static_cast<int>(kt.get<int64_t>());
-      if (ca.is_string()) hopts.compact_action = ca.get<std::string>();
       loop->set_history_options(hopts);
     }
     if (deps_.context_limit) loop->context_limit = deps_.context_limit(ctx.model);

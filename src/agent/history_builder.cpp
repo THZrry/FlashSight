@@ -321,22 +321,63 @@ std::string HistoryBuilder::project_tool_result(const std::string& name,
 }
 
 std::string HistoryBuilder::make_fold(const Json& turns, size_t from, size_t to,
-                                      const std::string& prior, int max_points) {
+                                      const std::string& prior, int max_points,
+                                      size_t max_digest_bytes) {
   std::string points;
+  std::string digest;
   int collected = 0;
+  // A fold must never erase the conversation: keyPoints are optional (they only
+  // exist when the model called the keypoint tool), so a summary made only of
+  // them was often just "[Earlier conversation was compacted]" and the model
+  // lost everything. Always add a per-turn digest: user prompts and assistant
+  // answers, one line each, so FULL compression still carries the thread.
+  const size_t kMaxDigestBytes =
+      max_digest_bytes > 512 ? max_digest_bytes : 512;
   for (size_t i = from; i < to && i < turns.size(); ++i) {
     const Json& t = turns[i];
     if (!t.is_object()) continue;
-    if (!t.contains("keyPoints") || !t["keyPoints"].is_array()) continue;
-    for (auto& kp : t["keyPoints"]) {
-      if (!kp.is_string() || collected >= max_points) continue;
-      points += "- " + kp.get<std::string>() + "\n";
-      ++collected;
+    // A forgotten turn is dropped from context, not summarised.
+    if (jsonutil::get<bool>(t, "forgotten", false)) continue;
+    if (t.contains("keyPoints") && t["keyPoints"].is_array()) {
+      for (auto& kp : t["keyPoints"]) {
+        if (!kp.is_string() || collected >= max_points) continue;
+        points += "- " + kp.get<std::string>() + "\n";
+        ++collected;
+      }
     }
+    if (digest.size() >= kMaxDigestBytes) continue;
+    std::string role = jsonutil::get<std::string>(t, "role", "");
+    std::string text;
+    if (role == "user") {
+      text = jsonutil::get<std::string>(t, "promptRaw", "");
+      if (text.empty()) text = jsonutil::get<std::string>(t, "content", "");
+    } else {
+      text = jsonutil::get<std::string>(t, "streamSummary", "");
+      if (text.empty()) text = jsonutil::get<std::string>(t, "content", "");
+    }
+    // The model's narration is process, not the answer; keep the answer line.
+    if (text.empty()) continue;
+    text = utf8::truncate(text, 260, "…");
+    for (size_t k = 0; k < text.size(); ++k) {
+      if (text[k] == '\n' || text[k] == '\r') text[k] = ' ';
+    }
+    std::string line = (role == "user" ? "U: " : "A: ") + text;
+    if (role != "user" && t.contains("toolCalls") && t["toolCalls"].is_array()) {
+      std::string names;
+      for (auto& c : t["toolCalls"]) {
+        std::string n = jsonutil::get<std::string>(c, "name", "");
+        if (n.empty()) continue;
+        if (!names.empty()) names += ", ";
+        names += n;
+      }
+      if (!names.empty()) line += " [tools: " + utf8::truncate(names, 120, "…") + "]";
+    }
+    digest += line + "\n";
   }
   std::string out = "[Earlier conversation was compacted]\n";
   if (!prior.empty()) out += prior + "\n";
   if (!points.empty()) out += "[Key points]\n" + points;
+  if (!digest.empty()) out += "[Turn digest]\n" + digest;
   return out;
 }
 
@@ -429,26 +470,39 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   // (or an explicit "compact now"). The API/provider deals with a long context;
   // we do not pre-emptively drop history.
 
-  // The TRIGGER (water level / forced) is decided by should_compress. The
-  // STRATEGY is separate: reaching the threshold only WARNS by default; folding
-  // old turns happens only when the user explicitly picked the short-view mode
-  // (or pressed the manual compress action). Setting a threshold must never be
-  // read as "enable short view".
+  // Two DIFFERENT reasons to compact, with different strategies:
+  //
+  // 1. The water level reached its threshold (or the user pressed compress):
+  //    FULL compression - every stored turn folds into the summary. That is the
+  //    request: "到达时全量进行压缩". It does not keep recent turns verbatim.
+  // 2. The current model window cannot hold the prompt (the user switched to a
+  //    smaller-window model): FULL compression would throw away the recent
+  //    working context, so fall back to SHORT VIEW - keep the newest turns and
+  //    fold the rest - and tell the UI this was automatic.
   int64_t raw_tokens = estimate_tokens(turns);
   CompressDecision dec = should_compress(opts_, raw_tokens);
-  const bool short_view = opts_.compact_action == "shortView";
-  bool must_fold = opts_.force_compress || (dec.compress && short_view);
-  if (must_fold) {
-    // Keep the newest `keep_turns` turns and fold everything older. That is the
-    // only way a forced/short-view compaction is guaranteed to change anything.
-    size_t keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 1;
-    if (keep >= total) keep = total > 1 ? total - 1 : total;
+  bool window_short = false;
+  if (opts_.context_limit > 0) {
+    int64_t need = raw_tokens > opts_.last_prompt_tokens ? raw_tokens
+                                                         : opts_.last_prompt_tokens;
+    if (need > opts_.context_limit) window_short = true;
+  }
+  const bool fold = opts_.force_compress || dec.compress || window_short;
+  if (fold) {
+    size_t keep = 0;  // full compression: no turn stays verbatim
+    if (window_short) {
+      keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 1;
+      if (keep >= total) keep = total > 1 ? total - 1 : total;
+    }
     size_t fold_to = total > keep ? total - keep : 0;
     // Fold from the start, but never fold turns the caller asked to forget
     // anyway (they are dropped, not summarised).
     if (fold_to > 0) {
+      // A short view is used precisely when the window is tight, so its summary
+      // must be small too; full compression can carry a richer digest.
+      size_t digest_cap = window_short ? 6000 : 32000;
       std::string fold = make_fold(turns, 0, fold_to, opts_.prior_summary,
-                                   opts_.max_fold_points);
+                                   opts_.max_fold_points, digest_cap);
       Json summary = Json::object();
       summary["role"] = "user";
       summary["content"] = fold;
@@ -468,6 +522,7 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
       out.messages = with_fold;
       out.est_tokens = used;
       out.compressed = true;
+      out.mode = window_short ? "short-view" : "full";
       out.compressed_from = 0;
       out.compressed_to = static_cast<int64_t>(fold_to);
       out.dropped_turns = static_cast<int64_t>(fold_to);

@@ -3129,3 +3129,33 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **测试**：440 用例 4109 断言全过。新增 `water_level_warns_without_short_view`（阈值 95% + keepTurns=1
     仍然一轮不丢）和 `loop_warns_at_water_level_without_dropping_history`（发提示事件、请求里仍有最早一轮）；
     原水位折叠用例显式选择 `shortView`。web / webview 双变体编译通过。
+
+
+<116>(FIXED): 压缩行为按原意重做：只保留水位阈值；到达阈值全量压缩；只有当前窗口装不下才自动短视图并提醒。
+  - **删掉多余设置**：`history.compactAction` 和“达到阈值时”整项、以及“只是触发信号/默认关闭”的说明全部删除。
+    设置页只剩"上下文水位阈值"一个控件（默认 80%），不新增任何开关。
+  - **阈值 = 全量压缩**：达到水位（或手动压缩）时，`build_neutral` 把所有已存轮次折进摘要（`keep=0`，
+    `mode="full"`、`droppedTurns=总轮数`），不在阈值路径保留最近几轮原文。之前把阈值和“只留最近轮”绑在
+    一起是错的。
+  - **窗口不够 = 自动短视图 + 提醒**：如果 `contextLimit` 小于 `max(全量历史估算, 上一次实际 prompt tokens)`
+    （典型场景：从 1M 模型切到小窗模型），全量压缩会丢掉刚做的工作上下文，这时才自动保留最近 `keepTurns`
+    轮、折叠其余（`mode="short-view"`），事件里带 `keptTurns`/`droppedTurns`/`reason=window-too-small`，
+    UI toast 明确提示“上下文窗口不足，已自动改用短视图（保留最近 N 轮）”。正常到阈值不会走短视图。
+  - **默认值回到 80**：`HistoryBuilder::Options`、AgentHost 三处读设置、SettingsStore 默认、UI 默认统一为 80，
+    避免上一轮“设置层还写着 80/0”那种多处默认值不一致。
+  - **测试**：440 用例 4112 断言全过。新增/改写：`compress_defaults_to_full_at_water_level`（默认 80、全量、
+    消息只剩 system+摘要）、`compress_water_level_folds_every_turn`、`window_too_small_uses_short_view`、
+    `loop_short_views_when_window_too_small`（短视图事件 + 最近轮原文仍在请求里）；设置页测试只允许阈值一个控件。
+    web / webview 双变体编译通过。
+
+
+<117>(FIXED): 全量压缩不能只折 keyPoints——补上逐轮摘要，避免压缩后只剩一句“已压缩”。
+  - 复核 `make_fold` 时发现：它只收集 turn 里可选的 `keyPoints`，而 keyPoints 只有在模型主动调用
+    keypoint 工具时才存在。没有 keyPoints 的会话一旦压缩，摘要就只有一行 "[Earlier conversation was
+    compacted]"，等于把全部上下文抹掉。全量压缩必须先真的“压出内容”。
+  - 现在 `make_fold` 在 keyPoints 之外总是追加 `[Turn digest]`：每条 user 轮取 promptRaw、assistant 轮取
+    streamSummary（截断到 260 字节、压成一行），assistant 轮附工具名；`forgotten` 轮仍然完全跳过，不进入
+    摘要。摘要总字节有上限（全量 32K，短视图 6K），避免摘要自己撑爆小窗。
+  - 测试加强：全量压缩的摘要必须包含真实对话（`A: answer 5` / `U: question 5`），短视图摘要必须包含被
+    折叠的旧轮内容；`history_forget_and_keypoints` 继续验证 forgotten 轮不出现。
+  - **测试**：440 用例 4115 断言全过；web / webview 双变体编译通过。

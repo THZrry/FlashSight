@@ -1284,9 +1284,11 @@ FS_TEST(uiapp_history_settings_keep_only_the_threshold_knobs) {
   app.open_modal_page("settings");
   app.update([](AppState& s) { s.settings_nav = "model_prefs"; });
   EXPECT_TRUE(dump_has(dom, "上下文水位阈值"));
-  EXPECT_TRUE(dump_has(dom, "达到阈值时"));
   EXPECT_TRUE(dump_has(dom, "关闭"));  // the "off" option of the threshold
-  EXPECT_TRUE(dump_has(dom, "仅提醒"));
+  // ONE control: there is no "what happens at the threshold" setting.
+  EXPECT_FALSE(dump_has(dom, "达到阈值时"));
+  EXPECT_FALSE(dump_has(dom, "仅提醒"));
+  EXPECT_FALSE(dump_has(dom, "短视图"));
   EXPECT_FALSE(dump_has(dom, "保留最近轮数"));
   EXPECT_FALSE(dump_has(dom, "立即压缩"));
   EXPECT_FALSE(dump_has(dom, "最近轮次"));
