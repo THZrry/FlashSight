@@ -410,15 +410,20 @@ std::vector<ModelEntry> builtin_models_preset() {
 void fill_model_defaults(ModelEntry* m) {
   if (!m) return;
   if (m->icon.empty()) m->icon = model_icon_for(m->id);
-  // Only fill the thinking config when there is none. A model that already
-  // carries levels (or a deliberate empty one) has been set by the user, and
-  // the capability flag is theirs too: caps.thinking and the level list are not
-  // the same thing (a model can reason without offering a ladder), so deriving
-  // one from the other would overwrite a considered answer with a guess.
-  if (m->thinking.levels.empty() && m->thinking.default_level.empty()) {
+  // A model that carries a DEFAULT thinking level but no ladder (the preset /
+  // user data stores the two separately) is the common case: the composer then
+  // offered only 开/关 until the settings page was opened and saved, because the
+  // save path filled the ladder while this one required BOTH fields to be empty.
+  if (m->thinking.levels.empty()) {
     m->thinking.levels = thinking_levels_for(m->id);
-    m->thinking.default_level = default_thinking_for(m->id);
-    if (!m->thinking.levels.empty()) m->caps.thinking = true;
+    if (!m->thinking.levels.empty()) {
+      m->caps.thinking = true;
+      bool ok = false;
+      for (size_t i = 0; i < m->thinking.levels.size(); ++i) {
+        if (m->thinking.levels[i] == m->thinking.default_level) ok = true;
+      }
+      if (!ok) m->thinking.default_level = m->thinking.levels[0];
+    }
   }
 }
 

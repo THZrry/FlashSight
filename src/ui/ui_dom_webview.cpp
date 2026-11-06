@@ -1098,6 +1098,10 @@ class WebViewDom : public IDom {
     }
     if (getenv("FS_UI_WEBVIEW_DEBUG")) {
       std::fprintf(stderr, "[webview] fire hid=%d value=%.60s\n", hid, v.c_str());
+      if (FILE* f = std::fopen("C:\\aaa\\FlashSight\\temp\\fs_event.log", "a")) {
+        std::fprintf(f, "fire hid=%d value=%.40s\n", hid, v.c_str());
+        std::fclose(f);
+      }
     }
     bus().fire(hid, v);
   }

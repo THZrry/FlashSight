@@ -3419,6 +3419,10 @@ FsResult FsApi::model_save(const std::string& providerId, const Json& model) {
   }
   if (m.display.empty()) m.display = m.id;
   m.user_set = true;
+  // Context length: optional. The UI prefers an API-reported value and falls
+  // back to this default; direct API callers get the same fallback instead of a
+  // stored 0 (which made the context water level uncomputable).
+  if (m.caps.context_len <= 0) m.caps.context_len = 128000;
   fill_model_defaults(&m);
   // 用户显式保存的档位表以用户为准：只有用户没给档位时才由粗匹配补
   if (m.thinking.levels.empty()) {
@@ -3513,7 +3517,14 @@ FsResult FsApi::model_all_enabled() {
     std::vector<ModelEntry> models = model_table_->list_models(c.id);
     for (size_t i = 0; i < models.size(); ++i) {
       if (!models[i].enabled) continue;
-      Json j = models[i].to_json();
+      // Fill derived defaults (thinking ladder from the model name) on a COPY:
+      // the composer builds its thinking control from this payload, so a model
+      // that has a default level but was never explicitly saved must still get
+      // the full ladder here - otherwise it showed only 开/关 until the user
+      // opened the model settings and pressed save.
+      ModelEntry m = models[i];
+      fill_model_defaults(&m);
+      Json j = m.to_json();
       j["providerId"] = c.id;
       j["providerName"] = c.name;
       arr.push_back(j);

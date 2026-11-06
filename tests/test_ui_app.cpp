@@ -1180,24 +1180,24 @@ FS_TEST(uiapp_appearance_applies_to_dom) {
   EXPECT_EQ(dom.appearance_for_test().palette, std::string("default"));
 }
 
-// Switching a settings section replays its entry animation. The body node
-// survives the patch, so without the replay token the animation only ever ran
-// on the first section you opened.
+// Switching a settings section must animate the new section in. The body is
+// KEYED by section (the sections are different pages and the bridged adapter
+// needs the identity), so each switch creates a fresh body node whose MOUNT
+// animation is the entry - not a replay on a surviving node.
 FS_TEST(uiapp_settings_sections_animate) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
   app.mount();
   app.open_modal_page("settings");
-  dom.clear_calls();
-  app.update([](AppState& s) { s.settings_nav = "appearance"; });
-  app.update([](AppState& s) { s.settings_nav = "network"; });
-  app.update([](AppState& s) { s.settings_nav = "about"; });
-  int replays = 0;
-  for (size_t i = 0; i < dom.calls().size(); ++i) {
-    if (dom.calls()[i].method == "play_animation") ++replays;
+  const char* secs[3] = {"appearance", "network", "about"};
+  for (int i = 0; i < 3; ++i) {
+    std::string sec = secs[i];
+    app.update([&](AppState& s) { s.settings_nav = sec; });
+    std::string d = dom.dump();
+    EXPECT_TRUE(d.find("settings-body") != std::string::npos);
+    EXPECT_TRUE(d.find("anim-enter") != std::string::npos);
   }
-  EXPECT_TRUE(replays >= 3);  // one per section switch
 }
 
 // A page whose content arrives late animates when the content lands, not only

@@ -2977,3 +2977,22 @@ The process of project: P0 环境搭建 + P1 AppCore
     这三个时刻强制读取一次 `session.todos`，作为丢失广播时的兜底。
   - **测试**：428 用例 3999 断言全过；web / webview 双变体编译通过。滚动分页用例补了"先跑完恢复的两个 schedule tick"，
     与真实时间线一致。
+
+<110>(PARTIAL): 运行中残留/思考档位/用量刷新/上下文档位可选 已修；供应商"新建"在原生 WebView 下仍打不开模板页（已取证，未根治）。
+  - **没运行却显示运行中**：自动轮标记 `auto_round` 在两种"没有 turn.done"的结束路径上没清——`loop.interrupted` 与
+    看门狗读到的 idle。现在两处都清；后端说不在跑，圆点就不会再按 auto_round>0 转。
+  - **有默认思考档位却只有关/开**：`fill_model_defaults` 以前要求 levels 和 default 都为空才补；模型只有 default 时
+    levels 一直空，而设置页保存路径会补，所以"去设置点一下保存就好了"。现在只要 levels 为空就按模型名补，并保证
+    default 在档位表里；`model.allEnabled` 也对返回的副本跑一次（输入框的思考控件读的就是它），不必先保存。
+  - **切页面用量不更新**：主页"用量统计"标签以前只在 `!usage_loaded` 时加载一次。现在每次进入都重读（侧栏用量仍按
+    切会话重读）。
+  - **模型上下文不再必填**：留空走默认 128000（后端 model.save 同样兜底），提示改为"API 获取优先，留空用默认"；
+    不再因为空值拒绝保存。
+  - **供应商"新建"（未修复，已定位到一半）**：点击确实触发（日志确认 state 变 creating=1、render 也以 26 个模板构建），
+    但在原生 WebView2 里 `.pv-templates` 容器到了 DOM 而它的 26 个子卡片没有——同一页里更早的标题/提示能挂上。排除了
+    分支子树键控、常驻页面 + display 切换、整页重建（重建时连 modal 层都不挂）几种方案；判断是 VDOM→webview 适配器
+    在"新建深层子节点"这条路径上丢了尾部操作。为此加了可复现的取证：`FS_UI_EVENT_DEBUG=1` 时 EventBus 的缺失 handler、
+    webview 的 fire、以及设置页构建状态都写到 `temp/fs_event.log`。下一次专门修这条通路。
+  - **附带**：设置页 body 按 section 加 key（切 section 会重建，桥接下不再留旧 handler）；滚动分页用例适配了"恢复期间
+    忽略滚动回显"。
+  - **测试**：428 用例 4004 断言全过；web / webview 双变体编译通过。

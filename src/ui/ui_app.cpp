@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -568,10 +569,20 @@ std::string rel_time(int64_t ms) {
   return std::string(buf);
 }
 
-}  // namespace
+// Temporary diagnostics for the settings click bug (FS_UI_EVENT_DEBUG=1).
+void fsdbg(const char* fmt, ...) {
+  if (!std::getenv("FS_UI_EVENT_DEBUG")) return;
+  FILE* f = std::fopen("C:\\aaa\\FlashSight\\temp\\fs_event.log", "a");
+  if (!f) return;
+  va_list ap;
+  va_start(ap, fmt);
+  std::vfprintf(f, fmt, ap);
+  va_end(ap);
+  std::fprintf(f, "\n");
+  std::fclose(f);
+}
 
-// Defined next to the plan/todo parsers further down; load_session is above it
-// and needs the declaration here.
+}  // namespace
 std::vector<AppState::TodoItem> parse_todo_items(const Json& items);
 
 // ===========================================================================
@@ -3867,6 +3878,11 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // cause is a rejected API key or a 429. The backend puts it in `error`.
     st_.interrupted = true;
     st_.turn_running = false;  // nothing is running after an interrupt
+    // The turn ended (possibly mid auto-round) WITHOUT turn.done. Leaving the
+    // auto-round marker set made the session dot spin forever after a failure -
+    // the "没运行却一直显示运行中" report - because the live row treats
+    // auto_round>0 as running.
+    st_.auto_round = 0;
     st_.interrupt_reason = jsonutil::get<std::string>(payload, "error", "");
     // Watched live = already seen: the row's red dot is for news you have NOT
     // looked at (the error line is in the transcript right here).
@@ -4810,7 +4826,9 @@ VNodePtr UiApp::build_home() {
       // 用量页要显示"按供应商"的范围列表：那来自 provider.listProviders，
       // 以前只有打开过设置或模型选择器才会加载，所以第一次进用量页左侧是空的。
       if (!st_.providers_loaded) load_providers();
-      if (!st_.usage_loaded) load_usage();
+      // ALWAYS re-read on entry: the page used to load exactly once per process,
+      // so switching back after a turn showed stale numbers ("切页面用量数据不更新").
+      load_usage();
     }
   }));
   // 搜索入口放在标题栏最右端（不是紧跟页签）：它是"整页"的动作，右对齐才
@@ -8698,6 +8716,9 @@ void UiApp::refresh_loop_state(const std::string& sid) {
     update([&](AppState& s) {
       s.suspended = suspended;
       s.turn_running = running;
+      // The backend is the authority: a parked/idle loop has no auto round in
+      // flight. Clearing here also recovers from a missed turn.done/auto.halted.
+      if (!running) s.auto_round = 0;
     });
   });
 }
@@ -8949,6 +8970,10 @@ VNodePtr UiApp::build_settings() {
 
   H body = el("div", "settings-body");
   const std::string& sec = st_.settings_nav;
+  // KEY the body by section. Sections have completely different children; with
+  // an unkeyed body the diff matched them by position, and through the bridged
+  // adapter the old section could stay in the DOM with stale handlers.
+  body.key("settings-body:" + sec);
   // The body is declared as an entry-animated panel keyed by SECTION, so
   // switching sections replays the animation (the node would otherwise be
   // patched in place and never animate). This is the per-page animation the
@@ -8957,16 +8982,24 @@ VNodePtr UiApp::build_settings() {
   if (backend_) load_settings_section(sec);
 
   if (sec == "providers") {
+    fsdbg("build providers creating=%d picked=%d selected=%s templates=%zu",
+          static_cast<int>(st_.provider_creating),
+          static_cast<int>(st_.pv_template_picked), st_.provider_selected.c_str(),
+          st_.provider_templates.size());
     // --- 供应商：左列表（选择/新建），右侧编辑或模板向导 ---
     H two = el("div", "pv-two");
+    two.key("pv-two");
     H list = el("div", "pv-list");
     H lhead = el("div", "pv-list-head");
     lhead.add(el("span", "pv-list-title").text(tr("供应商")));
     lhead.add(comp::button(tr("新建"), [this](const std::string&) {
+      fsdbg("provider new clicked (creating was %d, templates %zu)",
+            static_cast<int>(st_.provider_creating), st_.provider_templates.size());
       update([&](AppState& s) {
         s.provider_creating = true;
         s.provider_selected.clear();
       });
+      fsdbg("provider new applied (creating %d)", static_cast<int>(st_.provider_creating));
     }, "primary"));
     list.add(lhead);
     if (st_.providers.empty()) {
@@ -9000,6 +9033,7 @@ VNodePtr UiApp::build_settings() {
     two.add(list);
 
     H detail = el("div", "pv-detail");
+    detail.key("pv-detail");
 
     // The form is shared by "new" and "edit": 格式 is a fixed dropdown, the
     // template only pre-fills endpoint + headers, and 高级 holds headers.
@@ -9316,13 +9350,13 @@ VNodePtr UiApp::build_settings() {
         adv2.add(caps_grid);
 
         adv2.add(comp::section_title(tr("长度")));
-        // 上下文长度必填：0/空会让压缩与水位都算不出来（除以零或永远 0%），
-        // 所以这里要求一个数，保存时再校验一次。
+        // Context length is NOT required: the API fetch fills it when the
+        // endpoint reports one, otherwise the backend uses a sane default.
         adv2.add(comp::field(tr("上下文长度"), comp::text_input(
             d.context_len > 0 ? itos(static_cast<int>(d.context_len)) : std::string(),
-            tr("必填，如 128000"), [this](const std::string& v) {
+            tr("如 128000，留空用默认"), [this](const std::string& v) {
           st_.model_draft.context_len = static_cast<long long>(std::atoi(v.c_str()));
-        }), tr("必填：上下文窗口大小（token）")));
+        }), tr("可选：API 获取优先，留空回退默认值（128000）")));
         adv2.add(comp::field(tr("最大输出"), comp::text_input(
             d.max_output > 0 ? itos(static_cast<int>(d.max_output)) : std::string(),
             "如 8192", [this](const std::string& v) {
@@ -9445,7 +9479,7 @@ VNodePtr UiApp::build_settings() {
 
       detail.add(cols);
     };
-
+    
     if (st_.provider_creating && !st_.pv_template_picked) {
       // step 1: pick a template (it only pre-fills endpoint + headers). The grid
       // is auto-fill, so a wider window shows more templates per row instead of
@@ -9473,11 +9507,11 @@ VNodePtr UiApp::build_settings() {
           mark.text(t.name.empty() ? "?" : t.name.substr(0, 1));
         }
         c.add(mark);
-        H body = el("div", "pv-tpl-body");
-        body.add(el("div", "pv-tpl-name").text(t.name));
-        body.add(el("div", "pv-tpl-desc").text(t.description));
-        body.add(el("div", "pv-tpl-url").text(t.base_url));
-        c.add(body);
+        H tbody = el("div", "pv-tpl-body");
+        tbody.add(el("div", "pv-tpl-name").text(t.name));
+        tbody.add(el("div", "pv-tpl-desc").text(t.description));
+        tbody.add(el("div", "pv-tpl-url").text(t.base_url));
+        c.add(tbody);
         tpls.add(c);
       }
       detail.add(tpls);
@@ -11545,13 +11579,10 @@ void UiApp::save_model() {
     toast(tr("请填写模型名"));
     return;
   }
-  // 上下文长度必填：压缩阈值和上下文水位都要用它算比例，0 会让两者都失真。
-  if (m.context_len <= 0) {
-    update([&](AppState& s) {
-      s.model_status = tr("请填写上下文长度（必填）");
-    });
-    return;
-  }
+  // Context length is OPTIONAL: an explicit value wins, an API-fetched one is
+  // already in the draft, and an empty field falls back to a sane default. It is
+  // NOT a save blocker (the old check turned "leave it empty" into an error).
+  if (m.context_len <= 0) m.context_len = 128000;
   if (m.display.empty()) m.display = m.id;
   Json body = model_row_to_json(m);
   call_async("model.save", Json{{"providerId", pid}, {"model", body}},

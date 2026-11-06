@@ -12,6 +12,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <memory>
@@ -43,7 +45,18 @@ class EventBus {
   }
   void fire(int id, const std::string& value) {
     std::map<int, EventFn>::iterator it = handlers_.find(id);
-    if (it == handlers_.end() || !it->second) return;
+    if (it == handlers_.end() || !it->second) {
+      // A click that reaches the DOM but not the bus means the listener still
+      // holds an id from a previous generation (retain() dropped it). Logging
+      // this makes that class of "button does nothing" diagnosable.
+      if (std::getenv("FS_UI_EVENT_DEBUG")) {
+        if (FILE* f = std::fopen("C:\\aaa\\FlashSight\\temp\\fs_event.log", "a")) {
+          std::fprintf(f, "no handler id=%d live=%zu\n", id, handlers_.size());
+          std::fclose(f);
+        }
+      }
+      return;
+    }
     // Copy first: the handler usually calls update() -> render() -> retain(),
     // which erases this very entry. Invoking the map slot directly would
     // destroy the running closure (and its captures) mid-call.
