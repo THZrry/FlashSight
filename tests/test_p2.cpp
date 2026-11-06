@@ -378,11 +378,55 @@ FS_TEST(model_icon_matches_brand) {
   EXPECT_EQ(model_icon_for("kimi-k2"), std::string("kimi"));
   EXPECT_EQ(model_icon_for("moonshot-v1-8k"), std::string("moonshot"));
   EXPECT_EQ(model_icon_for("llama-3.3-70b"), std::string("meta"));
+  // Meta's Muse Spark contains "spark", which used to swallow it into iFlytek's
+  // Spark mark; the Meta rule must win.
+  EXPECT_EQ(model_icon_for("muse-spark-1"), std::string("meta"));
+  EXPECT_EQ(model_icon_for("spark-4.0"), std::string("spark"));
   EXPECT_EQ(model_icon_for("grok-3"), std::string("grok"));
   // 大小写不敏感
   EXPECT_EQ(model_icon_for("GPT-4o"), std::string("openai"));
   // 认不出来就返回空（UI 回退到通用图标，而不是给个错的品牌）
   EXPECT_TRUE(model_icon_for("some-unknown-thing").empty());
+}
+
+// Context fallback: current cloud models are 1M, so the default is generous and
+// only EXPLICIT low-tier name tokens shrink it. "minimax" must not read as "mini".
+FS_TEST(model_context_defaults_follow_a_1m_baseline) {
+  ModelEntry a;
+  a.id = "deepseek-v4.1";
+  fill_model_defaults(&a);
+  EXPECT_EQ(a.caps.context_len, int64_t(1048576));
+  ModelEntry b;
+  b.id = "clau" + std::string("de-sonnet-4.5");
+  fill_model_defaults(&b);
+  EXPECT_EQ(b.caps.context_len, int64_t(1048576));
+  ModelEntry c;
+  c.id = "gemini-2.5-flash";
+  fill_model_defaults(&c);
+  EXPECT_EQ(c.caps.context_len, int64_t(1048576));   // Flash is still 1M
+  ModelEntry d;
+  d.id = "minimax-m2";
+  fill_model_defaults(&d);
+  EXPECT_EQ(d.caps.context_len, int64_t(1048576));   // not "mini"
+  // Low-tier markers pull it down.
+  ModelEntry e;
+  e.id = "gpt-4o-mini";
+  fill_model_defaults(&e);
+  EXPECT_EQ(e.caps.context_len, int64_t(131072));
+  ModelEntry f;
+  f.id = "deepseek-v4.1-flash";
+  fill_model_defaults(&f);
+  EXPECT_EQ(f.caps.context_len, int64_t(131072));
+  ModelEntry g;
+  g.id = "qwen2.5-7b-instruct";
+  fill_model_defaults(&g);
+  EXPECT_EQ(g.caps.context_len, int64_t(131072));
+  // An API/user value always wins over the fallback.
+  ModelEntry h;
+  h.id = "gpt-4o-mini";
+  h.caps.context_len = 500000;
+  fill_model_defaults(&h);
+  EXPECT_EQ(h.caps.context_len, int64_t(500000));
 }
 
 // 从 API 拿到的模型没有能力/档位/图标：补齐默认值，但绝不覆盖用户已设的。
@@ -406,6 +450,24 @@ FS_TEST(model_fill_defaults_does_not_clobber) {
   EXPECT_EQ((int)u.thinking.levels.size(), 1);
   EXPECT_EQ(u.thinking.levels[0], std::string("only-one"));
   EXPECT_FALSE(u.caps.thinking);
+
+  // A persisted API icon computed by the old matcher is corrected: the model
+  // name is the source of truth for rows the user did not hand-edit. Without
+  // this, Meta's Muse Spark kept the iFlytek Spark icon forever.
+  ModelEntry a;
+  a.id = "virtual/muse_spark_1_3";
+  a.from_api = true;
+  a.icon = "spark";
+  fill_model_defaults(&a);
+  EXPECT_EQ(a.icon, std::string("meta"));
+  // ...but an explicitly saved icon is still the user's.
+  ModelEntry s;
+  s.id = "virtual/muse_spark_1_3";
+  s.from_api = true;
+  s.user_set = true;
+  s.icon = "custom-brand";
+  fill_model_defaults(&s);
+  EXPECT_EQ(s.icon, std::string("custom-brand"));
 }
 
 // 逐模型设置要能持久化并读回：这是"模型单独高级设置"的存储层。

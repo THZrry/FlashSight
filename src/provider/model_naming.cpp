@@ -112,7 +112,9 @@ std::string model_icon_for(const std::string& model_id) {
       {"moonshot", {"moonshot", nullptr}},
       {"zhipu", {"glm", "zhipu", nullptr}},
       {"chatglm", {"chatglm", nullptr}},
-      {"meta", {"llama", "meta-", nullptr}},
+      // "muse" is Meta's model line (Muse Spark); it must win over the bare
+      // "spark" below, which means iFlytek's Spark and used to swallow it.
+      {"meta", {"llama", "meta-", "muse", nullptr}},
       {"mistral", {"mistral", "mixtral", "codestral", "magistral", nullptr}},
       {"grok", {"grok", nullptr}},
       {"xai", {"xai", nullptr}},

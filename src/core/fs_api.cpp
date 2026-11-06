@@ -3469,7 +3469,8 @@ FsResult FsApi::model_save(const std::string& providerId, const Json& model) {
   // Context length: optional. The UI prefers an API-reported value and falls
   // back to this default; direct API callers get the same fallback instead of a
   // stored 0 (which made the context water level uncomputable).
-  if (m.caps.context_len <= 0) m.caps.context_len = 128000;
+  // fill_model_defaults() below picks the fallback window (1M by default, small
+  // only for explicit low-tier names); no fixed 128k here.
   fill_model_defaults(&m);
   // 用户显式保存的档位表以用户为准：只有用户没给档位时才由粗匹配补
   if (m.thinking.levels.empty()) {

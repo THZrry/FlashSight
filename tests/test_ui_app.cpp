@@ -1937,6 +1937,137 @@ FS_TEST(uiapp_model_picker_two_pane) {
   EXPECT_TRUE(dump_has(dom, "model-pick-btn"));
 }
 
+// The same model id can live on two providers. Selection is the PAIR: the other
+// provider's copy must not show a checkmark, and switching to it must show one.
+FS_TEST(uiapp_model_picker_selection_is_provider_aware) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    AppState::ProviderRow p1;
+    p1.id = "p1";
+    p1.name = "first";
+    p1.kind = "openai-chat";
+    AppState::ProviderRow p2;
+    p2.id = "p2";
+    p2.name = "second";
+    p2.kind = "openai-chat";
+    s.providers.push_back(p1);
+    s.providers.push_back(p2);
+    s.providers_loaded = true;
+    s.model = "same-model";
+    s.model_provider = "p2";
+    s.model_picker_open = true;
+    s.model_picker_owner = "composer";
+    s.model_picker_provider = "p1";
+    s.model_picker_loaded = true;
+    AppState::ModelRow a = mk_model("same-model");
+    a.provider = "p1";
+    AppState::ModelRow b = mk_model("same-model");
+    b.provider = "p2";
+    s.model_picker_models.push_back(a);
+    s.model_picker_models.push_back(b);
+  });
+  auto count = [&dom](const std::string& needle) {
+    const std::string d = dom.dump();
+    int n = 0;
+    for (size_t p = d.find(needle); p != std::string::npos;
+         p = d.find(needle, p + needle.size())) {
+      ++n;
+    }
+    return n;
+  };
+  // p1's page: same id, different provider -> neither active nor checked.
+  EXPECT_EQ(count("class=\"mp-model active\""), 0);
+  EXPECT_EQ(count("fa-check"), 0);
+  // p2's page: exactly the selected pair.
+  app.update([](AppState& s) { s.model_picker_provider = "p2"; });
+  EXPECT_EQ(count("class=\"mp-model active\""), 1);
+  EXPECT_EQ(count("fa-check"), 1);
+}
+
+// Opening the picker must land on the provider that owns the current model, not
+// on whichever provider happened to be first in the list.
+FS_TEST(uiapp_model_picker_opens_on_current_provider) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    AppState::ProviderRow p1;
+    p1.id = "p1";
+    p1.name = "first";
+    AppState::ProviderRow p2;
+    p2.id = "p2";
+    p2.name = "second";
+    s.providers.push_back(p1);
+    s.providers.push_back(p2);
+    s.providers_loaded = true;
+    s.model = "same-model";
+    s.model_provider = "p2";
+  });
+  app.open_model_picker("composer", "");
+  EXPECT_EQ(app.state().model_picker_provider, std::string("p2"));
+}
+
+// Picking a model must refresh the thinking ladder from the model TABLE at once.
+// Before, only saving the model in provider settings triggered this read, so the
+// composer kept the old pair (or no control at all) until that save.
+FS_TEST(uiapp_pick_model_refreshes_thinking_levels) {
+  class PickBackend : public IUiBackend {
+   public:
+    Json levels = Json::array({"off", "low", "high"});
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "model.allEnabled") {
+        r.data = Json{{"models", Json::array({
+            Json{{"id", "reasoner"},
+                 {"providerId", "p2"},
+                 {"providerName", "second"},
+                 {"thinking", Json{{"levels", levels}, {"default", "low"}}}},
+            Json{{"id", "old"}, {"providerId", "p1"},
+                 {"thinking", Json{{"levels", Json::array({"on", "off"})}}}},
+        })}};
+      }
+      if (method == "usage.session") {
+        r.data = Json{{"totalIn", 0}, {"totalOut", 0}, {"totalCache", 0},
+                      {"calls", 0}, {"lastIn", 0}, {"contextWindow", 0}};
+      }
+      if (method == "provider.balances") r.data = Json{{"providers", Json::array()}};
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s);
+    AppState::ProviderRow p2;
+    p2.id = "p2";
+    p2.name = "second";
+    s.providers.push_back(p2);
+    s.providers_loaded = true;
+    s.model = "old";
+    s.model_provider = "p1";
+    // A level from the PREVIOUS model that is not on the new ladder.
+    s.thinking = "medium";
+    s.model_available = true;
+  });
+  app.pick_model("p2", "reasoner");
+  EXPECT_EQ(app.state().model, std::string("reasoner"));
+  EXPECT_EQ(app.state().model_provider, std::string("p2"));
+  EXPECT_EQ((int)app.state().model_thinking_levels.size(), 3);
+  EXPECT_EQ(app.state().model_thinking_default, std::string("low"));
+  // medium is meaningless on off/low/high -> replaced by the model's default.
+  EXPECT_EQ(app.state().thinking, std::string("low"));
+}
+
 // Above 20 models the list is sorted and grouped by initial; below it the
 // headers would just be noise between every few rows.
 FS_TEST(uiapp_model_picker_groups_only_when_long) {

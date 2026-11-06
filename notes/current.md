@@ -3014,3 +3014,28 @@ The process of project: P0 环境搭建 + P1 AppCore
     对每条模型跑 `fill_model_defaults`，其中新增 `default_context_for`：已知家族（gemini 1M、claude 200k、
     gpt-4.1/5 1M、o1/o3/o4 200k、deepseek 128k、qwen 131k、kimi 256k…）给保守值，其余默认 128000；用户仍可覆盖。
   - **测试**：429 用例 4012 断言全过；web / webview 双变体编译通过。原生窗口验证模板页 26 张卡。
+
+
+<112>(FIXED): 选择器选中态按 (供应商, 模型) 判定 + 选完模型立即刷新思考档位 + 默认上下文改 1M 基线（低配关键词才降到 131K）+ Muse Spark 不再当成讯飞 Spark。
+  - **同名模型两页都打勾、还总跳到第一家**：上一批只修了路由，选择页面仍按模型 id 判定选中，`open_model_picker` 也
+    默认供应商列表第一家。现在选中态比较 PAIR（`st_.model_provider`），行 key 也带 provider（切换供应商页会重建行，
+    不会复用上一家的 active 类）；打开选择器直接定位到当前模型所属供应商。老会话若没记住 provider，则按后端同样的
+    解析顺序（第一条启用副本）标记，仍然只打一个勾。原生 WebView2 实测：从 DeepSeek 的 deepseek-flash 打开选择器
+    落在 DeepSeek、1 个 active/1 个勾；切到 Happy API 后 0 active/0 勾；关掉重开又回到 DeepSeek。
+  - **思考档位必须去供应商设置保存一遍才更新**：选择器里点模型只改了 `model`/`model_provider` 和会话设置，没有重读
+    模型表；输入框的档位读的是 `model.allEnabled`，所以直到设置页保存模型（那里会调 `refresh_model_availability`）
+    才变成新模型的档位。现在 `pick_model` 选完立即刷新，并校验当前档位：新档位表非空且旧值不在表里（例如从 medium
+    换到 off/low/high）时清掉旧值，再选中模型自己的默认档，避免控件显示新默认而请求还带旧档位。档位表为空（模型表
+    没有描述该模型）时保留会话记忆值，兼容旧行为。
+  - **默认上下文太短**：`default_context_for` 从"按家族给保守值"（claude 200k / deepseek 128k / qwen 131k / 默认
+    128k）改成 **1M 基线**（1048576），只有模型名的**独立 token** 明确是低配才降到 131072：mini / nano / flash /
+    lite / small / tiny / turbo / haiku / air，以及 7b / 8b / 1.5b 这类裸参数量。按 token 匹配是为了避免 "minimax"
+    被当成 "mini"；gemini 家族优先判 1M（Flash 也是 1M）。UI 保存模型不再把空值写成 128000，后端 model.save 也
+    交给 `fill_model_defaults`，提示改为"留空按模型名自动匹配（默认 1M）"。实测 Happy API 列表：grok-4.7 / muse 等
+    显示 1048K，agnes-2.5-flash / deepseek-v4.1-flash / glm-5.3-flash 等显示 131K。
+  - **Meta 的 Muse Spark 被认成讯飞 Spark 星火**：`model_icon_for` 的品牌表里 "spark" 是裸子串，排在前面时把
+    "muse_spark_..." 吞掉了。现在 Meta 规则包含 "muse"（UI 的 `brand_for_name` 同步），先于 spark 命中。另外，
+    之前按旧逻辑落盘的 API 模型图标（from_api 且非 user_set）会在 `fill_model_defaults` 里按新规则重算，否则配置里
+    的 "spark" 会一直留着；用户手改过的图标（user_set）不动。原生窗口实测两条 muse 模型都是 `mi-lobe-meta`。
+  - **测试**：433 用例 4034 断言全过；web / webview 双变体编译通过。新增选择器 pair/打开定位、选模型刷新档位、
+    1M 上下文基线、Muse 品牌与旧图标重算的用例。

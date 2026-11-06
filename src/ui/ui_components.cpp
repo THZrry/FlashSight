@@ -513,7 +513,7 @@ const char* brand_for_name(const std::string& name) {
       {"qwen", "qwen"}, {"qwq", "qwen"}, {"tongyi", "qwen"}, {"dashscope", "alibaba"},
       {"kimi", "kimi"}, {"moonshot", "moonshot"},
       {"glm", "zhipu"}, {"zhipu", "zhipu"}, {"chatglm", "chatglm"},
-      {"llama", "meta"}, {"meta-", "meta"},
+      {"llama", "meta"}, {"meta-", "meta"}, {"muse", "meta"},
       {"mistral", "mistral"}, {"mixtral", "mistral"}, {"codestral", "mistral"},
       {"grok", "grok"}, {"xai", "xai"},
       {"command-r", "cohere"}, {"cohere", "cohere"},

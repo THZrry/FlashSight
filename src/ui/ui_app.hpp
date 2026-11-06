@@ -627,6 +627,10 @@ struct AppState {
   // right pane for a session whose model lives elsewhere ("不会自动放到选择的
   // 那一页"). Resolved once per open, when the model list arrives.
   std::string model_picker_focus;
+  // The provider the focus model lives on. The same id may exist on several
+  // providers; without this the picker matched the first copy and jumped there,
+  // marking both providers' rows as the current selection.
+  std::string model_picker_focus_provider;
   std::vector<ModelRow> model_picker_models;   // 选中 provider 的启用模型
   bool model_picker_loaded = false;
   std::string model_picker_status;
@@ -1205,7 +1209,10 @@ class UiApp {
   void load_picker_models(const std::string& provider_id);
   // The popup itself. Shared by the composer and by settings fields so there is
   // one model picker in the app, not two that drift apart.
-  H build_model_picker(const std::string& owner, const std::string& current);
+  // current_provider: the picked model's provider ("" when unknown, e.g. a
+  // settings field that stores only the id). Selection compares the PAIR.
+  H build_model_picker(const std::string& owner, const std::string& current,
+                       const std::string& current_provider);
   // A settings field's model button (opens the picker for `setting_key`).
   H build_model_field(const std::string& owner, const std::string& setting_key,
                       const std::string& current, const std::string& placeholder);

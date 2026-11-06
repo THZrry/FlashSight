@@ -413,7 +413,12 @@ std::vector<ModelEntry> builtin_models_preset() {
 // Best-effort context window for a model id. Only used when the endpoint does
 // NOT report one (the common case for OpenAI-compatible /models): without it the
 // UI left the field empty and the context water level could not be computed.
-// Family-level values, deliberately conservative; the user can override.
+//
+// The default is deliberately GENEROUS: by now the mainstream cloud models all
+// ship a 1M window, so the old family table (claude 200k, deepseek 128k, ...)
+// understated every one of them and a too-small fallback shrinks the usable
+// workspace for no reason. Only explicit LOW-TIER markers in the name ("mini",
+// "nano", "flash", "lite", size suffixes like 7b) pull it back down.
 int64_t default_context_for(const std::string& model_id) {
   std::string s;
   s.reserve(model_id.size());
@@ -421,27 +426,59 @@ int64_t default_context_for(const std::string& model_id) {
     char c = model_id[i];
     s.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
   }
+  // Gemini's Flash line is still a 1M model, so the family wins over the word.
   if (s.find("gemini") != std::string::npos) return 1048576;
-  if (s.find("claude") != std::string::npos) return 200000;
-  if (s.find("gpt-4.1") != std::string::npos ||
-      s.find("gpt-5") != std::string::npos) {
-    return 1000000;
+  // Split into name TOKENS instead of raw substring matching: "minimax" must not
+  // be read as "mini", and a size suffix only counts when it is its own token.
+  std::vector<std::string> tok;
+  std::string cur;
+  for (size_t i = 0; i <= s.size(); ++i) {
+    char c = i < s.size() ? s[i] : '\0';
+    bool sep = (c == '\0' || c == '-' || c == '_' || c == '.' || c == '/' ||
+                c == ':' || c == ' ' || c == '@' || c == '+');
+    if (sep) {
+      if (!cur.empty()) {
+        tok.push_back(cur);
+        cur.clear();
+      }
+    } else {
+      cur.push_back(c);
+    }
   }
-  if (s.find("o1") == 0 || s.find("o3") == 0 || s.find("o4") == 0) return 200000;
-  if (s.find("deepseek") != std::string::npos) return 128000;
-  if (s.find("qwen") != std::string::npos) return 131072;
-  if (s.find("kimi") != std::string::npos || s.find("moonshot") != std::string::npos) {
-    return 262144;
+  static const char* const kCompact[] = {
+      "mini", "nano", "lite", "small", "tiny", "flash",
+      "turbo", "haiku", "air",           nullptr};
+  for (size_t t = 0; t < tok.size(); ++t) {
+    for (size_t k = 0; kCompact[k]; ++k) {
+      if (tok[t] == kCompact[k]) return 131072;
+    }
+    // 7b / 8b / 1.5b / 0.5b ...: a bare parameter count says "small model".
+    const std::string& w = tok[t];
+    bool size = w.size() >= 2 && w[w.size() - 1] == 'b';
+    for (size_t i = 0; size && i + 1 < w.size(); ++i) {
+      char c = w[i];
+      bool num = (c >= '0' && c <= '9') || c == '.';
+      if (!num && c != 'x') size = false;
+    }
+    if (size) return 131072;
   }
-  if (s.find("glm") != std::string::npos) return 128000;
-  if (s.find("grok") != std::string::npos) return 131072;
-  return 128000;
+  return 1048576;
 }
 
 // 补齐默认值：图标与思考档位由模型名粗匹配得出（实现见 model_naming.cpp）。
 void fill_model_defaults(ModelEntry* m) {
   if (!m) return;
-  if (m->icon.empty()) m->icon = model_icon_for(m->id);
+  const std::string derived_icon = model_icon_for(m->id);
+  // A persisted API/preset icon was computed by an OLDER name matcher: e.g.
+  // "muse_spark_..." was stored as iFlytek's "spark" before the Meta rule
+  // existed. Those rows are not user choices, so recompute them; a user-saved
+  // icon (user_set) is never touched. Without this the wrong brand survived in
+  // config forever, because fill only looked at an EMPTY icon.
+  if (!derived_icon.empty() && !m->user_set && (m->from_api || m->from_preset)) {
+    m->icon = derived_icon;
+  } else if (m->icon.empty()) {
+    m->icon = derived_icon;
+  }
   // Context length: endpoints rarely report it on /models. A model with no
   // context window made the water level uncomputable, so fall back to the
   // known preset or the model family's documented window - never leave it 0.

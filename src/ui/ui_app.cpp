@@ -6792,7 +6792,7 @@ VNodePtr UiApp::build_session() {
       });
     });
     comp_box.add(back);
-    comp_box.add(build_model_picker("composer", st_.model));
+    comp_box.add(build_model_picker("composer", st_.model, st_.model_provider));
   }
   }  // end: not showing an ask panel
   center.add(comp_box);
@@ -8815,16 +8815,28 @@ void UiApp::refresh_model_availability() {
       s.model_thinking_levels = levels;
       s.model_thinking_default = level_default;
       if (!provider_of_model.empty()) s.model_provider_label = provider_of_model;
+      // The chosen level belongs to the PREVIOUS model after a switch: "medium"
+      // is meaningless on a ladder of off/high. Drop it before pre-selecting, or
+      // the control shows the new default while send_message still sends the old
+      // level.
+      // Only a NON-EMPTY ladder can judge an old value: an empty list means the
+      // table does not describe this model, and the fallback pair must not throw
+      // away the session's remembered level.
+      bool known = false;
+      for (size_t i = 0; i < levels.size(); ++i) {
+        if (levels[i] == s.thinking && !s.thinking.empty()) known = true;
+      }
+      if (!levels.empty() && !s.thinking.empty() && !known) s.thinking.clear();
       // Pre-select the model's configured default when this session has not
       // chosen a level yet. Setting it in STATE (not just the <select>) is what
       // makes the choice visible to send_message: the request carries the level
       // shown in the control.
       if (s.thinking.empty() && !level_default.empty()) {
-        bool known = false;
+        bool def_known = false;
         for (size_t i = 0; i < levels.size(); ++i) {
-          if (levels[i] == level_default) known = true;
+          if (levels[i] == level_default) def_known = true;
         }
-        if (known) s.thinking = level_default;
+        if (def_known) s.thinking = level_default;
       }
       if (gone) {
         // Clearing the name is the point: an empty box says "pick one", while a
@@ -9375,9 +9387,9 @@ VNodePtr UiApp::build_settings() {
         // endpoint reports one, otherwise the backend uses a sane default.
         adv2.add(comp::field(tr("上下文长度"), comp::text_input(
             d.context_len > 0 ? itos(static_cast<int>(d.context_len)) : std::string(),
-            tr("如 128000，留空用默认"), [this](const std::string& v) {
+            tr("如 1048576，留空按模型匹配"), [this](const std::string& v) {
           st_.model_draft.context_len = static_cast<long long>(std::atoi(v.c_str()));
-        }), tr("可选：API 获取优先，留空回退默认值（128000）")));
+        }), tr("可选：API 获取优先，留空按模型名自动匹配（默认 1M）")));
         adv2.add(comp::field(tr("最大输出"), comp::text_input(
             d.max_output > 0 ? itos(static_cast<int>(d.max_output)) : std::string(),
             "如 8192", [this](const std::string& v) {
@@ -11606,7 +11618,9 @@ void UiApp::save_model() {
   // Context length is OPTIONAL: an explicit value wins, an API-fetched one is
   // already in the draft, and an empty field falls back to a sane default. It is
   // NOT a save blocker (the old check turned "leave it empty" into an error).
-  if (m.context_len <= 0) m.context_len = 128000;
+  // Leave 0 in the draft: the backend fills it from the model name (1M by
+  // default, low-tier variants smaller). Baking 128k in here made the fallback
+  // look like a user choice and kept every window short.
   if (m.display.empty()) m.display = m.id;
   Json body = model_row_to_json(m);
   call_async("model.save", Json{{"providerId", pid}, {"model", body}},
@@ -11705,15 +11719,22 @@ void UiApp::open_model_picker(const std::string& owner, const std::string& targe
   // was there, just not where the eye landed ("不会自动放到选择的那一页").
   std::string focus = target.empty() ? st_.model
                                      : sv_str(st_.settings_values, target, "");
+  // Only a session pick knows the provider. A settings field stores the model id
+  // alone, so there the first copy remains the best guess.
+  std::string focus_provider = target.empty() ? st_.model_provider : std::string();
   update([&](AppState& s) {
     s.model_picker_open = true;
     s.model_picker_owner = owner;
     s.model_picker_target = target;
     s.model_picker_query.clear();
     s.model_picker_focus = focus;
-    // Default to the provider being edited in settings, else the first one -
-    // opening onto an empty right pane would look broken.
-    if (s.model_picker_provider.empty()) {
+    s.model_picker_focus_provider = focus_provider;
+    // Open on the provider that OWNS the current model: that is the page the
+    // choice lives on. Falling back to whatever provider was last browsed made
+    // two same-name models look like one and opened the wrong page.
+    if (!focus_provider.empty()) {
+      s.model_picker_provider = focus_provider;
+    } else if (s.model_picker_provider.empty()) {
       s.model_picker_provider = !s.provider_selected.empty()
                                     ? s.provider_selected
                                     : (s.providers.empty() ? std::string()
@@ -11758,14 +11779,33 @@ void UiApp::load_picker_models(const std::string& provider_id) {
       // provider list, and the focus model's provider may not be the one that
       // happened to be selected (a fresh window defaults to providers[0]).
       if (!s.model_picker_focus.empty()) {
+        int fallback = -1;
         for (size_t i = 0; i < rows.size(); ++i) {
           if (rows[i].id != s.model_picker_focus) continue;
-          if (!rows[i].provider.empty() && rows[i].provider != s.model_picker_provider) {
-            s.model_picker_provider = rows[i].provider;
+          if (fallback < 0) fallback = static_cast<int>(i);
+          // Prefer the exact (provider, model) pair; a same-name model on
+          // another provider is a different choice.
+          if (!s.model_picker_focus_provider.empty() &&
+              !rows[i].provider.empty() &&
+              rows[i].provider != s.model_picker_focus_provider) {
+            continue;
           }
+          if (!rows[i].provider.empty()) s.model_picker_provider = rows[i].provider;
+          fallback = -1;   // exact match found: keep this page
           break;
         }
+        // The pair was not in the enabled list (disabled/deleted): still land on
+        // the provider the session remembers if it exists, rather than jumping to
+        // whichever copy happened to be first.
+        if (fallback >= 0) {
+          if (!s.model_picker_focus_provider.empty()) {
+            s.model_picker_provider = s.model_picker_focus_provider;
+          } else if (!rows[fallback].provider.empty()) {
+            s.model_picker_provider = rows[fallback].provider;
+          }
+        }
         s.model_picker_focus.clear();
+        s.model_picker_focus_provider.clear();
       }
     });
   });
@@ -11800,6 +11840,10 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
       if (!prov_label.empty()) s.model_provider_label = prov_label;
       s.model_available = true;   // an explicit pick is by definition usable
     });
+    // The thinking control is built from the model TABLE, not from the picker
+    // row: without this the ladder/default only refreshed after saving the model
+    // in provider settings ("保存一遍输入框的思考设置才能更新").
+    refresh_model_availability();
     if (!sid.empty()) {
       call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}},
                  [this, sid, prov](const BackendResult&) {
@@ -11847,7 +11891,7 @@ H UiApp::build_model_field(const std::string& owner, const std::string& setting_
     }));
   }
   if (st_.model_picker_open && st_.model_picker_owner == owner) {
-    VNodePtr pop = build_model_picker(owner, current);
+    VNodePtr pop = build_model_picker(owner, current, std::string());
     box.add(pop);
     // Anchored to this field's button, not to the whole window: the placement
     // pass measures and flips it when there is no room above.
@@ -11856,7 +11900,8 @@ H UiApp::build_model_field(const std::string& owner, const std::string& setting_
   return box;
 }
 
-H UiApp::build_model_picker(const std::string& owner, const std::string& current) {
+H UiApp::build_model_picker(const std::string& owner, const std::string& current,
+                            const std::string& current_provider) {
   H pop = el("div", "model-picker");
   pop.key("model-picker:" + owner);
   pop.anim(anim::kPop);
@@ -11949,6 +11994,18 @@ H UiApp::build_model_picker(const std::string& owner, const std::string& current
                                        : tr("没有匹配的模型。"),
         "", nullptr));
   } else {
+    // A session from before provider identity was persisted has no remembered
+    // provider. The backend then resolves by id (first enabled copy), so mark
+    // that copy rather than every provider's copy as selected.
+    std::string effective_provider = current_provider;
+    if (effective_provider.empty() && !current.empty()) {
+      for (size_t i = 0; i < st_.model_picker_models.size(); ++i) {
+        if (st_.model_picker_models[i].id == current) {
+          effective_provider = st_.model_picker_models[i].provider;
+          break;
+        }
+      }
+    }
     std::string last_group;
     H list = el("div", "mp-list");
     for (size_t i = 0; i < vis.size(); ++i) {
@@ -11966,9 +12023,16 @@ H UiApp::build_model_picker(const std::string& owner, const std::string& current
           last_group = g;
         }
       }
-      bool cur = m.id == current;
+      // Selection is the (provider, model) PAIR. Comparing the id alone marked
+      // both providers' copies as chosen, so the page showed two checkmarks.
+      bool cur = m.id == current &&
+                 (effective_provider.empty() || m.provider.empty() ||
+                  m.provider == effective_provider);
       H row = el("div", cur ? "mp-model active" : "mp-model");
-      row.key("mpm-" + m.id);
+      // Provider in the key: switching the left column between providers that
+      // host the same model must build a NEW row, not reuse one whose active
+      // class/checkmark belonged to the other provider's copy.
+      row.key("mpm-" + m.provider + ":" + m.id);
       std::string mid = m.id;
       // The row carries its own provider (the list is cross-provider), which is
       // also what the backend needs to resolve the model's capabilities.
