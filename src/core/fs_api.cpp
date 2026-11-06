@@ -109,7 +109,23 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     ProviderConn conn;
     bool found = false;
     ModelEntry picked;  // the model's own settings (retry) when it was matched
-    if (!req.model.empty()) {
+    // The PROVIDER the user picked wins. Two providers can serve the same model
+    // id; matching by name alone always routed to the first one, so picking the
+    // second provider's identical model silently used the first.
+    if (!req.provider.empty()) {
+      for (size_t i = 0; i < conns.size(); ++i) {
+        if (conns[i].id != req.provider) continue;
+        if (!conns[i].enabled) break;
+        conn = conns[i];
+        found = true;
+        std::vector<ModelEntry> models = mt->list_models(conn.id);
+        for (size_t k = 0; k < models.size(); ++k) {
+          if (models[k].id == req.model) { picked = models[k]; break; }
+        }
+        break;
+      }
+    }
+    if (!found && !req.model.empty()) {
       for (auto& c : conns) {
         if (!c.enabled) continue;
         std::vector<ModelEntry> models = mt->list_models(c.id);
@@ -1268,6 +1284,14 @@ FsResult FsApi::session_set_model(const std::string& sid, const std::string& mod
 FsResult FsApi::session_set_thinking(const std::string& sid, const std::string& thinking) {
   return sessions_->set_thinking(sid, thinking);
 }
+FsResult FsApi::session_set_provider(const std::string& sid,
+                                     const std::string& provider) {
+  FsResult r = sessions_->set_provider(sid, provider);
+  if (r.ok()) {
+    sessions_->append_system_op(sid, "setProvider", Json{{"provider", provider}});
+  }
+  return r;
+}
 FsResult FsApi::session_set_permission(const std::string& sid, const std::string& perm) {
   // 低→高需确认（permissions.md §1）：approve→permissive/full、permissive→full 都要令牌
   Json full;
@@ -1392,13 +1416,17 @@ FsResult FsApi::session_turns(const std::string& sid, int before, int limit) {
 // execution) take it individually.
 FsResult FsApi::session_send(const std::string& sid, const std::string& text,
                              const Json& attachments, const std::string& model,
-                             const std::string& thinking) {
+                             const std::string& thinking,
+                             const std::string& provider) {
   Json ss;
   {
     // Short prelude under the lock: persist the composer's model/thinking and
     // read the session settings. The turn itself runs WITHOUT it (see below).
     std::lock_guard<std::recursive_mutex> lk(mu_);
     if (!model.empty()) sessions_->set_model(sid, model);
+    // The provider is part of the model's identity (same id on two providers):
+    // persist it so the next turn routes to the same connection.
+    if (!provider.empty()) sessions_->set_provider(sid, provider);
     if (!thinking.empty()) sessions_->set_thinking(sid, thinking);
     Json full;
     FsResult r = sessions_->load_full(sid, &full);
@@ -1408,10 +1436,12 @@ FsResult FsApi::session_send(const std::string& sid, const std::string& text,
   bool auto_mode = jsonutil::get<bool>(ss, "autoMode", false);
   std::string perm = jsonutil::get<std::string>(ss, "filePerm", "permissive");
   std::string sess_model = jsonutil::get<std::string>(ss, "model", "");
+  std::string sess_provider = jsonutil::get<std::string>(ss, "provider", "");
   // AgentHost::send takes the lock around its own setup and releases it for the
   // model call; the turn's callbacks re-take it one at a time.
   return agent_host_->send(sid, text, attachments, auto_mode, perm, sess_model,
-                           jsonutil::get<std::string>(ss, "thinking", ""));
+                           jsonutil::get<std::string>(ss, "thinking", ""),
+                           sess_provider);
 }
 
 FsResult FsApi::session_append(const std::string& sid, const std::string& text) {
@@ -1434,7 +1464,8 @@ FsResult FsApi::session_resume(const std::string& sid) {
     if (sessions_->load_full(sid, &full).ok()) {
       Json ss = full.value("sessionSettings", Json::object());
       std::string model = jsonutil::get<std::string>(ss, "model", "");
-      if (!model.empty()) agent_host_->set_session_model(sid, model);
+      std::string provider = jsonutil::get<std::string>(ss, "provider", "");
+      if (!model.empty()) agent_host_->set_session_model(sid, model, provider);
     }
   }
   return agent_host_->resume(sid);
@@ -1496,7 +1527,8 @@ FsResult FsApi::session_continue(const std::string& sid, const std::string& guid
     if (sessions_->load_full(sid, &full).ok()) {
       Json ss = full.value("sessionSettings", Json::object());
       std::string model = jsonutil::get<std::string>(ss, "model", "");
-      if (!model.empty()) agent_host_->set_session_model(sid, model);
+      std::string provider = jsonutil::get<std::string>(ss, "provider", "");
+      if (!model.empty()) agent_host_->set_session_model(sid, model, provider);
     }
   }
   // AgentHost::continue_task releases the host lock for the turn, like send().
@@ -2639,6 +2671,21 @@ FsResult FsApi::usage_query(const Json& filter) {
     pm[kv.first] = e;
   }
   out["byProviderModel"] = pm;
+  // Model-only rollup (providers merged). The stats page uses THIS: a model
+  // served by two providers is one line, and the internal provider id is not
+  // shown. Requests still carry the provider (see session.send/providerId).
+  Json bm = Json::object();
+  for (auto& kv : sum.by_model) {
+    Json e = Json::object();
+    e["model"] = kv.second.model;
+    e["in"] = kv.second.in;
+    e["out"] = kv.second.out;
+    e["cache"] = kv.second.cache;
+    e["cost"] = kv.second.cost;
+    e["calls"] = kv.second.calls;
+    bm[kv.first] = e;
+  }
+  out["byModel"] = bm;
   Json days = Json::object();
   for (auto& kv : sum.by_day) {
     Json e = Json::object();

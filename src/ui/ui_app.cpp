@@ -981,6 +981,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.session_input = st_.session_input;
   v.edit_turn_id = st_.edit_turn_id;
   v.model = st_.model;
+  v.model_provider = st_.model_provider;
   v.model_index = st_.model_index;
   v.model_available = st_.model_available;
   v.model_thinking_levels = st_.model_thinking_levels;
@@ -1069,6 +1070,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.session_input = v.session_input;
   st_.edit_turn_id = v.edit_turn_id;
   st_.model = v.model;
+  st_.model_provider = v.model_provider;
   // 会话自己还没选过模型时，用设置里的会话默认模型（如果配了）。仍然为空就
   // 保持为空，按钮显示"选择模型"——不再凭空塞一个 gpt-4o-mini。
   if (st_.model.empty() && st_.settings_values.is_object() &&
@@ -1461,6 +1463,7 @@ void UiApp::load_session(const std::string& sid) {
                   : Json::object();
     std::string m = jsonutil::get<std::string>(ss, "model", "");
     if (!m.empty()) v.model = m;
+    v.model_provider = jsonutil::get<std::string>(ss, "provider", "");
     v.thinking = jsonutil::get<std::string>(ss, "thinking", "");
     std::string perm = jsonutil::get<std::string>(ss, "filePerm", "");
     if (!perm.empty()) {
@@ -1476,6 +1479,7 @@ void UiApp::load_session(const std::string& sid) {
       st_.session_ops = ops;
       if (!pid.empty()) st_.active_pid = pid;
       st_.model = v.model;
+      st_.model_provider = v.model_provider;
       st_.thinking = v.thinking;
       st_.permission = v.permission;
       st_.perm_index = v.perm_index;
@@ -5443,9 +5447,12 @@ VNodePtr UiApp::build_home_usage() {
 
 
   // ---- by model: a DONUT (the user asked for 饼/环状图, not bars) ----
-  Json pm = st_.usage_loaded && st_.usage.contains("byProviderModel") &&
-                    st_.usage["byProviderModel"].is_object()
-                ? st_.usage["byProviderModel"]
+  // byModel merges providers: the stats page answers "how much did this MODEL
+  // use", and the internal provider id is not user-facing (routing still carries
+  // the provider - see session.send providerId).
+  Json pm = st_.usage_loaded && st_.usage.contains("byModel") &&
+                    st_.usage["byModel"].is_object()
+                ? st_.usage["byModel"]
                 : Json::object();
   std::vector<std::pair<std::string, int64_t> > rows;
   int64_t total_tok = 0;
@@ -5455,8 +5462,8 @@ VNodePtr UiApp::build_home_usage() {
     if (n <= 0) n = jsonutil::get_int(it.value(), "calls", 0);  // tokens 未知时按次数
     if (n <= 0) continue;
     std::string model = jsonutil::get<std::string>(it.value(), "model", "");
-    std::string prov = jsonutil::get<std::string>(it.value(), "provider", "");
-    rows.push_back(std::make_pair(prov.empty() ? model : (prov + " / " + model), n));
+    if (model.empty()) model = it.key();
+    rows.push_back(std::make_pair(model, n));
     total_tok += n;
   }
   std::sort(rows.begin(), rows.end(),
@@ -5643,7 +5650,7 @@ VNodePtr UiApp::build_home_usage() {
   }
   panel.add(bymodel);
 
-  // ---- table: real byProviderModel rows, else an explicit empty state ----
+  // ---- table: byModel (providers merged), else an explicit empty state ----
   // Total tokens (in + out) is what the user watches; it replaces the cache
   // column, which was a per-row detail nobody read in this table.
   H tbl = el("table", "stat-table");
@@ -5656,10 +5663,10 @@ VNodePtr UiApp::build_home_usage() {
     const Json& e = it.value();
     H tr = el("tr");
     std::string model = jsonutil::get<std::string>(e, "model", "");
-    std::string prov = jsonutil::get<std::string>(e, "provider", "");
+    if (model.empty()) model = it.key();
     int64_t tin = jsonutil::get_int(e, "in", 0);
     int64_t tout = jsonutil::get_int(e, "out", 0);
-    tr.add(el("td").text(prov.empty() ? model : (prov + " / " + model)));
+    tr.add(el("td").text(model));
     tr.add(el("td").text(fmt_tokens(tin)));
     tr.add(el("td").text(fmt_tokens(tout)));
     tr.add(el("td").text(fmt_tokens(tin + tout)));
@@ -8745,17 +8752,31 @@ void UiApp::refresh_model_availability() {
     std::vector<std::string> levels;
     std::string level_default;
     std::string provider_of_model;
+    bool pair_found = false, model_found = false;
     if (r.data.contains("models") && r.data["models"].is_array()) {
       const Json& arr = r.data["models"];
       std::string cur_model = sid == st_.active_tab ? st_.model
                                                     : views_.get_or_create(sid).model;
+      std::string cur_provider =
+          sid == st_.active_tab ? st_.model_provider
+                                : views_.get_or_create(sid).model_provider;
       for (size_t i = 0; i < arr.size(); ++i) {
         std::string id = jsonutil::get<std::string>(arr[i], "id", "");
         if (!id.empty()) ids.push_back(id);
         if (id != cur_model) continue;
+        model_found = true;
+        std::string entry_provider =
+            jsonutil::get<std::string>(arr[i], "providerId", "");
+        // When the session remembers a provider, only THAT provider's copy of
+        // the model counts; otherwise two providers with the same model id made
+        // the wrong entry drive the thinking levels/label.
+        if (!cur_provider.empty() && entry_provider != cur_provider) continue;
+        if (pair_found) continue;
+        pair_found = true;
         provider_of_model =
             jsonutil::get<std::string>(arr[i], "providerName",
-                                       jsonutil::get<std::string>(arr[i], "providerId", ""));
+                                       entry_provider.empty() ? cur_provider
+                                                              : entry_provider);
         if (arr[i].contains("thinking") && arr[i]["thinking"].is_object() &&
             arr[i]["thinking"].contains("levels") &&
             arr[i]["thinking"]["levels"].is_array()) {
@@ -8776,17 +8797,16 @@ void UiApp::refresh_model_availability() {
     bool same_tab = (sid == st_.active_tab) || sid.empty();
     bool gone = false;
     std::string cur = same_tab ? st_.model : views_.get_or_create(sid).model;
+    std::string cur_prov =
+        same_tab ? st_.model_provider : views_.get_or_create(sid).model_provider;
     if (!cur.empty()) {
-      gone = true;
-      for (size_t i = 0; i < ids.size(); ++i) {
-        if (ids[i] == cur) { gone = false; break; }
-      }
+      gone = cur_prov.empty() ? !model_found : !pair_found;
     }
     if (!same_tab) {
       SessionView& v = views_.get_or_create(sid);
       v.available_model_ids = ids;
       v.model_available = !gone;
-      if (gone) v.model.clear();
+      if (gone) { v.model.clear(); v.model_provider.clear(); }
       return;
     }
     update([&](AppState& s) {
@@ -8794,7 +8814,7 @@ void UiApp::refresh_model_availability() {
       s.model_available = !gone;
       s.model_thinking_levels = levels;
       s.model_thinking_default = level_default;
-      s.model_provider_label = provider_of_model;
+      if (!provider_of_model.empty()) s.model_provider_label = provider_of_model;
       // Pre-select the model's configured default when this session has not
       // chosen a level yet. Setting it in STATE (not just the <select>) is what
       // makes the choice visible to send_message: the request carries the level
@@ -8810,6 +8830,7 @@ void UiApp::refresh_model_availability() {
         // Clearing the name is the point: an empty box says "pick one", while a
         // dead name next to a disabled send button says nothing useful.
         s.model.clear();
+        s.model_provider.clear();
         s.context_pct = -1;
         toast(tr("上次使用的模型已不可用，请重新选择"));
       }
@@ -10960,6 +10981,9 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   // 只改了按钮上的字。
   Json args = Json{{"sid", sid}, {"text", text}, {"attachments", attachments}};
   if (!st_.model.empty()) args["model"] = st_.model;
+  // Same model id can exist on two providers: the request must name the one the
+  // user picked, or the backend routes it to the first provider that has it.
+  if (!st_.model_provider.empty()) args["providerId"] = st_.model_provider;
   if (!st_.thinking.empty()) args["thinking"] = st_.thinking;
   // SHOW THE WAIT IMMEDIATELY. The first token can take seconds (a reasoning
   // model, a cold endpoint); until then the assistant message did not exist, so
@@ -11748,7 +11772,6 @@ void UiApp::load_picker_models(const std::string& provider_id) {
 }
 
 void UiApp::pick_model(const std::string& provider_id, const std::string& model_id) {
-  (void)provider_id;
   if (model_id.empty()) return;
   std::string target = st_.model_picker_target;
   std::string sid = active_sid();
@@ -11758,17 +11781,31 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
     s.model_picker_target.clear();
   });
   if (target.empty()) {
-    // the session's model
+    // the session's model. The PROVIDER is part of the choice: with the same
+    // model id on two providers, storing only the id always sent the request to
+    // the first one.
+    std::string prov = provider_id;
+    std::string prov_label;
+    if (!prov.empty()) {
+      for (size_t i = 0; i < st_.providers.size(); ++i) {
+        if (st_.providers[i].id == prov) {
+          prov_label = st_.providers[i].name.empty() ? prov : st_.providers[i].name;
+          break;
+        }
+      }
+    }
     update([&](AppState& s) {
       s.model = model_id;
+      s.model_provider = prov;
+      if (!prov_label.empty()) s.model_provider_label = prov_label;
       s.model_available = true;   // an explicit pick is by definition usable
     });
     if (!sid.empty()) {
       call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}},
-                 [this, sid](const BackendResult&) {
-        // The provider runtime caches per-session config (model, thinking,
-        // retry counters). Changing the model without refreshing it means the
-        // next turn can still be routed with the old one.
+                 [this, sid, prov](const BackendResult&) {
+        // Persist the provider on the SESSION too: send/continue read it from
+        // sessionSettings, so a restart keeps routing to the picked connection.
+        call_async("session.setProvider", Json{{"sid", sid}, {"providerId", prov}});
         call_async("session.refreshConfig", Json{{"sid", sid}});
         // The context window follows the model, so the water level must be
         // recomputed (the old percentage belongs to the old window).

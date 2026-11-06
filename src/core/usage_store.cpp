@@ -102,6 +102,16 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
     e.cost += r.cost;
     e.calls += 1;
     if (e.cost_kind.empty()) e.cost_kind = r.cost_kind;
+    // Cross-provider rollup by MODEL: the stats page groups by model (the same
+    // model served by two providers is one line), while requests are still routed
+    // by the provider recorded in the row.
+    UsageRow& bm = sum.by_model[r.model];
+    bm.ts = std::max(bm.ts, r.ts);
+    bm.model = r.model;
+    bm.in += r.in; bm.out += r.out; bm.cache += r.cache;
+    bm.cost += r.cost;
+    bm.calls += 1;
+    if (bm.cost_kind.empty()) bm.cost_kind = r.cost_kind;
     int64_t day = r.ts / 86400000;
     UsageRow& d = sum.by_day[day];
     d.in += r.in; d.out += r.out; d.cache += r.cache;

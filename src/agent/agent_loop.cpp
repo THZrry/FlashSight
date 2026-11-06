@@ -204,6 +204,7 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
                                     ModelCallResult* out) {
   ModelCallRequest req;
   req.model = opts_.model;
+  req.provider = opts_.provider;
   req.messages = messages;
   req.tools = tools;
   req.auto_mode = opts_.context.auto_mode;

@@ -64,6 +64,10 @@ struct UsageSummary {
   std::map<std::string, std::string> cost_kind_by_provider;
   // provider×model 聚合阶梯（key = "provider::model"）
   std::map<std::string, UsageRow> by_provider_model;
+  // model-only 聚合（跨供应商合并，key = model id). The stats page answers "how
+  // much did this MODEL cost/consume", not "which internal provider id"; routing
+  // still uses provider×model.
+  std::map<std::string, UsageRow> by_model;
   // time 桶（按天 ts/86400000）
   std::map<int64_t, UsageRow> by_day;
   // Newest rows, oldest-first (bounded). The side panel shows "this turn" and a

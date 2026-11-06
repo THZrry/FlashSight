@@ -48,6 +48,9 @@ using EventFn = std::function<void(const std::string& event, const Json& payload
 // 模型调用抽象（ProviderClient 包装，便于测试桩）
 struct ModelCallRequest {
   std::string model;
+  // The connection the user picked for this model. Two providers can serve the
+  // same model id; empty = resolve by name (legacy).
+  std::string provider;
   Json messages = Json::array();  // 中性消息（prompt::adapt 之前）
   Json tools = Json::array();     // 中性工具定义 [{name, description, parameters}]
   bool auto_mode = false;
@@ -80,6 +83,7 @@ class AgentLoop {
     std::string sid;
     std::string pid;
     std::string model;
+    std::string provider;                    // 模型所属连接（同名模型区分供应商）
     std::string permission = "permissive";  // 文件权限档
     std::string thinking;                   // 思考强度
     std::string thinking_lang = "";         // 思考语言（zh/en；空=不指定）
@@ -111,6 +115,11 @@ class AgentLoop {
   void set_permission(const std::string& perm) { opts_.permission = perm; }
   void set_thinking_lang(const std::string& lang) { opts_.thinking_lang = lang; }
   void set_model(const std::string& m) { opts_.model = m; }
+  // The PROVIDER is part of the model's identity: two providers can serve the
+  // same model id, and the request must go to the one the user picked. Empty =
+  // resolve by model name (backward compatible).
+  void set_provider(const std::string& p) { opts_.provider = p; }
+  const std::string& provider() const { return opts_.provider; }
   void set_thinking(const std::string& t) { opts_.thinking = t; }
   // The model this loop will send. Read by the host when it builds the context
   // and by subagents (which inherit the parent's model): `context().model` is

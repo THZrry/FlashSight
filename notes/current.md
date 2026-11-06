@@ -2996,3 +2996,21 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **附带**：设置页 body 按 section 加 key（切 section 会重建，桥接下不再留旧 handler）；滚动分页用例适配了"恢复期间
     忽略滚动回显"。
   - **测试**：428 用例 4004 断言全过；web / webview 双变体编译通过。
+
+<111>(FIXED): 供应商"新建"真因=webview 适配器的逐帧 DOM 批量写入丢尾；同名模型按供应商路由；统计按模型合并；API 模型列表自动补上下文。
+  - **供应商"新建"（上一批未根治）找到真因了**：问题不在供应商页面，也不在事件。11 月 3 日给 webview 适配器加的
+    "整帧 DOM 写入合成一条脚本"批量派发，在脚本尾部被截断/某条 op 失败时会**静默丢掉后面的所有操作**——模板页的
+    标题和提示在前半段挂上了，26 张模板卡在后半段全没了，页面于是半残、控件也指向旧节点。10 月 23 日的版本在批量
+    化之前，所以正常。现在 webview 回到**每条 DOM 操作一次 ExecuteScript**（与浏览器构建的同步 EM_JS 一致）。
+    原生 WebView2 实测：设置→供应商→新建，26 个模板卡全部出现。
+  - **两家供应商有同名模型却只能选第一家的**：供应商以前根本不是模型身份的一部分（`pick_model` 直接丢掉了
+    provider_id）。现在端到端都带上：`sessionSettings.provider`、`session.send` 的 `providerId`、
+    `ModelCallRequest.provider`、`AgentLoop::set_provider`；`call_model` 优先用它选连接（空才按名称回退）；
+    继续/恢复也会重读 provider。模型选择器存 provider，模型可用性按 (provider, model) 判定，不一致就清空重选。
+    新增 `addon2_session_model_provider_is_persisted`。
+  - **用量统计按模型合并**：`usage.query` 新增 `byModel`（跨供应商按模型求和）；用量页的环图和明细表改用它，
+    不再显示 `pr_xxx / model` 这种内部供应商 id。**路由仍然带供应商**，两件事分开。
+  - **API 获取模型列表自动补上下文**：`/models` 大多不报上下文，以前就留 0，UI 要求手填。现在 `fetch_models`
+    对每条模型跑 `fill_model_defaults`，其中新增 `default_context_for`：已知家族（gemini 1M、claude 200k、
+    gpt-4.1/5 1M、o1/o3/o4 200k、deepseek 128k、qwen 131k、kimi 256k…）给保守值，其余默认 128000；用户仍可覆盖。
+  - **测试**：429 用例 4012 断言全过；web / webview 双变体编译通过。原生窗口验证模板页 26 张卡。

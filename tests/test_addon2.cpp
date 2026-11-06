@@ -358,6 +358,34 @@ FS_TEST(addon2_session_seen_survives_restart) {
   EXPECT_TRUE(found);
 }
 
+// ---------- 供应商是模型身份的一部分：同名模型可以分属两家 ----------
+FS_TEST(addon2_session_model_provider_is_persisted) {
+  fstest::TempDir td("a2prov");
+  FakeClockA2 clock(1000);
+  FsApi api(ghc::filesystem::path(td.path()), &clock, nullptr);
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj_dir);
+  FsResult pr = api.project_create(proj_dir.string());
+  ASSERT_TRUE(pr.ok());
+  std::string pid = pr.data["pid"].get<std::string>();
+  FsResult sr = api.session_new(pid, proj_dir.string());
+  ASSERT_TRUE(sr.ok());
+  std::string sid = sr.data["sid"].get<std::string>();
+
+  EXPECT_TRUE(api.session_set_model(sid, "deepseek-v4.1-flash").ok());
+  EXPECT_TRUE(api.session_set_provider(sid, "pr_second").ok());
+  FsResult info = api.session_info(sid);
+  ASSERT_TRUE(info.ok());
+  ASSERT_TRUE(info.data.contains("sessionSettings"));
+  const Json& ss = info.data["sessionSettings"];
+  EXPECT_EQ(jsonutil::get<std::string>(ss, "model", ""),
+            std::string("deepseek-v4.1-flash"));
+  // The request must be able to name the SECOND provider that serves the same
+  // model id, not fall back to the first one by name.
+  EXPECT_EQ(jsonutil::get<std::string>(ss, "provider", ""),
+            std::string("pr_second"));
+}
+
 // ---------- 工作流：定义/启动/图结构/步骤重试跳过 ----------
 FS_TEST(addon2_workflow_backend) {
   FakeClockA2 clock(2000);

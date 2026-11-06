@@ -433,6 +433,10 @@ FsResult SessionManager::set_meta_flag(const std::string& sid, const Json& field
 FsResult SessionManager::set_model(const std::string& sid, const std::string& model) {
   return update_session_settings(sid, Json{{"model", model}});
 }
+FsResult SessionManager::set_provider(const std::string& sid,
+                                      const std::string& provider) {
+  return update_session_settings(sid, Json{{"provider", provider}});
+}
 FsResult SessionManager::set_thinking(const std::string& sid, const std::string& thinking) {
   return update_session_settings(sid, Json{{"thinking", thinking}});
 }

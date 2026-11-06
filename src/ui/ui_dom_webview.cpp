@@ -1238,16 +1238,18 @@ class WebViewDom : public IDom {
     webview_eval(w_, js.c_str());
   }
 
-  // Buffer a structural/content write into the frame's batch. See flush().
+  // Structural/content writes go through ExecuteScript ONE AT A TIME.
+  //
+  // They used to be batched into one script per frame. That batching is what
+  // broke newly created deep subtrees (the provider template grid arrived as an
+  // empty container while its earlier siblings attached): with a batch, a
+  // failure or truncation anywhere in the concatenated script silently drops
+  // everything after it, and the page keeps a half-built DOM with dead handlers.
+  // The 2026-10-23 build - before batching - was correct. Correctness first:
+  // per-op dispatch, identical to the browser build's synchronous EM_JS calls.
   void enqueue(const char* op, int i, int j, const std::string& a,
                const std::string& b) {
-    batch_ += "globalThis.__fsDomTry(";
-    batch_ += js_str(op);
-    batch_ += "," + std::to_string(i) + "," + std::to_string(j) + ",";
-    batch_ += js_str(a) + "," + js_str(b) + ");";
-    // A pathological frame (a big file preview) must not build an unbounded
-    // script in memory: ship it in chunks.
-    if (batch_.size() >= 512 * 1024) flush();
+    call(op, i, j, a, b);
   }
 
   // Same, but reports whether the glue is actually present. Used once at

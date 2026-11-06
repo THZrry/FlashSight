@@ -95,7 +95,7 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   reg("session.send", [api](const Json& a) {
     return api->session_send(s(a, "sid"), s(a, "text"),
                              a.contains("attachments") ? a["attachments"] : Json::array(),
-                             s(a, "model"), s(a, "thinking"));
+                             s(a, "model"), s(a, "thinking"), s(a, "providerId"));
   });
   reg("session.append", [api](const Json& a) {
     return api->session_append(s(a, "sid"), s(a, "text"));
@@ -143,6 +143,9 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   });
   reg("session.setModel", [api](const Json& a) {
     return api->session_set_model(s(a, "sid"), s(a, "model"));
+  });
+  reg("session.setProvider", [api](const Json& a) {
+    return api->session_set_provider(s(a, "sid"), s(a, "providerId"));
   });
   reg("session.setThinking", [api](const Json& a) {
     return api->session_set_thinking(s(a, "sid"), s(a, "thinking"));

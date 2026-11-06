@@ -51,6 +51,9 @@ class SessionManager {
 
   // ----- 会话设置（即时生效 + 记 systemOps）-----
   FsResult set_model(const std::string& sid, const std::string& model);
+  // The provider that serves the chosen model (same model id can exist on two
+  // providers; the request must carry which one the user picked).
+  FsResult set_provider(const std::string& sid, const std::string& provider);
   FsResult set_thinking(const std::string& sid, const std::string& thinking);
   FsResult set_permission(const std::string& sid, const std::string& perm);
   FsResult set_permission_confirm(const std::string& sid, const std::string& perm,

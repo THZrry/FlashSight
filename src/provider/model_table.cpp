@@ -361,6 +361,10 @@ ModelTable::FetchResult ModelTable::fetch_models(const std::string& provider_id,
       }
       models.push_back(m);
     }
+    // Fill what the endpoint did NOT report (context window, thinking ladder,
+    // icon). One fetch should configure the model; leaving context at 0 made the
+    // UI require manual entry ("获取列表后上下文没有自动填上").
+    for (size_t i = 0; i < models.size(); ++i) fill_model_defaults(&models[i]);
     if (models.empty()) {
       r.fallback_level = "user";
       r.message = "models fetch returned empty list, fallback";
@@ -406,10 +410,42 @@ std::vector<ModelEntry> builtin_models_preset() {
   return v;
 }
 
+// Best-effort context window for a model id. Only used when the endpoint does
+// NOT report one (the common case for OpenAI-compatible /models): without it the
+// UI left the field empty and the context water level could not be computed.
+// Family-level values, deliberately conservative; the user can override.
+int64_t default_context_for(const std::string& model_id) {
+  std::string s;
+  s.reserve(model_id.size());
+  for (size_t i = 0; i < model_id.size(); ++i) {
+    char c = model_id[i];
+    s.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
+  }
+  if (s.find("gemini") != std::string::npos) return 1048576;
+  if (s.find("claude") != std::string::npos) return 200000;
+  if (s.find("gpt-4.1") != std::string::npos ||
+      s.find("gpt-5") != std::string::npos) {
+    return 1000000;
+  }
+  if (s.find("o1") == 0 || s.find("o3") == 0 || s.find("o4") == 0) return 200000;
+  if (s.find("deepseek") != std::string::npos) return 128000;
+  if (s.find("qwen") != std::string::npos) return 131072;
+  if (s.find("kimi") != std::string::npos || s.find("moonshot") != std::string::npos) {
+    return 262144;
+  }
+  if (s.find("glm") != std::string::npos) return 128000;
+  if (s.find("grok") != std::string::npos) return 131072;
+  return 128000;
+}
+
 // 补齐默认值：图标与思考档位由模型名粗匹配得出（实现见 model_naming.cpp）。
 void fill_model_defaults(ModelEntry* m) {
   if (!m) return;
   if (m->icon.empty()) m->icon = model_icon_for(m->id);
+  // Context length: endpoints rarely report it on /models. A model with no
+  // context window made the water level uncomputable, so fall back to the
+  // known preset or the model family's documented window - never leave it 0.
+  if (m->caps.context_len <= 0) m->caps.context_len = default_context_for(m->id);
   // A model that carries a DEFAULT thinking level but no ladder (the preset /
   // user data stores the two separately) is the common case: the composer then
   // offered only 开/关 until the settings page was opened and saved, because the

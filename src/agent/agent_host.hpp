@@ -109,14 +109,17 @@ class AgentHost {
                 const Json& attachments, bool auto_mode,
                 const std::string& permission = "permissive",
                 const std::string& model = "",
-                const std::string& thinking = "");
+                const std::string& thinking = "",
+                const std::string& provider = "");
   FsResult append(const std::string& sid, const std::string& text);
 
   // 打断后续接（addon2 任务健壮性）：给原任务发送特定引导并续跑
   FsResult continue_task(const std::string& sid, const std::string& guidance);
   // Route the parked/next turn with the session's CURRENT model (a model switch
-  // while parked must not be ignored by 继续).
-  void set_session_model(const std::string& sid, const std::string& model);
+  // while parked must not be ignored by 继续). `provider` may be empty (resolve
+  // by name); two providers can serve the same model id.
+  void set_session_model(const std::string& sid, const std::string& model,
+                         const std::string& provider = "");
   // 子代理引导（addon2：子代理无轮概念，只需当前引导）
   FsResult subagent_steer(const std::string& id, const std::string& text);
   // 批准/拒绝（approve 档权限门）

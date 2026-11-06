@@ -261,6 +261,10 @@ struct AppState {
   // following.
   bool hist_follow = true;
   std::string model;
+  // The PROVIDER connection that serves this model. Two providers can offer the
+  // same model id, so routing by name alone always picked the first one; the
+  // request carries this id so the user's choice is honoured.
+  std::string model_provider;
   int model_index = 0;
   // Whether `model` still exists among the ENABLED models. A session remembers
   // the model it last used, but that model can disappear - the user disabled it,
@@ -814,6 +818,7 @@ struct SessionView {
   // 实际供应商可能一个模型都没连；按钮显示"选择模型"，或在设置里配了会话
   // 默认模型时用那一个（见 build_session / send_message）。
   std::string model;
+  std::string model_provider;  // see AppState::model_provider
   int model_index = 0;
   // See AppState::model_available: false = the remembered model is gone, so the
   // composer shows an empty model box and the send button is disabled.

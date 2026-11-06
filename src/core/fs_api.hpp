@@ -136,7 +136,10 @@ class FsApi {
   // separate setModel call did not land (or the session was just created).
   FsResult session_send(const std::string& sid, const std::string& text,
                         const Json& attachments, const std::string& model = "",
-                        const std::string& thinking = "");
+                        const std::string& thinking = "",
+                        const std::string& provider = "");
+  // Persist which provider serves the session's model (same id can exist on two).
+  FsResult session_set_provider(const std::string& sid, const std::string& provider);
   FsResult session_append(const std::string& sid, const std::string& text);
   FsResult session_suspend(const std::string& sid);
   // 中止: abort the reply being streamed and park it (resumable). 挂起 is

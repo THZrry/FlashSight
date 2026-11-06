@@ -680,7 +680,8 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
                          const Json& attachments, bool auto_mode,
                          const std::string& permission,
                          const std::string& model,
-                         const std::string& thinking) {
+                         const std::string& thinking,
+                         const std::string& provider) {
   (void)attachments;
   // Setup under the lock (loop lookup, context rebuild), then RELEASE it for
   // the turn itself. Holding it across loop.send() would block every other
@@ -693,6 +694,9 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
     std::lock_guard<std::recursive_mutex> host_lock(lock());
     loop = &loop_for(sid, auto_mode, permission);
     if (!model.empty()) loop->set_model(model);
+    // Always set it (empty clears): switching from a provider-qualified pick to a
+    // plain one must not keep routing through the previous provider.
+    loop->set_provider(provider);
     if (!thinking.empty()) loop->set_thinking(thinking);
     loop->set_permission(permission);
     loop->set_auto_mode(auto_mode);
@@ -767,11 +771,15 @@ FsResult AgentHost::continue_task(const std::string& sid, const std::string& gui
   return loop->continue_task(guidance);
 }
 
-void AgentHost::set_session_model(const std::string& sid, const std::string& model) {
+void AgentHost::set_session_model(const std::string& sid, const std::string& model,
+                                  const std::string& provider) {
   if (model.empty()) return;
   std::lock_guard<std::recursive_mutex> host_lock(lock());
   auto it = loops_.find(sid);
-  if (it != loops_.end() && it->second) it->second->set_model(model);
+  if (it != loops_.end() && it->second) {
+    it->second->set_model(model);
+    it->second->set_provider(provider);
+  }
 }
 
 // addon2：子代理引导（子代理没有轮的概念，只需当前引导）
