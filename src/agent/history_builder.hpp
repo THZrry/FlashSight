@@ -51,7 +51,12 @@ class HistoryBuilder {
     // 模型上下文窗口（0 = 未知）。未知时水位触发不可用，只有显式"立即压缩"。
     int64_t context_limit = 0;
     // 水位阈值（百分比）。<=0 关闭水位触发。
-    int compress_at_pct = 80;
+    // DEFAULT OFF: any compaction rewrites the prompt prefix, which invalidates
+    // the provider's prefix cache and changes the whole conversation the model
+    // sees. The user rejected losing earlier turns quietly ("随意去掉上文会破坏
+    // 缓存反增成本，又破坏了会话的完整性"), so only an explicit threshold or the
+    // manual compress action may fold.
+    int compress_at_pct = 0;
     // 压缩后至少保留的最近轮数：压缩不等于清空，最近几轮必须全量在。
     int keep_turns = 8;
     // 强制压缩（用户点"压缩"/UI 提示时）。

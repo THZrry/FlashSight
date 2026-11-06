@@ -193,17 +193,9 @@ class AgentLoop {
   FsResult resume_task();
   // True while a turn is parked between tool batches because of a suspend.
   bool parked() const { return parked_.load(); }
-  void cancel_wake();
 
   // 中断后续接（addon2）：给原任务发送特定引导，从保存点继续
   FsResult continue_task(const std::string& guidance);
-
-  // 子代理结果回调（自动模式唤醒父）
-  FsResult on_subagent_done(const std::string& subagent_id, const std::string& summary);
-  // 后台终端退出回调
-  FsResult on_terminal_exit(const std::string& tid, int exit_code);
-  // 定时器到点回调
-  FsResult on_timer();
 
   // 最后一轮的文本输出 / 消息数组（子代理摘要用）
   const std::string& last_text() const { return last_text_; }
@@ -258,8 +250,6 @@ class AgentLoop {
   // boundary with the transcript saved). Distinguishes "parked by the user from
   // a still-running turn" - only the former needs resume_task to continue.
   std::atomic<bool> parked_{false};
-  bool wake_scheduled_ = false;
-  int64_t wake_at_ms_ = 0;
 
   std::vector<std::string> steering_queue_;
 

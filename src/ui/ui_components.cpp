@@ -697,7 +697,8 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   // tool calls still has a work log. Without it the fold was not rendered at all,
   // so "过程说明" had nowhere to appear - which is why the narration looked like it
   // had been dropped again.
-  bool has_work = !m.thinking.empty() || !m.tools.empty() || !m.interim.empty();
+  bool has_work = !m.thinking.empty() || !m.tools.empty() || !m.interim.empty() ||
+                  !m.work_live.empty();
   if (has_work) {
     int nfail = 0;
     for (size_t i = 0; i < m.tools.size(); ++i) if (!m.tools[i].ok) ++nfail;
@@ -783,6 +784,13 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         if (!m.interim[interim_at].empty()) {
           inner.add(el("div", "work-note").text(m.interim[interim_at]));
         }
+      }
+      // A complete-step subagent's live work: process text, deliberately in the
+      // non-emphasis work colour. It used to be appended to the ANSWER, which
+      // made the subagent's thinking look like the main model's output.
+      if (!m.work_live.empty()) {
+        inner.add(el("div", "work-label").text(tr("子代理过程")));
+        inner.add(el("div", "work-note work-subagent").text(m.work_live));
       }
       // Appended, not grouped: it goes where the stream has reached, and a tool
       // call that arrives later simply lands below it.

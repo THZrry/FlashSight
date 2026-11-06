@@ -1452,3 +1452,34 @@ The process of project: P0 环境搭建
     要引导它请打开记录"，避免引导发错对象。
   - **测试**：437 用例 4085 断言全过；web / webview 双变体编译通过。原生 WebView2 实测首帧思考档、更新后的
     上下文数值、子代理面板均正常。
+
+
+<114>(FIXED/AUDIT): 自动压缩默认关闭（不再砍旧轮/砸缓存）+ 子代理思考与主回答彻底分流 + 事件分发的会话归属修复 + 删掉重复的唤醒实现。
+  - **自动压缩 = 赔本买卖**：后端把 `history.compressAtPct` 默认写成 80，等于用户什么都没设置也在水位到 80% 时
+    悄悄把旧轮折叠掉。压缩会改写提示前缀，provider 的前缀缓存全部失效（通常更贵），而且旧轮不再原样进入上下文，
+    会话完整性被破坏。现在默认 **0（关闭）**：`HistoryBuilder::Options`、宿主三处读设置、上下文状态、设置页默认
+    全部改 0；设置页显示"关闭（推荐）"，并明确写出"完整保留上文与缓存；开启后会改写提示前缀，通常更贵且丢失旧轮"。
+    手动/显式阈值仍可用，但必须是用户选择。新增 `compress_defaults_to_off`（99% 水位也不压，所有轮仍在）。
+  - **"思考又留在外面"的真因**：UI 的 `apply_session_event` 对 `fromSubagent` 事件只提前处理了 sidebar 的
+    live_text，然后让 `complete-step` **继续落入主会话处理器**。于是子代理的 stream.delta 被追加进主回答的
+    `msg.text`（正常颜色、正文位置），它的 tool.start 变成主工具行，连它自己的 turn.done 都可能改写主回合状态。
+    这就是"修一个坏一个"的来源：一个 agent 的传输事件驱动了另一个 agent 的状态。
+    现在所有子代理事件在更新侧栏后**无条件 return**；complete-step 的实时文本只进 `ChatMsg::work_live`，
+    在工作过程里用 `.work-note.work-subagent`（更弱的 non-emphasis 色）显示，子代理 done 时清空（完整记录仍在
+    子代理面板）。主回答 `text` 只由主模型自己的 stream.delta 写入。新增断言：子代理流文本不能出现在主回答里。
+  - **事件数据源/会话归属审计**：
+    - `auto.next` / `auto.halted` / `todo.updated` 以前只在活动标签的分支里处理；`todo.updated` 甚至有一段永远
+      走不到的 background 分支（因为更外层的 early-return 已返回）。现在它们统一走 `apply_session_event`，
+      按 `is_active` 写入 `AppState` 或 `SessionView`；`SessionView` 补了 `auto_round` 并随切标签保存/恢复。
+    - 后台会话的 `loop.interrupted` / `loop.paused` 不会清运行态，切过去还显示"运行中"；现在后台 view 也会清
+      `turn_running/auto_round` 并记录中断原因。
+    - `turn.done` 的后台分支错误地清了**活动会话**的 `st_.auto_round`，现在清 `vp->auto_round`。
+    - 事件总线的 session-scoped 列表补上 auto/todo，活动与后台走同一条路，减少"这个事件只在某个页面生效"的特判。
+  - **后端重复功能**：`AgentLoop` 里还留着一套从未被置位的 `wake_scheduled_/wake_at_ms_`、`cancel_wake`、
+    `on_terminal_exit`、`on_timer`（WakeScheduler 已取代它）。全部删除，`AgentHost::cancel_wake` 只操作唯一的
+    WakeScheduler 并发一次事件。
+  - **仍存在的架构债（本轮记录，不假装修完）**：webview 适配器胶水里仍硬编码了 `.tab/.ptab/.tab-close`、
+    `.model-field`、`.splitter-handle`、`.title-btn` 等业务 CSS 选择器。这些应改为框架级 `data-fs-*` 约定
+    （拖拽条/弹出锚点/分割条），让 wasm/webview 两个适配器都不认识业务类名；这是下一轮独立重构，不在本轮
+    为赶进度硬塞。
+  - **测试**：438 用例 4093 断言全过；web / webview 双变体编译通过。原生窗口冒烟：设置/会话正常渲染。

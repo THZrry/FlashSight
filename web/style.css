@@ -1575,6 +1575,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   border-left: 2px solid var(--border-strong);
   padding: 2px 0 2px 9px; margin: 4px 0;
 }
+/* A subagent's live process text: still process, so it stays out of the answer
+   colour and is a touch dimmer than the main model's narration. */
+.work-note.work-subagent { color: var(--text-faint); border-left-color: var(--border); }
 .work-label {
   font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
   color: var(--text-faint);

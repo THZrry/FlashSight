@@ -85,33 +85,10 @@ FsResult AgentLoop::resume_task() {
   return run_loop(msgs, opts_.model, active_tools());
 }
 
-void AgentLoop::cancel_wake() {
-  wake_scheduled_ = false;
-  wake_at_ms_ = 0;
-  emit("wake.cancelled", Json{{"sid", opts_.sid}});
-}
-
-FsResult AgentLoop::on_subagent_done(const std::string& subagent_id,
-                                     const std::string& summary) {
-  emit("subagent.done", Json{{"id", subagent_id}, {"summary", summary},
-                             {"sid", opts_.sid}});
-  return FsResult::success();
-}
-
-FsResult AgentLoop::on_terminal_exit(const std::string& tid, int exit_code) {
-  emit("terminal.exit", Json{{"tid", tid}, {"exitCode", exit_code},
-                             {"sid", opts_.sid}});
-  return FsResult::success();
-}
-
-FsResult AgentLoop::on_timer() {
-  if (wake_scheduled_ && wake_at_ms_ > 0) {
-    emit("wake.fired", Json{{"source", "timer"}, {"sid", opts_.sid}});
-    wake_scheduled_ = false;
-    wake_at_ms_ = 0;
-  }
-  return FsResult::success();
-}
+// Wake scheduling lives in AgentHost/WakeScheduler. AgentLoop's own timer flags
+// and event emitters were a second, unused implementation: nothing set
+// wake_scheduled_, nothing called these, and they could only duplicate/diverge
+// from the real scheduler. Removed in the batch-61 audit.
 
 // 高风险动作（agent-loop.md 3：写/删/发网络/跑终端）
 bool AgentLoop::is_high_risk(const std::string& tool) const {

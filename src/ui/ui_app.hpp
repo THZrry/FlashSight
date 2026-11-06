@@ -840,6 +840,10 @@ struct SessionView {
   // See AppState: a pending suspend/resume request, and whether a turn is running.
   bool suspend_pending = false;
   bool turn_running = false;
+  // Auto-continue round of this session while it is in the background. Kept
+  // here (not only in AppState) so switching to the tab shows the round divider
+  // and the list dot without waiting for a reload.
+  int auto_round = 0;
   bool interrupted = false;
   // Why the loop stopped (provider error / HTTP status). Shown in the interrupt
   // bar: "interrupted" without a reason reads like a UI bug.

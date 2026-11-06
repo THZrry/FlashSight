@@ -81,10 +81,10 @@ constexpr char kKeyUsageRetainDays[] = "usage.retainDays";
 constexpr char kKeyHistoryRecentTurns[] = "history.recentTurns";  // 默认 20
 constexpr char kKeyHistoryTokenBudget[] = "history.tokenBudget";  // 默认 32000
 // 压缩阈值：上下文水位（上一次请求的 prompt tokens / 模型窗口）达到该百分比
-// 就压缩。这是**主触发条件**——token 预算是硬上限，水位是"该动手了"的信号。
-// 默认 80：留 20% 给本轮输出与工具结果。
-constexpr char kKeyHistoryCompressAtPct[] = "history.compressAtPct";  // 默认 80
-// 压缩后保留的最近轮数（短视图下限）。压缩不是清空，最近几轮必须全量保留。
+// 就折叠旧轮。默认 0 = 关闭：压缩改写提示前缀，会让 provider 的前缀缓存失效
+// （通常更贵），并且旧轮不再原样进入上下文；只有用户显式开启才允许。
+constexpr char kKeyHistoryCompressAtPct[] = "history.compressAtPct";  // 默认 0
+// 显式开启压缩时保留的最近轮数。压缩不是清空，最近几轮必须全量保留。
 constexpr char kKeyHistoryKeepTurns[] = "history.keepTurns";  // 默认 8
 // 防过拟合开关（agent-loop.md 5；默认关）
 constexpr char kKeyOverfitEnabled[] = "session.overfitEnabled";

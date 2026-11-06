@@ -167,6 +167,12 @@ struct ChatMsg {
   // == tool index" rule put a later thought above earlier tools. Empty (old
   // stored turns) falls back to the index.
   std::vector<size_t> interim_after;
+  // Live text from a complete-step SUBAGENT while it works. It is process, not
+  // the answer: rendered as a non-emphasis note inside the work log and never
+  // appended to `text` (which is the main model's answer). Cleared when the
+  // subagent reports; the full record stays in the subagent panel.
+  std::string work_live;
+  std::string work_live_id;
   // 工作过程: reasoning + narration + tool calls, ONE continuous stream above the
   // answer - no separate "工具调用" section (splitting them made the same turn read
   // as two unrelated things), and OPEN while the turn runs so you can watch the

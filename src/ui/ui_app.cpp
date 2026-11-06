@@ -998,6 +998,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.attachments = st_.attachments;
   v.suspended = st_.suspended;
   v.turn_running = st_.turn_running;
+  v.auto_round = st_.auto_round;
   v.interrupted = st_.interrupted;
   v.interrupt_reason = st_.interrupt_reason;
   v.pending_wakes = st_.pending_wakes;
@@ -1484,8 +1485,9 @@ void UiApp::load_session(const std::string& sid) {
       if (!pid.empty()) st_.active_pid = pid;
       st_.model = v.model;
       st_.model_provider = v.model_provider;
-      st_.thinking = v.thinking;
-      st_.permission = v.permission;
+  st_.thinking = v.thinking;
+  st_.auto_round = v.auto_round;
+  st_.permission = v.permission;
       st_.perm_index = v.perm_index;
       st_.auto_mode = v.auto_mode;
       st_.enter_send = v.enter_send;
@@ -3270,62 +3272,69 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   // buried the actual answer, so those stay in the 子代理 sidebar (which is fed
   // by subagent.list / subagent.started / subagent.done separately).
   if (jsonutil::get<bool>(payload, "fromSubagent", false)) {
-    std::string sub_id = jsonutil::get<std::string>(payload, "subagentId", "");
-    // Feed the SIDEBAR's live view before deciding anything about the main chat:
-    // a running subagent's panel row shows what it is doing right now, and that
-    // is the only place its work is visible when it is not a complete-step.
+    // *** A subagent event belongs to the subagent, PERIOD. ***
     //
-    // NO render() here. A subagent generating text emits hundreds of deltas per
-    // second, and painting per delta starves the event loop - the SAME bug the
-    // main chat hit, and it freezes the whole app seconds after a subagent starts
-    // talking ("生成子代理后几秒内卡死"). The data is already recorded above; the
-    // paint is deferred to the same 25 ms floor the main transcript uses, and
-    // turn.done / the panel's own refresh paints the final state.
-    if (!sub_id.empty() && (event == "stream.delta" || event == "tool.start")) {
-      std::vector<AppState::SubagentRow>& rows =
-          is_active ? st_.subagents : views_.get_or_create(sid).subagents;
-      for (size_t k = 0; k < rows.size(); ++k) {
-        if (rows[k].id != sub_id) continue;
-        if (event == "stream.delta") {
-          rows[k].live_text += jsonutil::get<std::string>(payload, "text", "");
-          // Keep the tail: a long answer would otherwise grow the row without
-          // bound and the panel only shows the latest part anyway.
+    // This block used to let a complete-step's events fall through into the
+    // MAIN turn handlers. Its stream text was appended to `msg.text` (so the
+    // subagent's thinking appeared as the main answer), its tool rows became
+    // main tool rows, and its own turn.done could fold/stop the main turn. That
+    // is the "思考又跑到外面" / "修一个坏一个" class: transport events for one
+    // agent driving another agent's state.
+    //
+    // Now: update the sidebar/detail live view; for a complete-step, mirror its
+    // progress into the main WORK LOG as non-emphasis text; then return. No
+    // subagent event ever touches the main answer, tools, or loop state.
+    std::string sub_id = jsonutil::get<std::string>(payload, "subagentId", "");
+    std::string skind = jsonutil::get<std::string>(payload, "subagentKind", "");
+    const bool inline_step = (skind == "complete-step");
+    if (event == "stream.delta" || event == "tool.start") {
+      std::string nm = jsonutil::get<std::string>(payload, "name", "");
+      std::string piece = jsonutil::get<std::string>(payload, "text", "");
+      if (event == "tool.start" && !nm.empty()) {
+        piece = "\n[" + tr("调用") + " " + nm + "]";
+      }
+      if (!sub_id.empty()) {
+        std::vector<AppState::SubagentRow>& rows =
+            is_active ? st_.subagents : views_.get_or_create(sid).subagents;
+        for (size_t k = 0; k < rows.size(); ++k) {
+          if (rows[k].id != sub_id) continue;
+          rows[k].live_text += piece;
           if (rows[k].live_text.size() > 2000) {
             rows[k].live_text.erase(0, rows[k].live_text.size() - 2000);
           }
-        } else {
-          std::string nm = jsonutil::get<std::string>(payload, "name", "");
-          if (!nm.empty()) rows[k].live_text += "\n[" + tr("调用") + " " + nm + "]";
+          break;
         }
-        break;
-      }
-      // The detail tab is a SEPARATE copy of the row (fetched when it opened).
-      // Without this it kept showing the text from that moment while the work
-      // continued - the "detail page looks frozen" half of the report.
-      std::map<std::string, AppState::SubagentDetail>::iterator dit =
-          st_.subagent_details.find(sub_id);
-      if (dit != st_.subagent_details.end() && dit->second.loaded) {
-        if (event == "stream.delta") {
-          dit->second.row.live_text +=
-              jsonutil::get<std::string>(payload, "text", "");
+        // The detail tab is a SEPARATE copy of the row (fetched when it opened).
+        std::map<std::string, AppState::SubagentDetail>::iterator dit =
+            st_.subagent_details.find(sub_id);
+        if (dit != st_.subagent_details.end() && dit->second.loaded) {
+          dit->second.row.live_text += piece;
           if (dit->second.row.live_text.size() > 2000) {
             dit->second.row.live_text.erase(
                 0, dit->second.row.live_text.size() - 2000);
           }
-        } else {
-          std::string nm = jsonutil::get<std::string>(payload, "name", "");
-          if (!nm.empty()) {
-            dit->second.row.live_text += "\n[" + tr("调用") + " " + nm + "]";
-          }
         }
       }
-      // Mark dirty. pump() drains this at a human cadence (it runs on the
-      // browser's 250 ms timer and from the desktop event loop), which is all a
-      // "what is it doing now" preview needs.
+      if (inline_step && !piece.empty()) {
+        const std::string live_id = sub_id.empty() ? std::string("subagent") : sub_id;
+        std::vector<comp::ChatMsg>& msgs =
+            is_active ? st_.messages : views_.get_or_create(sid).messages;
+        int& total = is_active ? st_.history_total : views_.get_or_create(sid).history_total;
+        comp::ChatMsg& msg = ensure_turn_message(msgs, total, &next_msg_rev_, now_ms());
+        if (msg.work_live_id != live_id) {
+          msg.work_live.clear();
+          msg.work_live_id = live_id;
+        }
+        msg.work_live += piece;
+        if (msg.work_live.size() > 1200) {
+          msg.work_live.erase(0, msg.work_live.size() - 1200);
+        }
+        msg.rev = next_msg_rev_++;
+      }
+      // No render per delta: the pump paints the live preview at a human pace.
       subagent_stream_dirty_ = true;
     }
-    std::string skind = jsonutil::get<std::string>(payload, "subagentKind", "");
-    if (skind != "complete-step") return;
+    return;
   }
   // A fast stream delivers hundreds of deltas in one poll burst. Rendering once
   // per delta starves the browser's event loop: the next poll never runs, and
@@ -3338,6 +3347,68 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   // panels seeded so opening it later does not look empty
   SessionView* vp = nullptr;
   if (!is_active) vp = &views_.get_or_create(sid);
+  // ---- session-scoped state that must follow a BACKGROUND tab too ----
+  // These used to live only in on_backend_event's active branch, so a background
+  // session's auto-round/checklist updates were silently dropped and the tab
+  // showed stale state when switched to.
+  if (event == "auto.next") {
+    int round = static_cast<int>(jsonutil::get_int(payload, "round", 1));
+    std::string reason = jsonutil::get<std::string>(payload, "reason", "");
+    if (is_active) {
+      update([&](AppState& s) {
+        s.auto_round = round;
+        s.turn_running = true;
+        s.suspended = false;
+        s.toast = "自动继续（第 " + itos(round) + " 轮）" +
+                  (reason.empty() ? "" : "：" + reason);
+        s.toast_deadline_ms = now_ms() + kToastMs;
+      });
+      if (!sid.empty()) {
+        for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
+      }
+    } else {
+      vp->auto_round = round;
+      vp->turn_running = true;
+      vp->suspended = false;
+    }
+    return;
+  }
+  if (event == "auto.halted") {
+    std::string reason = jsonutil::get<std::string>(payload, "reason", "");
+    if (is_active) {
+      update([&](AppState& s) {
+        s.auto_round = 0;
+        s.turn_running = false;
+        s.toast = reason.empty() ? tr("自动继续已停止")
+                                 : (tr("自动继续已停止：") + reason);
+        s.toast_deadline_ms = now_ms() + kToastMs;
+      });
+    } else {
+      vp->auto_round = 0;
+      vp->turn_running = false;
+    }
+    return;
+  }
+  if (event == "todo.updated") {
+    std::vector<AppState::TodoItem> list =
+        parse_todo_items(payload.contains("items") ? payload["items"] : Json::array());
+    // The host tags the list with its OWNER (a session id for the main agent, a
+    // subagent id for its private tree). A subagent's checklist must not replace
+    // the session's.
+    std::string owner = jsonutil::get<std::string>(payload, "owner", "");
+    std::string routed = sid.empty() ? st_.active_tab : sid;
+    if (!owner.empty() && !routed.empty() && owner != routed) return;
+    if (is_active) {
+      bool was_empty = st_.todos.empty();
+      st_.todos = list;
+      if (!list.empty() && was_empty) st_.todo_open = true;
+    } else {
+      bool was_empty = vp->todos.empty();
+      vp->todos = list;
+      if (!list.empty() && was_empty) vp->todo_open = true;
+    }
+    return;
+  }
   if (event == "turn.started") {
     // The turn is in flight now: the composer's primary button becomes 中止, and
     // any parked state is stale (a new turn is running). The interrupt bar must
@@ -3436,7 +3507,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       });
     } else {
       vp->turn_running = false;
-      st_.auto_round = 0;
+      vp->auto_round = 0;
     }
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     if (!m.empty() && m.back().role == "assistant") {
@@ -3645,6 +3716,16 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       if (ended > 0) subs[i].ended_at = ended;
       if (subs[i].ended_at <= 0) subs[i].ended_at = now_ms();
     }
+    // The live process text was the inline view of the work. Once it reports,
+    // fold that view back: the record stays in the subagent panel and the main
+    // transcript keeps only the tool row + summary.
+    std::vector<comp::ChatMsg>& msgs = is_active ? st_.messages : vp->messages;
+    for (size_t i = 0; i < msgs.size(); ++i) {
+      if (msgs[i].work_live_id != id) continue;
+      msgs[i].work_live.clear();
+      msgs[i].work_live_id.clear();
+      msgs[i].rev = next_msg_rev_++;
+    }
     // A transcript tab for this agent should show the final state too (it was
     // opened while the agent was still running, which is the common case).
     std::map<std::string, AppState::SubagentDetail>::iterator d =
@@ -3778,6 +3859,20 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
         }
       }
     }
+    // Interrupt/pause end a background turn without turn.done. The view used to
+    // keep turn_running/auto_round set forever, so switching to that tab showed a
+    // spinning "running" composer for a task that had already stopped.
+    {
+      SessionView& v = views_.get_or_create(sid);
+      if (event == "loop.interrupted") {
+        v.turn_running = false;
+        v.auto_round = 0;
+        v.interrupted = true;
+        v.interrupt_reason = jsonutil::get<std::string>(payload, "error", "");
+      } else if (event == "loop.paused") {
+        v.turn_running = false;
+      }
+    }
     apply_session_event(sid, event, payload);
     if (!coalesced) render();
     return;
@@ -3786,7 +3881,11 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       event == "tool.start" ||
       event == "tool.update" || event == "assistant.interim" ||
       event == "subagent.done" || event == "loop.usage" ||
+      event == "auto.next" || event == "auto.halted" ||
+      event == "todo.updated" ||
       event == "terminal.exit" || event == "terminal.output") {
+    // Session-scoped: apply_session_event writes to AppState or the stashed view,
+    // so the same event works for the active tab and a background one.
     apply_session_event(sid, event, payload);
   } else if (event == "permission.prompt") {
     st_.ask_modal = true;
@@ -3833,27 +3932,6 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.ask_modal = true;
     st_.interrupted = false;  // this is a question, not a failure
     st_.interrupt_reason.clear();
-  } else if (event == "auto.next") {
-    // An automatic round is starting. Say so: otherwise the next answer simply
-    // appeared under the previous one and the session looked stuck.
-    int round = static_cast<int>(jsonutil::get_int(payload, "round", 1));
-    st_.auto_round = round;
-    // An auto round runs WITHOUT turn.started, so without this the composer
-    // showed 发送 (not 中止) for a task that was visibly working - the "输入框
-    // 显示不在跑" half of the earlier report.
-    st_.turn_running = true;
-    st_.suspended = false;
-    std::string reason = jsonutil::get<std::string>(payload, "reason", "");
-    st_.toast = "自动继续（第 " + itos(round) + " 轮）" +
-                (reason.empty() ? "" : "：" + reason);
-    st_.toast_deadline_ms = now_ms() + kToastMs;
-    // The purple dot means "running in the background": set it on the session
-    // row too, so the home/project lists show it without opening the tab.
-    // (SessionTab is a tab, not a session row - the rows live on the project
-    // cards, so they are refreshed from the backend instead.)
-    if (!sid.empty()) {
-      for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
-    }
   } else if (event == "wake.scheduled" || event == "wake.cancelled" ||
              event == "wake.fired") {
     // The wake bar is driven by the scheduler's pending list. Without this a
@@ -3861,15 +3939,6 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // and a fired timer left a stale "5 分钟后" countdown on screen.
     refresh_pending_wakes();
     if (event == "wake.fired" && !sid.empty()) refresh_loop_state(sid);
-  } else if (event == "auto.halted") {
-    st_.auto_round = 0;
-    st_.turn_running = false;  // the last auto round has ended
-    // Report the ACTUAL reason: the round cap and "the auto round ran no tools"
-    // both land here, and claiming "轮数上限" for the latter was misleading.
-    std::string reason = jsonutil::get<std::string>(payload, "reason", "");
-    st_.toast = reason.empty() ? tr("自动继续已停止")
-                               : (tr("自动继续已停止：") + reason);
-    st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "context.compressed") {
     int dropped = static_cast<int>(jsonutil::get_int(payload, "droppedTurns", 0));
     st_.toast = "上下文已压缩" + (dropped > 0 ? "（折叠 " + itos(dropped) + " 条）" : "");
@@ -3877,32 +3946,6 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   } else if (event == "subagent.steered") {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
-  } else if (event == "todo.updated") {
-    // The model's own checklist (todo_add/todo_check, one owner per session).
-    // It is the ONLY progress view in the composer: the plan is a document the
-    // model maintains, not a step tree to render.
-    std::vector<AppState::TodoItem> list =
-        parse_todo_items(payload.contains("items") ? payload["items"] : Json::array());
-    // The host tags the list with its OWNER: a session id for the main agent, a
-    // subagent id for a subagent's private tree. The panel is the session's, so
-    // a subagent's checklist must not replace it.
-    std::string owner = jsonutil::get<std::string>(payload, "owner", "");
-    std::string routed = sid.empty() ? st_.active_tab : sid;
-    if (!owner.empty() && !routed.empty() && owner != routed) return;
-    if (sid.empty() || sid == st_.active_tab) {
-      bool was_empty = st_.todos.empty();
-      st_.todos = list;
-      // A NEW checklist opens its panel: the model just wrote down what it is
-      // about to do, and that is exactly the moment the user wants to see it. A
-      // list the user has closed stays closed on later updates.
-      if (!list.empty() && was_empty) st_.todo_open = true;
-    } else {
-      SessionView& v = views_.get_or_create(sid);
-      bool was_empty = v.todos.empty();
-      v.todos = list;
-      if (!list.empty() && was_empty) v.todo_open = true;
-    }
-    render();
   } else if (event == "plan.update") {
     // `plan.update` carries the DOCUMENT (path/status/content), not a step tree
     // to draw. There is no plan panel: the file is the plan, and progress is the
@@ -8566,7 +8609,7 @@ void UiApp::apply_settings(const Json& values) {
   // Compaction: only the water-level threshold is a knob (the keep-turns count
   // and the token budget were misleading controls - see the settings page).
   st_.history_compress_at =
-      std::to_string(sv_int(st_.settings_values, "history.compressAtPct", 80));
+      std::to_string(sv_int(st_.settings_values, "history.compressAtPct", 0));
   // file black/white lists: stored as arrays; join for the textarea draft
   st_.file_blacklist_text = join_lines(st_.settings_values, "permissions.files.blacklist");
   st_.file_whitelist_text = join_lines(st_.settings_values, "permissions.files.whitelist");
@@ -9786,20 +9829,21 @@ VNodePtr UiApp::build_settings() {
     }), tr("影响工具/skill 说明的双语选择")));
 
     body.add(comp::section_title(tr("压缩")));
-    // 自动压缩阈值：上下文水位（上一次请求的 prompt tokens / 模型窗口）达到该
-    // 百分比就开始压缩较早的轮次。给档位而不是让用户填百分比，因为"多少算满"
-    // 本来就是个经验值。键名与后端一致：history.compressAtPct。
+    // 自动压缩默认关闭。压缩会改写提示前缀：provider 的前缀缓存全部失效，
+    // 反而更贵；被折叠的旧轮也不再原样进入上下文。只有用户显式选择阈值
+    // 才开启。给档位而不是让用户填百分比，因为"多少算满"本来就是个经验值。
+    // 键名与后端一致：history.compressAtPct。
     body.add(comp::field(tr("自动压缩阈值"), comp::select(
-        std::vector<std::string>{"60%", "70%", "80%", "90%", tr("关闭")},
+        std::vector<std::string>{"60%", "70%", "80%", "90%", tr("关闭（推荐）")},
         [&]() {
-          int n = sv_int(st_.settings_values, "history.compressAtPct", 80);
+          int n = sv_int(st_.settings_values, "history.compressAtPct", 0);
           return n <= 0 ? 4 : n <= 60 ? 0 : n <= 70 ? 1 : n <= 80 ? 2 : 3;
         }(),
         [this](const std::string& v) {
       int idx = std::atoi(v.c_str());
       const int vals[5] = {60, 70, 80, 90, 0};
-      set_setting("history.compressAtPct", vals[idx < 0 || idx > 4 ? 2 : idx]);
-    }), tr("上下文占用达到该比例时自动压缩较早的轮次")));
+      set_setting("history.compressAtPct", vals[idx < 0 || idx > 4 ? 4 : idx]);
+    }), tr("默认关闭：完整保留上文与缓存；开启后会改写提示前缀，通常更贵且丢失旧轮")));
     // This page used to carry three more knobs. Only the threshold above is a
     // real control:
     //   * "保留最近轮数" - the number of full turns kept when compaction runs is an

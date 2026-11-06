@@ -84,6 +84,27 @@ FS_TEST(compress_decision_uses_water_level) {
   EXPECT_EQ(d4.reason, std::string("forced"));
 }
 
+// Default is OFF. Automatic folding rewrites the prompt prefix (invalidating the
+// provider's prefix cache) and silently drops old turns; it must be opt-in only.
+FS_TEST(compress_defaults_to_off) {
+  HistoryBuilder::Options opts;
+  EXPECT_EQ(opts.compress_at_pct, 0);
+  opts.context_limit = 1000;
+  opts.last_prompt_tokens = 990;  // 99% of the window
+  auto d = HistoryBuilder::should_compress(opts, 99999);
+  EXPECT_FALSE(d.compress);
+
+  HistoryBuilder hb(opts);
+  Json full = make_full(6);
+  HistoryResult hr = hb.build_neutral(full);
+  EXPECT_FALSE(hr.compressed);
+  std::string all;
+  for (auto& m : hr.messages) all += jsonutil::get<std::string>(m, "content", "");
+  // EVERY turn is still in the prompt.
+  EXPECT_TRUE(all.find("question 0 with") != std::string::npos);
+  EXPECT_TRUE(all.find("answer 5") != std::string::npos);
+}
+
 // ---------- 水位触发时压缩确实发生，且最近 keep_turns 轮全量保留 ----------
 FS_TEST(compress_water_level_keeps_recent_turns) {
   HistoryBuilder::Options opts;
@@ -147,6 +168,8 @@ FS_TEST(loop_emits_compressed_event_on_water_level) {
   opts.permission = "full";
   opts.history.system_prefix = "sys";
   opts.history.keep_turns = 1;
+  // Auto-compaction is OFF by default now; this test covers the opt-in path.
+  opts.history.compress_at_pct = 80;
   opts.context.auto_mode = false;
   std::vector<std::string> events;
   std::vector<Json> payloads;

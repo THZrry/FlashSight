@@ -1138,6 +1138,9 @@ const Entry kEnTable[] = {
     {"当前步骤在子代理中执行", "The current step is running in a subagent"},
     {"这里的输入发给主会话；要引导它请打开记录", "Text here goes to the main session; open the record to steer the subagent"},
     {"打开记录", "Open record"},
+    {"子代理过程", "Subagent process"},
+    {"关闭（推荐）", "Off (recommended)"},
+    {"默认关闭：完整保留上文与缓存；开启后会改写提示前缀，通常更贵且丢失旧轮", "Off by default: keeps the full history and prefix cache; enabling rewrites the prompt prefix and is usually more expensive"},
 };
 
 const int kEnCount = static_cast<int>(sizeof(kEnTable) / sizeof(kEnTable[0]));

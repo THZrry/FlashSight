@@ -4672,6 +4672,16 @@ FS_TEST(uiapp_subagent_events_split_by_kind) {
                            {"text", "step output"},
                            {"fromSubagent", true},
                            {"subagentKind", "complete-step"}});
+  // State first: if this fails the event never reached the transcript; if it
+  // passes, the problem is in rendering the work note.
+  EXPECT_TRUE(!app.state().messages.empty());
+  EXPECT_EQ(app.state().messages.back().work_live, std::string("step output"));
+  // ...and it is NOT the answer: the subagent's stream must never become the
+  // main model's output text.
+  EXPECT_TRUE(app.state().messages.back().text.empty());
+  // Subagent deltas are coalesced like main stream deltas (no per-delta paint);
+  // the pump is what flushes them, exactly as in the running app.
+  app.pump();
   EXPECT_TRUE(dom.dump().find("step output") != std::string::npos);
 }
 

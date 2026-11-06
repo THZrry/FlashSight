@@ -298,7 +298,7 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
   // (recent-turns and token-budget were removed: they folded history on every
   // turn regardless of the water level.)
   if (deps_.setting) {
-    Json cp = deps_.setting(opts.pid, "history.compressAtPct", Json(80));
+    Json cp = deps_.setting(opts.pid, "history.compressAtPct", Json(0));
     Json kt = deps_.setting(opts.pid, "history.keepTurns", Json(8));
     if (cp.is_number()) opts.history.compress_at_pct = static_cast<int>(cp.get<int64_t>());
     if (kt.is_number()) opts.history.keep_turns = static_cast<int>(kt.get<int64_t>());
@@ -803,7 +803,7 @@ FsResult AgentHost::context_status(const std::string& sid) {
     prompt = it->second->last_prompt_tokens();
   }
   if (deps_.setting) {
-    Json v = deps_.setting("", "history.compressAtPct", Json(80));
+    Json v = deps_.setting("", "history.compressAtPct", Json(0));
     if (v.is_number()) at = static_cast<int>(v.get<int64_t>());
   }
   if (limit > 0 && prompt > 0) {
@@ -872,7 +872,7 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
     // did nothing until the app restarted - "the options have no effect".
     if (deps_.setting) {
       HistoryBuilder::Options hopts = loop->history_options();
-      Json cp = deps_.setting(ctx.pid, "history.compressAtPct", Json(80));
+      Json cp = deps_.setting(ctx.pid, "history.compressAtPct", Json(0));
       Json kt = deps_.setting(ctx.pid, "history.keepTurns", Json(8));
       if (cp.is_number()) hopts.compress_at_pct = static_cast<int>(cp.get<int64_t>());
       if (kt.is_number()) hopts.keep_turns = static_cast<int>(kt.get<int64_t>());
@@ -981,9 +981,9 @@ FsResult AgentHost::resume(const std::string& sid) {
 
 FsResult AgentHost::cancel_wake(const std::string& sid) {
   std::lock_guard<std::recursive_mutex> host_lock(lock());
+  // ONE source of truth: the WakeScheduler. AgentLoop used to keep a second,
+  // never-set copy of the timer flags and emit its own wake.cancelled.
   wakes_.cancel(sid);
-  auto it = loops_.find(sid);
-  if (it != loops_.end()) it->second->cancel_wake();
   emit("wake.cancelled", Json{{"sid", sid}});
   return FsResult::success();
 }
