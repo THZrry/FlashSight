@@ -18,7 +18,11 @@ namespace {
 // back into the backend must not be queued behind the turn itself.
 thread_local int g_in_backend_call = 0;
 
-constexpr int kMaxWorkers = 4;
+// Two concurrent turns (multi-session auto mode) must not starve the UI's own
+// panels: each turn holds a worker for its whole round trip, and a balance probe
+// or a terminal grid fetch can hold another. 4 left no headroom, so every panel
+// call queued behind the turns and the window showed stale state.
+constexpr int kMaxWorkers = 8;
 // The UI queue is bounded. The UI thread drains it every 50 ms, but a long
 // tool-heavy turn can emit hundreds of events per second, and if the UI thread
 // is stuck for a while (a big patch, a slow machine, a compositor stall) the

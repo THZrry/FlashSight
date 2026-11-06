@@ -85,6 +85,7 @@ FS_TEST(tool_names_are_wire_safe) {
   std::vector<std::string> must_have = {"read_file", "edit_file", "write_file",
                                         "list_dir", "find_files", "remove_file",
                                         "plan_update", "subagent_spawn",
+                                        "wake_schedule", "wake_cancel", "wake_list",
                                         "todo_add", "terminal_exec"};
   for (auto& want : must_have) {
     bool found = false;

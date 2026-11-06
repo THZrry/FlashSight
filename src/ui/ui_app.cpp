@@ -53,7 +53,11 @@ class SlowEventLog {
   ~SlowEventLog() {
     int64_t dt = mono_ms() - t0_;
     if (dt < 500) return;
-    if (!std::getenv("FS_RES_LOG")) return;
+    // ON by default (a slow-event line is rare and tiny); FS_RES_LOG=0 opts out.
+    // The old test was inverted, so the one diagnostic meant for an unattended
+    // freeze was off unless someone set the env var.
+    const char* env = std::getenv("FS_RES_LOG");
+    if (env && std::strcmp(env, "0") == 0) return;
     const char* tmp = std::getenv("TEMP");
     std::string path =
         std::string(tmp && *tmp ? tmp : ".") + "\\flashsight_res.log";
@@ -3295,6 +3299,26 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         }
         break;
       }
+      // The detail tab is a SEPARATE copy of the row (fetched when it opened).
+      // Without this it kept showing the text from that moment while the work
+      // continued - the "detail page looks frozen" half of the report.
+      std::map<std::string, AppState::SubagentDetail>::iterator dit =
+          st_.subagent_details.find(sub_id);
+      if (dit != st_.subagent_details.end() && dit->second.loaded) {
+        if (event == "stream.delta") {
+          dit->second.row.live_text +=
+              jsonutil::get<std::string>(payload, "text", "");
+          if (dit->second.row.live_text.size() > 2000) {
+            dit->second.row.live_text.erase(
+                0, dit->second.row.live_text.size() - 2000);
+          }
+        } else {
+          std::string nm = jsonutil::get<std::string>(payload, "name", "");
+          if (!nm.empty()) {
+            dit->second.row.live_text += "\n[" + tr("调用") + " " + nm + "]";
+          }
+        }
+      }
       // Mark dirty. pump() drains this at a human cadence (it runs on the
       // browser's 250 ms timer and from the desktop event loop), which is all a
       // "what is it doing now" preview needs.
@@ -3611,16 +3635,25 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     }
   } else if (event == "subagent.done") {
     std::string id = jsonutil::get<std::string>(payload, "id", "");
+    std::string summary = jsonutil::get<std::string>(payload, "summary", "");
+    int64_t ended = jsonutil::get_int(payload, "endedAt", 0);
     std::vector<AppState::SubagentRow>& subs = is_active ? st_.subagents : vp->subagents;
     for (size_t i = 0; i < subs.size(); ++i) {
-      if (subs[i].id == id) subs[i].status = "done";
+      if (subs[i].id != id) continue;
+      subs[i].status = "done";
+      if (!summary.empty()) subs[i].summary = summary;
+      if (ended > 0) subs[i].ended_at = ended;
+      if (subs[i].ended_at <= 0) subs[i].ended_at = now_ms();
     }
     // A transcript tab for this agent should show the final state too (it was
     // opened while the agent was still running, which is the common case).
     std::map<std::string, AppState::SubagentDetail>::iterator d =
         st_.subagent_details.find(id);
-    if (d != st_.subagent_details.end() && d->second.loaded) {
-      load_subagent_detail(id);
+    if (d != st_.subagent_details.end()) {
+      d->second.row.status = "done";
+      if (!summary.empty()) d->second.row.summary = summary;
+      if (ended > 0) d->second.row.ended_at = ended;
+      if (d->second.loaded) load_subagent_detail(id);
     }
   } else if (event == "subagent.started") {
     // A NEW subagent gets its row here. The panel's rows come from
@@ -3821,6 +3854,13 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     if (!sid.empty()) {
       for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
     }
+  } else if (event == "wake.scheduled" || event == "wake.cancelled" ||
+             event == "wake.fired") {
+    // The wake bar is driven by the scheduler's pending list. Without this a
+    // wake scheduled from a tool appeared only after some unrelated refresh,
+    // and a fired timer left a stale "5 分钟后" countdown on screen.
+    refresh_pending_wakes();
+    if (event == "wake.fired" && !sid.empty()) refresh_loop_state(sid);
   } else if (event == "auto.halted") {
     st_.auto_round = 0;
     st_.turn_running = false;  // the last auto round has ended
@@ -4381,6 +4421,21 @@ void UiApp::render() {
                    static_cast<long long>(dt),
                    static_cast<int>(st_.messages.size()),
                    st_.active_tab.c_str(), static_cast<int>(msg_nodes_.size()));
+      // stderr is invisible in a GUI launch; the resource log is what survives
+      // an unattended freeze. Same opt-out as the slow-event log.
+      const char* env = std::getenv("FS_RES_LOG");
+      if (!(env && std::strcmp(env, "0") == 0)) {
+        const char* tmp = std::getenv("TEMP");
+        std::string path = std::string(tmp && *tmp ? tmp : ".") +
+                           "\\flashsight_res.log";
+        if (FILE* f = std::fopen(path.c_str(), "a")) {
+          std::fprintf(f, "[slow] render ms=%lld msgs=%d tab=%s nodes=%d\n",
+                       static_cast<long long>(dt),
+                       static_cast<int>(st_.messages.size()),
+                       st_.active_tab.c_str(), static_cast<int>(msg_nodes_.size()));
+          std::fclose(f);
+        }
+      }
     }
   }
 }
@@ -6063,6 +6118,34 @@ VNodePtr UiApp::build_session() {
       comp_box.add(bar);
     }
   }
+  // A complete-step subagent is doing the CURRENT step. Make the send target
+  // explicit: the composer still talks to the MAIN session (its message becomes
+  // steering for the next main round), while "引导" for the step belongs to the
+  // subagent's own panel. Silently sending to the wrong agent was the report.
+  {
+    const AppState::SubagentRow* step_agent = nullptr;
+    for (size_t i = 0; i < st_.subagents.size(); ++i) {
+      if (st_.subagents[i].status == "running" &&
+          st_.subagents[i].kind == "complete-step") {
+        step_agent = &st_.subagents[i];
+        break;
+      }
+    }
+    if (step_agent) {
+      std::string id = step_agent->id;
+      std::string title = step_agent->kind + " · " + id;
+      H bar = el("div", "interrupt-bar subagent-bar");
+      bar.add(el("i", "fa fa-diagram-project"));
+      bar.add(el("span", "ib-text").text(tr("当前步骤在子代理中执行")));
+      bar.add(el("span", "ib-reason dim").text(
+          tr("这里的输入发给主会话；要引导它请打开记录")));
+      bar.add(el("span", "grow"));
+      bar.add(comp::button(tr("打开记录"), [this, id, title](const std::string&) {
+        open_subagent_tab(id, title);
+      }, "ghost"));
+      comp_box.add(bar);
+    }
+  }
   // Interrupted task: a persistent bar with the action that actually helps.
   // The loop can continue from its saved point, so this is one click instead of
   // retyping the request.
@@ -6567,9 +6650,18 @@ VNodePtr UiApp::build_session() {
   // disable/enable ladder is only a FALLBACK for a model whose table carries no
   // levels at all.
   std::vector<std::string> levels = st_.model_thinking_levels;
+  // FIRST PAINT: the model table reply is async, so on the very first render of
+  // a session the ladder was still empty and the composer showed the generic
+  // 关/开 pair until a switch or a save. Use the same name-based fallback the
+  // backend fills with, so the correct ladder is there immediately.
+  std::string want_default = st_.model_thinking_default;
   if (levels.empty() && !st_.model.empty()) {
-    levels.push_back("disable");
-    levels.push_back("enable");
+    levels = thinking_levels_for(st_.model);
+    if (want_default.empty()) want_default = default_thinking_for(st_.model);
+    if (levels.empty()) {
+      levels.push_back("disable");
+      levels.push_back("enable");
+    }
   }
   if (!levels.empty()) {
     // Selection: the session's own choice if it is a valid level, otherwise the
@@ -6577,8 +6669,7 @@ VNodePtr UiApp::build_session() {
     // selected", because an empty value means "send no hint" and the control
     // would then misrepresent that as one of the listed options.
     int sel = 0;
-    std::string want = st_.thinking.empty() ? st_.model_thinking_default
-                                            : st_.thinking;
+    std::string want = st_.thinking.empty() ? want_default : st_.thinking;
     for (size_t i = 0; i < levels.size(); ++i) {
       if (levels[i] == want) { sel = static_cast<int>(i); break; }
     }
@@ -7099,13 +7190,18 @@ VNodePtr UiApp::build_side_panel() {
       body.add(comp::empty_state(tr("读取子代理记录…"), "", nullptr));
     } else {
       const AppState::SubagentRow& row = det->row;
+      const bool row_running = row.status == "running";
       H hd = el("div", "sap-head");
-      hd.add(el("span", row.status == "running" ? "sa-status running" : "sa-status done")
-                 .text(row.status == "running" ? "●" : "✓"));
+      hd.add(el("span", row_running ? "sa-status running" : "sa-status done")
+                 .text(row_running ? "●" : "✓"));
+      if (row_running) hd.add(el("span", "sa-running-badge").text(tr("运行中")));
       hd.add(el("span", "sa-kind").text(row.kind));
       if (!row.model.empty()) hd.add(comp::badge(row.model));
       hd.add(el("span", "grow"));
-      if (row.started_at > 0 && row.ended_at > 0) {
+      if (row_running && row.started_at > 0) {
+        hd.add(el("span", "dim").text(tr("已运行 ") +
+                                      session_duration(row.started_at, 0)));
+      } else if (row.started_at > 0 && row.ended_at > 0) {
         hd.add(el("span", "dim").text(session_duration(row.started_at, row.ended_at)));
       }
       hd.add(comp::icon_button("rotate", tr("刷新"), [this, sub_id](const std::string&) {
@@ -7117,12 +7213,6 @@ VNodePtr UiApp::build_side_panel() {
         t.add(el("span", "sap-label").text(tr("任务")));
         t.add(el("div", "sap-task-text").text(row.task));
         body.add(t);
-      }
-      if (!row.summary.empty()) {
-        H sm = el("div", "sap-summary");
-        sm.add(el("span", "sap-label").text(tr("摘要")));
-        sm.add(el("div", "sap-summary-text").text(row.summary));
-        body.add(sm);
       }
       // 引导 lives HERE, on the detail page: a running agent takes it between
       // tool calls, a finished one gets a follow-up that continues with the same
@@ -7159,8 +7249,12 @@ VNodePtr UiApp::build_side_panel() {
         body.add(steer);
       }
       if (row.transcript.is_array() && row.transcript.size() > 0) {
+        // Say the ORDER out loud. The panel used to print "对话记录 · N" over a
+        // list whose summary sat ABOVE it, so it read as if the result came
+        // before the work that produced it.
         body.add(el("div", "sap-label").text(
-            tr("对话记录") + " · " + itos(static_cast<int>(row.transcript.size()))));
+            tr("过程记录（按时间顺序，最新在最后）") + " · " +
+            itos(static_cast<int>(row.transcript.size())) + tr(" 条")));
         for (size_t k = 0; k < row.transcript.size(); ++k) {
           const Json& e = row.transcript[k];
           std::string role = jsonutil::get<std::string>(e, "role", "");
@@ -7192,6 +7286,18 @@ VNodePtr UiApp::build_side_panel() {
       } else {
         body.add(comp::empty_state(tr("这个子代理还没有对话记录。"), "", nullptr));
       }
+      // The RESULT comes AFTER the process it summarises. It is also what the
+      // main conversation received - saying so removes the "is this the prompt
+      // or the answer?" ambiguity.
+      if (!row.summary.empty()) {
+        H sm = el("div", "sap-summary");
+        sm.add(el("span", "sap-label").text(tr("结果摘要（已回传主会话）")));
+        sm.add(el("div", "sap-summary-text").text(row.summary));
+        body.add(sm);
+      } else if (row_running) {
+        body.add(el("div", "sap-live-hint").text(
+            tr("还在运行；结果摘要完成后再回传主会话。")));
+      }
     }
   } else if (kind == "subagents") {
     if (st_.subagents.empty()) {
@@ -7199,10 +7305,14 @@ VNodePtr UiApp::build_side_panel() {
     }
     for (size_t i = 0; i < st_.subagents.size(); ++i) {
       const AppState::SubagentRow& a = st_.subagents[i];
-      H card = el("div", "subagent-card");
+      const bool a_running = a.status == "running";
+      H card = el("div", a_running ? "subagent-card running" : "subagent-card");
       H head = el("div", "sa-head");
-      head.add(el("span", a.status == "running" ? "sa-status running" : "sa-status done")
-                   .text(a.status == "running" ? "●" : "✓"));
+      head.add(el("span", a_running ? "sa-status running" : "sa-status done")
+                   .text(a_running ? "●" : "✓"));
+      // A running agent must be unmistakable in a list that also holds finished
+      // ones: the single "●" was easy to miss and the card said nothing else.
+      if (a_running) head.add(el("span", "sa-running-badge").text(tr("运行中")));
       head.add(el("span", "sa-kind").text(a.kind));
       head.add(el("span", "sa-id dim").text(a.id));
       if (!a.model.empty()) head.add(comp::badge(a.model));
@@ -7232,16 +7342,42 @@ VNodePtr UiApp::build_side_panel() {
         card.attr("title", tr("点击打开完整记录"));
         card.cls("clickable");
       }
-      card.add(el("div", "sa-task").text(a.task));
+      // The overview is a LIST, not the record: one card with an entire task
+      // description pushed every other agent off screen. Full text is on the
+      // detail page.
+      card.add(el("div", "sa-task").text(
+          cut_display(a.task, 240, tr(" …（打开记录查看全文）"))));
       // Live progress: what the subagent is doing RIGHT NOW. A running subagent
       // used to show only "running" plus a duration, so the panel answered
       // "something is happening" but not "what" - the report was "只能在侧边栏
       // 看到在运行，不能看跑的具体内容".
       if (a.status == "running" && !a.live_text.empty()) {
+        // Tail only: the row preview is "what is it doing now", and 2000 chars of
+        // narration made one card taller than the panel.
+        std::string live_text = a.live_text;
+        if (live_text.size() > 500) {
+          size_t cut = live_text.size() - 500;
+          while (cut < live_text.size() &&
+                 (static_cast<unsigned char>(live_text[cut]) & 0xC0) == 0x80) {
+            ++cut;
+          }
+          live_text = "…" + live_text.substr(cut);
+        }
         H live = el("div", "sa-live");
         live.add(el("span", "sa-live-label").text(tr("正在做")));
-        live.add(el("div", "sa-live-text").text(a.live_text));
+        live.add(el("div", "sa-live-text").text(live_text));
         card.add(live);
+      }
+      // The RESULT is the first thing a finished card should answer. It used to
+      // be hidden entirely whenever the transcript existed (the toggle branch
+      // skipped the summary), so a completed step's card showed neither result
+      // nor readable history at a glance.
+      if (!a_running && !a.summary.empty()) {
+        H sm = el("div", "sa-summary");
+        sm.add(el("span", "sa-summary-label").text(tr("结果摘要")));
+        sm.add(el("div", "sa-summary-text").text(
+            cut_display(a.summary, 500, tr(" …（打开记录查看全文）"))));
+        card.add(sm);
       }
       // Transcript: the subagent's own conversation, folded. It is kept out of
       // the main chat on purpose, but the user must be able to read it.
@@ -7293,8 +7429,6 @@ VNodePtr UiApp::build_side_panel() {
           }
           card.add(log);
         }
-      } else if (!a.summary.empty()) {
-        card.add(el("div", "sa-summary").text(a.summary));
       }
       // Steering lives on the DETAIL page (this card NAVIGATES on click, so a
       // text field here could not even be clicked into: the click bubbled and

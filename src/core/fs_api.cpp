@@ -2451,8 +2451,16 @@ void FsApi::terminal_tick() {
       // Freeze the entry on disk with its exit status.
       TermEntry* e = terminals_->find(tid);
       if (e) persist_terminal_entry(e->to_json());
+      int exit_code = static_cast<int>(jsonutil::get_int(c, "exitCode", 0));
       emit_event("terminal.exit", Json{{"sid", sid}, {"tid", tid},
-                                       {"exitCode", jsonutil::get_int(c, "exitCode", 0)}});
+                                       {"exitCode", exit_code}});
+      // wakeOnExit used to be stored and never read, and AgentHost's
+      // on_terminal_exit had no caller at all - a background command could
+      // finish with nobody resuming the task. This is the only exit path that
+      // knows both the entry flag and the agent host.
+      if (e && e->wake_on_exit && agent_host_ && !sid.empty()) {
+        agent_host_->on_terminal_exit(sid, tid, exit_code);
+      }
     }
   }
 }

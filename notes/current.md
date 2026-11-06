@@ -3039,3 +3039,46 @@ The process of project: P0 环境搭建 + P1 AppCore
     的 "spark" 会一直留着；用户手改过的图标（user_set）不动。原生窗口实测两条 muse 模型都是 `mi-lobe-meta`。
   - **测试**：433 用例 4034 断言全过；web / webview 双变体编译通过。新增选择器 pair/打开定位、选模型刷新档位、
     1M 上下文基线、Muse 品牌与旧图标重算的用例。
+
+
+<113>(FIXED): 双会话卡死真因=前台终端等待持锁 + wakeOnExit 从未接线；定时唤醒工具；模型上下文按 2026 资料重排；complete-step 阻塞派活与子代理 UI 重做。
+  - **卡死（恶性 bug）真因**：`TerminalManager::spawn` 在**持有终端全局锁 mu_** 的情况下执行前台等待
+    （`reproc_wait`）。两个会话同时跑 `terminal_exec sleep 60` 时，第一个 sleep 把 mu_ 拿走 60 秒；第二个
+    spawn 的回合线程、每 60ms 一跑的终端 poller（同时负责 `on_timer_tick` 唤醒调度）、UI 的 terminal.grid
+    请求全部排队。两个回合 + 余额 + 网格把 4 个 NativeBackend worker 占满后，plan/唤醒/状态请求都只进不出，
+    界面看起来完全卡死；后端自己还在跑，所以关掉再开能看到回合已经完成。这就是"plan 不更新、也没能计划唤醒"。
+    现在前台等待**释放 mu_**（只把注册/收尾留在锁内），`fg_wait` 标记让 tick 继续收输出但把退出判定留给
+    waiter；worker 上限 4→8；SlowEventLog 的开关以前写反了（默认关），现在默认开，慢 render 也写
+    `%TEMP%\flashsight_res.log`。新增 `terminal_foreground_wait_does_not_block_the_manager`（前台 4 秒命令
+    期间 tick/另一个 spawn 必须 1.5 秒内返回）。
+  - **wakeOnExit 是死的**：`AgentHost::on_terminal_exit` 没有任何调用者，`wake.fired` 也没有消费者——
+    后台终端退出后不会续跑，模型也没有任何工具能"计划唤醒"。现在：
+    - `terminal_tick` 在 justExited 时按 TermEntry.wake_on_exit 调用宿主；`wake.fired` 会真正启动一轮
+      （专用可 join 的唤醒线程；任务已在跑则转成 round-end 引导，不并发开第二轮）。
+    - 新增模型工具 `wake_schedule` / `wake_cancel` / `wake_list`：安排 delayMs 后自动续跑，**不要再用
+      terminal_exec sleep 等待**（那会占一整个回合）。唤醒提示是 `SYSTEM: ...`，要求先看 plan/todo 再继续。
+    - WakeScheduler 加锁（schedule 来自工具线程、due 来自 poller）；fire 在锁外执行，避免回调里再调度死锁。
+    - UI 收到 wake.scheduled/fired/cancelled 立即刷新唤醒条与 loop 状态。
+  - **模型能力印象更新（参考 temp/models.md）**：`default_context_for` 改成按 2026 家族表取值，再回退到
+    关键词：DeepSeek V4 Pro/Flash 1M、GLM-5.3 1M / GLM-5 200K、Kimi K3 1M（K3-256k 256K）、MiniMax M3 1M /
+    M2 204.8K、MiMo V2.6 1M / V2 256K、Qwen 3.6-3.8/Max 1M、Grok 4.7 500K / 4 Fast 128K、GPT-5 400K /
+    GPT-5.6/6 1.05M、Claude 5.x 1M / Claude 4 与 3 200K、Gemini 3.5 Pro 2M。只有**未知家族**才用
+    mini/nano/flash/lite/size 这类 token 降档；DeepSeek/Qwen/GLM 的 Flash 不再被误判成小窗。
+    原生窗口实测：deepseek-v4.1-flash / glm-5.3-flash 1000K、grok-4.7 500K、muse 1048K、agnes-*-flash 131K。
+  - **思考档位首次进入**：首帧先用和后台相同的 `thinking_levels_for()/default_thinking_for()` 兜底，不再先
+    渲染关/开对；上一批的"选模型立即刷新 + 非法旧档位清掉"保留。新增 deepseek-v4 / qwen3.6-3.8 / glm-5 /
+    kimi-k3 / minimax-m3 / grok-4 / gpt-6 等档位识别。
+  - **上下文过限**：核查确认 `HistoryBuilder` 在**上一次请求的 prompt tokens ≥ 窗口 80%**（可设置）时压缩：
+    保留最新 `keepTurns`（默认 8）轮，其余折叠成摘要 user 消息（带 priorSummary），发 `context.compressed`
+    提示。不是清空重来；单轮就超限时压缩跳过硬上，由 provider 报错。
+  - **子代理 = 主会话的隔离工作区**：`complete-step` 现在**强制阻塞**并直接返回摘要（以前 wait 默认 false，
+    模型拿到 running 就继续，于是干脆自己把活干完，主上下文仍然被工具输出占满）。提示词改为"规划完就必须
+    派活"：清单建好后逐项 spawn complete-step，主会话只保留规划与摘要；子代理工作记录留在自己的会话/侧栏。
+    实测主上下文只收到 `{summary}`，完整 transcript 不进主历史。
+  - **子代理 UI**：总览卡片任务/结果截断（代码 + 3 行 CSS clamp），不再一条占满侧栏；完成卡片始终显示
+    "结果摘要"；运行中卡片有高亮边框 + "运行中"徽标 + 已运行时长；详情页顺序改为
+    任务 → 引导 → 过程记录（明确标注按时间顺序、最新在最后）→ 结果摘要（已回传主会话）；运行中详情实时
+    追加子代理文本。主输入框在 complete-step 运行时显示"当前步骤在子代理中执行 / 这里的输入发给主会话；
+    要引导它请打开记录"，避免引导发错对象。
+  - **测试**：437 用例 4085 断言全过；web / webview 双变体编译通过。原生 WebView2 实测首帧思考档、更新后的
+    上下文数值、子代理面板均正常。

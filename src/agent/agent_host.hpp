@@ -2,6 +2,7 @@
 // 职责：按 sid 管理 AgentLoop；工具回调接线（terminal/net/vision）；事件扇出；落库。
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -273,6 +274,23 @@ class AgentHost {
   };
   std::vector<SubagentThread> subagent_threads_;
   std::mutex subagent_mu_;
+
+  // Wake continuations. A fired wake starts a turn; that must NOT run on the
+  // terminal poller (it would block every later wake) and must be joinable
+  // (a detached thread that outlives AgentHost is a use-after-free). Same
+  // done-flag + reaper pattern as subagent threads.
+  struct WakeThread {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool> > done;
+  };
+  std::vector<WakeThread> wake_threads_;
+  std::mutex wake_mu_;
+  // One continuation per session at a time. A second wake while it runs is
+  // delivered as round-end steering instead of starting a parallel turn.
+  std::set<std::string> wake_inflight_;
+  void start_wake_continuation(const PendingWake& w);
+  void reap_wake_threads();
+  void wait_wake_threads();
 
   // 子代理执行器（宿主内部实现；seed 是父会话的环境快照）
   FsResult run_subagent(const Json& req, const ContextInput& seed, Json* out);

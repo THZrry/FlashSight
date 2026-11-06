@@ -20,6 +20,7 @@ WakeScheduler::WakeScheduler(const Clock* clock)
 
 PendingWake WakeScheduler::schedule(const std::string& sid, WakeSource source,
                                     int64_t at_ms, const std::string& ref) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   cancel(sid);  // 同会话同时只有一个待唤醒
   PendingWake w;
   w.sid = sid;
@@ -32,6 +33,7 @@ PendingWake WakeScheduler::schedule(const std::string& sid, WakeSource source,
 }
 
 bool WakeScheduler::cancel(const std::string& sid) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   bool found = false;
   for (auto& w : wakes_) {
     if (w.sid == sid && !w.cancelled) {
@@ -44,21 +46,31 @@ bool WakeScheduler::cancel(const std::string& sid) {
 
 std::vector<PendingWake> WakeScheduler::due(int64_t now_ms) {
   std::vector<PendingWake> out;
-  std::vector<PendingWake> keep;
-  for (auto& w : wakes_) {
-    if (w.cancelled) continue;
-    if (w.source == WakeSource::kTimer && w.at_ms > now_ms) {
-      keep.push_back(w);
-      continue;
+  FireFn fn;
+  {
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    std::vector<PendingWake> keep;
+    for (auto& w : wakes_) {
+      if (w.cancelled) continue;
+      if (w.source == WakeSource::kTimer && w.at_ms > now_ms) {
+        keep.push_back(w);
+        continue;
+      }
+      out.push_back(w);
     }
-    out.push_back(w);
-    if (fire_fn_) fire_fn_(w);
+    wakes_.swap(keep);
+    fn = fire_fn_;
   }
-  wakes_.swap(keep);
+  // Fire OUTSIDE the lock: a callback may schedule/cancel or start a turn, and
+  // holding the scheduler mutex there would deadlock that work.
+  if (fn) {
+    for (size_t i = 0; i < out.size(); ++i) fn(out[i]);
+  }
   return out;
 }
 
 std::vector<PendingWake> WakeScheduler::pending_for_sid(const std::string& sid) const {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   std::vector<PendingWake> out;
   for (auto& w : wakes_) {
     if (w.sid == sid && !w.cancelled) out.push_back(w);
@@ -67,6 +79,7 @@ std::vector<PendingWake> WakeScheduler::pending_for_sid(const std::string& sid) 
 }
 
 bool WakeScheduler::has_pending(const std::string& sid) const {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   for (auto& w : wakes_) {
     if (w.sid == sid && !w.cancelled) return true;
   }

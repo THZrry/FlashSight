@@ -76,6 +76,63 @@ void register_orchestration_tools(ToolRegistry* registry) {
       });
   }
 
+  // ----- scheduled wake ----------------------------------------------------
+  {
+    ToolDef def;
+    def.name = "wake_schedule";
+    def.description =
+        "安排一次定时唤醒：delayMs 之后自动重新开始本会话的一轮。Schedule ONE "
+        "future turn. Do NOT sleep inside terminal_exec for a delay: that pins a "
+        "turn and a text-only wait produces nothing. Call this, end the current "
+        "turn, and the scheduler will resume you with a SYSTEM note at the due "
+        "time; put what should happen then in `note` (it is shown back to you). "
+        "Only one pending wake per session; scheduling again replaces it.";
+    Json params = Json::object();
+    params["type"] = "object";
+    params["properties"] = obj({
+        {"delayMs", obj({{"type", "integer"},
+                         {"description", "从现在起多少毫秒后唤醒 (>=1)"}})},
+        {"note", obj({{"type", "string"},
+                      {"description", "到点后要做什么（自包含，会作为唤醒提示回传）"}})},
+    });
+    params["required"] = Json::array({"delayMs"});
+    def.parameters = params;
+    registry->register_tool("wake_schedule", def,
+      [](const ToolContext& ctx, const Json& args) -> FsResult {
+        Json req = args;
+        req["op"] = "schedule";
+        return need(ctx, ctx.wake_op, req);
+      });
+  }
+  {
+    ToolDef def;
+    def.name = "wake_cancel";
+    def.description = "取消本会话尚未到点的唤醒. Cancel the pending scheduled wake.";
+    Json params = Json::object();
+    params["type"] = "object";
+    params["properties"] = Json::object();
+    def.parameters = params;
+    registry->register_tool("wake_cancel", def,
+      [](const ToolContext& ctx, const Json& args) -> FsResult {
+        (void)args;
+        return need(ctx, ctx.wake_op, Json{{"op", "cancel"}});
+      });
+  }
+  {
+    ToolDef def;
+    def.name = "wake_list";
+    def.description = "查看本会话的待唤醒事件. List pending wakes for this session.";
+    Json params = Json::object();
+    params["type"] = "object";
+    params["properties"] = Json::object();
+    def.parameters = params;
+    registry->register_tool("wake_list", def,
+      [](const ToolContext& ctx, const Json& args) -> FsResult {
+        (void)args;
+        return need(ctx, ctx.wake_op, Json{{"op", "list"}});
+      });
+  }
+
   // ----- subagents ---------------------------------------------------------
   {
     ToolDef def;
@@ -84,10 +141,12 @@ void register_orchestration_tools(ToolRegistry* registry) {
         "派子代理（上下文隔离）. Delegate to a subagent whose transcript stays out "
         "of this conversation; you get a summary back. "
         "kind: local-research|complete-step|check-files|research|explore|round-plan. "
-        "For a multi-step task, spawn ONE complete-step per checklist item instead "
-        "of doing the steps inline: each step's work then lives in its own "
-        "transcript (visible in the side panel) and only its summary enters this "
-        "conversation. "
+        "complete-step ALWAYS blocks and returns its summary; the work lives in "
+        "the subagent transcript (shown inline while it runs, then kept in the "
+        "side panel) and only the summary enters this conversation. "
+        "After planning a multi-step job, you MUST use one complete-step per "
+        "checklist item instead of doing the steps inline: this is how the main "
+        "context stays small. "
         "task 必须自包含（子代理看不到本会话）. The task must be self-contained.";
     Json params = Json::object();
     params["type"] = "object";

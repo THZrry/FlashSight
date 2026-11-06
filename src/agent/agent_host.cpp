@@ -71,13 +71,109 @@ AgentHost::AgentHost(AgentHostDeps deps) : deps_(std::move(deps)), wakes_(deps_.
     p["source"] = wake_source_str(w.source);
     p["ref"] = w.ref;
     emit("wake.fired", p);
+    // A wake that only tells the UI "something fired" is a dead end: the
+    // terminal-exit / subagent-done / model-timer event is the reason a parked
+    // task should resume, and nothing else consumes wake.fired. Start (or
+    // steer) that turn here.
+    start_wake_continuation(w);
   });
 }
 
 AgentHost::~AgentHost() {
   // Worker threads capture `this`; they must be joined before any member is
   // destroyed. A detached thread here would be a use-after-free.
+  wait_wake_threads();
   wait_subagents();
+}
+
+void AgentHost::wait_wake_threads() {
+  std::vector<WakeThread> jobs;
+  {
+    std::lock_guard<std::mutex> lk(wake_mu_);
+    jobs.swap(wake_threads_);
+  }
+  for (size_t i = 0; i < jobs.size(); ++i) {
+    if (jobs[i].thread.joinable()) jobs[i].thread.join();
+  }
+  std::lock_guard<std::mutex> lk(wake_mu_);
+  wake_inflight_.clear();
+}
+
+void AgentHost::reap_wake_threads() {
+  std::vector<WakeThread> finished;
+  {
+    std::lock_guard<std::mutex> lk(wake_mu_);
+    for (std::vector<WakeThread>::iterator it = wake_threads_.begin();
+         it != wake_threads_.end();) {
+      if (it->done && it->done->load()) {
+        finished.push_back(std::move(*it));
+        it = wake_threads_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (size_t i = 0; i < finished.size(); ++i) {
+    if (finished[i].thread.joinable()) finished[i].thread.join();
+  }
+}
+
+void AgentHost::start_wake_continuation(const PendingWake& w) {
+  if (w.sid.empty()) return;
+  std::string note;
+  switch (w.source) {
+    case WakeSource::kTimer:
+      note = "SYSTEM: 定时唤醒已到";
+      if (!w.ref.empty()) note += "（备注：" + w.ref + "）";
+      note += "。请先看规划/清单，按下一步继续；全部完成就收尾并给出总结。";
+      break;
+    case WakeSource::kTerminalExit:
+      note = "SYSTEM: 后台终端 " + w.ref +
+             " 已退出。先用 terminal_poll 读取它的输出，再按规划继续；全部完成就"
+             "收尾并给出总结。";
+      break;
+    case WakeSource::kSubagentDone:
+      note = "SYSTEM: 子代理 " + w.ref +
+             " 已完成。读取它的摘要，按规划继续；全部完成就收尾并给出总结。";
+      break;
+    default:
+      note = "SYSTEM: 唤醒事件已到。按当前规划继续。";
+      break;
+  }
+  {
+    std::lock_guard<std::recursive_mutex> host_lock(lock());
+    std::map<std::string, std::unique_ptr<AgentLoop> >::iterator it = loops_.find(w.sid);
+    if (it == loops_.end() || !it->second) return;  // nothing to continue
+    LoopState st = it->second->state();
+    bool busy = st != LoopState::kIdle && st != LoopState::kTurnDone;
+    if (!busy) {
+      std::lock_guard<std::mutex> wl(wake_mu_);
+      if (!wake_inflight_.insert(w.sid).second) busy = true;
+    }
+    if (busy) {
+      // The task is already working: this wake becomes guidance for the next
+      // round rather than a second concurrent turn.
+      steering_[w.sid].push(SteeringKind::kRoundEnd, note);
+      emit("steering.queued", Json{{"sid", w.sid},
+                                   {"kind", "round-end"},
+                                   {"text", note}});
+      return;
+    }
+  }
+  std::shared_ptr<std::atomic<bool> > done(new std::atomic<bool>(false));
+  std::string sid = w.sid;
+  std::lock_guard<std::mutex> wl(wake_mu_);
+  WakeThread job;
+  job.done = done;
+  job.thread = std::thread([this, sid, note, done]() {
+    continue_task(sid, note);
+    {
+      std::lock_guard<std::mutex> lk(wake_mu_);
+      wake_inflight_.erase(sid);
+    }
+    done->store(true);
+  });
+  wake_threads_.push_back(std::move(job));
 }
 
 void AgentHost::wait_subagents() {
@@ -472,6 +568,47 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
     if (out) *out = cur;
     return FsResult::success(cur);
   };
+  // Timer wakes: the model schedules "come back in N seconds" and ENDS its
+  // turn. Sleeping inside terminal_exec was the old workaround; it pinned a turn
+  // worker (and, before the lock fix, the whole terminal manager) for the wait.
+  ctx.wake_op = [this, sid](const Json& args, Json* out) -> FsResult {
+    std::string op = jsonutil::get<std::string>(args, "op", "schedule");
+    if (op == "cancel") {
+      bool had = wakes_.cancel(sid);
+      emit("wake.cancelled", Json{{"sid", sid}});
+      if (out) *out = Json{{"cancelled", had}};
+      return FsResult::success(Json{{"cancelled", had}});
+    }
+    if (op == "list") {
+      std::vector<PendingWake> list = wakes_.pending_for_sid(sid);
+      int64_t now = deps_.clock ? deps_.clock->now_ms() : WallClock().now_ms();
+      Json arr = Json::array();
+      for (size_t i = 0; i < list.size(); ++i) {
+        arr.push_back(Json{{"source", wake_source_str(list[i].source)},
+                           {"at", list[i].at_ms},
+                           {"inMs", list[i].at_ms > 0 ? list[i].at_ms - now : 0},
+                           {"ref", list[i].ref}});
+      }
+      if (out) *out = Json{{"wakes", arr}};
+      return FsResult::success(Json{{"wakes", arr}});
+    }
+    int64_t delay = jsonutil::get_int(args, "delayMs", 0);
+    if (delay <= 0) {
+      return FsResult::error(ErrCode::kInvalidArg, "delayMs must be > 0");
+    }
+    // A year-long timer is a typo, not intent; cap it so a bad argument cannot
+    // park the task beyond the process lifetime.
+    const int64_t kMax = 7LL * 24 * 3600 * 1000;
+    if (delay > kMax) delay = kMax;
+    std::string note = jsonutil::get<std::string>(args, "note", "");
+    int64_t at = (deps_.clock ? deps_.clock->now_ms() : WallClock().now_ms()) + delay;
+    wakes_.schedule(sid, WakeSource::kTimer, at, note);
+    emit("wake.scheduled", Json{{"sid", sid}, {"at", at}, {"delayMs", delay},
+                                {"note", note}});
+    Json res = Json{{"at", at}, {"delayMs", delay}, {"note", note}};
+    if (out) *out = res;
+    return FsResult::success(res);
+  };
   ctx.subagent_op = [this, sid](const Json& args, Json* out) -> FsResult {
     std::string op = jsonutil::get<std::string>(args, "op", "");
     if (op == "spawn") {
@@ -486,6 +623,11 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
       // matter what, so "spawn one step, get its answer, then spawn the next"
       // was impossible from the model's side (it had to guess with follow_up).
       bool wait = jsonutil::get<bool>(args, "wait", false);
+      // complete-step IS the current task advancing: it must block and return
+      // its summary. A non-blocking default forced the model to poll/follow-up,
+      // which it rarely did - so it kept doing the steps inline, which is
+      // exactly the context cost delegation exists to avoid.
+      if (kind == "complete-step") wait = true;
       std::string id;
       FsResult r = subagent_spawn(sid, kind, task, model, 1, timeout, &id);
       if (!r.ok()) return r;
@@ -1188,19 +1330,23 @@ FsResult AgentHost::subagent_detail(const std::string& id) {
 
 FsResult AgentHost::on_terminal_exit(const std::string& sid, const std::string& tid,
                                      int exit_code) {
+  (void)exit_code;
+  // terminal.exit itself is emitted by FsApi::terminal_tick (which owns the
+  // process registry); this only turns a wakeOnExit terminal's exit into an
+  // actual continuation. The old code emitted terminal.exit here TOO and was
+  // never called from anywhere - wakeOnExit was a feature that did nothing.
   std::lock_guard<std::recursive_mutex> host_lock(lock());
-  // 后台终端退出：自动模式唤醒，手动模式徽标（事件统一发 terminal.exit + wake.fired）
-  emit("terminal.exit", Json{{"sid", sid}, {"tid", tid}, {"exitCode", exit_code}});
   wakes_.schedule(sid, WakeSource::kTerminalExit, 0, tid);
-  auto due = wakes_.due(0);
+  wakes_.due(0);
   return FsResult::success();
 }
 
 FsResult AgentHost::on_timer_tick() {
-  // Reap FIRST, and therefore before taking the lock: reap joins subagent
+  // Reap FIRST, and therefore before taking the lock: reap joins worker
   // threads, whose final act is an emit that needs the host lock. Holding it
   // across the join deadlocked the app a few seconds after a subagent finished
   // (the tick is what made it look like a hang rather than a slow call).
+  reap_wake_threads();
   reap_subagent_threads();
   std::lock_guard<std::recursive_mutex> host_lock(lock());
   // Keep the record table bounded: each finished record holds a whole transcript

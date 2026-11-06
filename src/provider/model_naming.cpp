@@ -38,10 +38,13 @@ std::vector<std::string> thinking_levels_for(const std::string& model_id) {
   const std::string m = lower_ascii(model_id);
   std::vector<std::string> lv;
   // 分级：推理强度可分档
-  static const char* const kGraded[] = {"o1", "o3", "o4", "gpt-5", nullptr};
+  static const char* const kGraded[] = {"o1", "o3", "o4", "gpt-5", "gpt-6",
+                                        "deepseek-v4", "qwen3.6", "qwen3.7",
+                                        "qwen3.8", "glm-5", "kimi-k3",
+                                        "minimax-m3", "grok-4", nullptr};
   static const char* const kClaude[] = {"claude", "anthropic", nullptr};
-  static const char* const kGemini[] = {"gemini-2.5", "gemini-3", "gemini-thinking",
-                                        nullptr};
+  static const char* const kGemini[] = {"gemini-2.5", "gemini-3", "gemini-4",
+                                        "gemini-thinking", nullptr};
   // 国产推理模型：能推理但只有开关，没有中间档
   static const char* const kCnReason[] = {"deepseek-r", "deepseek-reasoner", "qwq",
                                           "glm-z1", "kimi-thinking",
@@ -79,7 +82,7 @@ std::string default_thinking_for(const std::string& model_id) {
   // 纯推理模型默认开着（选它就是为了推理）
   static const char* const kAlwaysReason[] = {"deepseek-r", "deepseek-reasoner",
                                               "qwq", "o1", "o3", "o4", "glm-z1",
-                                              "ernie-x1", nullptr};
+                                              "ernie-x1", "kimi-k3", nullptr};
   if (has_any(m, kAlwaysReason, count_of(kAlwaysReason))) {
     for (size_t i = 0; i < lv.size(); ++i) {
       if (lv[i] == "high") return "high";

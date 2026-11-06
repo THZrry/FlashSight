@@ -4786,6 +4786,95 @@ FS_TEST(uiapp_subagent_transcript_shows_tools_with_text) {
   EXPECT_TRUE(d.find("工具调用") != std::string::npos);
 }
 
+// The subagent OVERVIEW is a list: one long task/summary must not push every
+// other agent off screen, and a running agent needs an explicit badge rather
+// than a small dot buried in the header.
+FS_TEST(uiapp_subagent_overview_is_truncated_and_marks_running) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  std::string long_task = "TASK_START";
+  for (int i = 0; i < 400; ++i) long_task += "x";
+  long_task += "TASK_END";
+  std::string long_sum = "SUM_START";
+  for (int i = 0; i < 800; ++i) long_sum += "y";
+  long_sum += "SUM_END";
+  app.update([&](AppState& s) {
+    seed_session(s, "sess_a");
+    for (size_t i = 0; i < s.side_tabs.size(); ++i) {
+      if (s.side_tabs[i].kind == "subagents") s.active_side = s.side_tabs[i].id;
+    }
+    AppState::SubagentRow running;
+    running.id = "sub_run";
+    running.kind = "complete-step";
+    running.status = "running";
+    running.task = long_task;
+    running.live_text = "LIVE_MARK";
+    running.started_at = 1700000000000LL;
+    s.subagents.push_back(running);
+    AppState::SubagentRow done;
+    done.id = "sub_done";
+    done.kind = "complete-step";
+    done.status = "done";
+    done.task = "short task";
+    done.summary = long_sum;
+    done.started_at = 1700000000000LL;
+    done.ended_at = 1700000030000LL;
+    s.subagents.push_back(done);
+  });
+  const std::string d = dom.dump();
+  EXPECT_TRUE(d.find("运行中") != std::string::npos);
+  EXPECT_TRUE(d.find("结果摘要") != std::string::npos);
+  EXPECT_TRUE(d.find("TASK_START") != std::string::npos);
+  EXPECT_FALSE(d.find("TASK_END") != std::string::npos);   // clamped
+  EXPECT_FALSE(d.find("SUM_END") != std::string::npos);    // clamped
+  // The running card carries the live marker; the done card its result.
+  EXPECT_TRUE(d.find("LIVE_MARK") != std::string::npos);
+  // The composer names the send target: step work runs in the subagent, so a
+  // typed 引导 must not silently go to the main session.
+  EXPECT_TRUE(d.find("当前步骤在子代理中执行") != std::string::npos);
+}
+
+// Detail page order: the WORK (chronological process log) comes before the
+// RESULT it produced, and both are labelled. It used to print the summary above
+// the transcript with no order, which read backwards.
+FS_TEST(uiapp_subagent_detail_orders_process_then_summary) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    AppState::SubagentDetail det;
+    det.loaded = true;
+    det.row.id = "sub_1";
+    det.row.kind = "complete-step";
+    det.row.status = "done";
+    det.row.task = "TASK_MARK";
+    det.row.summary = "RESULT_MARK";
+    det.row.transcript = Json::array(
+        {Json{{"role", "user"}, {"content", "PROCESS_MARK"}},
+         Json{{"role", "assistant"}, {"content", "step finished"}}});
+    s.subagent_details["sub_1"] = det;
+    SideTab t;
+    t.id = "sb1";
+    t.kind = "subagent";
+    t.subagent_id = "sub_1";
+    t.title = "complete-step";
+    s.side_tabs.push_back(t);
+    s.active_side = "sb1";
+  });
+  const std::string d = dom.dump();
+  size_t proc = d.find("PROCESS_MARK");
+  size_t result = d.find("RESULT_MARK");
+  EXPECT_TRUE(proc != std::string::npos);
+  EXPECT_TRUE(result != std::string::npos);
+  EXPECT_TRUE(proc < result);
+  EXPECT_TRUE(d.find("过程记录（按时间顺序，最新在最后）") != std::string::npos);
+  EXPECT_TRUE(d.find("结果摘要（已回传主会话）") != std::string::npos);
+}
+
 // ---- 第四十六批：过程解说的锚点 / 规划与清单合一 / 卡片内控件不冒泡 ----
 
 // A round can issue SEVERAL tool calls. The note that arrives with that round

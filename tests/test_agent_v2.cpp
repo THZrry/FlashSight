@@ -465,12 +465,12 @@ FS_TEST(main_context_recommends_step_delegation) {
   in.max_subagent_parallel = 4;
   in.max_subagent_depth = 3;
   std::string sys = AgentContext::build_system(in);
-  EXPECT_TRUE(sys.find("Delegate each step") != std::string::npos);
+  EXPECT_TRUE(sys.find("After planning, delegate") != std::string::npos);
   EXPECT_TRUE(sys.find("complete-step") != std::string::npos);
   EXPECT_TRUE(sys.find("todoId") != std::string::npos);
   // Chinese variant carries the same instruction.
   ContextInput zh = in;
   zh.lang = ContextLang::kZh;
   std::string zsys = AgentContext::build_system(zh);
-  EXPECT_TRUE(zsys.find("每一步单独派一个 complete-step") != std::string::npos);
+  EXPECT_TRUE(zsys.find("规划完就必须派活") != std::string::npos);
 }

@@ -5,8 +5,10 @@
 //   * an approval in the middle of a group (the rest were dropped),
 //   * tool results being replayed to the model (they were not),
 //   * auto mode continuing on an open plan (it never continued).
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "test_framework.hpp"
@@ -522,6 +524,51 @@ FS_TEST(host_send_wires_tools_and_system_prompt) {
   std::string user = jsonutil::get<std::string>(req.messages.back(), "content", "");
   EXPECT_TRUE(user.find("<runtime>") != std::string::npos);
   EXPECT_TRUE(user.find("hello") != std::string::npos);
+}
+
+// A fired wake must actually START the next turn. wake.fired used to be emitted
+// into the void: the scheduler fired, the UI showed nothing, and the task never
+// resumed ("没能计划唤醒").
+FS_TEST(host_wake_fires_a_new_turn) {
+  Json full = Json::object();
+  full["meta"] = Json{{"sid", "s_wake"}, {"pid", "p1"}, {"cwd", "C:/proj"},
+                      {"title", "t"}};
+  full["sessionSettings"] = Json{{"model", "model-x"}, {"filePerm", "full"}};
+  full["turns"] = Json::array();
+  std::vector<ModelCallRequest> requests;
+  AgentHostDeps deps;
+  deps.load_full = [&full](const std::string&, Json* out) -> FsResult {
+    *out = full;
+    return FsResult::success();
+  };
+  deps.append_turn = [&full](const std::string&, const Json& turn) -> FsResult {
+    full["turns"].push_back(turn);
+    return FsResult::success();
+  };
+  deps.call_model = [&requests](const ModelCallRequest& req, ModelCallResult* out,
+                                const std::function<void(const std::string&)>&) {
+    requests.push_back(req);
+    out->text = "ok";
+    return FsResult::success();
+  };
+  AgentHost host(std::move(deps));
+  host.register_builtin_tools(nullptr);
+  ASSERT_TRUE(host.send("s_wake", "start", Json::object(), false, "full",
+                        "model-x").ok());
+  size_t before = requests.size();
+  host.wakes().schedule("s_wake", WakeSource::kTimer, 0, "check the build");
+  host.wakes().due(1000);
+  // The continuation runs on its own thread (it must not block the scheduler).
+  for (int i = 0; i < 300; ++i) {
+    if (requests.size() > before && !host.is_running("s_wake")) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ((int)requests.size(), (int)before + 1);
+  // The SYSTEM wake note is the new user message, not an empty "continue".
+  std::string user = jsonutil::get<std::string>(requests.back().messages.back(),
+                                                "content", "");
+  EXPECT_TRUE(user.find("SYSTEM") != std::string::npos);
+  EXPECT_TRUE(user.find("check the build") != std::string::npos);
 }
 
 // ---------- 闪退也要有记录：流式期间定期写 live 快照 ----------

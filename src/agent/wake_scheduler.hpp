@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -51,13 +52,20 @@ class WakeScheduler {
   std::vector<PendingWake> pending_for_sid(const std::string& sid) const;
   bool has_pending(const std::string& sid) const;
 
-  void set_fire_fn(FireFn fn) { fire_fn_ = std::move(fn); }
+  void set_fire_fn(FireFn fn) {
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    fire_fn_ = std::move(fn);
+  }
 
  private:
   const Clock* clock_;
   WallClock default_clock_;
   std::vector<PendingWake> wakes_;
   FireFn fire_fn_;
+  // schedule() comes from a model tool / HTTP/UI thread while due() runs on the
+  // terminal poller. Unsynchronized, these raced on wakes_ and could drop or
+  // duplicate a timer. Recursive because schedule() cancels first.
+  mutable std::recursive_mutex mu_;
 };
 
 }  // namespace fs

@@ -395,32 +395,62 @@ FS_TEST(model_context_defaults_follow_a_1m_baseline) {
   ModelEntry a;
   a.id = "deepseek-v4.1";
   fill_model_defaults(&a);
-  EXPECT_EQ(a.caps.context_len, int64_t(1048576));
+  EXPECT_EQ(a.caps.context_len, int64_t(1000000));
   ModelEntry b;
   b.id = "clau" + std::string("de-sonnet-4.5");
   fill_model_defaults(&b);
-  EXPECT_EQ(b.caps.context_len, int64_t(1048576));
+  EXPECT_EQ(b.caps.context_len, int64_t(200000));   // Claude 4 line
   ModelEntry c;
   c.id = "gemini-2.5-flash";
   fill_model_defaults(&c);
   EXPECT_EQ(c.caps.context_len, int64_t(1048576));   // Flash is still 1M
   ModelEntry d;
-  d.id = "minimax-m2";
+  d.id = "minimax-m2.7";
   fill_model_defaults(&d);
-  EXPECT_EQ(d.caps.context_len, int64_t(1048576));   // not "mini"
-  // Low-tier markers pull it down.
+  EXPECT_EQ(d.caps.context_len, int64_t(204800));   // not "mini"
+  // temp/models.md: DeepSeek V4 Flash and Qwen 3.7 Flash are 1M, so the old
+  // "flash => small" rule must not win over the family.
   ModelEntry e;
   e.id = "gpt-4o-mini";
   fill_model_defaults(&e);
-  EXPECT_EQ(e.caps.context_len, int64_t(131072));
+  EXPECT_EQ(e.caps.context_len, int64_t(128000));
   ModelEntry f;
   f.id = "deepseek-v4.1-flash";
   fill_model_defaults(&f);
-  EXPECT_EQ(f.caps.context_len, int64_t(131072));
+  EXPECT_EQ(f.caps.context_len, int64_t(1000000));
   ModelEntry g;
   g.id = "qwen2.5-7b-instruct";
   fill_model_defaults(&g);
-  EXPECT_EQ(g.caps.context_len, int64_t(131072));
+  EXPECT_EQ(g.caps.context_len, int64_t(128000));
+  // Newer families with specific windows.
+  ModelEntry k;
+  k.id = "kimi-k3-256k";
+  fill_model_defaults(&k);
+  EXPECT_EQ(k.caps.context_len, int64_t(262144));
+  ModelEntry k3;
+  k3.id = "kimi-k3.1-pro";
+  fill_model_defaults(&k3);
+  EXPECT_EQ(k3.caps.context_len, int64_t(1048576));
+  ModelEntry glm;
+  glm.id = "glm-5.3";
+  fill_model_defaults(&glm);
+  EXPECT_EQ(glm.caps.context_len, int64_t(1000000));
+  ModelEntry glm5;
+  glm5.id = "glm-5-turbo";
+  fill_model_defaults(&glm5);
+  EXPECT_EQ(glm5.caps.context_len, int64_t(200000));
+  ModelEntry grok;
+  grok.id = "grok-4.7";
+  fill_model_defaults(&grok);
+  EXPECT_EQ(grok.caps.context_len, int64_t(500000));
+  ModelEntry mini5;
+  mini5.id = "gpt-5-mini";
+  fill_model_defaults(&mini5);
+  EXPECT_EQ(mini5.caps.context_len, int64_t(400000));   // GPT-5 mini is 400k
+  ModelEntry ds;
+  ds.id = "deepseek-chat";
+  fill_model_defaults(&ds);
+  EXPECT_EQ(ds.caps.context_len, int64_t(128000));
   // An API/user value always wins over the fallback.
   ModelEntry h;
   h.id = "gpt-4o-mini";

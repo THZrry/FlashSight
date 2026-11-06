@@ -10,6 +10,7 @@
 
 using namespace fs;
 
+#include <chrono>
 #include <thread>
 
 FS_TEST(shell_detect_finds_something) {
@@ -78,6 +79,45 @@ FS_TEST(terminal_poll_and_kill) {
   const TermEntry* e = reg.find(tid);
   ASSERT_TRUE(e != nullptr);
   EXPECT_TRUE(e->status == TermStatus::kExited || e->status == TermStatus::kKilled);
+}
+
+// A foreground command must NOT hold the manager lock while it waits: tick()
+// (the wake scheduler's clock), other spawns and poll/kill all share it. The
+// two-session freeze was `terminal_exec sleep 60` blocking every one of them for
+// a minute.
+FS_TEST(terminal_foreground_wait_does_not_block_the_manager) {
+  WallClock clock;
+  TerminalRegistry reg(&clock);
+  TerminalManager mgr(&reg, &clock);
+#if defined(_WIN32)
+  std::string slow = "ping -n 5 127.0.0.1 > nul";   // ~4 s
+#else
+  std::string slow = "sleep 4";
+#endif
+  Json fg = Json::object();
+  fg["command"] = slow;
+  fg["background"] = false;
+  fg["timeoutMs"] = 15000;
+  Json fg_out;
+  FsResult fg_r;
+  std::thread t([&]() { fg_r = mgr.spawn(fg, &fg_out); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  mgr.tick();   // must not wait behind the foreground process
+  Json bg = Json::object();
+  bg["command"] = "echo quick";
+  bg["background"] = true;
+  Json bg_out;
+  FsResult bg_r = mgr.spawn(bg, &bg_out);
+  int64_t ms = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - t0).count());
+  EXPECT_TRUE(bg_r.ok());
+  EXPECT_TRUE(ms < 1500);
+  t.join();
+  EXPECT_TRUE(fg_r.ok());
+  EXPECT_EQ(jsonutil::get<std::string>(fg_out, "status", ""), std::string("exited"));
 }
 
 FS_TEST(terminal_spawn_empty_command_errors) {

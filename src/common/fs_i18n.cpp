@@ -1129,6 +1129,15 @@ const Entry kEnTable[] = {
     {"Web 版用这个服务提供界面；Webview / WhaleUI 版有原生窗口，不启动服务。",
      "The web build serves the UI over this server; the Webview / WhaleUI builds "
      "have a native window and do not start it."},
+    {"结果摘要", "Result summary"},
+    {" …（打开记录查看全文）", " … (open the record for the full text)"},
+    {"过程记录（按时间顺序，最新在最后）", "Process log (chronological, newest last)"},
+    {" 条", " entries"},
+    {"结果摘要（已回传主会话）", "Result summary (returned to the main session)"},
+    {"还在运行；结果摘要完成后再回传主会话。", "Still running; the summary is returned to the main session when it finishes."},
+    {"当前步骤在子代理中执行", "The current step is running in a subagent"},
+    {"这里的输入发给主会话；要引导它请打开记录", "Text here goes to the main session; open the record to steer the subagent"},
+    {"打开记录", "Open record"},
 };
 
 const int kEnCount = static_cast<int>(sizeof(kEnTable) / sizeof(kEnTable[0]));

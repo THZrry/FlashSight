@@ -63,6 +63,8 @@ struct ToolContext {
   std::function<FsResult(const Json&, Json*)> todo_op;
   // 规划树（PlanStore）：{op:"update"|"get", plan?} -> {plan}
   std::function<FsResult(const Json&, Json*)> plan_op;
+  // 定时/事件唤醒（WakeScheduler）：{op:"schedule"|"cancel"|"list", delayMs, note}
+  std::function<FsResult(const Json&, Json*)> wake_op;
   // 子代理：{op:"spawn"|"list"|"cancel"|"steer", ...}
   std::function<FsResult(const Json&, Json*)> subagent_op;
   // 工作流：{op:"start"|"list"|"get", ...}

@@ -161,10 +161,11 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
       // keeps the plan and the summaries; each step's working context lives in
       // its own subagent transcript.
       out.push_back(
-          "- **每一步单独派一个 complete-step**：清单建好后，逐项 subagent_spawn"
+          "- **规划完就必须派活**：清单建好后，默认逐项 subagent_spawn"
           "（kind=complete-step，task 写清该项的验收标准，step 填该项标题，"
-          "todoId 填对应 id）。主会话只保留规划与摘要，逐步的工作过程在侧栏"
-          "可查但不占主上下文。不要自己在主会话里把所有步骤做完。");
+          "todoId 填对应 id）。complete-step 会阻塞并直接返回摘要，主会话只保留"
+          "规划与摘要，逐步的工作过程在侧栏可查、不占主上下文。只有确实一步就能"
+          "做完的小事才留在主会话，不要把所有步骤都自己做。");
       out.push_back(
           "- 依赖关系：后一步依赖前一步结果时，等它返回摘要再派下一步；"
           "互不依赖的可以一次并行派出。");
@@ -196,12 +197,14 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "terminal instead of substituting \"should be\" or \"usually\" for evidence.");
     if (in.allow_subagents) {
       out.push_back(
-          "- **Delegate each step to its own complete-step subagent.** Once the "
-          "checklist exists, spawn one per item (kind=complete-step, task = that "
-          "item's acceptance criteria, step = the item title, todoId = its id). The "
-          "main conversation keeps the plan and the summaries; each step's working "
-          "context stays in its own transcript - readable in the side panel, not "
-          "counted against this conversation. Do not do every step inline here.");
+          "- **After planning, delegate.** Once the checklist exists, spawn one "
+          "complete-step per item (kind=complete-step, task = that item's "
+          "acceptance criteria, step = the item title, todoId = its id). A "
+          "complete-step BLOCKS and returns its summary, so the main conversation "
+          "keeps the plan and the summaries while each step's working context "
+          "stays in its own transcript - readable in the side panel, not counted "
+          "against this conversation. Only a genuinely one-step task stays "
+          "inline; do not do every step here.");
       out.push_back(
           "- Ordering: when a step needs the previous step's result, wait for its "
           "summary before spawning the next; independent steps can go out in "

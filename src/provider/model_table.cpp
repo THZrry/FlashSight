@@ -426,8 +426,6 @@ int64_t default_context_for(const std::string& model_id) {
     char c = model_id[i];
     s.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
   }
-  // Gemini's Flash line is still a 1M model, so the family wins over the word.
-  if (s.find("gemini") != std::string::npos) return 1048576;
   // Split into name TOKENS instead of raw substring matching: "minimax" must not
   // be read as "mini", and a size suffix only counts when it is its own token.
   std::vector<std::string> tok;
@@ -445,6 +443,109 @@ int64_t default_context_for(const std::string& model_id) {
       cur.push_back(c);
     }
   }
+  auto has = [&s](const char* n) { return s.find(n) != std::string::npos; };
+  auto has_tok = [&tok](const char* n) {
+    for (size_t i = 0; i < tok.size(); ++i) {
+      if (tok[i] == n) return true;
+    }
+    return false;
+  };
+  auto size_token = [&tok]() {
+    for (size_t t = 0; t < tok.size(); ++t) {
+      const std::string& w = tok[t];
+      bool size = w.size() >= 2 && w[w.size() - 1] == 'b';
+      for (size_t i = 0; size && i + 1 < w.size(); ++i) {
+        char c = w[i];
+        bool num = (c >= '0' && c <= '9') || c == '.';
+        if (!num && c != 'x') size = false;
+      }
+      if (size) return true;
+    }
+    return false;
+  };
+  // Values are from temp/models.md (Nov 2026). Family rules come FIRST; the
+  // generic low-tier tokens only decide the unknown-model fallback. "flash" is
+  // NOT a size hint for DeepSeek/Qwen/GLM - their Flash/Plus lines carry the
+  // full window (deepseek-v4-flash is 1M), which a substring rule got wrong.
+  if (has("gemini")) {
+    if (has("gemini-3.5-pro")) return 2000000;
+    return 1048576;  // Gemini 4, 3.5 Flash, 2.5 family
+  }
+  if (has("claude")) {
+    if (has("claude-5") || has("opus-5") || has("sonnet-5") || has("haiku-5")) {
+      return 1000000;
+    }
+    if (has("claude-4") || has("claude-3") || has("sonnet-4") || has("opus-4") ||
+        has("haiku-4") || has("claude-3.7") || has("claude-3.5")) {
+      return 200000;
+    }
+    return 1000000;  // future Claude generations: 1M is the new default
+  }
+  if (has("gpt-6") || has("gpt-5.6")) return 1050000;
+  if (has("gpt-5")) return 400000;
+  if (has("gpt-4.1")) return 1048576;
+  if (has("gpt-4o") || has("gpt-4-turbo")) return 128000;
+  if (has("gpt-3.5")) return 16384;
+  if (has("o1") || has("o3") || has("o4")) return 200000;
+  if (has("deepseek")) {
+    if (has("deepseek-v4")) return 1000000;  // V4 Pro / V4 Flash
+    return 128000;                            // V3 / chat / reasoner / V2
+  }
+  if (has("qwen")) {
+    if (has("qwen3.8") || has("qwen3.7") || has("qwen3.6") || has("qwen-max") ||
+        has("qwen-plus") || has("qwen-flash")) {
+      return 1000000;
+    }
+    if (has("qwen2.5") && has("1m")) return 1000000;
+    if (has("qwen3-") && size_token()) return 32768;  // open-source Qwen3
+    if (has("qwen2.5") && size_token()) return 128000;
+    return 1000000;
+  }
+  if (has("kimi") || has("moonshot")) {
+    if (has("k3-256k") || has_tok("256k")) return 262144;
+    if (has("k2.6")) return 200000;
+    if (has("k3")) return 1048576;
+    if (has("k2")) return 262144;
+    if (has("8k")) return 8192;
+    if (has("32k")) return 32768;
+    if (has("128k")) return 131072;
+    return 262144;
+  }
+  if (has("glm")) {
+    if (has("glm-5.3")) return 1000000;
+    if (has("glm-5")) return 200000;
+    if (has("glm-4")) return 128000;
+    return 200000;
+  }
+  if (has("minimax")) {
+    if (has("m3") || has("text-01")) return 1000000;
+    if (has("m2")) return 204800;
+    return 1000000;
+  }
+  if (has("mimo")) {
+    if (has("v2.6") || has("v2.5")) return 1048576;
+    if (has("v2")) return 262144;
+    return 1048576;
+  }
+  if (has("grok")) {
+    if (has("4.7")) return 500000;
+    if (has("code-fast")) return 262144;
+    if (has("4-fast") || has("4-reasoning") || has("grok-3") || has("grok-4")) {
+      return 131072;
+    }
+    return 1048576;
+  }
+  if (has("doubao") || has("seed")) return 256000;
+  if (has("ernie") || has("wenxin")) return 128000;
+  if (has("llama")) {
+    if (has("scout")) return 10000000;
+    return 128000;
+  }
+  if (has("mistral") || has("mixtral")) return 128000;
+  if (has("command")) return 128000;
+  if (has("yi-")) return 200000;
+  if (has("nova")) return 1000000;
+  // Unknown family: 1M baseline, low-tier name tokens pull it down.
   static const char* const kCompact[] = {
       "mini", "nano", "lite", "small", "tiny", "flash",
       "turbo", "haiku", "air",           nullptr};
@@ -452,16 +553,8 @@ int64_t default_context_for(const std::string& model_id) {
     for (size_t k = 0; kCompact[k]; ++k) {
       if (tok[t] == kCompact[k]) return 131072;
     }
-    // 7b / 8b / 1.5b / 0.5b ...: a bare parameter count says "small model".
-    const std::string& w = tok[t];
-    bool size = w.size() >= 2 && w[w.size() - 1] == 'b';
-    for (size_t i = 0; size && i + 1 < w.size(); ++i) {
-      char c = w[i];
-      bool num = (c >= '0' && c <= '9') || c == '.';
-      if (!num && c != 'x') size = false;
-    }
-    if (size) return 131072;
   }
+  if (size_token()) return 131072;
   return 1048576;
 }
 

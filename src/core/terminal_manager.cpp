@@ -33,6 +33,11 @@ struct TerminalManager::Proc {
   size_t reported = 0;    // out 中已上报给 UI 的字节数（tick 只发新增）
   bool exited = false;
   int exit_code = 0;
+  // A foreground spawn is waiting on this process OUTSIDE mu_ (see spawn()).
+  // tick() must still drain output for the live panel, but exit detection and
+  // the registry transition belong to that waiter; otherwise both would mark
+  // the terminal exited and the event would race the tool result.
+  bool fg_wait = false;
   // Which manager owns this process: feed_screen is static and needs it to reach
   // the per-instance output sink (a static sink outlived its FsApi and called
   // into a destroyed object in the unit test).
@@ -159,7 +164,12 @@ void TerminalManager::drain(Proc& p) {
 }
 
 FsResult TerminalManager::spawn(const Json& args, Json* out) {
-  std::lock_guard<std::mutex> lk(mu_);
+  // A foreground command waits HERE for its whole run, so mu_ must not be held
+  // across that wait: it is the manager-wide lock shared by tick(), every other
+  // terminal's spawn/poll/kill, and (through tick) the wake scheduler. A
+  // `terminal_exec sleep 60` used to block all of them for a full minute - the
+  // two-session freeze where the plan and scheduled wakes never updated.
+  std::unique_lock<std::mutex> lk(mu_);
   std::string command = jsonutil::get<std::string>(args, "command", "");
   bool interactive = jsonutil::get<bool>(args, "interactive", false);
   // 交互式终端没有命令：它就是"设置里的那个 shell"的一个会话
@@ -267,7 +277,16 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
   // 交互式终端永远立即返回：它的生命周期由用户/UI 控制
   if (!background && !interactive) {
     Proc& pr = *procs_[tid];
-    int w = reproc_wait(pr.h, static_cast<int>(timeout_ms > 0 ? timeout_ms : REPROC_INFINITE));
+    pr.fg_wait = true;
+    reproc_t* handle = pr.h;
+    int wait_ms = static_cast<int>(timeout_ms > 0 ? timeout_ms : REPROC_INFINITE);
+    // Release the manager lock for the wait. tick() keeps draining output for
+    // the live panel (and skips exit detection while fg_wait is set); other
+    // sessions can spawn their own terminals in parallel.
+    lk.unlock();
+    int w = reproc_wait(handle, wait_ms);
+    lk.lock();
+    pr.fg_wait = false;
     drain(pr);
     if (w == REPROC_ETIMEDOUT) {
       // 转后台继续跑（terminal.md：前台超时由宿主转后台）
@@ -460,7 +479,10 @@ std::vector<Json> TerminalManager::tick() {
     size_t before = p.out.size();
     drain(p);
     bool new_out = p.out.size() > before;
-    if (!p.exited) {
+    // The foreground waiter owns exit detection/finalization; a tick racing it
+    // would mark the registry exited and emit terminal.exit before the tool
+    // returns. Output still streams so the terminal panel stays live.
+    if (!p.exited && !p.fg_wait) {
       if (p.pty) {
         int code = 0;
         if (p.pty->exited(&code)) {
