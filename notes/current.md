@@ -3159,3 +3159,44 @@ The process of project: P0 环境搭建 + P1 AppCore
   - 测试加强：全量压缩的摘要必须包含真实对话（`A: answer 5` / `U: question 5`），短视图摘要必须包含被
     折叠的旧轮内容；`history_forget_and_keypoints` 继续验证 forgotten 轮不出现。
   - **测试**：440 用例 4115 断言全过；web / webview 双变体编译通过。
+
+
+<118>(FIXED/AUDIT): 框架/适配器这一层的弹层焦点、剪贴板、页面切换状态与实时快照统一修整；不是再单独打症状补丁。
+  - **模型选择器盖住输入框（点两次/先失焦）**：选择器是按“模型按钮”定位的，而按钮在输入框下面，于是
+    980x590 的弹层向上展开时**盖住了 textarea**。用户点的“外面”其实点在模型行上：第一次只是选中/关闭，
+    输入框根本没拿到焦点，看起来要点两次。现在 composer 的选择器以**输入框**为锚点向上展开，弹层底部
+    停在输入框上方；`placePopup` 同时给弹层加 `max-height`（上方/下方剩余空间），永远不再覆盖锚点。
+    另外删除了 `picker-backdrop`（它吞掉第一次点击），外部关闭统一交给 outside dispatcher。
+  - **外部点击关闭的时序**：mousedown 立即 render 会拆掉目标节点，mouseup/click 落到 `<body>`（焦点丢失）。
+    两个适配器都改成**收集要关闭的弹层 → setTimeout(0) 后再关闭**；关闭所有不含目标的外层弹层，而不是
+    遇到第一个就 return。C++ 的 outside 回调 id 按弹层节点**稳定复用**（原来每帧换新 id，延迟关闭时会
+    找不到回调）；wasm 也从“每个弹层一个 document 监听器”改成统一 dispatcher（不再泄漏节点闭包）。
+  - **右键粘贴**：WebView2 会拒绝脚本发起的 clipboard 读取（经 C++ 往返后用户手势已丢失），
+    且点菜单项后 `document.activeElement` 已不是输入框。现在：
+    - contextmenu 捕获阶段记录 `ctxTarget`，编辑命令一律用它（不是 activeElement）；
+    - 原生适配器新增 `read_clipboard_text()`（Win32 `CF_UNICODETEXT`）和 `insert_text_at_caret()`，
+      粘贴走“C++ 读系统剪贴板 → JS 插入光标处并触发 input”，完全不需要浏览器剪贴板权限；
+    - 浏览器构建保留 navigator.clipboard 回退。实测右键→粘贴后 textarea 值为 `PASTE_FINAL`。
+  - **同名模型不同供应商看不出变化**：模型按钮在窄宽度下把 provider 标签 `display:none`，切换后文字完全
+    一样；现在 provider 始终可见（紧凑模式只缩小），按钮 title 也带 provider。实测 Happy/A6 两个
+    `deepseek-v4.1-flash` 单击一次即可切换，按钮显示 `Happy API | …` / `A6API | …`。
+  - **切页面状态/错误气泡**：
+    - 切换标签会清理**完成菜单**（complete_kind/items/query）和 picker 的 owner/models/loaded；以前它们
+      会带到下一个会话，`data-keys-capture` 还留在新 textarea 上。
+    - `model_available` 是后端检查结果，不再从 stashed view 恢复 false；打开会话先乐观可用，检查失败也
+      不再把发送按钮永久卡死。
+    - `call_async` 增加 quiet 模式：模型可用性、usage、todos、loopState、balances 这些**被动刷新**失败
+      不再弹全局错误气泡（面板自己显示空状态），用户动作才提示。
+    - 选择模型的 setModel→setProvider→refreshConfig 现在**串行**：之前 refreshConfig 可能先于
+      setProvider 执行，读回旧 provider，和按钮显示不一致。
+    - 子代理 done 事件补 `sid`：以前 background 会话的子代理完成会被当成活动会话（空 sid 视为 active），
+      可能清错 transcript 的 work_live。
+  - **切页面思考跑到输出**：`live_state()` 的 text 以前累积**所有轮**的流式文本（包括已完成轮的过程解说），
+    重新打开运行中的标签就把全部过程当回答。现在每轮结束把该轮解说移入 `live_interim_` 并清空
+    `live_text_`；快照带 `interim/interimAfter`，UI 的 attach_live_turn 把它还原到 ChatMsg::interim
+    （工作过程，非强调色），text 只剩当前轮回答。
+  - **空模型会话的发送/Enter**：以前只 toast 后无动作，看起来像按钮/回车坏了。现在发送时如果没有可用模型，
+    会提示并**自动打开模型选择器**（输入保留）。实测空模型会话按 Enter：toast“请先选择模型”+ picker 打开。
+  - **测试**：441 用例 4126 断言全过；新增 live snapshot 的 interim 分离断言、切标签清理完成菜单/picker 状态。
+    web / webview 双变体编译通过。原生窗口实测：弹层不再盖住输入框、单击外部关闭且焦点留在 textarea、
+    单击切换同名校验的供应商、右键粘贴、空模型 Enter 打开选择器。

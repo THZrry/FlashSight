@@ -461,6 +461,47 @@ FS_TEST(loop_auto_continues_with_open_todos_after_empty_round) {
   EXPECT_TRUE(rec.saw("auto.halted"));
 }
 
+// A tab reopened mid-turn reads live_state(). Its `text` must be the CURRENT
+// round only; completed-round narration belongs in `interim`, otherwise the
+// reopened tab showed thinking as the answer ("切页面思考跑到任务输出").
+FS_TEST(loop_live_snapshot_keeps_narration_out_of_the_answer) {
+  AgentLoop::Options opts;
+  opts.sid = "s_live_split";
+  opts.permission = "full";
+  AgentLoop loop(std::move(opts));
+  std::vector<Json> live_snaps;
+  int calls = 0;
+  loop.call_model = [&loop, &live_snaps, &calls](
+                        const ModelCallRequest&, ModelCallResult* out,
+                        const std::function<void(const std::string&)>& on_delta)
+      -> FsResult {
+    live_snaps.push_back(loop.live_state());
+    if (calls++ == 0) {
+      out->text = "thinking first";
+      out->tool_calls = Json::array({call("c1", "noop", Json::object())});
+    } else {
+      out->text = "final answer";
+    }
+    if (on_delta && !out->text.empty()) on_delta(out->text);
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json{{"ok", true}});
+  };
+  loop.persist_turn = [](const Json&) {};
+  ASSERT_TRUE(loop.send("go").ok());
+  ASSERT_TRUE(live_snaps.size() >= 2);
+  const Json& after_first = live_snaps[1];
+  // Narration is in the work log...
+  ASSERT_TRUE(after_first.contains("interim"));
+  ASSERT_TRUE(after_first["interim"].is_array());
+  ASSERT_TRUE(after_first["interim"].size() >= 1);
+  EXPECT_EQ(after_first["interim"][0].get<std::string>(),
+            std::string("thinking first"));
+  // ...and NOT in the answer text.
+  EXPECT_EQ(jsonutil::get<std::string>(after_first, "text", ""), std::string());
+}
+
 // ---------- 宿主接线：请求里必须真的有工具表和非空系统提示 ----------
 // This is the end-to-end shape check for the wiring bug that made the agent
 // useless: AgentLoop was created with no tools and no system prompt, so the

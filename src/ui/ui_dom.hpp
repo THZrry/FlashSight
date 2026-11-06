@@ -300,6 +300,14 @@ class IDom {
     (void)command;
     return false;
   }
+  // Native clipboard read, when the platform has one. The browser build returns
+  // empty and falls back to navigator.clipboard inside exec_edit("paste").
+  virtual std::string read_clipboard_text() { return std::string(); }
+  // Insert text into the element the context menu was opened on, at its caret.
+  // This path needs NO clipboard permission: the text came from the native
+  // clipboard, so a WebView2 app can paste even though script-initiated
+  // clipboard reads are refused ("右键粘贴没用").
+  virtual void insert_text_at_caret(const std::string& text) { (void)text; }
 
   // --- file picker (upload) ---
   // Clicking `node` opens the OS file chooser. The picked files are sent to the

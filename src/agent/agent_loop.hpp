@@ -297,6 +297,11 @@ class AgentLoop {
   // written. Guarded by live_mu_ (the UI thread reads it).
   mutable std::mutex live_mu_;
   std::string live_text_;
+  // Narration from COMPLETED rounds, kept apart from the current round's text.
+  // Without this, reopening a running tab concatenated every round's narration
+  // into the answer ("切页面思考跑到任务输出").
+  Json live_interim_ = Json::array();
+  std::vector<int64_t> live_interim_after_;
   Json live_tools_ = Json::array();
   int64_t live_started_ms_ = 0;
   bool live_running_ = false;

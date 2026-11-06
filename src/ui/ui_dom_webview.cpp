@@ -38,6 +38,10 @@
 
 #include <webview.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,6 +56,20 @@ namespace fs {
 namespace ui {
 
 namespace {
+
+#ifdef _WIN32
+std::string wide_to_utf8_win(const std::wstring& w) {
+  if (w.empty()) return std::string();
+  int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(),
+                                static_cast<int>(w.size()), nullptr, 0, nullptr,
+                                nullptr);
+  if (n <= 0) return std::string();
+  std::string out(static_cast<size_t>(n), '\0');
+  ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                        &out[0], n, nullptr, nullptr);
+  return out;
+}
+#endif
 
 std::string js_str(const std::string& s) {
   std::string out;
@@ -94,7 +112,10 @@ const char* kGlueJs = R"JS(
   var S = {
     nodes: [null],   // id -> DOM node (id 1 = root)
     handlers: [],    // id -> { kind -> [eventName, listener] }
-    outside: Object.create(null)  // popup node id -> element awaiting outside click
+    outside: Object.create(null),  // popup node id -> element awaiting outside click
+    // The element that was right-clicked. Menu items are buttons: focusing them
+    // moved focus off the text field, so paste/cut/copy ran against <body>.
+    ctxTarget: null
   };
   globalThis.__fsDom = S;
 
@@ -113,6 +134,7 @@ const char* kGlueJs = R"JS(
   // the menu is the same wherever you click (cut/copy/paste are provided by the
   // app's items, see exec_edit / pasteClipboard below).
   document.addEventListener('contextmenu', function (ev) {
+    S.ctxTarget = ev.target;
     ev.preventDefault();
   }, true);
 
@@ -161,21 +183,53 @@ const char* kGlueJs = R"JS(
     var t = ev.target;
     // Only the ANCHOR is exempt (the button that toggles the popup); exempting
     // the parent container swallowed presses on its siblings.
-    if (t && t.closest && t.closest('.model-field, .model-btn-wrap, [data-keep-popup]')) {
+    if (t && t.closest && t.closest('.model-pick-btn, .model-btn-wrap, [data-keep-popup]')) {
       return;
     }
+    var pending = [];
     for (var k in S.outside) {
       var el = S.outside[k];
       if (!el || !el.isConnected) { delete S.outside[k]; continue; }
-      if (el.contains(t)) continue;
-      var cb = el.__fsOutCb;
+      if (el.contains(t)) continue;   // a press inside this popup keeps it
       delete S.outside[k];
-      if (cb) { post('fs_ui_outside', [cb]); return; }
+      pending.push(k);
     }
+    if (!pending.length) return;
+    // CLOSE AFTER THE PRESS COMPLETES. Closing on mousedown rebuilt the tree
+    // before mouseup, so the click landed on <body>: the textarea lost focus and
+    // the user needed a second click ("先失焦再点一次才关闭"). Deferring also
+    // lets a click inside ANOTHER popup (e.g. a model row) run its own handler
+    // before an unrelated popup is dismissed - the stale popup used to eat the
+    // first click ("点两次才能选择模型").
+    setTimeout(function () {
+      for (var n = 0; n < pending.length; ++n) {
+        var pop = S.nodes[pending[n]];
+        if (!pop || !pop.isConnected) continue;
+        var cb = pop.__fsOutCb;
+        delete S.outside[pending[n]];
+        if (cb) post('fs_ui_outside', [cb]);
+      }
+    }, 0);
   }, true);
 
   // Push state the C++ mirror needs. Called BEFORE the app handler runs.
   function push(what, id, v) { post('fs_ui_push', [what, id | 0, String(v == null ? '' : v)]); }
+
+  // The text field an edit command (paste/cut/copy/select-all) belongs to. The
+  // menu click moves focus to the menu, so `document.activeElement` is the wrong
+  // element by then; the contextmenu target is the field the user right-clicked.
+  function editTarget() {
+    var t = S.ctxTarget;
+    if (t && t.isConnected && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+                               t.isContentEditable)) {
+      return t;
+    }
+    var a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) {
+      return a;
+    }
+    return t && t.isConnected ? t : a;
+  }
 
   var NAMES = ['click', 'input', 'change', 'keydown', 'keyenter', 'submit',
                'dblclick', 'contextmenu', 'scroll', 'mouseenter', 'mouseleave',
@@ -496,9 +550,14 @@ const char* kGlueJs = R"JS(
         if (below >= ph || below >= above) {
           el.style.top = Math.round(ay + ar.height + gap) + 'px';
           el.classList.add('below');
+          // Never extend over the anchor (or the control above it): a popup
+          // taller than the free space must scroll, not swallow clicks meant
+          // for the input.
+          el.style.maxHeight = Math.max(120, vh - ar.bottom - gap - 8) + 'px';
         } else {
           el.style.top = Math.round(ay - ph - gap) + 'px';
           el.classList.remove('below');
+          el.style.maxHeight = Math.max(120, ar.top - gap - 8) + 'px';
         }
         var leftVp = ar.left;
         if (leftVp + pw > vw - 8) leftVp = vw - pw - 8;
@@ -737,10 +796,34 @@ const char* kGlueJs = R"JS(
         }
         return;
       case 'execEdit':
-        // Runs a browser edit command against the focused field. The app draws
-        // its own menu over text fields, so cut/copy/paste/select-all have to
-        // come from here rather than from the (suppressed) native menu.
-        try { document.execCommand(a, false, null); } catch (e) {}
+        // Runs a browser edit command against the field the menu was opened on.
+        // The app draws its own menu over text fields, so cut/copy/paste/
+        // select-all come from here rather than from the (suppressed) native
+        // menu. Focus first: clicking the menu item took it away.
+        (function () {
+          var el = editTarget();
+          if (el && el.focus) { try { el.focus(); } catch (e) {} }
+          try { document.execCommand(a, false, null); } catch (e) {}
+        })();
+        return;
+      case 'insertText':
+        // Insert text obtained from the NATIVE clipboard. No clipboard API and
+        // no permission: the WebView2 host read the text itself.
+        (function () {
+          var el = editTarget();
+          if (!el) return;
+          if (el.focus) { try { el.focus(); } catch (e) {} }
+          try {
+            var s = el.selectionStart, e2 = el.selectionEnd;
+            if (typeof s === 'number' && typeof e2 === 'number') {
+              el.value = el.value.slice(0, s) + a + el.value.slice(e2);
+              el.selectionStart = el.selectionEnd = s + a.length;
+            } else {
+              el.value += a;
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          } catch (err) {}
+        })();
         return;
       case 'pasteClip':
         // execCommand('paste') is refused by every modern engine; the async
@@ -748,8 +831,9 @@ const char* kGlueJs = R"JS(
         // click IS one). Insert at the caret and fire `input` so the app's
         // handler sees the new value.
         (function () {
-          var el = document.activeElement;
+          var el = editTarget();
           if (!el || !navigator.clipboard || !navigator.clipboard.readText) return;
+          if (el.focus) { try { el.focus(); } catch (e) {} }
           navigator.clipboard.readText().then(function (t) {
             if (!t) return;
             try {
@@ -942,15 +1026,22 @@ class WebViewDom : public IDom {
     // forever - one std::function per frame, per open popup, for the life of
     // the window.
     std::map<uint64_t, int>::iterator old = outside_by_node_.find(popup.id);
+    int id;
     if (old != outside_by_node_.end()) {
-      outside_cbs_.erase(old->second);
-      outside_by_node_.erase(old);
+      // KEEP the id for this popup node. A render used to mint a new id every
+      // frame; a dismissal deferred by one tick then referenced an erased
+      // callback and silently did nothing. Updating the callback in place makes
+      // the binding survive repaints.
+      id = old->second;
+    } else {
+      id = ++outside_seq_;
+      outside_by_node_[popup.id] = id;
     }
-    int id = ++outside_seq_;
     if (cb) {
       outside_cbs_[id] = std::move(cb);
+    } else {
+      outside_cbs_.erase(id);
     }
-    outside_by_node_[popup.id] = id;
     call("outside", idx(popup), 0, std::to_string(id), "");
   }
 
@@ -1040,6 +1131,30 @@ class WebViewDom : public IDom {
     call("execEdit", 0, 0, command, "");
     if (command == "paste") call("pasteClip", 0, 0, "", "");
     return true;
+  }
+  std::string read_clipboard_text() override {
+#ifdef _WIN32
+    // WebView2 refuses script-initiated clipboard READS (the menu click's user
+    // gesture is lost across the C++ round trip), so the native app reads the
+    // Win32 clipboard and inserts the text itself.
+    if (!::OpenClipboard(nullptr)) return std::string();
+    std::string out;
+    HANDLE h = ::GetClipboardData(CF_UNICODETEXT);
+    if (h) {
+      const wchar_t* w = static_cast<const wchar_t*>(::GlobalLock(h));
+      if (w) {
+        out = wide_to_utf8_win(std::wstring(w));
+        ::GlobalUnlock(h);
+      }
+    }
+    ::CloseClipboard();
+    return out;
+#else
+    return std::string();
+#endif
+  }
+  void insert_text_at_caret(const std::string& text) override {
+    call("insertText", 0, 0, text, "");
   }
   void bind_file_picker(Node node, const std::string& pid,
                         std::function<void(const std::string&)> cb) override {

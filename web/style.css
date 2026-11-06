@@ -2512,16 +2512,16 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
      truncate without losing the control's meaning) */
   .composer-tools .select { max-width: 78px; }
   .composer-tools .bar-group { min-width: 0; }
-  /* the model button is the widest item in the row and its label is the least
-     essential (the icon already identifies the brand) */
-  .model-pick-btn { max-width: 74px; padding: 0 6px; }
+  /* Keep the provider visible even in compact mode: two providers can expose
+     the SAME model id, and hiding the owner made the button look unchanged
+     after switching ("选中了又不改"). The model name may ellipsize; the owner
+     must not disappear. */
+  .model-pick-btn { max-width: 120px; padding: 0 6px; }
   .composer-tools .btn { padding-left: 7px; padding-right: 7px; }
   /* The spacer element is hidden here, but the right group still keeps its
      margin-left:auto (see .ct-right) so it stays pinned to the right edge. */
   .composer-tools .grow { display: none; }
-  /* The provider name is context, not identity: drop it before the model name
-     (which is what the button is FOR). */
-  .mpb-prov { display: none; }
+  .mpb-prov { max-width: 4.5em; font-size: 10px; }
 }
 
 /* Thinking level: ONE icon button (see the 思考档位 block in ui_app.cpp). The

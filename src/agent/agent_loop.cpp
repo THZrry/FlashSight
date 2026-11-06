@@ -937,6 +937,8 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     std::lock_guard<std::mutex> lk(live_mu_);
     live_running_ = true;
     live_text_.clear();
+    live_interim_ = Json::array();
+    live_interim_after_.clear();
     live_tools_ = Json::array();
     live_started_ms_ = turn_started_ms_;
   }
@@ -1055,6 +1057,21 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
                                      {"tools", static_cast<int>(executed_calls_.size())}});
       interim_texts_.push_back(result.text);
       interim_after_.push_back(static_cast<int>(executed_calls_.size()));
+      // The LIVE snapshot needs the same split: this round's text is narration,
+      // not the answer, and the next round starts a new answer. Clear live_text_
+      // so a tab reopened mid-turn does not show all prior narration as the
+      // reply. Keep the narration in the live work log instead.
+      {
+        std::lock_guard<std::mutex> lk(live_mu_);
+        live_interim_.push_back(result.text);
+        live_interim_after_.push_back(static_cast<int>(executed_calls_.size()));
+        live_text_.clear();
+        while (live_interim_.size() > 40) {
+          live_interim_.erase(live_interim_.begin());
+          if (!live_interim_after_.empty()) live_interim_after_.erase(
+              live_interim_after_.begin());
+        }
+      }
       // Bound it: a model that narrates every round of a very long turn would
       // otherwise grow this (and the turn it is persisted with) without limit.
       // The last few narrations are what a reader actually wants.
@@ -1183,6 +1200,8 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     std::lock_guard<std::mutex> lk(live_mu_);
     live_running_ = false;
     live_text_.clear();
+    live_interim_ = Json::array();
+    live_interim_after_.clear();
     live_tools_ = Json::array();
   }
   // Clear the crash-safe copy too: the turn landed, so it must not be replayed as
@@ -1353,6 +1372,14 @@ Json AgentLoop::live_state() const {
   j["startedAt"] = live_started_ms_;
   j["autoRound"] = current_auto_round_.load();
   j["tools"] = live_tools_;
+  // Completed-round narration belongs in the reopened tab's WORK LOG, not in
+  // its answer. The UI merges these arrays into ChatMsg::interim.
+  j["interim"] = live_interim_;
+  Json afters = Json::array();
+  for (size_t i = 0; i < live_interim_after_.size(); ++i) {
+    afters.push_back(live_interim_after_[i]);
+  }
+  j["interimAfter"] = afters;
   return j;
 }
 

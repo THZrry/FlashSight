@@ -2445,13 +2445,24 @@ FS_TEST(uiapp_switching_tab_closes_popups) {
     s.tab_ids.push_back("sess_b");
     s.model_picker_open = true;
     s.model_picker_owner = "composer";
+    s.model_picker_loaded = true;
     s.skill_menu_open = true;
     s.side_menu_open = true;
+    // The inline completion menu belongs to the session being left. Left set, it
+    // kept data-keys-capture on the NEXT tab's textarea and an open menu for the
+    // previous session's text.
+    s.complete_kind = AppState::CompleteKind::kCommand;
+    s.complete_query = "old";
+    s.complete_items.push_back(std::make_pair(std::string("/old"), false));
   });
   app.show("sess_b");
   EXPECT_FALSE(app.state().model_picker_open);
   EXPECT_FALSE(app.state().skill_menu_open);
   EXPECT_FALSE(app.state().side_menu_open);
+  EXPECT_TRUE(app.state().model_picker_owner.empty());
+  EXPECT_TRUE(app.state().complete_kind == AppState::CompleteKind::kNone);
+  EXPECT_TRUE(app.state().complete_items.empty());
+  EXPECT_TRUE(app.state().complete_query.empty());
 }
 
 // The side panel keeps its own visit stack: closing the active panel returns to

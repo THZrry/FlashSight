@@ -959,8 +959,12 @@ class UiApp {
   void tick_terminal();
   // Async backend call with a completion handler (browser-safe). The sync
   // call() is unavailable in the wasm build, so all UI actions go through here.
+  // `quiet` is for PASSIVE refreshes (availability, usage, todos, loop state):
+  // their failure is represented in the panel it belongs to, and popping a
+  // toast for every failed background read made tab switches look broken.
   void call_async(const std::string& method, const Json& args,
-                  std::function<void(const BackendResult&)> done = nullptr);
+                  std::function<void(const BackendResult&)> done = nullptr,
+                  bool quiet = false);
   // Pull project.list / session.list from the backend into AppState.
   void load_projects();
   // Pull terminal.list for the active session.

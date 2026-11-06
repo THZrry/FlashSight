@@ -38,8 +38,39 @@ EM_JS(void, fs_dom_boot, (), {
   // is identical wherever you click.
   if (!globalThis.__fsCtxMenuPatched) {
     globalThis.__fsCtxMenuPatched = true;
+    if (!globalThis.__fsOutside) globalThis.__fsOutside = Object.create(null);
     document.addEventListener('contextmenu', function (ev) {
+      // Remember the field the menu belongs to: clicking a menu item moves
+      // focus away, and paste/cut/copy used to run against <body>.
+      globalThis.__fsCtxTarget = ev.target;
       ev.preventDefault();
+    }, true);
+    // ONE dismissal dispatcher for every popup. Deferred to the next tick: a
+    // mousedown-close rebuilt the tree before mouseup, so the click landed on
+    // <body> (input lost focus, "click twice to close") and a stale popup could
+    // eat the press that was meant for a model row.
+    document.addEventListener('mousedown', function (ev) {
+      var t = ev.target;
+      if (t && t.closest && t.closest('.model-pick-btn, .model-btn-wrap, [data-keep-popup]')) {
+        return;
+      }
+      var pending = [];
+      for (var k in globalThis.__fsOutside) {
+        var pop = globalThis.__fsNodes[k];
+        if (!pop || !pop.isConnected) { delete globalThis.__fsOutside[k]; continue; }
+        if (pop.contains(t)) continue;
+        delete globalThis.__fsOutside[k];
+        pending.push(k);
+      }
+      if (!pending.length) return;
+      setTimeout(function () {
+        for (var n = 0; n < pending.length; ++n) {
+          var pop = globalThis.__fsNodes[pending[n]];
+          if (!pop || !pop.isConnected) continue;
+          var cb = pop.__fsOutsideCb;
+          if (cb && Module._fs_ui_outside_click) Module._fs_ui_outside_click(cb);
+        }
+      }, 0);
     }, true);
     // Middle-click belongs to the app, not to Chromium: its default is
     // scroll-to-pan, which over a tab strip reads as "middle click did something
@@ -102,6 +133,7 @@ EM_JS(void, fs_dom_off, (int node_id, int kind), {  var h = globalThis.__fsHandl
 EM_JS(void, fs_dom_forget, (int node_id), {
   if (globalThis.__fsNodes) globalThis.__fsNodes[node_id] = undefined;
   if (globalThis.__fsHandlers) globalThis.__fsHandlers[node_id] = undefined;
+  if (globalThis.__fsOutside) delete globalThis.__fsOutside[node_id];
 });
 
 EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
@@ -549,10 +581,12 @@ EM_JS(void, fs_dom_place_popup, (int popup_node, int anchor_node), {  var pop = 
   if (below >= ph || below >= above) {
     pop.style.top = Math.round(ay + a.height + gap) + 'px';
     pop.classList.add('below');
+    pop.style.maxHeight = Math.max(120, vh - a.bottom - gap - 8) + 'px';
   } else {
     // anchor-relative distance from the block's top to the popup's bottom edge
     pop.style.top = Math.round(ay - ph - gap) + 'px';
     pop.classList.remove('below');
+    pop.style.maxHeight = Math.max(120, a.top - gap - 8) + 'px';
   }
   // horizontal: keep the whole popup on screen (viewport clamp, then convert)
   var leftVp = a.left;
@@ -566,32 +600,15 @@ EM_JS(void, fs_dom_place_popup, (int popup_node, int anchor_node), {  var pop = 
 // what opened it). This replaces the full-screen backdrop for popovers rendered
 // inside a small field: a backdrop there covered the field itself, so the first
 // click closed the popup AND was swallowed.
+// Register a popup for the ONE dismissal dispatcher installed in fs_dom_boot.
+// A per-popup document listener here could never be removed and kept its node
+// alive; the deferred dispatcher also protects the press that is closing it.
 EM_JS(void, fs_dom_outside_click, (int popup_node, int cb_id), {
   var pop = globalThis.__fsNodes[popup_node];
   if (!pop) return;
   pop.__fsOutsideCb = cb_id;
-  if (pop.__fsOutsideInit) return;
-  pop.__fsOutsideInit = true;
-  pop.__fsOutsideHandler = function (ev) {
-    // A popup that has left the DOM must not dismiss whatever is open now: its
-    // document listener outlives the node, and firing the (still-registered)
-    // callback closed the NEXT popup on the first press anywhere.
-    if (!pop.isConnected) return;
-    if (!pop.__fsOutsideCb) return;
-    var t = ev.target;
-    if (pop.contains(t)) return;
-    // The ANCHOR owns the toggle: a press on it is a toggle, not a dismiss -
-    // closing here would reopen immediately on the following click. Only the
-    // anchor is exempt. Testing the whole PARENT container instead (the old
-    // `host.contains(t)`) also ignored every SIBLING of the popup inside that
-    // container, so a press on the popup's own field wrapper or on a sibling
-    // button did nothing and the popup looked impossible to dismiss.
-    if (t && t.closest && t.closest('.model-field, .model-btn-wrap, [data-keep-popup]')) {
-      return;
-    }
-    if (Module._fs_ui_outside_click) Module._fs_ui_outside_click(pop.__fsOutsideCb);
-  };
-  document.addEventListener('mousedown', pop.__fsOutsideHandler, true);
+  if (!globalThis.__fsOutside) globalThis.__fsOutside = Object.create(null);
+  globalThis.__fsOutside[popup_node] = 1;
 });
 
 // Drag the top edge of a bottom panel to set its height. Same shape as
@@ -914,14 +931,56 @@ EM_JS(void, fs_dom_copy_text, (const char* text), {
 // Run a browser edit command against the focused field. The app draws its own
 // context menu over text fields (the native one is suppressed), so cut / copy /
 // paste / select-all have to be reachable from a menu item.
+// Insert clipboard text (obtained by the host) at the context target's caret.
+EM_JS(void, fs_dom_insert_text, (const char* text), {
+  function editTarget() {
+    var t = globalThis.__fsCtxTarget;
+    if (t && t.isConnected && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+                               t.isContentEditable)) return t;
+    var a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) {
+      return a;
+    }
+    return t && t.isConnected ? t : a;
+  }
+  var el = editTarget();
+  if (!el) return;
+  try { el.focus(); } catch (e) {}
+  var t = UTF8ToString(text);
+  try {
+    var s = el.selectionStart, e2 = el.selectionEnd;
+    if (typeof s === 'number' && typeof e2 === 'number') {
+      el.value = el.value.slice(0, s) + t + el.value.slice(e2);
+      el.selectionStart = el.selectionEnd = s + t.length;
+    } else {
+      el.value += t;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  } catch (err) {}
+});
+
 EM_JS(void, fs_dom_exec_edit, (const char* command), {
   var c = UTF8ToString(command);
   if (!c) return;
+  // The field the context menu was opened on. `activeElement` is the menu by
+  // the time the item is clicked, so the old code could not paste at all.
+  function editTarget() {
+    var t = globalThis.__fsCtxTarget;
+    if (t && t.isConnected && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+                               t.isContentEditable)) return t;
+    var a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) {
+      return a;
+    }
+    return t && t.isConnected ? t : a;
+  }
+  var target = editTarget();
   if (c === 'paste') {
     // execCommand('paste') is refused by every modern engine; the async
     // clipboard API is the only path, and a menu click is a valid user gesture.
-    var el = document.activeElement;
+    var el = target;
     if (!el || !navigator.clipboard || !navigator.clipboard.readText) return;
+    try { el.focus(); } catch (e) {}
     navigator.clipboard.readText().then(function (t) {
       if (!t) return;
       try {
@@ -937,6 +996,7 @@ EM_JS(void, fs_dom_exec_edit, (const char* command), {
     }).catch(function () {});
     return;
   }
+  if (target && target.focus) { try { target.focus(); } catch (e) {} }
   try { document.execCommand(c, false, null); } catch (e) {}
 });
 
@@ -1062,6 +1122,12 @@ std::map<int, std::function<void()> >& outside_cbs() {
 int& outside_seq() {
   static int s = 0;
   return s;
+}
+// popup node id -> stable callback id. Reusing the id across renders keeps a
+// deferred dismissal (setTimeout 0) valid even if a repaint happened meanwhile.
+std::map<int, int>& outside_by_node() {
+  static std::map<int, int> m;
+  return m;
 }
 
 // one-shot timer callbacks (post-animation cleanup)
@@ -1224,7 +1290,13 @@ class WasmDom : public IDom {
     val p = n["parentNode"];
     if (!p.isNull() && !p.isUndefined()) p.call<void>("removeChild", n);
     nodes_[static_cast<size_t>(node.id)] = val::undefined();
-    fs_dom_forget(static_cast<int>(node.id));
+    int nid = static_cast<int>(node.id);
+    std::map<int, int>::iterator ob = outside_by_node().find(nid);
+    if (ob != outside_by_node().end()) {
+      outside_cbs().erase(ob->second);
+      outside_by_node().erase(ob);
+    }
+    fs_dom_forget(nid);
   }
 
   void clear(Node parent) override {
@@ -1360,12 +1432,21 @@ class WasmDom : public IDom {
     // replaced the picker's, and the document listeners installed by the earlier
     // popup then fired the WRONG callback (or none) - "clicking elsewhere does
     // not close it" / "it closes the wrong thing".
-    int cb_id = 0;
-    if (cb) {
+    int node_id = static_cast<int>(popup.id);
+    std::map<int, int>::iterator old = outside_by_node().find(node_id);
+    int cb_id;
+    if (old != outside_by_node().end()) {
+      cb_id = old->second;   // stable across renders (see the deferred close)
+    } else {
       cb_id = ++outside_seq();
-      outside_cbs()[cb_id] = std::move(cb);
+      outside_by_node()[node_id] = cb_id;
     }
-    fs_dom_outside_click(static_cast<int>(popup.id), cb_id);
+    if (cb) {
+      outside_cbs()[cb_id] = std::move(cb);
+    } else {
+      outside_cbs().erase(cb_id);
+    }
+    fs_dom_outside_click(node_id, cb_id);
   }
 
   void bind_vsplitter(Node splitter, Node panel,
@@ -1469,6 +1550,9 @@ class WasmDom : public IDom {
   bool exec_edit(const std::string& command) override {
     fs_dom_exec_edit(command.c_str());
     return true;
+  }
+  void insert_text_at_caret(const std::string& text) override {
+    fs_dom_insert_text(text.c_str());
   }
 
   void play_animation(Node node, const std::string& cls) override {

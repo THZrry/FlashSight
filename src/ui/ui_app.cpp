@@ -642,7 +642,8 @@ void UiApp::mount() {
 // Backend plumbing
 // ---------------------------------------------------------------------------
 void UiApp::call_async(const std::string& method, const Json& args,
-                       std::function<void(const BackendResult&)> done) {
+                       std::function<void(const BackendResult&)> done,
+                       bool quiet) {
   if (!backend_) {
     if (done) {
       BackendResult r;
@@ -653,8 +654,8 @@ void UiApp::call_async(const std::string& method, const Json& args,
     }
     return;
   }
-  backend_->call_async(method, args, [this, done](const BackendResult& r) {
-    if (!r.ok && !r.message.empty()) {
+  backend_->call_async(method, args, [this, done, quiet](const BackendResult& r) {
+    if (!r.ok && !r.message.empty() && !quiet) {
       // surface backend failures instead of failing silently
       st_.toast = r.code.empty() ? r.message : (r.code + ": " + r.message);
       st_.toast_deadline_ms = now_ms() + kToastMs;
@@ -1087,7 +1088,11 @@ void UiApp::load_session_view(const std::string& sid) {
     }
   }
   st_.model_index = v.model_index;
-  st_.model_available = v.model_available;
+  // `model_available` is the result of a BACKEND CHECK, not session data. A
+  // stashed false (an old failed check, a slow reply) made the send button
+  // permanently disabled after switching tabs. Start optimistic and let the
+  // refresh clear it if the model is really gone.
+  st_.model_available = true;
   st_.model_thinking_levels = v.model_thinking_levels;
   st_.model_thinking_default = v.model_thinking_default;
   st_.model_provider_label = v.model_provider_label;
@@ -1175,9 +1180,24 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   // Any open transient popup belongs to the tab being left. Leaving it up is how
   // the model picker "stayed glued" across a tab switch.
   st_.model_picker_open = false;
+  st_.model_picker_owner.clear();
+  st_.model_picker_target.clear();
+  st_.model_picker_models.clear();
+  st_.model_picker_loaded = false;
+  st_.model_picker_focus.clear();
+  st_.model_picker_focus_provider.clear();
   st_.skill_menu_open = false;
   st_.thinking_menu_open = false;
   st_.side_menu_open = false;
+  // The inline completion menu is SESSION state too. Left set, the next tab's
+  // textarea kept data-keys-capture and an open menu for text that belonged to
+  // the previous session (Enter/Tab then behaved as if a menu was showing).
+  st_.complete_kind = AppState::CompleteKind::kNone;
+  st_.complete_query.clear();
+  st_.complete_prefix.clear();
+  st_.complete_dir.clear();
+  st_.complete_items.clear();
+  st_.complete_index = 0;
   // A context menu belongs to what was right-clicked; navigating away leaves
   // nothing for it to act on.
   st_.ctx_open = false;
@@ -1610,7 +1630,7 @@ void UiApp::refresh_session_todos(const std::string& sid) {
       if (v.todos.empty() && !list.empty()) v.todo_open = true;
       v.todos = list;
     }
-  });
+  }, true);  // passive reconciliation; the todo panel owns the empty state
 }
 
 // Ask the NEXT render to position the transcript at the remembered offset before// the browser paints it.
@@ -2003,7 +2023,7 @@ void UiApp::load_balances(bool force) {
       s.balances_loading = false;
       s.balances_at = now_ms();
     });
-  });
+  }, true);  // the balance panel renders its own failed state
 }
 
 // Per-session usage: the side panel's "context level / cache / this turn's cost
@@ -2131,7 +2151,7 @@ void UiApp::load_session_usage(const std::string& sid) {
       s.turn_out = turn_known ? t_out : -1;
       s.turn_cost_kind = t_kind;
     });
-  });
+  }, true);  // passive: the usage panel shows "—" when data is unavailable
 }
 void UiApp::attach_live_turn(const std::string& sid) {
   if (sid.empty()) return;
@@ -2143,11 +2163,41 @@ void UiApp::attach_live_turn(const std::string& sid) {
     std::string text = jsonutil::get<std::string>(r.data, "text", "");
     std::string user_text = jsonutil::get<std::string>(r.data, "userText", "");
     int64_t started = jsonutil::get_int(r.data, "startedAt", 0);
+    // Narration from completed rounds travels with the live snapshot so a tab
+    // reopened mid-turn still shows it in the WORK LOG, not concatenated into
+    // the answer. Without this, switching pages turned thinking into output.
+    std::vector<std::string> interim;
+    std::vector<size_t> interim_after;
+    if (r.data.contains("interim") && r.data["interim"].is_array()) {
+      const Json& arr = r.data["interim"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        if (arr[i].is_string()) interim.push_back(arr[i].get<std::string>());
+      }
+    }
+    if (r.data.contains("interimAfter") && r.data["interimAfter"].is_array()) {
+      const Json& arr = r.data["interimAfter"];
+      for (size_t i = 0; i < arr.size(); ++i) {
+        interim_after.push_back(static_cast<size_t>(
+            arr[i].is_number() ? arr[i].get<int64_t>() : 0));
+      }
+    }
     // A crashed turn is shown as a FINISHED message (nobody is writing it any
     // more) plus the user's question when the transcript does not have it. The
     // process died mid-turn, so the answer exists only in this snapshot.
     if (!running && !crashed) return;
     if (st_.active_tab != sid) return;
+    auto apply_live = [&](comp::ChatMsg* a) {
+      a->text = text;   // current round only; narration is in `interim`
+      a->interim = interim;
+      a->interim_after = interim_after;
+      a->streaming = running;  // a crashed turn is not still being written
+      // Do not force a fold the user closed during the turn.
+      if (!a->work_touched) a->work_open = running;
+      a->started_at = started > 0 ? started : now_ms();
+      if (!running) a->ended_at = a->started_at;
+      a->now_ms = running ? now_ms() : 0;
+      a->rev = next_msg_rev_++;
+    };
     update([&](AppState& s) {
       // The question itself may be missing: a crashed turn's user message was
       // written at turn start, but a crash BEFORE that (or a cleared snapshot)
@@ -2173,20 +2223,13 @@ void UiApp::attach_live_turn(const std::string& sid) {
       // message (a turn.done may have landed between the request and the reply).
       if (!s.messages.empty() && s.messages.back().role == "assistant" &&
           s.messages.back().streaming) {
-        if (s.messages.back().text.size() < text.size()) {
-          s.messages.back().text = text;
-          s.messages.back().rev = next_msg_rev_++;
-        }
+        apply_live(&s.messages.back());
         return;
       }
       comp::ChatMsg a;
       a.role = "assistant";
-      a.text = text;
-      a.streaming = running;  // a crashed turn is not still being written
-      a.started_at = started > 0 ? started : now_ms();
-      if (!running) a.ended_at = a.started_at;  // no live counter for a dead turn
-      a.rev = next_msg_rev_++;
       a.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+      apply_live(&a);
       s.messages.push_back(a);
     });
     if (crashed) {
@@ -4259,7 +4302,17 @@ void UiApp::render() {
     {
       VNodePtr pop = find_by_key_prefix(tree_, "model-picker:");
       VNodePtr anchor = find_by_key_prefix(tree_, "model-field:");
-      if (pop && !anchor) anchor = find_by_key(tree_, "model-btn-wrap");
+      if (pop && !anchor) {
+        // The composer picker must open above the INPUT, not above the model
+        // BUTTON: the button sits below the textarea, so anchoring to it covered
+        // the input with the popup. Clicks meant for the input then hit a model
+        // row (first click selected/closed, second focused) and "clicking
+        // outside" could not reach the field at all.
+        if (st_.model_picker_owner == "composer") {
+          anchor = find_by_key(tree_, "session-input");
+        }
+        if (!anchor) anchor = find_by_key(tree_, "model-btn-wrap");
+      }
       if (pop && anchor && pop->dom.valid() && anchor->dom.valid()) {
         dom_.place_popup(pop->dom, anchor->dom);
       }
@@ -6644,10 +6697,11 @@ VNodePtr UiApp::build_session() {
       }
     }
     if (!prov_label.empty()) {
-      // Provider is shown only when there is room (CSS hides it in compact mode,
-      // under .composer crowded / narrow width). It is context, not the model's
-      // identity, so it must not push the model name out of the button.
+      // The provider is part of the MODEL'S IDENTITY here (the same id can exist
+      // on two connections). It stays visible in compact mode - hiding it made a
+      // provider switch look like a no-op because the button text was identical.
       model_btn.add(el("span", "mpb-prov").text(prov_label));
+      model_btn.attr("title", st_.model + " · " + prov_label);
     }
     model_btn.add(el("span", "mpb-name").text(st_.model));
   }
@@ -6918,23 +6972,18 @@ VNodePtr UiApp::build_session() {
   // ---- 模型选择器 ----
   // Anchored to the composer, exactly like the "/" menu above: it opens from the
   // model button, so it has to come out of it (a dialog in the middle of the
-  // screen has no visible connection to what opened it). It also must NOT live
-  // in the overlay layer, which is `pointer-events: none` - a backdrop placed
-  // there cannot receive the click that is supposed to dismiss it, which is why
-  // the picker used to stay glued open.
+  // screen has no visible connection to what opened it).
+  //
+  // NO BACKDROP. The full-area dismissal layer intercepted the first press on
+  // the textarea (or any other control): the picker closed, but the press never
+  // reached the input, so it lost focus and the user had to click again. The
+  // outside-click dispatcher (render -> bind_outside_click) already dismisses
+  // the popup AFTER the press is delivered.
   //
   // The popup itself is a shared component (build_model_picker): the same one is
   // used by the settings fields, so "which model" is answered identically
   // everywhere and there is only one copy to keep working.
   if (st_.model_picker_open && st_.model_picker_owner == "composer") {
-    H back = el("div", "picker-backdrop");
-    back.on(EventKind::kClick, [this](const std::string&) {
-      update([&](AppState& s) {
-        s.model_picker_open = false;
-        s.model_picker_owner.clear();
-      });
-    });
-    comp_box.add(back);
     comp_box.add(build_model_picker("composer", st_.model, st_.model_provider));
   }
   }  // end: not showing an ask panel
@@ -8913,7 +8962,7 @@ void UiApp::refresh_loop_state(const std::string& sid) {
       // flight. Clearing here also recovers from a missed turn.done/auto.halted.
       if (!running) s.auto_round = 0;
     });
-  });
+  }, true);  // watchdog; a failed poll must not pop an error toast
 }
 
 // A session remembers the model it last used, but that model can disappear: the
@@ -8928,7 +8977,22 @@ void UiApp::refresh_model_availability() {
   std::string sid = active_sid();
   call_async("model.allEnabled", Json::object(),
              [this, sid](const BackendResult& r) {
-    if (!r.ok) return;   // a failed check must not block sending
+    if (!r.ok) {
+      // A failed CHECK must not leave a dead send button. The old early return
+      // kept whatever `model_available` the stashed view had (often false from
+      // an earlier failure), so a session could show 发送 permanently disabled
+      // even though the model was fine. Let the send itself report a real
+      // backend error if there is one.
+      bool same = (sid == st_.active_tab) || sid.empty();
+      std::string cur = same ? st_.model : views_.get_or_create(sid).model;
+      if (cur.empty()) return;
+      if (same) {
+        update([&](AppState& s) { s.model_available = true; });
+      } else {
+        views_.get_or_create(sid).model_available = true;
+      }
+      return;
+    }
     std::vector<std::string> ids;
     // The composer needs the model's CONFIGURED thinking levels, not a guess from
     // its name. `thinking_levels_for()` is a hardcoded name whitelist (o1/claude/
@@ -9033,7 +9097,7 @@ void UiApp::refresh_model_availability() {
         toast(tr("上次使用的模型已不可用，请重新选择"));
       }
     });
-  });
+  }, true);  // passive availability check; failures are handled by keeping send usable
 }
 
 void UiApp::refresh_server_status() {
@@ -11060,7 +11124,15 @@ VNodePtr UiApp::build_overlays() {
       // globally, so there is no native fallback to fall back to).
       item(tr("剪切"), "scissors", [this]() { dom_.exec_edit("cut"); });
       item(tr("复制"), "copy", [this]() { dom_.exec_edit("copy"); });
-      item(tr("粘贴"), "paste", [this]() { dom_.exec_edit("paste"); });
+      item(tr("粘贴"), "paste", [this]() {
+        // Native adapters read the OS clipboard themselves; script-initiated
+        // clipboard reads are refused by WebView2, which is why right-click
+        // paste did nothing. The browser build has no native clipboard and
+        // falls back to navigator.clipboard.
+        std::string clip = dom_.read_clipboard_text();
+        if (!clip.empty()) dom_.insert_text_at_caret(clip);
+        else dom_.exec_edit("paste");
+      });
       item(tr("全选"), "arrow-up-from-bracket", [this]() { dom_.exec_edit("selectAll"); });
       sep();
       item(tr("清空输入"), "eraser", [this]() {
@@ -11089,7 +11161,10 @@ void UiApp::send_message() {
   // Skipped when there is no backend at all (the local demo path) - that mode has
   // no model to resolve and is used by the UI tests and the standalone preview.
   if (backend_ && (st_.model.empty() || !st_.model_available)) {
+    // A send that silently refuses reads as a dead button/Enter key (exactly the
+    // report). Open the picker: that IS the next action.
     toast(st_.model.empty() ? tr("请先选择模型") : tr("该模型已不可用，请重新选择"));
+    if (st_.providers_loaded) open_model_picker("composer", "");
     return;
   }
   std::string text = st_.session_input;
@@ -12036,13 +12111,19 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
                  [this, sid, prov](const BackendResult&) {
         // Persist the provider on the SESSION too: send/continue read it from
         // sessionSettings, so a restart keeps routing to the picked connection.
-        call_async("session.setProvider", Json{{"sid", sid}, {"providerId", prov}});
-        call_async("session.refreshConfig", Json{{"sid", sid}});
-        // The context window follows the model, so the water level must be
-        // recomputed (the old percentage belongs to the old window).
-        load_session_usage(sid);
-        // A different model is usually a different PROVIDER: the balance is stale.
-        load_balances(false);
+        // PROVIDER BEFORE refreshConfig. The two used to be queued together and
+        // could run in either order on the worker pool; refreshConfig then read
+        // the OLD provider and the session's stored routing disagreed with the
+        // model button ("通过别的方式切换还是可能调用错误的那个").
+        call_async("session.setProvider", Json{{"sid", sid}, {"providerId", prov}},
+                   [this, sid](const BackendResult&) {
+          call_async("session.refreshConfig", Json{{"sid", sid}});
+          // The context window follows the model, so the water level must be
+          // recomputed (the old percentage belongs to the old window).
+          load_session_usage(sid);
+          // A different model is usually a different PROVIDER: balance is stale.
+          load_balances(false);
+        });
       });
     }
     toast(tr("已切换到 ") + model_id);

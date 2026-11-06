@@ -20,6 +20,10 @@ const char* subagent_status_str(SubagentStatus s) {
 Json SubagentRecord::to_json() const {
   Json j = Json::object();
   j["id"] = id;
+  // Events are routed by `sid`. Without it, subagent.done from a BACKGROUND
+  // session landed on the active tab (empty sid counts as active) and could
+  // clear/fold the wrong transcript.
+  j["sid"] = parent_sid;
   j["parentSid"] = parent_sid;
   j["kind"] = kind;
   j["task"] = task;
