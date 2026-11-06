@@ -3113,3 +3113,19 @@ The process of project: P0 环境搭建 + P1 AppCore
     （拖拽条/弹出锚点/分割条），让 wasm/webview 两个适配器都不认识业务类名；这是下一轮独立重构，不在本轮
     为赶进度硬塞。
   - **测试**：438 用例 4093 断言全过；web / webview 双变体编译通过。原生窗口冒烟：设置/会话正常渲染。
+
+
+<115>(FIXED): 阈值与短视图彻底解耦；并找到上一轮“默认关闭”实际没生效的原因（SettingsStore 里还写着 80）。
+  - **阈值 ≠ 短视图**：`history.compressAtPct` 只是“某次调用完发现窗口到了 X%”的**触发信号**；达到阈值后
+    怎么处理是另一个独立选择。新增 `history.compactAction`：默认 `"warn"` —— 只发
+    `context.compactSuggested` 提示，**历史原样完整发送**；只有显式选 `"shortView"` 才折叠旧轮。
+    `force_compress`（手动压缩）仍然折叠，因为那是用户主动点的。设置页现在是两个独立控件：
+    “上下文水位阈值”（默认关闭）和“达到阈值时”（默认仅提醒）。
+  - **上一轮为什么“默认关闭”没生效**：`SettingsStore::default_value` 里 `history.compressAtPct` 的默认值
+    仍是 80。宿主和 UI 读取时虽然写了 0，但设置层总会返回 80，所以默认行为其实还是自动压缩。这正是
+    “同一事实多处默认值”的重复来源。现在 SettingsStore 默认 0，并新增 `history.compactAction = "warn"`；
+    `settings_new_keys_defaults` 用例同步断言。阈值设置不再隐含短视图。
+  - **提示**：到水位时 UI toast “上下文已到 X%：历史仍完整保留；可在设置里选择是否压缩”，不再静默折叠。
+  - **测试**：440 用例 4109 断言全过。新增 `water_level_warns_without_short_view`（阈值 95% + keepTurns=1
+    仍然一轮不丢）和 `loop_warns_at_water_level_without_dropping_history`（发提示事件、请求里仍有最早一轮）；
+    原水位折叠用例显式选择 `shortView`。web / webview 双变体编译通过。

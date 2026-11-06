@@ -1141,6 +1141,12 @@ const Entry kEnTable[] = {
     {"子代理过程", "Subagent process"},
     {"关闭（推荐）", "Off (recommended)"},
     {"默认关闭：完整保留上文与缓存；开启后会改写提示前缀，通常更贵且丢失旧轮", "Off by default: keeps the full history and prefix cache; enabling rewrites the prompt prefix and is usually more expensive"},
+    {"上下文水位阈值", "Context water-level threshold"},
+    {"只是触发信号；默认关闭，完整保留上文与缓存", "Trigger only; off by default, keeps the full history and prefix cache"},
+    {"达到阈值时", "When the threshold is reached"},
+    {"仅提醒（推荐）", "Notify only (recommended)"},
+    {"折叠旧轮（短视图）", "Fold old turns (short view)"},
+    {"仅提醒：历史原样发送；短视图：只保留最近几轮（会改写前缀，通常更贵）", "Notify only: send history unchanged; short view: keep only recent turns (rewrites the prefix, usually more expensive)"},
 };
 
 const int kEnCount = static_cast<int>(sizeof(kEnTable) / sizeof(kEnTable[0]));

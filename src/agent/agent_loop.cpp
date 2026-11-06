@@ -774,14 +774,23 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
                                       {"waterPct", dec.pct},
                                       {"promptTokens", dec.prompt_tokens},
                                       {"contextLimit", dec.context_limit}});
-    } else if (dec.compress) {
-      // Wanted to compact but there was nothing to drop (a single huge turn).
-      // Say so instead of silently doing nothing.
+    } else if (dec.compress &&
+               (hopts.compact_action == "shortView" || hopts.force_compress)) {
+      // Short view / manual compress was requested but there is nothing to drop
+      // (a single huge turn). Say so instead of silently doing nothing.
       emit("context.compressSkipped", Json{{"sid", opts_.sid},
                                            {"reason", dec.reason},
                                            {"turns", full.contains("turns")
                                                          ? full["turns"].size()
                                                          : 0}});
+    } else if (dec.compress) {
+      // The threshold is a SIGNAL. With the default "warn" strategy the full
+      // history still goes out unchanged; the user decides whether to compact.
+      emit("context.compactSuggested", Json{{"sid", opts_.sid},
+                                            {"reason", dec.reason},
+                                            {"waterPct", dec.pct},
+                                            {"promptTokens", dec.prompt_tokens},
+                                            {"contextLimit", dec.context_limit}});
     }
   }
   if (messages.empty()) {

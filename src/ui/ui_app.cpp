@@ -3939,6 +3939,13 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // and a fired timer left a stale "5 分钟后" countdown on screen.
     refresh_pending_wakes();
     if (event == "wake.fired" && !sid.empty()) refresh_loop_state(sid);
+  } else if (event == "context.compactSuggested") {
+    // Threshold reached, strategy = warn (default): history is UNCHANGED. Tell
+    // the user instead of silently folding; the choice lives in Settings.
+    int pct = static_cast<int>(jsonutil::get_int(payload, "waterPct", 0));
+    st_.toast = "上下文已到 " + itos(pct) +
+                "%：历史仍完整保留；可在设置里选择是否压缩";
+    st_.toast_deadline_ms = now_ms() + kToastMs * 2;
   } else if (event == "context.compressed") {
     int dropped = static_cast<int>(jsonutil::get_int(payload, "droppedTurns", 0));
     st_.toast = "上下文已压缩" + (dropped > 0 ? "（折叠 " + itos(dropped) + " 条）" : "");
@@ -9833,7 +9840,7 @@ VNodePtr UiApp::build_settings() {
     // 反而更贵；被折叠的旧轮也不再原样进入上下文。只有用户显式选择阈值
     // 才开启。给档位而不是让用户填百分比，因为"多少算满"本来就是个经验值。
     // 键名与后端一致：history.compressAtPct。
-    body.add(comp::field(tr("自动压缩阈值"), comp::select(
+    body.add(comp::field(tr("上下文水位阈值"), comp::select(
         std::vector<std::string>{"60%", "70%", "80%", "90%", tr("关闭（推荐）")},
         [&]() {
           int n = sv_int(st_.settings_values, "history.compressAtPct", 0);
@@ -9843,7 +9850,22 @@ VNodePtr UiApp::build_settings() {
       int idx = std::atoi(v.c_str());
       const int vals[5] = {60, 70, 80, 90, 0};
       set_setting("history.compressAtPct", vals[idx < 0 || idx > 4 ? 4 : idx]);
-    }), tr("默认关闭：完整保留上文与缓存；开启后会改写提示前缀，通常更贵且丢失旧轮")));
+    }), tr("只是触发信号；默认关闭，完整保留上文与缓存")));
+    // The threshold and the strategy are TWO decisions. Reaching the water level
+    // used to imply "keep only recent turns" - setting a threshold silently
+    // enabled short view. Now the default action at the threshold is a NOTICE.
+    body.add(comp::field(tr("达到阈值时"), comp::select(
+        std::vector<std::string>{tr("仅提醒（推荐）"), tr("折叠旧轮（短视图）")},
+        [&]() {
+          return sv_str(st_.settings_values, "history.compactAction", "warn") ==
+                         "shortView"
+                     ? 1
+                     : 0;
+        }(),
+        [this](const std::string& v) {
+      set_setting("history.compactAction", std::atoi(v.c_str()) == 1 ? "shortView"
+                                                                    : "warn");
+    }), tr("仅提醒：历史原样发送；短视图：只保留最近几轮（会改写前缀，通常更贵）")));
     // This page used to carry three more knobs. Only the threshold above is a
     // real control:
     //   * "保留最近轮数" - the number of full turns kept when compaction runs is an

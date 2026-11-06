@@ -429,13 +429,18 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   // (or an explicit "compact now"). The API/provider deals with a long context;
   // we do not pre-emptively drop history.
 
-  // The compaction DECISION (water level / forced) is made by should_compress.
+  // The TRIGGER (water level / forced) is decided by should_compress. The
+  // STRATEGY is separate: reaching the threshold only WARNS by default; folding
+  // old turns happens only when the user explicitly picked the short-view mode
+  // (or pressed the manual compress action). Setting a threshold must never be
+  // read as "enable short view".
   int64_t raw_tokens = estimate_tokens(turns);
   CompressDecision dec = should_compress(opts_, raw_tokens);
-  bool must_fold = dec.compress;
+  const bool short_view = opts_.compact_action == "shortView";
+  bool must_fold = opts_.force_compress || (dec.compress && short_view);
   if (must_fold) {
     // Keep the newest `keep_turns` turns and fold everything older. That is the
-    // only way a forced/water-level compaction is guaranteed to change anything.
+    // only way a forced/short-view compaction is guaranteed to change anything.
     size_t keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 1;
     if (keep >= total) keep = total > 1 ? total - 1 : total;
     size_t fold_to = total > keep ? total - keep : 0;

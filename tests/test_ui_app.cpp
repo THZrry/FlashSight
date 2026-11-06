@@ -1271,12 +1271,11 @@ FS_TEST(uiapp_settings_page) {
   }
 }
 
-// Compaction has exactly ONE control: the water-level threshold. "最近轮次" as a
-// window and "token 硬上限" were removed because both compacted on EVERY turn
-// regardless of the water level. "保留最近轮数" and "立即压缩" followed: the
-// first is an internal detail nobody can observe, the second only armed a flag
-// for the NEXT turn and so did nothing when pressed. This test pins the survivors
-// so a future edit cannot quietly bring the fake knobs back.
+// Compaction has TWO independent controls: WHEN to look (the water-level
+// threshold) and WHAT to do when it fires (notify only / short view). Setting a
+// threshold must not imply the short view. The old "最近轮次" window and "token
+// 硬上限" compacted on EVERY turn and were removed, as were "保留最近轮数" (an
+// invisible internal value) and "立即压缩" (armed a flag for the next turn).
 FS_TEST(uiapp_history_settings_keep_only_the_threshold_knobs) {
   NullDom dom;
   AppState st = AppState::make();
@@ -1284,8 +1283,10 @@ FS_TEST(uiapp_history_settings_keep_only_the_threshold_knobs) {
   app.mount();
   app.open_modal_page("settings");
   app.update([](AppState& s) { s.settings_nav = "model_prefs"; });
-  EXPECT_TRUE(dump_has(dom, "自动压缩阈值"));
+  EXPECT_TRUE(dump_has(dom, "上下文水位阈值"));
+  EXPECT_TRUE(dump_has(dom, "达到阈值时"));
   EXPECT_TRUE(dump_has(dom, "关闭"));  // the "off" option of the threshold
+  EXPECT_TRUE(dump_has(dom, "仅提醒"));
   EXPECT_FALSE(dump_has(dom, "保留最近轮数"));
   EXPECT_FALSE(dump_has(dom, "立即压缩"));
   EXPECT_FALSE(dump_has(dom, "最近轮次"));

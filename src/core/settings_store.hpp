@@ -84,6 +84,9 @@ constexpr char kKeyHistoryTokenBudget[] = "history.tokenBudget";  // 默认 3200
 // 就折叠旧轮。默认 0 = 关闭：压缩改写提示前缀，会让 provider 的前缀缓存失效
 // （通常更贵），并且旧轮不再原样进入上下文；只有用户显式开启才允许。
 constexpr char kKeyHistoryCompressAtPct[] = "history.compressAtPct";  // 默认 0
+// 达到阈值后的动作（与阈值本身解耦）："warn" 只提醒、历史原样发送（默认）；
+// "shortView" 才折叠旧轮。阈值 != 短视图。
+constexpr char kKeyHistoryCompactAction[] = "history.compactAction";  // 默认 warn
 // 显式开启压缩时保留的最近轮数。压缩不是清空，最近几轮必须全量保留。
 constexpr char kKeyHistoryKeepTurns[] = "history.keepTurns";  // 默认 8
 // 防过拟合开关（agent-loop.md 5；默认关）

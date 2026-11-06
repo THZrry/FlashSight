@@ -7,6 +7,7 @@
 //   * the usage view can report cache hit rate and per-turn cost,
 //   * a checklist step can be delegated with its transcript kept out of the
 //     main conversation.
+#include <algorithm>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -105,12 +106,35 @@ FS_TEST(compress_defaults_to_off) {
   EXPECT_TRUE(all.find("answer 5") != std::string::npos);
 }
 
+// Setting a threshold is a SIGNAL, not a strategy. With the default "warn"
+// action the water level may be crossed, but the history still goes out whole -
+// even though keep_turns would have dropped old turns if folding were enabled.
+FS_TEST(water_level_warns_without_short_view) {
+  HistoryBuilder::Options opts;
+  opts.system_prefix = "sys";
+  opts.context_limit = 10000;
+  opts.compress_at_pct = 80;
+  opts.last_prompt_tokens = 9500;  // 95% -> trigger
+  opts.keep_turns = 1;             // would drop everything older if folded
+  EXPECT_EQ(opts.compact_action, std::string("warn"));
+  auto d = HistoryBuilder::should_compress(opts, 99999);
+  EXPECT_TRUE(d.compress);         // the signal fires
+  HistoryResult hr = HistoryBuilder(opts).build_neutral(make_full(6));
+  EXPECT_FALSE(hr.compressed);     // ...but nothing is dropped
+  std::string all;
+  for (auto& m : hr.messages) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find("question 0 with") != std::string::npos);
+  EXPECT_TRUE(all.find("answer 5") != std::string::npos);
+}
+
 // ---------- 水位触发时压缩确实发生，且最近 keep_turns 轮全量保留 ----------
 FS_TEST(compress_water_level_keeps_recent_turns) {
   HistoryBuilder::Options opts;
   opts.system_prefix = "sys";
   opts.context_limit = 10000;
   opts.compress_at_pct = 80;
+  // Opt-in strategy: the threshold alone only warns now.
+  opts.compact_action = "shortView";
   opts.last_prompt_tokens = 9000;  // 90% -> water-level trigger
   // keep_turns counts STORED turns (user and assistant each count): 4 keeps the
   // last two exchanges.
@@ -137,6 +161,7 @@ FS_TEST(compress_actually_shrinks_messages) {
   opts.system_prefix = "sys";
   opts.context_limit = 10000;
   opts.compress_at_pct = 80;
+  opts.compact_action = "shortView";
   opts.keep_turns = 2;
   Json full = make_full(30);
   // Uncompressed size.
@@ -168,8 +193,10 @@ FS_TEST(loop_emits_compressed_event_on_water_level) {
   opts.permission = "full";
   opts.history.system_prefix = "sys";
   opts.history.keep_turns = 1;
-  // Auto-compaction is OFF by default now; this test covers the opt-in path.
+  // The threshold is only the trigger; this test covers the opt-in short-view
+  // strategy that actually folds.
   opts.history.compress_at_pct = 80;
+  opts.history.compact_action = "shortView";
   opts.context.auto_mode = false;
   std::vector<std::string> events;
   std::vector<Json> payloads;
@@ -198,6 +225,59 @@ FS_TEST(loop_emits_compressed_event_on_water_level) {
   EXPECT_EQ(jsonutil::get<std::string>(payloads[0], "reason", ""),
             std::string("water-level"));
   EXPECT_TRUE(jsonutil::get_int(payloads[0], "waterPct", 0) >= 90);
+}
+
+// Threshold + default strategy: warn, send everything. The old code treated
+// "threshold reached" as "short view", so merely enabling a threshold silently
+// folded history. The two decisions are separate.
+FS_TEST(loop_warns_at_water_level_without_dropping_history) {
+  AgentLoop::Options opts;
+  opts.sid = "s_warn";
+  opts.permission = "full";
+  opts.history.system_prefix = "sys";
+  opts.history.keep_turns = 1;
+  opts.history.compress_at_pct = 80;       // trigger ON
+  // compact_action defaults to "warn"
+  opts.context.auto_mode = false;
+  std::vector<std::string> events;
+  std::vector<Json> suggested;
+  opts.event = [&](const std::string& e, const Json& p) {
+    events.push_back(e);
+    if (e == "context.compactSuggested") suggested.push_back(p);
+  };
+  AgentLoop loop(std::move(opts));
+  loop.context_limit = 10000;
+  loop.set_last_prompt_tokens(9500);
+  Json full = make_full(10);
+  loop.load_history = [&full](Json* out) -> FsResult {
+    *out = full;
+    return FsResult::success();
+  };
+  std::vector<ModelCallRequest> requests;
+  loop.call_model = [&requests](const ModelCallRequest& req, ModelCallResult* out,
+                                const std::function<void(const std::string&)>&) {
+    requests.push_back(req);
+    out->text = "ok";
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json::object());
+  };
+  ASSERT_TRUE(loop.send("next").ok());
+  ASSERT_TRUE(!suggested.empty());
+  EXPECT_EQ(jsonutil::get<std::string>(suggested[0], "reason", ""),
+            std::string("water-level"));
+  EXPECT_TRUE(jsonutil::get_int(suggested[0], "waterPct", 0) >= 90);
+  EXPECT_TRUE(std::find(events.begin(), events.end(), "context.compressed") ==
+              events.end());
+  // The full transcript is still in the request, including the oldest turn.
+  ASSERT_TRUE(!requests.empty());
+  std::string sent;
+  for (auto& m : requests[0].messages) {
+    sent += jsonutil::get<std::string>(m, "content", "");
+  }
+  EXPECT_TRUE(sent.find("question 0 with") != std::string::npos);
+  EXPECT_TRUE(sent.find("answer 9") != std::string::npos);
 }
 
 // ---------- loop：request_compress 下一轮强制压缩 ----------

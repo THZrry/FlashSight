@@ -293,15 +293,16 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
       opts.thinking = jsonutil::get<std::string>(ss, "thinking", "");
     }
   }
-  // Compaction settings. Only TWO knobs remain, and both mean what they say:
-  // the water-level threshold and how much stays verbatim when it fires.
-  // (recent-turns and token-budget were removed: they folded history on every
-  // turn regardless of the water level.)
+  // Compaction settings. THREE independent facts: WHEN to look (threshold),
+  // WHAT to do when it fires (compactAction: warn by default / shortView), and
+  // how much stays verbatim if folding is chosen.
   if (deps_.setting) {
     Json cp = deps_.setting(opts.pid, "history.compressAtPct", Json(0));
     Json kt = deps_.setting(opts.pid, "history.keepTurns", Json(8));
+    Json ca = deps_.setting(opts.pid, "history.compactAction", Json("warn"));
     if (cp.is_number()) opts.history.compress_at_pct = static_cast<int>(cp.get<int64_t>());
     if (kt.is_number()) opts.history.keep_turns = static_cast<int>(kt.get<int64_t>());
+    if (ca.is_string()) opts.history.compact_action = ca.get<std::string>();
   }
   opts.event = [this](const std::string& e, const Json& p) { emit(e, p); };
   auto loop = std::unique_ptr<AgentLoop>(new AgentLoop(std::move(opts)));
@@ -874,8 +875,10 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
       HistoryBuilder::Options hopts = loop->history_options();
       Json cp = deps_.setting(ctx.pid, "history.compressAtPct", Json(0));
       Json kt = deps_.setting(ctx.pid, "history.keepTurns", Json(8));
+      Json ca = deps_.setting(ctx.pid, "history.compactAction", Json("warn"));
       if (cp.is_number()) hopts.compress_at_pct = static_cast<int>(cp.get<int64_t>());
       if (kt.is_number()) hopts.keep_turns = static_cast<int>(kt.get<int64_t>());
+      if (ca.is_string()) hopts.compact_action = ca.get<std::string>();
       loop->set_history_options(hopts);
     }
     if (deps_.context_limit) loop->context_limit = deps_.context_limit(ctx.model);
