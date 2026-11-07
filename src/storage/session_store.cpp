@@ -399,6 +399,10 @@ ghc::filesystem::path SessionFileStore::todos_path(const std::string& sid) const
   return ps_.session_dir(sid) / "todos.json";
 }
 
+ghc::filesystem::path SessionFileStore::compaction_path(const std::string& sid) const {
+  return ps_.session_dir(sid) / "compaction.json";
+}
+
 std::vector<std::string> SessionFileStore::list_terminal_logs(const std::string& sid) const {
   std::vector<std::string> out;
   ghc::filesystem::path d = ps_.terminals_dir(sid);

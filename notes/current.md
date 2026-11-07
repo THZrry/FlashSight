@@ -1,4 +1,4 @@
-﻿# FlashSight Notes
+# FlashSight Notes
 
 The process of project: P0 环境搭建 + P1 AppCore
 
@@ -3239,3 +3239,16 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **跨平台**：新逻辑都在共享 UI/工具层；WhaleUI 的拖动加左键判断，`copy_text` 走 `whaleui_clipboard_set_text`（不再空实现）；Win32 剪贴板仍只在 `_WIN32` 分支，非 Windows 保留 `navigator.clipboard` 回退。
   - **测试/构建**：448 用例 4186 断言全过（含严格 edit schema、读回编号、revert、长列表、todo 恢复/erase）。web / webview / whaleui 三变体编译通过；原生窗口实测右键拖动无效左键有效、17 会话默认 10 行、终端只剩“所有终端/新增”。live 工具快照路径未在真实模型回合复测（当时没有可跑的回合），由代码路径与快照用例覆盖。
   - **闪退**：事件日志里没有 FlashSight 的 Application Error；同一时间只有 0x10e GPU bugcheck / BlueScreen 记录，应用侧无崩溃转储，无法本地复现。已保留/加强 WebView 批量与 UTF-8 防护，但没有证据把那次退出归到具体代码路径。
+
+
+<121>(FIXED/AUDIT): 压缩结果持久化并在重开时复用（修复 16% 却超窗→9% 短视图和缓存重排）、read_file 行号改用 U+2502、自动轮取消硬上限（迭代续跑）、0x10e 崩溃溯源。
+  - **重开丢压缩内容**：压缩摘要以前只存在于当轮 `build_neutral` 的内存里，从不落盘。重开会把完整历史重新发一遍，把已经被摘要覆盖的旧轮再算进窗口，于是“打开显示 16%，发送却说超上下文，自动短视图后变 9%”，早期信息被丢。新增会话级 `compaction.json`（`{summary, compactedTurns, lastTurnId}`）：
+    - `AgentLoop` 每轮开始前加载；全量压缩后保存，没有全量摘要时短视图也保存（见下）。重开/下一轮直接复用摘要。
+    - `build_neutral` 只回放 `summary + turns[compactedTurns..]`，窗口判断用**有效历史**（摘要 + 未折叠轮次），不再用完整 transcript；旧轮不会重复计数。
+    - `lastTurnId` 校验 + 折叠区间内 `forgotten` 检查：fork/rollback/forget 后不会把旧摘要套到不同内容上。
+    - 短视图在**没有全量摘要**时也落盘（否则已存在的长会话每次重开都会重新生成同一个短视图）；但它不会覆盖全量摘要，且记录 `mode=short-view`，换回大窗口时会被忽略并恢复完整历史。摘要头不会每次压缩都嵌套一层。
+    - 复用摘要后 prompt 前缀是 system + summary + 固定边界后的轮次，重开不再重排旧上下文；provider 缓存命中是否恢复需真实回合验证（本次没有可跑的模型回合）。
+  - **read_file 行号歧义**：`N\tline` 遇到 tab 缩进文件会变成 `2\t\tcode`，模型无法分辨哪个 tab 是行号。改成 `N│line`（U+2502），返回 `lineFormat`，描述明确“第一个 │ 前是行号，│ 后是原样内容（tab 保留），不要把 N│ 写进 newText”。`numbers=false` 仍是原文。
+  - **自动轮硬上限**：`max_auto_continues` 默认改为 0（不设硬上限），停止交给 todo/plan/空轮/重复守卫。直接把 12→无限会让原来的 `return run_loop(next)` 递归无限加深（测试直接 `0xC00000FD` 栈溢出）；现在 `run_loop` 用 trampoline：自动轮把下一轮 messages/model/tools 放进 `auto_pending_*` 并返回，外层循环继续，不递归。测试里会无限产生工具调用的桩显式设 cap。
+  - **崩溃溯源**：最新的 `110726-42171-01.dmp` 是 `0x10e`，参数 1 = `0x2D`；按 Microsoft 文档这是 `DdiMapCpuHostAperture` 失败，属于**显卡驱动**不可恢复错误，不是应用异常（Application 日志无 FlashSight Error/WER）。最后一条资源日志 21:23:56：tools 318→359、terms 0→11、handles 478→561（没有失控增长）、pump_gap 53–70ms；21:39:20 系统 bugcheck 后重启。GPU：NVIDIA RTX 4060 Laptop 32.0.15.9174（2025-12-30）/ Intel Iris Xe 32.0.101.7076。建议更新显卡驱动；应用侧无法捕获 kernel bugcheck。资源日志与用户描述的 20:31 有一小时差，以事件日志时间为准。
+  - **测试/构建**：454 用例 4223 断言全过（新增压缩持久化/重开不短视图/短视图状态复用/陈旧状态忽略/loop 复用摘要、tab 缩进行号、自动轮 cap 用例）。web / webview / whaleui 三变体编译通过。

@@ -529,14 +529,36 @@ FS_TEST(edit_file_requires_exact_range_fields) {
   // read_file shows real line numbers by default; numbers=false is raw.
   FsResult numbered = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
   ASSERT_TRUE(numbered.ok());
-  EXPECT_TRUE(numbered.data["content"].get<std::string>().find("2\tBETA") !=
-              std::string::npos);
+  EXPECT_TRUE(numbered.data["content"].get<std::string>().find(
+                  "2\xE2\x94\x82" "BETA") != std::string::npos);
   FsResult raw = reg.invoke(ctx, "read_file",
                             Json{{"path", "a.txt"}, {"numbers", false}});
   ASSERT_TRUE(raw.ok());
   EXPECT_EQ(raw.data["content"].get<std::string>(), std::string("alpha\nBETA\ngamma\ndelta\n"));
 }
 
+
+// Tab-indented files must not make the line-number gutter look like content:
+// the separator is U+2502, and the bytes after it are the untouched line.
+FS_TEST(read_file_gutter_is_not_a_tab) {
+  fstest::TempDir td("readgutter");
+  ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj);
+  {
+    std::ofstream ofs((proj / "tabs.txt").string(), std::ios::binary);
+    ofs << "\talpha\n\t\tbeta\n";
+  }
+  ToolRegistry reg;
+  register_file_tools(&reg);
+  ToolContext ctx;
+  ctx.cwd = proj.string();
+  FsResult r = reg.invoke(ctx, "read_file", Json{{"path", "tabs.txt"}});
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.data["content"].get<std::string>(),
+            std::string("1\xE2\x94\x82\talpha\n2\xE2\x94\x82\t\tbeta\n"));
+  EXPECT_TRUE(r.data["lineFormat"].get<std::string>().find("N\xE2\x94\x82text") !=
+              std::string::npos);
+}
 
 // ---------- ask：手动模式发事件；自动模式拒绝 ----------
 FS_TEST(ask_tool_modes) {
@@ -747,7 +769,7 @@ FS_TEST(file_tools_flow) {
   rargs["limit"] = 1;
   FsResult rr = reg.invoke(ctx, "read_file", rargs);
   ASSERT_TRUE(rr.ok());
-  EXPECT_EQ(rr.data["content"].get<std::string>(), std::string("2\tline2\n"));
+  EXPECT_EQ(rr.data["content"].get<std::string>(), std::string("2\xE2\x94\x82line2\n"));
   // Three lines, not four: the trailing newline terminates line 3 rather than
   // starting an empty line 4 (an edit addressed at line 4 would otherwise
   // silently append instead of failing).
@@ -895,7 +917,7 @@ FS_TEST(file_tools_flow) {
   EXPECT_EQ(er3.data["changes"][0]["before"].get<std::string>(), std::string("line1"));
   FsResult rr3a = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
   ASSERT_TRUE(rr3a.ok());
-  EXPECT_TRUE(rr3a.data["content"].get<std::string>().find("1\tX") == 0);
+  EXPECT_TRUE(rr3a.data["content"].get<std::string>().find("1\xE2\x94\x82X") == 0);
 
   // 行号越界 -> 拒绝（不会静默追加）
   Json e4 = Json::object();

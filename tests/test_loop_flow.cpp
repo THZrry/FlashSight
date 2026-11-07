@@ -697,6 +697,66 @@ FS_TEST(loop_auto_continue_keeps_last_answer) {
   EXPECT_TRUE(has_answer);
 }
 
+// ---------- 压缩结果持久化：下一次 run 直接复用摘要，不重放全文 ----------
+FS_TEST(loop_reuses_durable_compaction_state) {
+  Json full = Json::object();
+  Json turns = Json::array();
+  for (int i = 0; i < 4; ++i) {
+    Json t = Json::object();
+    t["role"] = i % 2 == 0 ? "user" : "assistant";
+    t["turnId"] = "t" + std::to_string(i);
+    if (i % 2 == 0) t["promptRaw"] = "old question " + std::to_string(i);
+    else t["streamSummary"] = "old answer " + std::to_string(i);
+    turns.push_back(t);
+  }
+  full["turns"] = turns;
+  Json saved;
+  AgentLoop::Options first;
+  first.sid = "s_comp";
+  first.permission = "full";
+  first.history.force_compress = true;
+  AgentLoop loop1(std::move(first));
+  loop1.load_history = [&full](Json* out) {
+    *out = full;
+    return FsResult::success();
+  };
+  loop1.compaction_save = [&saved](const std::string&, const Json& s) { saved = s; };
+  loop1.call_model = [](const ModelCallRequest&, ModelCallResult* out,
+                        const std::function<void(const std::string&)>&) {
+    out->text = "first";
+    return FsResult::success();
+  };
+  ASSERT_TRUE(loop1.send("go").ok());
+  ASSERT_TRUE(saved.is_object());
+  EXPECT_TRUE(saved.contains("summary"));
+
+  // A NEW loop (next turn / next process) loads that state. The request must be
+  // system + durable summary + the new user turn, not the four old turns.
+  AgentLoop::Options second;
+  second.sid = "s_comp";
+  second.permission = "full";
+  AgentLoop loop2(std::move(second));
+  loop2.compaction_load = [&saved](const std::string&) { return saved; };
+  loop2.load_history = [&full](Json* out) {
+    *out = full;
+    return FsResult::success();
+  };
+  Json seen;
+  loop2.call_model = [&seen](const ModelCallRequest& req, ModelCallResult* out,
+                             const std::function<void(const std::string&)>&) {
+    seen = req.messages;
+    out->text = "second";
+    return FsResult::success();
+  };
+  ASSERT_TRUE(loop2.send("next").ok());
+  ASSERT_TRUE(seen.is_array());
+  EXPECT_EQ((int)seen.size(), 3);  // system + summary + the new user turn
+  std::string all;
+  for (auto& m : seen) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find("compacted") != std::string::npos);
+  EXPECT_TRUE(all.find("next") != std::string::npos);
+}
+
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------
 FS_TEST(loop_unattended_denies_instead_of_waiting) {
   AgentLoop::Options opts;

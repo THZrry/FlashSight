@@ -93,10 +93,10 @@ class AgentLoop {
     // in one line, and the user can continue.
     int max_tool_rounds = 200;              // 单轮最多模型往返次数（安全上限）
     int max_repeat_calls = 3;               // 连续相同调用上限
-    // 12 stopped long tasks midway ("自动12轮后没有继续发起了"). The cap is only a
-    // runaway guard, not a work budget; open todos/plan should be allowed to
-    // finish. 50 rounds still bounds a runaway loop.
-    int max_auto_continues = 50;            // 自动模式最多自动续跑轮数
+    // No hard auto-continue cap: open todos / an open plan are the stop
+    // condition, and the empty-round + repeat guards already stop a runaway.
+    // <=0 means unlimited. A configured positive value is only a test/safety net.
+    int max_auto_continues = 0;
     // 无人值守（子代理）：需要批准的动作直接拒绝并回填原因，而不是进入
     // waiting 等一个不会有人按的按钮。
     bool unattended = false;
@@ -223,6 +223,11 @@ class AgentLoop {
 
   // 会话历史（Host 注入：返回 full.json）
   std::function<FsResult(Json*)> load_history;
+  // Durable compaction state for this session. Loaded before each turn and
+  // saved after a FULL compression, so reopening the app reuses the summary
+  // instead of replaying a transcript that no longer fits the window.
+  std::function<Json(const std::string& sid)> compaction_load;
+  std::function<void(const std::string& sid, const Json& state)> compaction_save;
   // 落库一轮
   std::function<void(const Json&)> persist_turn;
   // Write the IN-FLIGHT turn to disk (a crash-safe snapshot), called every couple
@@ -262,6 +267,12 @@ class AgentLoop {
   std::string pending_call_id_;
   std::string current_call_id_;
   Json pending_tool_results_ = Json::array();
+  // Auto-continue trampoline (see run_loop): a round that wants another one
+  // records the next conversation here instead of recursing into run_loop.
+  bool auto_pending_ = false;
+  Json auto_pending_messages_ = Json::array();
+  std::string auto_pending_model_;
+  Json auto_pending_tools_ = Json::array();
 
   // Approval gate state. A model reply can carry several tool calls; when one
   // of them needs the user's yes, the rest must not be lost. `gate_messages_`

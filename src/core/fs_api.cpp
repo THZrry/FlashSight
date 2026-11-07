@@ -446,6 +446,29 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     std::string err;
     jsonutil::write_atomic(st.todos_path(owner).string(), items, &err);
   };
+  // Durable compaction state. This is conversation context, not a cache: a
+  // reopened session must start from the summary the previous run compressed to,
+  // not re-send every stored turn and fall back to a lossy short view.
+  deps.compaction_load = [sm_todo](const std::string& sid) -> Json {
+    if (sid.empty()) return Json::object();
+    SessionFileStore st = sm_todo->make_store(sid);
+    if (!st.exists(sid)) return Json::object();
+    std::ifstream in(st.compaction_path(sid).string(), std::ios::binary);
+    if (!in) return Json::object();
+    try {
+      Json j = Json::parse(in);
+      return j.is_object() ? j : Json::object();
+    } catch (...) {
+      return Json::object();
+    }
+  };
+  deps.compaction_save = [sm_todo](const std::string& sid, const Json& state) {
+    if (sid.empty()) return;
+    SessionFileStore st = sm_todo->make_store(sid);
+    if (!st.exists(sid)) return;
+    std::string err;
+    jsonutil::write_atomic(st.compaction_path(sid).string(), state, &err);
+  };
   // Crash-safe live snapshot. Stored as runtime.json's `live` field: runtime.json
   // is explicitly "cache, may be deleted", which is exactly the right lifetime for
   // an in-flight turn (it is cleared when the turn lands).

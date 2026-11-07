@@ -474,6 +474,171 @@ FS_TEST(history_replays_every_turn_without_a_water_level) {
   EXPECT_TRUE(all.find("compacted") == std::string::npos);
 }
 
+// ---------- durable compaction: reopen reuses the summary ----------
+FS_TEST(compaction_state_replays_summary_and_only_new_turns) {
+  Json turns = Json::array();
+  for (int i = 0; i < 4; ++i) {
+    Json t = Json::object();
+    t["role"] = i % 2 == 0 ? "user" : "assistant";
+    t["turnId"] = "t" + std::to_string(i);
+    if (i % 2 == 0) t["promptRaw"] = "old question " + std::to_string(i);
+    else t["streamSummary"] = "old answer " + std::to_string(i);
+    turns.push_back(t);
+  }
+  Json full = Json::object();
+  full["turns"] = turns;
+  HistoryBuilder::Options first;
+  first.system_prefix = "sys";
+  first.force_compress = true;
+  HistoryResult folded = HistoryBuilder(first).build_neutral(full);
+  ASSERT_TRUE(folded.compressed);
+  EXPECT_EQ(folded.mode, std::string("full"));
+  EXPECT_EQ(folded.compacted_turns, int64_t(4));
+  EXPECT_EQ(folded.compacted_turn_id, std::string("t3"));
+  EXPECT_FALSE(folded.summary.empty());
+
+  // A later run (new process) sees the same four turns plus one new turn and
+  // starts from the persisted summary: only the new turn is replayed verbatim.
+  Json later = turns;
+  Json neu = Json::object();
+  neu["role"] = "user";
+  neu["turnId"] = "t4";
+  neu["promptRaw"] = "brand new question";
+  later.push_back(neu);
+  Json full2 = Json::object();
+  full2["turns"] = later;
+  HistoryBuilder::Options second;
+  second.system_prefix = "sys";
+  second.prior_summary = folded.summary;
+  second.compacted_turns = folded.compacted_turns;
+  second.prior_turn_id = folded.compacted_turn_id;
+  HistoryResult hr = HistoryBuilder(second).build_neutral(full2);
+  EXPECT_FALSE(hr.compressed);
+  // system + summary + the one new user turn
+  EXPECT_EQ((int)hr.messages.size(), 3);
+  std::string all;
+  for (auto& m : hr.messages) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find("brand new question") != std::string::npos);
+}
+
+// The concrete regression: open at a low water level, send, and the full
+// transcript no longer fits the window -> a short view silently replaced the
+// earlier summary. With durable state the effective prompt is summary + new
+// turns and the short view must NOT trigger.
+FS_TEST(compaction_state_prevents_short_view_after_reopen) {
+  Json turns = Json::array();
+  for (int i = 0; i < 4; ++i) {
+    Json t = Json::object();
+    t["role"] = i % 2 == 0 ? "user" : "assistant";
+    t["turnId"] = "t" + std::to_string(i);
+    std::string body(4000, 'x');
+    if (i % 2 == 0) t["promptRaw"] = body;
+    else t["streamSummary"] = body;
+    turns.push_back(t);
+  }
+  Json full = Json::object();
+  full["turns"] = turns;
+  HistoryBuilder::Options first;
+  first.system_prefix = "sys";
+  first.force_compress = true;
+  HistoryResult folded = HistoryBuilder(first).build_neutral(full);
+  ASSERT_TRUE(folded.compressed);
+
+  Json full2 = Json::object();
+  full2["turns"] = turns;
+  HistoryBuilder::Options reopened;
+  reopened.system_prefix = "sys";
+  reopened.context_limit = 2000;      // full transcript is far larger
+  reopened.last_prompt_tokens = 100;
+  reopened.prior_summary = folded.summary;
+  reopened.compacted_turns = folded.compacted_turns;
+  reopened.prior_turn_id = folded.compacted_turn_id;
+  HistoryResult ok = HistoryBuilder(reopened).build_neutral(full2);
+  EXPECT_FALSE(ok.compressed);        // summary fits; no short view
+  EXPECT_TRUE(ok.mode.empty());
+
+  // Same window WITHOUT the durable summary: this is the old failure mode.
+  HistoryBuilder::Options bare = reopened;
+  bare.prior_summary.clear();
+  bare.compacted_turns = 0;
+  bare.prior_turn_id.clear();
+  HistoryResult short_view = HistoryBuilder(bare).build_neutral(full2);
+  EXPECT_TRUE(short_view.compressed);
+  EXPECT_EQ(short_view.mode, std::string("short-view"));
+}
+
+// A fork/rollback changes turn ids; a summary bound to the old turns must be
+// ignored rather than applied to different content.
+FS_TEST(stale_compaction_state_is_ignored) {
+  Json turns = Json::array();
+  for (int i = 0; i < 3; ++i) {
+    Json t = Json::object();
+    t["role"] = "user";
+    t["turnId"] = "new" + std::to_string(i);
+    t["promptRaw"] = "question " + std::to_string(i);
+    turns.push_back(t);
+  }
+  Json full = Json::object();
+  full["turns"] = turns;
+  HistoryBuilder::Options opts;
+  opts.system_prefix = "sys";
+  opts.prior_summary = "[Earlier conversation was compacted]\nSTALE";
+  opts.compacted_turns = 2;
+  opts.prior_turn_id = "old-turn-id";
+  HistoryResult hr = HistoryBuilder(opts).build_neutral(full);
+  EXPECT_FALSE(hr.compressed);
+  std::string all;
+  for (auto& m : hr.messages) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find("STALE") == std::string::npos);
+  EXPECT_TRUE(all.find("question 0") != std::string::npos);
+}
+
+// A short view gets a durable baseline too, otherwise an EXISTING long session
+// (no compaction.json yet) regenerates the same lossy short view on every
+// reopen. It is reused only while the window is still too small.
+FS_TEST(short_view_state_is_reused_until_the_window_grows) {
+  Json turns = Json::array();
+  for (int i = 0; i < 20; ++i) {
+    Json t = Json::object();
+    t["role"] = i % 2 == 0 ? "user" : "assistant";
+    t["turnId"] = "t" + std::to_string(i);
+    std::string body(2000, 'x');
+    if (i % 2 == 0) t["promptRaw"] = body;
+    else t["streamSummary"] = body;
+    turns.push_back(t);
+  }
+  Json full = Json::object();
+  full["turns"] = turns;
+  HistoryBuilder::Options tight;
+  tight.system_prefix = "sys";
+  tight.context_limit = 1500;
+  tight.last_prompt_tokens = 100;
+  HistoryResult first = HistoryBuilder(tight).build_neutral(full);
+  ASSERT_TRUE(first.compressed);
+  EXPECT_EQ(first.mode, std::string("short-view"));
+  EXPECT_TRUE(first.compacted_turns > 0);
+  EXPECT_TRUE(first.compacted_turns < 20);
+  EXPECT_FALSE(first.summary.empty());
+
+  HistoryBuilder::Options reuse = tight;
+  reuse.prior_summary = first.summary;
+  reuse.compacted_turns = first.compacted_turns;
+  reuse.prior_turn_id = first.compacted_turn_id;
+  reuse.prior_mode = "short-view";
+  HistoryResult again = HistoryBuilder(reuse).build_neutral(full);
+  EXPECT_FALSE(again.compressed);
+  EXPECT_TRUE(again.messages.size() < 20);
+
+  HistoryBuilder::Options roomy = reuse;
+  roomy.context_limit = 100000;  // switched back to a large-window model
+  HistoryResult restored = HistoryBuilder(roomy).build_neutral(full);
+  EXPECT_FALSE(restored.compressed);
+  std::string all;
+  for (auto& m : restored.messages) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find(std::string(2000, 'x')) != std::string::npos);
+  EXPECT_TRUE(restored.messages.size() > again.messages.size());
+}
+
 // ---------- 遗忘 / keyPoints 折叠 ----------
 FS_TEST(history_forget_and_keypoints) {
   HistoryBuilder::Options opts;

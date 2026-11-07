@@ -28,6 +28,11 @@ struct HistoryResult {
   //                  switched to a smaller model): keep the newest turns and
   //                  fold the rest. The UI must tell the user this happened.
   std::string mode;
+  // The fold that was produced (mode=="full") or reused. Persisting it lets the
+  // next run start from the summary instead of replaying every stored turn.
+  std::string summary;
+  int64_t compacted_turns = 0;     // leading turns represented by `summary`
+  std::string compacted_turn_id;   // turnId of the last compacted turn
 };
 
 // 提示词前缀装配（session-history.md 3 定稿顺序）：
@@ -40,8 +45,16 @@ class HistoryBuilder {
     Json tools = Json::array();   // 工具定义（旧字段，保留兼容）
     Json mcp = Json::object();    // skills 与 MCP（旧字段，保留兼容）
     Json disabled_system_tools = Json::array();  // 被禁用的系统工具
-    // 上一次压缩留下的摘要（runtime.json）。没有就把被折叠轮的要点重新拼一遍。
+    // 上一次压缩留下的摘要（compaction.json）。没有就把被折叠轮的要点重新拼一遍。
     std::string prior_summary;
+    // How many leading turns `prior_summary` already represents. 0 = none.
+    // `prior_turn_id` guards against a fork/rollback that changed the turns.
+    int64_t compacted_turns = 0;
+    std::string prior_turn_id;
+    // How the persisted summary was produced: "full" or "short-view". A short
+    // view is only reused while the window is still too small; with a bigger
+    // window the full transcript can be replayed again.
+    std::string prior_mode;
     // 被折叠区间最多保留多少条要点，防止摘要自己撑爆预算。
     int max_fold_points = 40;
     // Messages to replay BEFORE the current turn, for a run that continues an

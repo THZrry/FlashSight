@@ -71,6 +71,11 @@ class SessionFileStore {
   // The task list (todo) of this session, persisted as its own small file so a
   // reopen/restart starts from the checklist the task already had.
   ghc::filesystem::path todos_path(const std::string& sid) const;
+  // Durable compaction state: {summary, compactedTurns, lastTurnId}. A summary
+  // is part of the conversation context, not a cache: losing it on restart made
+  // a reopened session replay the full transcript, exceed the window and fall
+  // back to a lossy short view.
+  ghc::filesystem::path compaction_path(const std::string& sid) const;
 
  private:
   ProjectStore ps_;

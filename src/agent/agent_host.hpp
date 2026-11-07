@@ -82,6 +82,11 @@ struct AgentHostDeps {
   // session file; the FsApi side ignores them.
   std::function<Json(const std::string& owner)> todo_load;
   std::function<void(const std::string& owner, const Json& items)> todo_save;
+  // Durable compaction: {summary, compactedTurns, lastTurnId}. Losing it across
+  // a restart makes a reopened session replay the full transcript, blow the
+  // window and regenerate a lossy short view (and an unstable prompt prefix).
+  std::function<Json(const std::string& sid)> compaction_load;
+  std::function<void(const std::string& sid, const Json& state)> compaction_save;
   // 工作流（WorkflowStore）。工具层只转发 {op, sid, ...}
   std::function<FsResult(const Json&, Json*)> workflow_op;
   const Clock* clock = nullptr;

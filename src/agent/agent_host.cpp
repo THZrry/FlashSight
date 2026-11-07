@@ -317,6 +317,13 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
     if (!deps_.load_full) return FsResult::error(ErrCode::kNotSupported, "no history");
     return deps_.load_full(hist_sid, out);
   };
+  loop->compaction_load = [this, hist_sid](const std::string& s) -> Json {
+    if (!deps_.compaction_load) return Json::object();
+    return deps_.compaction_load(s.empty() ? hist_sid : s);
+  };
+  loop->compaction_save = [this](const std::string& s, const Json& state) {
+    if (deps_.compaction_save) deps_.compaction_save(s, state);
+  };
   loop->persist_turn = [this, hist_sid](const Json& turn) {
     persist_turn(hist_sid, turn);
     // Title upkeep runs after a turn lands: the placeholder appears on the first

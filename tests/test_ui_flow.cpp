@@ -302,6 +302,9 @@ FS_TEST(tool_limit_pauses_instead_of_failing) {
   opts.sid = "s_limit";
   opts.permission = "full";
   opts.max_tool_rounds = 3;
+  // This stub keeps returning tool calls, so it would continue forever under the
+  // no-hard-cap product default; bound it explicitly for the test.
+  opts.max_auto_continues = 3;
   Rec rec;
   opts.event = rec.fn();
   AgentLoop loop(std::move(opts));

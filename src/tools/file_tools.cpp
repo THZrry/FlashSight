@@ -328,12 +328,15 @@ void register_file_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "read_file";
     def.description =
-        "读取文件（按行分页；content 每行带真实行号；返回 hash 供 edit_file）. "
-        "Read a file by lines. `content` is prefixed with the REAL 1-based line "
-        "number (`N<TAB>line`) so edit_file start/end can be copied exactly - do "
-        "not count lines yourself. Returns {hash, content, startLine, endLine, "
-        "totalLines, truncated}; pass `hash` to edit_file. Pass numbers=false only "
-        "when you need the exact bytes. Files >1MB need explicit offset/limit.";
+        "读取文件（按行分页；content 每行 = 行号 + U+2502 + 原文，例如 `12│code`；"
+        "│ 后的内容才是文件原文，tab 缩进原样保留）. "
+        "Read a file by lines. Default `content` is `N│line`: everything AFTER the "
+        "first │ is the exact line (leading tabs preserved), and the `N│` prefix is "
+        "NOT part of the file - never copy it into newText. Use the N before │ for "
+        "edit_file start/end; do not count lines yourself. Returns {hash, content, "
+        "startLine, endLine, totalLines, truncated, lineFormat}; pass `hash` to "
+        "edit_file. Pass numbers=false only when you need the exact bytes. Files "
+        ">1MB need explicit offset/limit.";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
@@ -418,7 +421,11 @@ void register_file_tools(ToolRegistry* registry) {
             line = utf8::truncate(line, kMaxLineChars, " …(line truncated)");
             clipped = true;
           }
-          if (numbers) out += std::to_string(i + 1) + "\t";
+          // A TAB separator was ambiguous: a file indented with tabs produced
+          // `12\t\tcode`, and the model could read the gutter tab as one of the
+          // file's tabs. U+2502 (│) is visually distinct and never appears as
+          // leading indentation, so "everything after the first │" is exact.
+          if (numbers) out += std::to_string(i + 1) + "\xE2\x94\x82";
           out += line;
           out += "\n";
         }
@@ -430,6 +437,12 @@ void register_file_tools(ToolRegistry* registry) {
         data["truncated"] = end < total;
         if (clipped) data["longLinesTruncated"] = true;
         data["eol"] = eol == "\r\n" ? "crlf" : "lf";
+        data["numbers"] = numbers;
+        if (numbers) {
+          data["lineFormat"] =
+              "N│text; the N│ prefix is the line number, text after the first │ "
+              "is the exact line (tabs preserved)";
+        }
         // Say WHICH encoding the bytes were: the model is reading a transcoded
         // copy, so an edit that writes CJK back must not assume the file was
         // UTF-8 to begin with. ("utf-8" is the overwhelmingly common case and is

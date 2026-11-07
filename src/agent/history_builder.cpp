@@ -464,8 +464,16 @@ std::string HistoryBuilder::make_fold(const Json& turns, size_t from, size_t to,
     }
     digest += line + "\n";
   }
-  std::string out = "[Earlier conversation was compacted]\n";
-  if (!prior.empty()) out += prior + "\n";
+  std::string out;
+  if (prior.empty()) {
+    out = "[Earlier conversation was compacted]\n";
+  } else if (prior.rfind("[Earlier conversation was compacted]", 0) == 0) {
+    // The durable summary already carries the header; do not nest a second one
+    // on every later compaction.
+    out = prior + "\n";
+  } else {
+    out = "[Earlier conversation was compacted]\n" + prior + "\n";
+  }
   if (!points.empty()) out += "[Key points]\n" + points;
   if (!digest.empty()) out += "[Turn digest]\n" + digest;
   return out;
@@ -551,30 +559,74 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   }
   const Json& turns = full["turns"];
   size_t total = turns.size();
-  // NO recent-turns window.
-  //
-  // `recent_turns` used to cut everything older than N turns and fold it, which
-  // meant a session longer than N compacted on EVERY turn (the "每轮对话似乎都会
-  // 压缩" report) no matter what the water level said. All turns are read now, and
-  // the ONLY trigger is the compaction decision below - which is the water level
-  // (or an explicit "compact now"). The API/provider deals with a long context;
-  // we do not pre-emptively drop history.
+  // NO recent-turns window. The water level (or an explicit "compact now") is
+  // the only trigger; the API/provider deals with a long context.
 
-  // Two DIFFERENT reasons to compact, with different strategies:
-  //
-  // 1. The water level reached its threshold (or the user pressed compress):
-  //    FULL compression - every stored turn folds into the summary. That is the
-  //    request: "到达时全量进行压缩". It does not keep recent turns verbatim.
-  // 2. The current model window cannot hold the prompt (the user switched to a
-  //    smaller-window model): FULL compression would throw away the recent
-  //    working context, so fall back to SHORT VIEW - keep the newest turns and
-  //    fold the rest - and tell the UI this was automatic.
-  int64_t raw_tokens = estimate_tokens(turns);
+  // ---- durable compaction state -------------------------------------------
+  // A previous run may have folded a leading prefix of turns into a summary.
+  // Reusing it is not an optimisation: without it a reopened session replays
+  // the whole transcript, exceeds the window and regenerates a lossy short
+  // view, losing early information the summary already held.
+  std::string prior = opts_.prior_summary;
+  size_t start = 0;
+  bool prior_ok = false;
+  // Full transcript size, used to decide whether a persisted SHORT VIEW is
+  // still necessary (the user may have switched to a bigger-window model).
+  int64_t raw_tokens_all = estimate_tokens(turns);
+  if (!prior.empty() && opts_.compacted_turns > 0 &&
+      opts_.compacted_turns <= static_cast<int64_t>(total)) {
+    size_t c = static_cast<size_t>(opts_.compacted_turns);
+    bool ok = true;
+    if (!opts_.prior_turn_id.empty()) {
+      ok = c > 0 && turns[c - 1].is_object() &&
+           jsonutil::get<std::string>(turns[c - 1], "turnId", "") ==
+               opts_.prior_turn_id;
+    }
+    // A forgotten turn inside the compacted prefix means the summary still
+    // contains text the user asked to drop: discard it and rebuild.
+    for (size_t i = 0; ok && i < c; ++i) {
+      if (!turns[i].is_object() ||
+          jsonutil::get<bool>(turns[i], "forgotten", false)) {
+        ok = false;
+      }
+    }
+    // A short view is a fallback for a tight window. If the FULL transcript
+    // fits the current window again (model switched back), replay all of it.
+    if (ok && opts_.prior_mode == "short-view" && opts_.context_limit > 0 &&
+        raw_tokens_all <= opts_.context_limit) {
+      ok = false;
+    }
+    if (ok) {
+      start = c;
+      prior_ok = true;
+    }
+  }
+  if (!prior_ok) {
+    prior.clear();
+    start = 0;
+  }
+
+  // Effective history = the durable summary + turns not yet folded. Using the
+  // FULL transcript here was the "reopen at 16%, send says over window" bug:
+  // the turns the summary already replaced were counted again.
+  auto range_tokens = [](const Json& arr, size_t from, size_t to) -> int64_t {
+    int64_t sum = 0;
+    for (size_t i = from; i < to && i < arr.size(); ++i) {
+      if (!arr[i].is_object()) continue;
+      if (jsonutil::get<bool>(arr[i], "forgotten", false)) continue;
+      sum += estimate_tokens(arr[i]);
+    }
+    return sum;
+  };
+  int64_t prior_tokens = prior.empty() ? 0 : estimate_tokens(prior);
+  int64_t raw_tokens = raw_tokens_all;
+  int64_t effective_tokens = prior_tokens + range_tokens(turns, start, total);
   CompressDecision dec = should_compress(opts_, raw_tokens);
   bool window_short = false;
   if (opts_.context_limit > 0) {
-    int64_t need = raw_tokens > opts_.last_prompt_tokens ? raw_tokens
-                                                         : opts_.last_prompt_tokens;
+    int64_t need = effective_tokens > opts_.last_prompt_tokens
+                       ? effective_tokens
+                       : opts_.last_prompt_tokens;
     if (need > opts_.context_limit) window_short = true;
   }
   const bool fold = opts_.force_compress || dec.compress || window_short;
@@ -584,22 +636,23 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
       keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 1;
       if (keep >= total) keep = total > 1 ? total - 1 : total;
     }
-    size_t fold_to = total > keep ? total - keep : 0;
-    // Fold from the start, but never fold turns the caller asked to forget
-    // anyway (they are dropped, not summarised).
-    if (fold_to > 0) {
+    size_t fold_to = total > keep ? total - keep : start;
+    if (fold_to < start) fold_to = start;
+    // Nothing new to fold: every stored turn is already represented by the
+    // durable summary. Reuse it instead of reporting a compression that did
+    // not change anything.
+    if (!(prior_ok && fold_to == start)) {
       // A short view is used precisely when the window is tight, so its summary
       // must be small too; full compression can carry a richer digest.
       size_t digest_cap = window_short ? 6000 : 32000;
-      std::string fold = make_fold(turns, 0, fold_to, opts_.prior_summary,
+      std::string fold = make_fold(turns, start, fold_to, prior,
                                    opts_.max_fold_points, digest_cap);
       Json summary = Json::object();
       summary["role"] = "user";
       summary["content"] = fold;
-      Json with_fold = Json::array();
-      with_fold.push_back(messages[0]);
+      Json with_fold = messages;
       with_fold.push_back(summary);
-      int64_t used = 0;
+      int64_t used = estimate_tokens(fold);
       for (size_t i = fold_to; i < total; ++i) {
         const Json& t = turns[i];
         if (!t.is_object()) continue;
@@ -613,17 +666,29 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
       out.est_tokens = used;
       out.compressed = true;
       out.mode = window_short ? "short-view" : "full";
-      out.compressed_from = 0;
+      out.compressed_from = static_cast<int64_t>(start);
       out.compressed_to = static_cast<int64_t>(fold_to);
       out.dropped_turns = static_cast<int64_t>(fold_to);
+      out.summary = fold;
+      out.compacted_turns = static_cast<int64_t>(fold_to);
+      if (fold_to > 0 && turns[fold_to - 1].is_object()) {
+        out.compacted_turn_id =
+            jsonutil::get<std::string>(turns[fold_to - 1], "turnId", "");
+      }
       return out;
     }
   }
-  // No compaction: replay EVERY turn, in order. This is the normal path now - the
-  // window/budget used to fold older turns unconditionally, which compacted a long
-  // session on every single turn regardless of the water level.
-  int64_t used = 0;
-  for (size_t i = 0; i < total; ++i) {
+  // Normal replay: the durable summary (if any) followed by every turn it does
+  // not cover. This is the path a reopened session takes when the summary makes
+  // the prompt fit; it must NOT be reported as a new compression.
+  if (prior_ok) {
+    Json summary = Json::object();
+    summary["role"] = "user";
+    summary["content"] = prior;
+    messages.push_back(summary);
+  }
+  int64_t used = prior_tokens;
+  for (size_t i = start; i < total; ++i) {
     const Json& t = turns[i];
     if (!t.is_object()) continue;
     if (jsonutil::get<bool>(t, "forgotten", false)) continue;

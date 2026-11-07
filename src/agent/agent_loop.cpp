@@ -725,6 +725,18 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
 FsResult AgentLoop::run_turn(const std::string& user_text) {
   state_ = LoopState::kPlanning;
   HistoryBuilder::Options hopts = opts_.history;
+  // Reuse the durable summary from a previous run/turn. Without this a reopened
+  // session starts from the full transcript, which no longer fits the window
+  // and gets replaced by a lossy short view.
+  if (compaction_load) {
+    Json st = compaction_load(opts_.sid);
+    if (st.is_object()) {
+      hopts.prior_summary = jsonutil::get<std::string>(st, "summary", "");
+      hopts.compacted_turns = jsonutil::get_int(st, "compactedTurns", 0);
+      hopts.prior_turn_id = jsonutil::get<std::string>(st, "lastTurnId", "");
+      hopts.prior_mode = jsonutil::get<std::string>(st, "mode", "full");
+    }
+  }
   // The system prefix is owned by AgentContext, which is refreshed by the host
   // before every send. If the host did not provide one (unit tests, embedded
   // use), fall back to the legacy explicit prefix.
@@ -772,6 +784,25 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
     HistoryResult hist = hb.build_neutral(full);
     messages = hist.messages;
     if (!messages.is_array()) messages = Json::array();
+    // A FULL compression is durable context: persist the summary and the prefix
+    // it replaces, so the next turn/run replays summary + new turns instead of
+    // the entire transcript. A SHORT view is also saved when there was no
+    // durable full summary yet (an existing long session would otherwise
+    // regenerate the same lossy short view on every reopen); it is never
+    // allowed to overwrite a durable FULL summary.
+    bool save_compaction =
+        hist.compressed && hist.compacted_turns > 0 && !hist.summary.empty() &&
+        (hist.mode == "full" ||
+         (hist.mode == "short-view" && hopts.prior_mode != "full"));
+    if (save_compaction && compaction_save) {
+      Json state = Json::object();
+      state["summary"] = hist.summary;
+      state["compactedTurns"] = hist.compacted_turns;
+      state["lastTurnId"] = hist.compacted_turn_id;
+      state["mode"] = hist.mode;
+      state["savedAt"] = WallClock().now_ms();
+      compaction_save(opts_.sid, state);
+    }
     if (hist.compressed) {
       int64_t total_turns = full.contains("turns") && full["turns"].is_array()
                                 ? static_cast<int64_t>(full["turns"].size())
@@ -847,12 +878,27 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
 // stayed on disk with no answer, no tool log, no error. "我前面讲的所有内容都
 // 必须保存" means the failure path has to write too.
 FsResult AgentLoop::run_loop(Json messages, const std::string& model, const Json& tools) {
-  try {
-    return run_loop_impl(std::move(messages), model, tools);
-  } catch (const std::exception& e) {
-    return fail_turn(std::string("internal error: ") + e.what());
-  } catch (...) {
-    return fail_turn("internal error");
+  // Auto-continue used to recurse (`return run_loop(new_messages, ...)`), so an
+  // unbounded auto mode eventually overflowed the stack. Iterate instead: each
+  // round returns with `auto_pending_` set, and this loop starts the next one
+  // with the same (conservative) exception handling.
+  Json cur_messages = std::move(messages);
+  std::string cur_model = model;
+  Json cur_tools = tools;
+  for (;;) {
+    auto_pending_ = false;
+    FsResult r;
+    try {
+      r = run_loop_impl(std::move(cur_messages), cur_model, cur_tools);
+    } catch (const std::exception& e) {
+      return fail_turn(std::string("internal error: ") + e.what());
+    } catch (...) {
+      return fail_turn("internal error");
+    }
+    if (!auto_pending_) return r;
+    cur_messages = std::move(auto_pending_messages_);
+    cur_model = auto_pending_model_;
+    cur_tools = std::move(auto_pending_tools_);
   }
 }
 
@@ -1255,7 +1301,8 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
 
   // ---- auto mode: continue while the plan is still open ----
   if (auto_continue) {
-    if (auto_continues_ < opts_.max_auto_continues) {
+    if (opts_.max_auto_continues <= 0 ||
+        auto_continues_ < opts_.max_auto_continues) {
       ++auto_continues_;
       state_ = LoopState::kIdle;
       // Announce the round BEFORE it starts. Without this the next round's text
@@ -1306,7 +1353,12 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
       last_user_text_ = nudge;
       current_auto_round_.store(auto_continues_);
       turn_started_ms_ = WallClock().now_ms();
-      return run_loop(msgs, opts_.model, tools);
+      // Hand the next round to the run_loop() trampoline instead of recursing.
+      auto_pending_ = true;
+      auto_pending_messages_ = msgs;
+      auto_pending_model_ = opts_.model;
+      auto_pending_tools_ = tools;
+      return FsResult::success();
     }
     emit("auto.halted", Json{{"sid", opts_.sid},
                              {"reason", "auto-continue limit reached"},
