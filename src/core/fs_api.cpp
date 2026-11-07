@@ -1277,18 +1277,51 @@ void FsApi::maybe_upgrade_title(const std::string& sid) {
   }
 }
 FsResult FsApi::session_set_model(const std::string& sid, const std::string& model) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   FsResult r = sessions_->set_model(sid, model);
-  if (r.ok()) sessions_->append_system_op(sid, "setModel", Json{{"model", model}});
+  if (r.ok()) {
+    sessions_->append_system_op(sid, "setModel", Json{{"model", model}});
+    // A session can be MID-TURN (auto rounds) when the user changes the model.
+    // Updating only the stored settings left the live AgentLoop on the old model
+    // and, worse, the old provider for every following auto round.
+    Json full;
+    if (agent_host_ && sessions_->load_full(sid, &full).ok()) {
+      Json ss = full.value("sessionSettings", Json::object());
+      agent_host_->set_session_model(
+          sid, model, jsonutil::get<std::string>(ss, "provider", ""));
+    }
+  }
   return r;
+}
+
+FsResult FsApi::session_set_model_provider(const std::string& sid,
+                                           const std::string& model,
+                                           const std::string& provider) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  FsResult rm = sessions_->set_model(sid, model);
+  if (!rm.ok()) return rm;
+  FsResult rp = sessions_->set_provider(sid, provider);
+  if (!rp.ok()) return rp;
+  sessions_->append_system_op(sid, "setModel", Json{{"model", model}});
+  sessions_->append_system_op(sid, "setProvider", Json{{"provider", provider}});
+  if (agent_host_) agent_host_->set_session_model(sid, model, provider);
+  return FsResult::success();
 }
 FsResult FsApi::session_set_thinking(const std::string& sid, const std::string& thinking) {
   return sessions_->set_thinking(sid, thinking);
 }
 FsResult FsApi::session_set_provider(const std::string& sid,
                                      const std::string& provider) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   FsResult r = sessions_->set_provider(sid, provider);
   if (r.ok()) {
     sessions_->append_system_op(sid, "setProvider", Json{{"provider", provider}});
+    Json full;
+    if (agent_host_ && sessions_->load_full(sid, &full).ok()) {
+      Json ss = full.value("sessionSettings", Json::object());
+      std::string model = jsonutil::get<std::string>(ss, "model", "");
+      if (!model.empty()) agent_host_->set_session_model(sid, model, provider);
+    }
   }
   return r;
 }

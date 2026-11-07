@@ -109,6 +109,12 @@ class FsApi {
   // Never overwrites a title the USER typed (meta.titleUser = true).
   void maybe_upgrade_title(const std::string& sid);
   FsResult session_set_model(const std::string& sid, const std::string& model);
+  // Model + provider are one routing identity. Applying them together (and to a
+  // LIVE loop) is what stops an auto-continue round from using the provider the
+  // session had before the picker changed it.
+  FsResult session_set_model_provider(const std::string& sid,
+                                      const std::string& model,
+                                      const std::string& provider);
   FsResult session_set_thinking(const std::string& sid, const std::string& thinking);
   FsResult session_set_permission(const std::string& sid, const std::string& perm);
   FsResult session_set_permission_confirm(const std::string& sid, const std::string& perm,

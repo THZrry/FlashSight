@@ -3200,3 +3200,19 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **测试**：441 用例 4126 断言全过；新增 live snapshot 的 interim 分离断言、切标签清理完成菜单/picker 状态。
     web / webview 双变体编译通过。原生窗口实测：弹层不再盖住输入框、单击外部关闭且焦点留在 textarea、
     单击切换同名校验的供应商、右键粘贴、空模型 Enter 打开选择器。
+
+
+<119>(FIXED/AUDIT): 供应商路由的活循环同步 + WebView 批量写入的 UTF-8 根因（卡死/模板页） + edit_file 纯区间替换 + 历史精简/缓存 + 切页气泡去重 + 终端显示编号。
+  - **A6 会话实际走 Happy（auto 轮仍用旧 provider）**：`session.setModel`/`setProvider` 只写了 sessionSettings，没有更新已经存在的 AgentLoop。用户中途把模型从 Happy 换到 A6 后，正在自动轮的这个 loop 仍用旧 provider；下一条请求去了 Happy（A6 日志为空）。现在新增 `session_set_model_provider(sid, model, provider)`，选择器只发一个 `session.setModel`（带 providerId），后端在同一个锁里写两项并立即 `AgentHost::set_session_model()`；单独的 setModel/setProvider 也会同步活 loop。Provider 标签在紧凑模式也不再隐藏（同名模型切换后按钮必须能看出换了供应商）。
+  - **11:00 卡死的现场**：`%TEMP%\flashsight_res.log` 在冻结前出现 pump_gap 186/257ms，随后 10:59:16 后没有 pump；同时该会话 144 条消息、933 个工具块。usage 记录显示 11:01:44 后端仍完成了一次 135s、402k/401k cache 的调用——即 UI 线程卡住、后台继续。根因在 WebView DOM 桥：每帧几万个 ExecuteScript 调用把 WebView2 队列压垮；而且只要**任意一个 op 的字符串含非法 UTF-8**，`widen_string` 会让整批脚本静默不执行。
+  - **批量写入的正确实现**：`enqueue` 改成 JSON 元组数组，一次 flush 最多 256KB，由 `__fsDomBatch` 顺序执行且逐 op try/catch；flush 前做 `utf8::valid/sanitize` 兜底。之前“批量丢尾”的真实触发点是供应商模板页的首字母标记：`t.name.substr(0,1)` 把中文名截成单字节 0xE8，整批脚本非法 → 模板页从 26 张变成 0 张。现在取首个 **UTF-8 字符**，并验证 26 张卡恢复。render 的 do/while 也加了 16 次上限，防反馈环把 UI 线程永久占住。
+  - **切页 User-User-Assistant-Assistant(running)**：`load_session` 的 keep 逻辑保留了本地无 turn_id 的 streaming assistant，attach_live_turn 又追加一条；自动轮的用户轮在磁盘里渲染成 system 分隔条，live snapshot 的 "SYSTEM: continue" 又被追加成 user。现在 load 时丢弃本地 live assistant（运行/崩溃由 live snapshot 重建，已结束的回合在磁盘上），attach 时若末尾是自动轮 system 分隔条则不再追加 user；live snapshot 的 text 只含当前轮，完成轮的解说进 `live_interim_`（切页后仍在工作过程、非强调色）。
+  - **edit_file 改成纯区间替换**：schema/描述去掉 `expect`，`edits:[{start,end,newText}]`，只校验文件 hash，不再因为“引用的旧文本不一致”拒绝；`start` 缺省时 end 视为单行。用户明确说过“区间替换而不是文本替换”，以前的 `expected text does not match lines 25-25` 就是文本校验造成的。
+  - **历史重放精简（full.json 仍完整）**：
+    - 工具 **参数** 以前原样重放：write_file 的 content、edit_file 的 newText/expect、plan_update 的整篇文档每轮都再发一遍。新增 `project_tool_args`：write_file 只留 path/bytes，edit 只留 path+行区间+newBytes，plan_update 只留 status，terminal 命令截断，其他有界。
+    - 工具 **结果** 去掉了 `truncated`/`detail` 这类重放噪声，目录名用逗号紧凑连接；read_file 样本降到 400 字节；plan 结果只留 status/path/exists。
+    - 结果 JSON 用紧凑 dump（无缩进空格）。新增用例断言 8000 字符的 write_file content / 4000 字符 edit newText 不会进入历史。
+  - **缓存 52% 的中间可变内容是 git**：`build_system` 的环境块里带着 branch/dirty/ahead/behind；模型一编辑/提交，system 前缀就变，provider 的 prefix cache 从这里全部失效。git 状态移到 **runtime 尾块**（追加在最新 user 消息），system 字节稳定；新增用例比较 dirty 前后 system 完全相等、runtime 含 git。
+  - **终端编号**：短前台命令即使记录被裁剪也消耗 tid，列表会显示 #107。UI 现在显示终端在用户列表中的序号（1..N），不再显示后端 tid；新增用例。
+  - **语义确认**：todo 是列表（未清空自动轮继续），plan 是文档（未 done 自动轮继续，用于产出 todo），workflow 是并行大流水线；WhaleUI 那次 plan_update done 但 todo 还有未完成项，所以自动轮继续是符合规则的，不是把 plan 当成 todo。
+  - **测试**：445 用例 4150 断言全过；web / webview 双变体编译通过。原生窗口实测：供应商模板 26 张、选择器单击切换/外部关闭焦点保留、右键粘贴、空模型 Enter 打开选择器。另：清理了此前验证时误写进 new1 会话 111 的两条测试消息。

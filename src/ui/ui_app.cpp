@@ -99,6 +99,19 @@ std::string itos(int v) {
 // Cut text for DISPLAY at a UTF-8 character boundary. Half a CJK character is
 // invalid UTF-8, and these strings go straight to the DOM adapter (which
 // re-encodes them), so a cut inside a sequence paints a replacement glyph.
+// Byte length of the FIRST UTF-8 character (1..4). Taking substr(0,1) of a CJK
+// string produced a lone 0xE8; one invalid byte makes the whole webview DOM
+// batch fail to widen, so the page silently stayed empty.
+size_t first_utf8_len(const std::string& s) {
+  if (s.empty()) return 0;
+  unsigned char c = static_cast<unsigned char>(s[0]);
+  if (c < 0x80) return 1;
+  if ((c & 0xE0) == 0xC0) return 2;
+  if ((c & 0xF0) == 0xE0) return 3;
+  if ((c & 0xF8) == 0xF0) return 4;
+  return 1;
+}
+
 std::string cut_display(const std::string& s, size_t max_bytes,
                         const std::string& suffix) {
   if (s.size() <= max_bytes) return s;
@@ -792,6 +805,16 @@ void UiApp::pump() {
       }
     }
   }
+}
+
+std::string UiApp::term_display_no(const std::string& tid) const {
+  for (size_t i = 0; i < st_.term_order.size(); ++i) {
+    if (st_.term_order[i] == tid) return itos(static_cast<int>(i) + 1);
+  }
+  for (size_t i = 0; i < st_.terminals.size(); ++i) {
+    if (st_.terminals[i].tid == tid) return itos(static_cast<int>(i) + 1);
+  }
+  return "?";
 }
 
 // Terminal refresh, driven by its own (faster) timer: a terminal must keep up
@@ -1568,6 +1591,12 @@ void UiApp::load_session(const std::string& sid) {
       for (size_t i = 0; i < st_.messages.size(); ++i) {
         const comp::ChatMsg& lm = st_.messages[i];
         if (!lm.turn_id.empty()) continue;
+        // DROP local live ASSISTANT bubbles. A turn is persisted before
+        // turn.done, so a finished one is on disk; a running/crashed one is
+        // reconstructed from the live snapshot by attach_live_turn. Keeping the
+        // local copy as well produced two assistant bubbles in a row after a
+        // page switch (User-User-Assistant-Assistant).
+        if (lm.role == "assistant") continue;
         bool seen = false;
         for (size_t k = msgs.size(); k-- > 0;) {
           if (msgs[k].role == lm.role && msgs[k].text == lm.text) {
@@ -2209,6 +2238,14 @@ void UiApp::attach_live_turn(const std::string& sid) {
             have_user = true;
             break;
           }
+        }
+        // An AUTO round is stored as a user turn but renders as a SYSTEM
+        // divider. Appending the raw "SYSTEM: continue" prompt after that
+        // divider produced User-User after a page switch. The divider already
+        // represents it.
+        if (!have_user && user_text.compare(0, 7, "SYSTEM:") == 0 &&
+            !s.messages.empty() && s.messages.back().role == "system") {
+          have_user = true;
         }
         if (!have_user) {
           comp::ChatMsg u;
@@ -4168,9 +4205,11 @@ void UiApp::render() {
   const int64_t render_t0 = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count();
   render_in_progress_ = true;
+  int render_passes = 0;
   do {
     render_pending_ = false;
     ++render_count_;
+    ++render_passes;
     VNodePtr neu = build_shell();
     // Exit direction belongs to the MOVE, not to the page: a page's exit_anim
     // was baked in when it was CREATED, so a page opened by a forward move
@@ -4514,7 +4553,15 @@ void UiApp::render() {
     // drop exit-animated nodes whose animation has finished (they are no longer
     // part of the tree, so nothing else would ever remove them)
     sweep_exits(dom_, now_ms());
-  } while (render_pending_);
+  } while (render_pending_ && render_passes < 16);
+  if (render_pending_) {
+    // A render that keeps asking for another pass is a feedback loop, not a
+    // paint. Drop the pending flag instead of spinning the UI thread forever;
+    // the next real update still renders.
+    render_pending_ = false;
+    std::fprintf(stderr, "[slow] render-loop cut after %d passes msgs=%d\n",
+                 render_passes, static_cast<int>(st_.messages.size()));
+  }
   render_in_progress_ = false;
   {
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -8283,7 +8330,8 @@ VNodePtr UiApp::build_terminal_drawer() {
       H ih = el("div", "td-all-head");
       ih.add(el("span", t.status == "running" ? "term-dot running" : "term-dot")
                  .text("●"));
-      ih.add(el("span", "td-all-name").text("#" + tid + " " + term_display_name(t)));
+      ih.add(el("span", "td-all-name").text("#" + term_display_no(tid) + " " +
+                                            term_display_name(t)));
       ih.add(el("span", "grow"));
       // three states, and the tab one matters: a closed terminal keeps running,
       // so "running" alone would not tell you why it has no tab
@@ -8468,7 +8516,8 @@ VNodePtr UiApp::build_terminal_drawer() {
       load_terminal_grid(tid);
     });
     tb.add(el("span", t.status == "running" ? "term-dot running" : "term-dot").text("●"));
-    tb.add(el("span", "td-tab-name").text("#" + t.tid + " " + term_display_name(t)));
+    tb.add(el("span", "td-tab-name").text("#" + term_display_no(t.tid) + " " +
+                                          term_display_name(t)));
     // rename (the name is cosmetic; the shell keeps running)
     tb.add(comp::icon_button("\u270e", tr("重命名"), [this, tid](const std::string&) {
       update([&](AppState& s) {
@@ -9301,7 +9350,10 @@ VNodePtr UiApp::build_settings() {
         std::string brand = provider_brand_for_endpoint(p.endpoint, p.name);
         H mark = el("span", "pv-item-mark");
         if (!brand.empty()) mark.add(comp::model_icon(brand, p.name, "mi-lg"));
-        else mark.text(p.name.empty() ? "?" : p.name.substr(0, 1));
+        else {
+          size_t clen = first_utf8_len(p.name);
+          mark.text(clen > 0 ? p.name.substr(0, clen) : "?");
+        }
         it.add(mark);
       }
       H top = el("div", "pv-item-top");
@@ -9787,7 +9839,12 @@ VNodePtr UiApp::build_settings() {
           mark = el("span", "pv-tpl-mark brand");
           mark.add(comp::model_icon(brand, t.name, "mi-lg"));
         } else {
-          mark.text(t.name.empty() ? "?" : t.name.substr(0, 1));
+          // FIRST UTF-8 CHARACTER, not the first byte. `substr(0,1)` cut a CJK
+          // name in half; the invalid byte made the whole DOM batch script
+          // invalid UTF-8, so WebView2 silently dropped the entire provider
+          // template page (26 cards).
+          size_t clen = first_utf8_len(t.name);
+          mark.text(clen > 0 ? t.name.substr(0, clen) : "?");
         }
         c.add(mark);
         H tbody = el("div", "pv-tpl-body");
@@ -12107,23 +12164,19 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
     // in provider settings ("保存一遍输入框的思考设置才能更新").
     refresh_model_availability();
     if (!sid.empty()) {
-      call_async("session.setModel", Json{{"sid", sid}, {"model", model_id}},
-                 [this, sid, prov](const BackendResult&) {
-        // Persist the provider on the SESSION too: send/continue read it from
-        // sessionSettings, so a restart keeps routing to the picked connection.
-        // PROVIDER BEFORE refreshConfig. The two used to be queued together and
-        // could run in either order on the worker pool; refreshConfig then read
-        // the OLD provider and the session's stored routing disagreed with the
-        // model button ("通过别的方式切换还是可能调用错误的那个").
-        call_async("session.setProvider", Json{{"sid", sid}, {"providerId", prov}},
-                   [this, sid](const BackendResult&) {
-          call_async("session.refreshConfig", Json{{"sid", sid}});
-          // The context window follows the model, so the water level must be
-          // recomputed (the old percentage belongs to the old window).
-          load_session_usage(sid);
-          // A different model is usually a different PROVIDER: balance is stale.
-          load_balances(false);
-        });
+      // ONE route writes model + provider together and updates the LIVE loop.
+      // Two calls used to race, and an auto-continue round that started between
+      // them kept the old provider - the request went to Happy after the user
+      // picked A6 ("A6 日志没有，全是 0 输出").
+      call_async("session.setModel",
+                 Json{{"sid", sid}, {"model", model_id}, {"providerId", prov}},
+                 [this, sid](const BackendResult&) {
+        call_async("session.refreshConfig", Json{{"sid", sid}});
+        // The context window follows the model, so the water level must be
+        // recomputed (the old percentage belongs to the old window).
+        load_session_usage(sid);
+        // A different model is usually a different PROVIDER: balance is stale.
+        load_balances(false);
       });
     }
     toast(tr("已切换到 ") + model_id);
@@ -12813,7 +12866,8 @@ std::vector<const TermItem*> UiApp::filtered_terminals() const {
       out.push_back(&t);
       continue;
     }
-    std::string name = "#" + t.tid + " " + term_display_name(t) + " " + t.shell;
+    std::string name = "#" + term_display_no(t.tid) + " " + term_display_name(t) +
+                       " " + t.shell;
     bool hit = term_match_one(name, pat);
     if (!hit && st_.term_filter_input) {
       std::map<std::string, std::string>::const_iterator it =

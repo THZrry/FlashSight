@@ -728,6 +728,27 @@ FS_TEST(uiapp_reopened_tab_appends) {
   EXPECT_EQ(ord[2]->tid, std::string("2"));  // appended, not back in the middle
 }
 
+// Visible terminal numbers are the ORDER in the user's list, not the backend
+// tid: short unrecorded commands consumed tids, so a list of 11 terminals could
+// display #107.
+FS_TEST(uiapp_terminal_numbers_are_list_ordinals) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.terminal_open = true;
+    s.terminals.push_back(TermItem{"107", "cmd", "one", "running"});
+    s.terminals.push_back(TermItem{"108", "cmd", "two", "running"});
+    s.term_order = {"107", "108"};
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("#1 ") != std::string::npos);
+  EXPECT_TRUE(d.find("#2 ") != std::string::npos);
+  EXPECT_TRUE(d.find("#107") == std::string::npos);
+}
+
 // The 文件 button uploads (a DOM-adapter binding opens the chooser) instead of
 // opening the file panel; the reply adds ATTACHMENTS above the composer.
 FS_TEST(uiapp_file_button_uploads) {
@@ -4897,6 +4918,76 @@ FS_TEST(uiapp_subagent_detail_orders_process_then_summary) {
   EXPECT_TRUE(proc < result);
   EXPECT_TRUE(d.find("过程记录（按时间顺序，最新在最后）") != std::string::npos);
   EXPECT_TRUE(d.find("结果摘要（已回传主会话）") != std::string::npos);
+}
+
+// A tab reopened during an AUTO round must not append the live "SYSTEM:
+// continue" prompt as a second user bubble after the stored system divider, and
+// must not duplicate the assistant bubble. That produced
+// User-User-Assistant-Assistant(running) after a page switch.
+FS_TEST(uiapp_live_auto_round_does_not_duplicate_bubbles) {
+  class LiveBackend : public IUiBackend {
+   public:
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.info") {
+        r.data = Json{{"meta", Json{{"sid", "s_live"}, {"pid", "p1"}}},
+                      {"sessionSettings",
+                       Json{{"model", "m1"}, {"provider", "pr1"},
+                            {"enterSend", "enter"}}},
+                      {"systemOps", Json::array()}};
+      } else if (method == "session.turns") {
+        r.data = Json{{"turns", Json::array({Json{
+                                     {"role", "user"},
+                                     {"promptRaw", "SYSTEM: 继续。"},
+                                     {"autoRound", 1},
+                                     {"system", true},
+                                     {"turnId", "t1"},
+                                     {"ts", 10}}})},
+                      {"start", 0}, {"total", 1}, {"hasMore", false}};
+      } else if (method == "session.liveTurn") {
+        r.data = Json{{"running", true},
+                      {"text", "partial answer"},
+                      {"userText", "SYSTEM: 继续。"},
+                      {"startedAt", 11},
+                      {"interim", Json::array()},
+                      {"interimAfter", Json::array()}};
+      } else if (method == "model.allEnabled") {
+        r.data = Json{{"models", Json::array(
+                                   {Json{{"id", "m1"}, {"providerId", "pr1"}}})}};
+      } else if (method == "session.todos") {
+        r.data = Json{{"items", Json::array()}};
+      } else if (method == "session.loopState") {
+        r.data = Json{{"state", "idle"}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "s_live");
+    s.providers_loaded = true;
+  });
+  app.show("s_live");
+  const std::vector<comp::ChatMsg>& msgs = app.state().messages;
+  int users = 0;
+  for (size_t i = 0; i < msgs.size(); ++i) {
+    if (msgs[i].role == "user") ++users;
+    if (i > 0 && msgs[i].role == "user" && msgs[i - 1].role == "user") {
+      EXPECT_TRUE(false);  // two user bubbles in a row
+    }
+    if (i > 0 && msgs[i].role == "assistant" && msgs[i - 1].role == "assistant") {
+      EXPECT_TRUE(false);  // two assistant bubbles in a row
+    }
+  }
+  EXPECT_EQ(users, 0);  // the auto prompt is represented by the system divider
+  EXPECT_TRUE(!msgs.empty());
+  EXPECT_TRUE(msgs.back().role == "assistant");
+  EXPECT_EQ(msgs.back().text, std::string("partial answer"));
 }
 
 // ---- 第四十六批：过程解说的锚点 / 规划与清单合一 / 卡片内控件不冒泡 ----

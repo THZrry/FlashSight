@@ -957,6 +957,10 @@ class UiApp {
   // feel like a keyboard, and waiting for the 250ms event pump made keystrokes
   // appear in batches instead of one by one.
   void tick_terminal();
+  // Visible terminal number: the position in the user's terminal list, not the
+  // backend tid. Short foreground commands are pruned from the list but still
+  // consumed a tid, which made the visible numbers jump (#107 for 11 terminals).
+  std::string term_display_no(const std::string& tid) const;
   // Async backend call with a completion handler (browser-safe). The sync
   // call() is unavailable in the wasm build, so all UI actions go through here.
   // `quiet` is for PASSIVE refreshes (availability, usage, todos, loop state):

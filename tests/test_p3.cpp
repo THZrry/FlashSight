@@ -878,7 +878,7 @@ FS_TEST(file_tools_flow) {
   EXPECT_FALSE(er2.ok());
   EXPECT_TRUE(er2.data.contains("stale"));
 
-  // 重新读取后再改：expect 不符 -> 拒绝，并回报真实内容
+  // 重新读取后再改：区间替换只校验 hash，stale 的 expect 文本不能阻止写入
   FsResult rr2 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
   ASSERT_TRUE(rr2.ok());
   Json e3 = Json::object();
@@ -886,8 +886,11 @@ FS_TEST(file_tools_flow) {
   e3["hash"] = rr2.data["hash"];
   e3["edits"] = Json::array({Json{{"start", 1}, {"expect", "WRONG"}, {"newText", "X"}}});
   FsResult er3 = reg.invoke(ctx, "edit_file", e3);
-  EXPECT_FALSE(er3.ok());
-  EXPECT_EQ(er3.data["actual"].get<std::string>(), std::string("line1"));
+  ASSERT_TRUE(er3.ok());
+  EXPECT_EQ(er3.data["changes"][0]["before"].get<std::string>(), std::string("line1"));
+  FsResult rr3a = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(rr3a.ok());
+  EXPECT_TRUE(rr3a.data["content"].get<std::string>().find("X") == 0);
 
   // 行号越界 -> 拒绝（不会静默追加）
   Json e4 = Json::object();

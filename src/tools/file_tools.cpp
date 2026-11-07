@@ -579,15 +579,14 @@ void register_file_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "edit_file";
     def.description =
-        "按行号替换（哈希校验；失败不写盘）. Edit by line range with verification. "
-        "Args: path, hash (from read_file), edits:[{start?, end?, expect?, newText}]. "
-        "`start`/`end` are 1-based inclusive line numbers in the file AS READ. "
-        "`start` may be OMITTED: with `expect` the range is end - lines(expect) + 1..end, "
-        "without it `end` alone is that single line (a 0 start means line 1). "
-        "`expect` is the exact current text of those lines - if it differs, the "
-        "edit is refused and the real text is returned. Multiple edits apply to "
-        "the original line numbers (they are applied bottom-up, so they never "
-        "shift each other).";
+        "按行号区间替换（只校验文件 hash；不做文本匹配）. Replace a LINE RANGE. "
+        "Args: path, hash (from read_file), edits:[{start, end, newText}]. "
+        "`start`/`end` are 1-based inclusive line numbers in the file AS READ; "
+        "`end` defaults to `start` (a single line). The range is replaced "
+        "unconditionally as long as `hash` matches - there is NO expected-text "
+        "comparison (a stale line's wording must not block a range edit). "
+        "Multiple edits use the original line numbers and are applied bottom-up, "
+        "so they never shift each other.";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
@@ -597,15 +596,12 @@ void register_file_tools(ToolRegistry* registry) {
     Json edit = Json::object();
     edit["type"] = "object";
     edit["properties"] = Json{
-        {"start", Json{{"type", "integer"},
-                       {"description", "起始行（1-based，含；可省略：见 description）"}}},
+        {"start", Json{{"type", "integer"}, {"description", "起始行（1-based，含）"}}},
         {"end", Json{{"type", "integer"}, {"description", "结束行（含；默认=start）"}}},
-        {"expect", Json{{"type", "string"},
-                        {"description", "这些行当前的确切内容（不含换行）；不符则拒绝；省略 start 时用它算起点"}}},
         {"newText", Json{{"type", "string"},
                          {"description", "替换后的内容；空串=删除这些行"}}},
     };
-    edit["required"] = Json::array({"newText"});
+    edit["required"] = Json::array({"start", "newText"});
     props["edits"] = Json{{"type", "array"}, {"items", edit},
                           {"description", "要应用的行替换列表"}};
     props["lineEnding"] = Json{{"type", "string"},
@@ -693,12 +689,19 @@ void register_file_tools(ToolRegistry* registry) {
           int end = has_end ? static_cast<int>(jsonutil::get_int(e, "end", 0)) : 0;
           int start = has_start ? static_cast<int>(jsonutil::get_int(e, "start", 0)) : 0;
           if (!has_start) {
-            int expect_lines = 1;
-            for (size_t c = 0; c < expect.size(); ++c) {
-              if (expect[c] == '\n') ++expect_lines;
+            if (!expect.empty()) {
+              // Legacy calls that quoted text but omitted start: derive the
+              // range from the quote (the text is NOT compared any more).
+              int expect_lines = 1;
+              for (size_t c = 0; c < expect.size(); ++c) {
+                if (expect[c] == '\n') ++expect_lines;
+              }
+              start = has_end ? end - expect_lines + 1 : 1;
+              if (start < 1) start = 1;
+            } else {
+              // A range edit with only `end`: replace that single line.
+              start = has_end ? end : 1;
             }
-            start = has_end ? end - expect_lines + 1 : 1;
-            if (start < 1) start = 1;
           } else if (start < 1) {
             start = 1;
           }
@@ -721,35 +724,10 @@ void register_file_tools(ToolRegistry* registry) {
               std::vector<std::string>(lines.begin() + (start - 1),
                                        lines.begin() + end),
               eol, false);
-          // Check 2: content of the lines. Catches off-by-one and stale reads
-          // even when the hash happens to match (e.g. the model edited twice
-          // without re-reading).
-          //
-          // COMPARE WITH NORMALISED NEWLINES. `actual` is joined with the FILE's
-          // EOL, while the model's `expect` uses \n - on a CRLF file every edit
-          // was refused with "expected text does not match" even though the
-          // lines were identical. Line endings are not what is being verified.
-          std::string expect_cmp;
-          expect_cmp.reserve(expect.size());
-          for (size_t c = 0; c < expect.size(); ++c) {
-            if (expect[c] != '\r') expect_cmp += expect[c];
-          }
-          std::string actual_cmp;
-          actual_cmp.reserve(actual.size());
-          for (size_t c = 0; c < actual.size(); ++c) {
-            if (actual[c] != '\r') actual_cmp += actual[c];
-          }
-          if (!expect.empty() && expect_cmp != actual_cmp) {
-            FsResult r = FsResult::error(
-                ErrCode::kInvalidArg,
-                "expected text does not match lines " + std::to_string(start) + "-" +
-                    std::to_string(end) + "; nothing was written");
-            r.data = Json{{"path", rel},
-                          {"actual", utf8::truncate(actual, 800)},
-                          {"expected", utf8::truncate(expect, 800)},
-                          {"currentHash", cur_hash}};
-            return r;
-          }
+          // NO expected-text comparison. The range + file hash is the whole
+          // contract: the user asked for line-range replacement, and a stale
+          // quote must not turn a valid range into "nothing was written".
+          (void)expect;
           std::string new_text = jsonutil::get<std::string>(e, "newText", "");
           FsResult noise = check_noise(new_text);
           if (!noise.ok()) return noise;

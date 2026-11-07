@@ -142,6 +142,12 @@ UiApi::UiApi(FsApi* api) : api_(api) {
     return api->session_live_turn(s(a, "sid"));
   });
   reg("session.setModel", [api](const Json& a) {
+    // The picker always sends providerId (possibly empty): model+provider are
+    // ONE routing identity and must reach the live loop together.
+    if (a.contains("providerId")) {
+      return api->session_set_model_provider(s(a, "sid"), s(a, "model"),
+                                             s(a, "providerId"));
+    }
     return api->session_set_model(s(a, "sid"), s(a, "model"));
   });
   reg("session.setProvider", [api](const Json& a) {

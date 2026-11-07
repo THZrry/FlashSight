@@ -384,6 +384,18 @@ FS_TEST(addon2_session_model_provider_is_persisted) {
   // model id, not fall back to the first one by name.
   EXPECT_EQ(jsonutil::get<std::string>(ss, "provider", ""),
             std::string("pr_second"));
+
+  // ONE call writes the pair (model + provider) so a live auto round can never
+  // observe a half-applied route.
+  EXPECT_TRUE(api.session_set_model_provider(sid, "deepseek-v4.1-flash",
+                                             "pr_third").ok());
+  FsResult info2 = api.session_info(sid);
+  ASSERT_TRUE(info2.ok());
+  const Json& ss2 = info2.data["sessionSettings"];
+  EXPECT_EQ(jsonutil::get<std::string>(ss2, "model", ""),
+            std::string("deepseek-v4.1-flash"));
+  EXPECT_EQ(jsonutil::get<std::string>(ss2, "provider", ""),
+            std::string("pr_third"));
 }
 
 // ---------- 工作流：定义/启动/图结构/步骤重试跳过 ----------

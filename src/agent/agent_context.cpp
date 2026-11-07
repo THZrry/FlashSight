@@ -425,20 +425,10 @@ std::string AgentContext::build_system(const ContextInput& in) {
   if (!in.encoding.empty()) env.push_back(kv("terminal encoding", in.encoding));
   if (!in.model.empty()) env.push_back(kv("model", in.model));
   if (!in.thinking.empty()) env.push_back(kv("thinking", in.thinking));
-  if (!in.git.empty()) {
-    std::string branch = jsonutil::get<std::string>(in.git, "branch", "");
-    if (!branch.empty()) {
-      std::string line = branch;
-      if (jsonutil::get<bool>(in.git, "dirty", false)) line += " (dirty)";
-      int ahead = static_cast<int>(jsonutil::get_int(in.git, "ahead", 0));
-      int behind = static_cast<int>(jsonutil::get_int(in.git, "behind", 0));
-      if (ahead) line += " ahead " + std::to_string(ahead);
-      if (behind) line += " behind " + std::to_string(behind);
-      std::string op = jsonutil::get<std::string>(in.git, "operation", "");
-      if (!op.empty()) line += " [" + op + " in progress]";
-      env.push_back(kv("git", line));
-    }
-  }
+  // GIT STATUS IS NOT HERE. Branch/dirty/ahead changes when the model edits or
+  // commits, and a system-prefix change invalidates the provider's prompt cache
+  // from that line onward (the user saw 52% cache). It belongs in the volatile
+  // runtime block, which is appended to the newest user message.
   if (in.cli_tools.is_object() && !in.cli_tools.empty()) {
     std::vector<std::string> names;
     for (auto it = in.cli_tools.begin(); it != in.cli_tools.end(); ++it) {
@@ -567,6 +557,20 @@ std::string AgentContext::build_runtime(const ContextInput& in, const RuntimeSta
                   static_cast<long long>((rem % 3600) / 60),
                   static_cast<long long>(rem % 60));
     lines.push_back(std::string(zh(in) ? "时间: " : "time: ") + buf);
+  }
+  if (!in.git.empty()) {
+    std::string branch = jsonutil::get<std::string>(in.git, "branch", "");
+    if (!branch.empty()) {
+      std::string line = branch;
+      if (jsonutil::get<bool>(in.git, "dirty", false)) line += " (dirty)";
+      int ahead = static_cast<int>(jsonutil::get_int(in.git, "ahead", 0));
+      int behind = static_cast<int>(jsonutil::get_int(in.git, "behind", 0));
+      if (ahead) line += " ahead " + std::to_string(ahead);
+      if (behind) line += " behind " + std::to_string(behind);
+      std::string op = jsonutil::get<std::string>(in.git, "operation", "");
+      if (!op.empty()) line += " [" + op + " in progress]";
+      lines.push_back("git: " + line);
+    }
   }
 
   // The plan is a DOCUMENT. The model does not need it re-printed every round

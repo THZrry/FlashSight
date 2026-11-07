@@ -152,7 +152,11 @@ FS_TEST(context_project_and_env_sections) {
   EXPECT_TRUE(sys.find("concise") != std::string::npos);
   EXPECT_TRUE(sys.find("C:/git/git.exe") != std::string::npos);
   EXPECT_TRUE(sys.find("NODE_ENV") != std::string::npos);
-  EXPECT_TRUE(sys.find("main (dirty)") != std::string::npos);
+  // Git state is volatile: it belongs in the runtime tail, not the cached prefix.
+  EXPECT_TRUE(sys.find("main (dirty)") == std::string::npos);
+  RuntimeState st;
+  std::string rt = AgentContext::build_runtime(in, st);
+  EXPECT_TRUE(rt.find("main (dirty)") != std::string::npos);
 }
 
 // ---------- 子代理上下文：角色/任务，且不要求思考语言 ----------
@@ -373,6 +377,66 @@ FS_TEST(history_projects_tool_results_on_replay) {
       "some_mcp_tool", Json::object(), std::string(3000, 'z'));
   EXPECT_TRUE(pu.find(std::string(3000, 'z')) == std::string::npos);
   EXPECT_TRUE(pu.size() > 10);
+}
+
+// Tool ARGUMENTS are replayed too, and a write_file's `content` is the whole
+// file. History must carry the intent (path/bytes, edit ranges), not the body.
+FS_TEST(history_projects_tool_arguments_on_replay) {
+  HistoryBuilder::Options opts;
+  opts.system_prefix = "sys";
+  HistoryBuilder hb(opts);
+  Json turns = Json::array();
+  turns.push_back(Json{{"role", "user"}, {"promptRaw", "write it"}});
+  Json asst = Json::object();
+  asst["role"] = "assistant";
+  asst["streamSummary"] = "done";
+  asst["toolCalls"] = Json::array({
+      Json{{"id", "c1"},
+           {"name", "write_file"},
+           {"args", Json{{"path", "src/big.cpp"}, {"content", std::string(8000, 'z')}}},
+           {"ok", true},
+           {"detail", "{\"ok\":true,\"path\":\"src/big.cpp\"}"}},
+      Json{{"id", "c2"},
+           {"name", "edit_file"},
+           {"args", Json{{"path", "src/a.cpp"},
+                         {"edits", Json::array({Json{{"start", 3},
+                                                     {"end", 4},
+                                                     {"newText", std::string(4000, 'q')}}})}}},
+           {"ok", true},
+           {"detail", "{}"}},
+  });
+  turns.push_back(asst);
+  Json full = Json{{"turns", turns}};
+  HistoryResult hr = hb.build_neutral(full);
+  ASSERT_TRUE(hr.messages.size() >= 3);
+  const Json& calls = hr.messages[2]["toolCalls"];
+  ASSERT_TRUE(calls.is_array());
+  ASSERT_TRUE(calls.size() == 2);
+  std::string all = calls.dump();
+  EXPECT_TRUE(all.find(std::string(8000, 'z')) == std::string::npos);
+  EXPECT_TRUE(all.find(std::string(4000, 'q')) == std::string::npos);
+  EXPECT_TRUE(all.find("src/big.cpp") != std::string::npos);
+  EXPECT_TRUE(all.find("src/a.cpp") != std::string::npos);
+  EXPECT_TRUE(all.find("\"start\":3") != std::string::npos ||
+              all.find("\"start\": 3") != std::string::npos);
+}
+
+// The stable system prefix must NOT change when git state changes: a per-turn
+// git status in the prefix invalidated the provider's whole prompt cache.
+FS_TEST(git_status_is_runtime_not_system_prefix) {
+  ContextInput in;
+  in.agent_name = "FlashSight";
+  in.sid = "s_git";
+  in.lang = ContextLang::kZh;
+  in.git = Json{{"branch", "main"}, {"dirty", false}};
+  std::string sys1 = AgentContext::build_system(in);
+  in.git = Json{{"branch", "main"}, {"dirty", true}};
+  std::string sys2 = AgentContext::build_system(in);
+  EXPECT_EQ(sys1, sys2);  // the cacheable prefix is byte-stable
+  RuntimeState st;
+  st.now_ms = 0;
+  std::string rt = AgentContext::build_runtime(in, st);
+  EXPECT_TRUE(rt.find("git: main (dirty)") != std::string::npos);
 }
 
 // ---------- 预算裁剪保留最新，而不是丢掉最新的 ----------

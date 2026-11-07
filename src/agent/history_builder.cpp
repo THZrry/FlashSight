@@ -23,6 +23,93 @@ int64_t HistoryBuilder::estimate_tokens(const Json& j) {
   return estimate_tokens(j.dump());
 }
 
+namespace {
+Json compact_value(const Json& v, int depth);  // defined below
+
+// Tool ARGUMENTS are replayed on every later turn. The fresh result may be
+// complete (the model needs it while it is working), but the historical copy
+// must not re-send whole file contents / diff bodies: that is what made a long
+// session cost hundreds of thousands of prompt tokens. This keeps the routing
+// facts and the ranges; the bulky payload stays in full.json and is re-readable
+// with a tool call when actually needed.
+Json project_tool_args(const std::string& name, const Json& in) {
+  Json out = Json::object();
+  if (!in.is_object()) return out;
+  auto str = [&](const char* k, size_t cap) {
+    if (!in.contains(k) || !in[k].is_string()) return;
+    out[k] = utf8::truncate(in[k].get<std::string>(), cap, "…");
+  };
+  auto num = [&](const char* k) {
+    if (in.contains(k) && in[k].is_number()) out[k] = in[k];
+  };
+  auto boolean = [&](const char* k) {
+    if (in.contains(k) && in[k].is_boolean()) out[k] = in[k];
+  };
+  if (name == "write_file") {
+    str("path", 400);
+    num("bytes");
+    // content is the whole file; it is in full.json and in the file itself.
+  } else if (name == "edit_file") {
+    str("path", 400);
+    str("lineEnding", 20);
+    if (in.contains("edits") && in["edits"].is_array()) {
+      Json ranges = Json::array();
+      const Json& es = in["edits"];
+      for (size_t i = 0; i < es.size() && i < 50; ++i) {
+        if (!es[i].is_object()) continue;
+        ranges.push_back(Json{
+            {"start", es[i].value("start", Json(0))},
+            {"end", es[i].value("end", Json(0))},
+            {"newBytes", static_cast<int64_t>(
+                 jsonutil::get<std::string>(es[i], "newText", "").size())}});
+      }
+      out["edits"] = Json{{"count", static_cast<int>(es.size())}, {"ranges", ranges}};
+    }
+  } else if (name == "read_file") {
+    str("path", 400);
+    num("offset");
+    num("limit");
+  } else if (name == "terminal_exec" || name == "terminal_spawn") {
+    str("command", 1200);
+    str("shell", 80);
+    num("timeoutMs");
+    boolean("background");
+    boolean("wakeOnExit");
+  } else if (name == "plan_update") {
+    // The document lives at .flashsight/plans/<sid>.md; replaying its whole body
+    // every turn is pure cost. Status is the machine-readable fact.
+    str("status", 20);
+  } else if (name == "todo_add" || name == "todo_check" || name == "todo_uncheck" ||
+             name == "todo_erase") {
+    num("id");
+    str("task", 200);
+    boolean("done");
+  } else if (name == "subagent_spawn") {
+    str("kind", 60);
+    str("step", 200);
+    str("task", 600);
+    num("todoId");
+  } else if (name == "subagent_follow_up" || name == "subagent_steer") {
+    str("id", 80);
+    str("text", 500);
+  } else if (name == "fetch_url") {
+    str("url", 800);
+    str("method", 12);
+    num("timeoutMs");
+  } else if (name == "search_web") {
+    str("query", 500);
+    num("count");
+  } else if (name == "ask") {
+    str("question", 800);
+  } else {
+    // Unknown/MCP tool: preserve the shape, bound every string.
+    Json c = compact_value(in, 0);
+    if (c.is_object()) out = c;
+  }
+  return out;
+}
+}  // namespace
+
 // One stored turn becomes one or more neutral messages.
 //
 // A persisted assistant turn carries what the model SAID and what the tools
@@ -67,6 +154,9 @@ void HistoryBuilder::turn_to_neutral(const Json& turn, Json* out) {
     std::string name = jsonutil::get<std::string>(c, "name", "");
     if (name.empty()) continue;
     Json n = prompt::normalize_tool_call(c, "call_" + std::to_string(seq++));
+    // History replay gets a bounded argument copy; the tool result below is
+    // projected too. Full fidelity stays in full.json.
+    if (n.contains("args")) n["args"] = project_tool_args(name, n["args"]);
     calls.push_back(n);
     // The result is the payload the tool produced. A stored turn may carry it as
     // `result` (structured, older turns) or `detail` (the display text the panel
@@ -196,16 +286,16 @@ std::string HistoryBuilder::project_tool_result(const std::string& name,
 
   if (name == "read_file") {
     copy("path"); copy("startLine"); copy("endLine"); copy("totalLines");
-    copy("hash"); copy("eol"); copy("truncated");
+    copy("hash"); copy("eol");
     std::string content = jsonutil::get<std::string>(r, "content", "");
     if (!content.empty()) {
       // Enough to recognise the file. `hash` is what makes a stale re-use fail
       // loudly instead of corrupting the file, so the model can re-read safely.
       out["content"] = utf8::truncate(
-          content, 900, "\n… (rest omitted when replayed; call read_file again)");
+          content, 400, "… (call read_file again for the full text)");
     }
   } else if (name == "edit_file" || name == "write_file") {
-    copy("path"); copy("totalLines"); copy("hash"); copy("beforeHash");
+    copy("path"); copy("totalLines"); copy("hash");
     copy("summary"); copy("bytes");
     int n = array_size(r, "changes");
     if (n >= 0) {
@@ -221,7 +311,7 @@ std::string HistoryBuilder::project_tool_result(const std::string& name,
       out["changes"] = Json{{"count", n}, {"ranges", ranges}};
     }
   } else if (name == "list_dir" || name == "find_files") {
-    copy("path"); copy("truncated"); copy("detail");
+    copy("path");
     int n = array_size(r, "entries");
     if (n >= 0) {
       out["entries"] = n;
@@ -230,10 +320,10 @@ std::string HistoryBuilder::project_tool_result(const std::string& name,
       for (size_t i = 0; i < arr.size() && i < 60; ++i) {
         std::string nm = jsonutil::get<std::string>(arr[i], "name", "");
         if (nm.empty()) continue;
-        if (!names.empty()) names += "\n";
+        if (!names.empty()) names += ",";
         names += nm;
       }
-      if (!names.empty()) out["names"] = utf8::truncate(names, 1200, "\n…");
+      if (!names.empty()) out["names"] = utf8::truncate(names, 900, "…");
     }
     n = array_size(r, "results");
     if (n >= 0) {
@@ -246,7 +336,7 @@ std::string HistoryBuilder::project_tool_result(const std::string& name,
       out["sample"] = sample;
     }
     if (r.contains("names") && r["names"].is_string() && !out.contains("names")) {
-      out["names"] = utf8::truncate(r["names"].get<std::string>(), 1200, "\n…");
+      out["names"] = utf8::truncate(r["names"].get<std::string>(), 900, "…");
     }
   } else if (name == "terminal" || name == "terminal_run" || name == "exec" ||
              name == "run_command" || name == "shell") {
@@ -299,9 +389,9 @@ std::string HistoryBuilder::project_tool_result(const std::string& name,
       out["items"] = items;
     }
   } else if (name == "plan_update" || name == "plan_get") {
-    copy("goal");
-    int n = array_size(r, "steps");
-    if (n >= 0) out["steps"] = n;
+    // The plan is a DOCUMENT. Replaying its body is cost; status/path are the
+    // facts that let the model continue (see plan_get when it needs the text).
+    copy("status"); copy("exists"); copy("path");
   } else if (name.rfind("subagent_", 0) == 0) {
     copy("id"); copy("kind"); copy("status"); copy("step");
   } else {

@@ -50,6 +50,7 @@
 #include <vector>
 
 #include "fs_json.hpp"
+#include "fs_utf8.hpp"
 #include "ui_vdom.hpp"  // bus() - the framework's handler registry
 
 namespace fs {
@@ -124,6 +125,18 @@ const char* kGlueJs = R"JS(
   // cancelling the rest of the frame.
   globalThis.__fsDomTry = function (op, i, j, a, b) {
     try { globalThis.__fsDomCall(op, i, j, a, b); } catch (e) {}
+  };
+  // Batch ONE render's DOM writes into a single ExecuteScript. The ops are a
+  // JSON array, not concatenated source: a bad op is caught individually and
+  // cannot truncate the rest (the old source-concatenation batch silently
+  // dropped the tail of a subtree). This is what keeps a 144-message / 900-tool
+  // transcript from enqueueing tens of thousands of ExecuteScript calls and
+  // wedging WebView2 (the system-wide freeze after a tab switch).
+  globalThis.__fsDomBatch = function (ops) {
+    for (var k = 0; k < ops.length; k++) {
+      try { globalThis.__fsDomCall(ops[k][0], ops[k][1], ops[k][2],
+                                   ops[k][3], ops[k][4]); } catch (e) {}
+    }
   };
 
   // The browser's own context menu is a document-level default, so a per-node
@@ -1178,11 +1191,33 @@ class WebViewDom : public IDom {
   }
   bool supports_exit_animations() const override { return true; }
 
-  // Ship the buffered DOM writes as ONE script. Called at the end of a render
-  // (UiApp::render) and whenever a direct call must observe the patched DOM.
+  // Ship the buffered DOM writes as ONE JSON-array batch. Called at the end of a
+  // render (UiApp::render) and whenever a direct call must observe the patched
+  // DOM. The array is capped so a single ExecuteScript never carries a whole
+  // huge transcript; each op is caught individually on the JS side.
   void flush() override {
     if (batch_.empty()) return;
-    webview_eval(w_, batch_.c_str());
+    std::string js = "globalThis.__fsDomBatch([";
+    js += batch_;
+    js += "])";
+    // Defence in depth: ExecuteScript widens the whole script through
+    // MultiByteToWideChar; ONE invalid byte anywhere makes the entire batch a
+    // no-op (the template-grid symptom). The producing code must be fixed too,
+    // but the transport must not lose a whole frame over one bad string.
+    if (!utf8::valid(js)) js = utf8::sanitize(js);
+    if (std::getenv("FS_UI_EVENT_DEBUG")) {
+      if (FILE* f = std::fopen("C:\\aaa\\FlashSight\\temp\\fs_event.log", "a")) {
+        std::fprintf(f, "[batch] ops_bytes=%d js_bytes=%d head=%.600s\n",
+                     static_cast<int>(batch_.size()), static_cast<int>(js.size()),
+                     js.c_str());
+        std::fclose(f);
+      }
+      if (FILE* f = std::fopen("C:\\aaa\\FlashSight\\temp\\batch_last.js", "wb")) {
+        std::fwrite(js.data(), 1, js.size(), f);
+        std::fclose(f);
+      }
+    }
+    webview_eval(w_, js.c_str());
     batch_.clear();
   }
 
@@ -1346,25 +1381,39 @@ class WebViewDom : public IDom {
 
   void call(const char* op, int i, int j, const std::string& a,
             const std::string& b) {
+    // A direct call (bind/place/measure) must observe everything enqueued
+    // before it.
+    flush();
+    std::string sa = utf8::valid(a) ? a : utf8::sanitize(a);
+    std::string sb = utf8::valid(b) ? b : utf8::sanitize(b);
     std::string js = "globalThis.__fsDomCall(";
     js += js_str(op);
     js += "," + std::to_string(i) + "," + std::to_string(j) + ",";
-    js += js_str(a) + "," + js_str(b) + ")";
+    js += js_str(sa) + "," + js_str(sb) + ")";
     webview_eval(w_, js.c_str());
   }
 
-  // Structural/content writes go through ExecuteScript ONE AT A TIME.
-  //
-  // They used to be batched into one script per frame. That batching is what
-  // broke newly created deep subtrees (the provider template grid arrived as an
-  // empty container while its earlier siblings attached): with a batch, a
-  // failure or truncation anywhere in the concatenated script silently drops
-  // everything after it, and the page keeps a half-built DOM with dead handlers.
-  // The 2026-10-23 build - before batching - was correct. Correctness first:
-  // per-op dispatch, identical to the browser build's synchronous EM_JS calls.
+  // Structural/content writes are collected as JSON tuples and shipped in
+  // bounded batches. The old source-concatenation batch was abandoned because a
+  // failure/truncation anywhere silently dropped the REST of the frame (the
+  // provider-template grid bug). A JSON array + per-op try/catch does not have
+  // that failure mode, and it prevents tens of thousands of ExecuteScript calls
+  // from piling up in WebView2 when a large session is rebuilt.
   void enqueue(const char* op, int i, int j, const std::string& a,
                const std::string& b) {
-    call(op, i, j, a, b);
+    if (!batch_.empty()) batch_ += ',';
+    batch_ += '[';
+    batch_ += js_str(op);
+    batch_ += ',';
+    batch_ += std::to_string(i);
+    batch_ += ',';
+    batch_ += std::to_string(j);
+    batch_ += ',';
+    batch_ += js_str(a);
+    batch_ += ',';
+    batch_ += js_str(b);
+    batch_ += ']';
+    if (batch_.size() >= 256 * 1024) flush();
   }
 
   // Same, but reports whether the glue is actually present. Used once at
