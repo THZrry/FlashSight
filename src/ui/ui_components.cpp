@@ -1038,6 +1038,17 @@ H turn_summary(const std::string& text) {
 
 // ---------- markdown-ish ----------
 
+// A heading is `#`..`######` followed by end-of-line or a space. During
+// streaming the model emits `#`, `##`, ... BEFORE the space and title; those
+// partial lines used to fall through the heading branch and then the paragraph
+// gather broke on `l2[0]=='#'` without advancing i - an infinite loop that froze
+// the whole UI on the first character of a streamed `## answer`.
+bool is_heading_line(const std::string& s) {
+  size_t n = 0;
+  while (n < s.size() && s[n] == '#') ++n;
+  return n > 0 && n <= 6 && (n == s.size() || s[n] == ' ');
+}
+
 std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
                                EventFn on_link) {
   std::vector<H> out;
@@ -1056,7 +1067,14 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
   }
 
   size_t i = 0;
+  // Defensive progress guard: a branch that neither consumes a line nor
+  // advances `i` used to spin while allocating a <p> per iteration, which
+  // exhausted system commit. Every legitimate block consumes at least one line;
+  // a factor of 8 leaves room for multi-block lines but stops a future bug.
+  size_t guard = 0;
+  const size_t max_steps = lines.size() * 8 + 64;
   while (i < lines.size()) {
+    if (++guard > max_steps) break;
     const std::string& ln = lines[i];
     // fenced code
     if (ln.size() >= 3 && ln.compare(0, 3, "```") == 0) {
@@ -1123,17 +1141,16 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
       continue;
     }
     // heading
-    if (!ln.empty() && ln[0] == '#') {
+    if (is_heading_line(ln)) {
       size_t n = 0;
       while (n < ln.size() && ln[n] == '#') ++n;
-      if (n <= 6 && n < ln.size() && ln[n] == ' ') {
-        std::string lvl = "h" + itos(static_cast<int>(n));
-        H h = el(lvl, "md-h");
-        inline_md(h, trim(ln.substr(n + 1)), on_link);
-        out.push_back(h);
-        ++i;
-        continue;
-      }
+      std::string lvl = "h" + itos(static_cast<int>(n));
+      H h = el(lvl, "md-h");
+      inline_md(h, n < ln.size() ? trim(ln.substr(n + 1)) : std::string(),
+                on_link);
+      out.push_back(h);
+      ++i;
+      continue;
     }
     // list (group consecutive items)
     if (ln.size() >= 2 && (ln.compare(0, 2, "- ") == 0 || ln.compare(0, 2, "* ") == 0)) {
@@ -1292,7 +1309,7 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
       const std::string& l2 = lines[i];
       if (trim(l2).empty()) break;
       if (l2.size() >= 3 && l2.compare(0, 3, "```") == 0) break;
-      if (!l2.empty() && l2[0] == '#') break;
+      if (is_heading_line(l2)) break;
       if (l2.size() >= 2 && (l2.compare(0, 2, "- ") == 0 || l2.compare(0, 2, "* ") == 0)) break;
       if (!para.empty()) para += "\n";
       para += l2;

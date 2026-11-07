@@ -1632,3 +1632,13 @@ The process of project: P0 环境搭建
   - **资源记录升级（这次有测量）**：两个 native host 每 30 秒写 `[res]`，字段包括 `mem_ws/peak/private/commit`、`sys_avail/commit/limit`、WebView2 子进程数+commit 总和、`threads`、`handles`、`gdi/user`、render 线程 `stack_peak_kb`、消息/工具/终端字节数、`dom_slots/live/made/handlers`、`auto_round/turn_running`。之前只有函数耗时和 handles，无法验证内存理论；以后崩溃后有 commit/线程/自动轮状态。
   - **基线实测**：原生窗口打开 30 条消息/349 工具块：main private 12→20MB、WebView2 组 1.30→1.40GB、system commit 14.5GB/41.7GB、threads 15、dom_slots 2655（nodes_made 2676）。这是正常基线；下次事件按日志中的 commit/threads/auto_round 判断是否复发。
   - **测试/构建**：454 用例 4223 断言全过；web / webview / whaleui 三变体编译通过。
+
+
+<123>(ROOT CAUSE/FIX): 发送即卡死 = Markdown 渲染器在流式首字符 `#` 上的死循环，不是内存/GPU。
+  - **复现**：从 23:43 的 live snapshot 取出发送中的回答文本，对每个前缀跑 `comp::markdown_blocks`；**前缀长度 1（单个 `#`）就 100% CPU 永不返回**。之前的测试进程就是这样挂着被手动杀掉的。
+  - **原因**：标题分支要求 `#` 后面有空格（`n < ln.size() && ln[n]==' '`）。模型流式输出 `#`、`##` 时还没有空格，标题分支不消费；随后段落收集在 `l2[0]=='#'` 时 `break`，但也不 `++i`，`while(i < lines.size())` 永远原地打转。每轮循环还会 `out.push_back(<p>)`，所以既是 100% CPU，也是**无界 VNode 分配**；发送后第一个 delta 就是 `#`，UI 线程立刻开始吃内存，画面/时间/转圈全部冻结。**0:04 那次已经查清：不是 WhaleUI，是我们 23:59 启动的 fs_tests 诊断进程卡在同一个前缀循环里；[res] 显示 app 主进程仅 21MB、WebView2 组 1.37GB 稳定，而 system commit 从 47GB 涨到 65GB、avail 到 0，正是它在每轮分配 `<p>`。已在定位后杀掉，系统随后恢复；这部分是我的测试干扰，抱歉。**
+  - **修复**：新增 `is_heading_line()`：`#`..`######` + 行尾/空格都算标题；`#`/`##` 直接消费成空标题，段落收集只在**合法标题**处 break。`#foo` 这种不是标题的行走普通段落。回归用例 `comp_markdown_incomplete_heading_terminates` 覆盖 `#`/`##`/`#foo`/`## ` 以及一条真实流式回答的所有前缀（修复前该用例会挂死）。另加 `max_steps = lines*8+64` 的进度守卫：以后任何分支不漏 `++i` 也只截断，不会无限分配。
+  - **md4c 真实情况（回答用户提问）**：仓库里确实 vendored/编译了 `md4c-master`（`md4c.c`/`md4c-html.c`/`entity.c` 在 fs_core 里），但 **src 里没有任何 `md_parse`/`md_html` 调用**；实际 UI 用的是 `ui_components.cpp` 手写的 `markdown_blocks()` + `inline_md()`。所以不存在两套解析器，只有一套手写解析器，md4c 目前是死权重。正常进入能渲染二级标题，是因为完整的 `## 标题`（有空格）走对了手写标题分支；只有流式半截 `#`/`##` 触发死循环。之前要求的“魔改 md4c 输出 diff AST”从未接入实现；这是一笔明确的债，不能把 md4c 的存在当成已实现。
+  - **这次不是内存**：23:43:17 的 `[res]` 是 main private 44MB、WebView2 组 1.39GB、system commit 13.7/41.7GB、threads 20；没有 commit 压力。0x10e 崩溃和自动轮空转是另一条线（<122>）。内存日志保留，但本次根因是纯 CPU 死循环。
+  - **顺手**：WebView2 子进程/线程枚举移出 UI 线程，改成后台线程每 10 秒刷新原子缓存；避免新加的内存日志本身成为潜在阻塞点。
+  - **测试/构建**：455 用例 4285 断言全过；web / webview / whaleui 三变体编译通过。

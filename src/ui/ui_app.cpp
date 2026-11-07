@@ -19,8 +19,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <regex>
 #include <set>
+#include <thread>
 
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <windows.h>
@@ -102,7 +104,74 @@ void note_render_stack() {
   }
 }
 
+// Child-process and thread enumeration is NOT cheap and may block on a hung
+// WebView2 process. A send froze the UI right after this logging was added, so
+// it runs on its own thread; the UI only reads cached atomics.
+std::atomic<unsigned long long> g_webview_mb(0);
+std::atomic<int> g_webview_count(0);
+std::atomic<int> g_thread_count(0);
+
+void refresh_child_stats() {
+  const unsigned long long mb = 1024ULL * 1024ULL;
+  unsigned long long webview_mb = 0;
+  int webview_count = 0;
+  HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap != INVALID_HANDLE_VALUE) {
+    PROCESSENTRY32 pe;
+    std::memset(&pe, 0, sizeof(pe));
+    pe.dwSize = sizeof(pe);
+    if (::Process32First(snap, &pe)) {
+      do {
+        if (::_stricmp(pe.szExeFile, "msedgewebview2.exe") != 0) continue;
+        HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 pe.th32ProcessID);
+        if (!h) continue;
+        PROCESS_MEMORY_COUNTERS_EX c;
+        std::memset(&c, 0, sizeof(c));
+        if (::GetProcessMemoryInfo(h,
+                                   reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&c),
+                                   sizeof(c))) {
+          webview_mb += static_cast<unsigned long long>(c.PrivateUsage) / mb;
+          ++webview_count;
+        }
+        ::CloseHandle(h);
+      } while (::Process32Next(snap, &pe));
+    }
+    ::CloseHandle(snap);
+  }
+  int thread_count = 0;
+  HANDLE tsnap = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (tsnap != INVALID_HANDLE_VALUE) {
+    THREADENTRY32 te;
+    std::memset(&te, 0, sizeof(te));
+    te.dwSize = sizeof(te);
+    DWORD self = ::GetCurrentProcessId();
+    if (::Thread32First(tsnap, &te)) {
+      do {
+        if (te.th32OwnerProcessID == self) ++thread_count;
+      } while (::Thread32Next(tsnap, &te));
+    }
+    ::CloseHandle(tsnap);
+  }
+  g_webview_mb.store(webview_mb, std::memory_order_relaxed);
+  g_webview_count.store(webview_count, std::memory_order_relaxed);
+  g_thread_count.store(thread_count, std::memory_order_relaxed);
+}
+
+void start_child_probe() {
+  static std::once_flag once;
+  std::call_once(once, []() {
+    std::thread([]() {
+      for (;;) {
+        refresh_child_stats();
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+      }
+    }).detach();
+  });
+}
+
 std::string process_memory_stats() {
+  start_child_probe();
   char buf[640];
   PROCESS_MEMORY_COUNTERS_EX pmc;
   std::memset(&pmc, 0, sizeof(pmc));
@@ -117,51 +186,10 @@ std::string process_memory_stats() {
   DWORD gdi = ::GetGuiResources(::GetCurrentProcess(), GR_GDIOBJECTS);
   DWORD user = ::GetGuiResources(::GetCurrentProcess(), GR_USEROBJECTS);
   const unsigned long long mb = 1024ULL * 1024ULL;
-  // The WebView2 renderer/GPU processes are where a DOM/GPU leak would actually
-  // live; the host process alone looks innocent. Sum their private commit so
-  // the next incident has a number instead of "the main process is small".
-  unsigned long long webview_mb = 0;
-  int webview_count = 0;
-  int thread_count = 0;
-  {
-    HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap != INVALID_HANDLE_VALUE) {
-      PROCESSENTRY32 pe;
-      std::memset(&pe, 0, sizeof(pe));
-      pe.dwSize = sizeof(pe);
-      if (::Process32First(snap, &pe)) {
-        do {
-          if (::_stricmp(pe.szExeFile, "msedgewebview2.exe") != 0) continue;
-          HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                                   pe.th32ProcessID);
-          if (!h) continue;
-          PROCESS_MEMORY_COUNTERS_EX c;
-          std::memset(&c, 0, sizeof(c));
-          if (::GetProcessMemoryInfo(h,
-                                     reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&c),
-                                     sizeof(c))) {
-            webview_mb += static_cast<unsigned long long>(c.PrivateUsage) / mb;
-            ++webview_count;
-          }
-          ::CloseHandle(h);
-        } while (::Process32Next(snap, &pe));
-      }
-      ::CloseHandle(snap);
-    }
-    HANDLE tsnap = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (tsnap != INVALID_HANDLE_VALUE) {
-      THREADENTRY32 te;
-      std::memset(&te, 0, sizeof(te));
-      te.dwSize = sizeof(te);
-      DWORD self = ::GetCurrentProcessId();
-      if (::Thread32First(tsnap, &te)) {
-        do {
-          if (te.th32OwnerProcessID == self) ++thread_count;
-        } while (::Thread32Next(tsnap, &te));
-      }
-      ::CloseHandle(tsnap);
-    }
-  }
+  const unsigned long long webview_mb =
+      g_webview_mb.load(std::memory_order_relaxed);
+  const int webview_count = g_webview_count.load(std::memory_order_relaxed);
+  const int thread_count = g_thread_count.load(std::memory_order_relaxed);
   if (have_proc && have_sys) {
     std::snprintf(
         buf, sizeof(buf),

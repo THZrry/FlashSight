@@ -368,6 +368,27 @@ FS_TEST(comp_markdown_blocks) {
 
 // ---------- components: chat message roles ----------
 
+// A streamed answer arrives one character at a time. `#` / `##` before the
+// space used to fall through the heading branch, and the paragraph gather
+// broke on a leading '#' WITHOUT advancing - markdown_blocks() spun forever
+// and the UI froze on the first character of a `## ...` answer.
+FS_TEST(comp_markdown_incomplete_heading_terminates) {
+  const char* samples[] = {"#", "##", "###", "#foo", "## ", "## Title",
+                           "# Title\n#", "# Title\n#foo\n# "};
+  for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i) {
+    std::vector<H> blocks = comp::markdown_blocks(samples[i], nullptr, nullptr);
+    EXPECT_TRUE(!blocks.empty());
+  }
+  // Streaming prefixes of a real answer shape must all terminate too.
+  const std::string stream = "## 先回答排序：我同意你的判断\n\n- L3\n- L2\n";
+  for (size_t n = 1; n <= stream.size(); ++n) {
+    std::vector<H> blocks = comp::markdown_blocks(stream.substr(0, n), nullptr,
+                                                  nullptr);
+    EXPECT_TRUE(!blocks.empty());
+    if (blocks.empty()) break;
+  }
+}
+
 FS_TEST(comp_chat_roles) {
   comp::ChatMsg user;
   user.role = "user";
