@@ -725,6 +725,7 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
 FsResult AgentLoop::run_turn(const std::string& user_text) {
   state_ = LoopState::kPlanning;
   HistoryBuilder::Options hopts = opts_.history;
+  if (current_auto_round_.load() == 0) empty_auto_streak_ = 0;
   // Reuse the durable summary from a previous run/turn. Without this a reopened
   // session starts from the full transcript, which no longer fits the window
   // and gets replaced by a lossy short view.
@@ -1277,6 +1278,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   // instruction to keep going ("清单没清空，自动轮却不继续" was this guard
   // suppressing a todo-driven continuation after a text-only round).
   if (auto_continue && this_auto_round > 0 && !turn_had_tools) {
+    ++empty_auto_streak_;
     bool open_todos = false;
     if (runtime_state) {
       RuntimeState st = runtime_state();
@@ -1289,14 +1291,22 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
         }
       }
     }
-    if (!open_todos) {
+    // Two consecutive empty auto rounds mean the model is not making progress,
+    // even if a checklist is still open. Continuing forever is how an apparently
+    // "finished" task kept waking and re-rendering until the system committed
+    // out (the stored session had dozens of SYSTEM-continue turns with empty
+    // answers). A single empty round still continues when todos are open.
+    if (!open_todos || empty_auto_streak_ >= 2) {
       auto_continue = false;
       auto_why.clear();
       emit("auto.halted", Json{{"sid", opts_.sid},
-                               {"reason", zh ? "自动轮没有执行任何工具，已停止"
-                                             : "auto round ran no tools; stopped"},
-                               {"rounds", auto_continues_}});
+                               {"reason", zh ? "自动轮连续没有执行任何工具，已停止"
+                                             : "auto rounds ran no tools; stopped"},
+                               {"rounds", auto_continues_},
+                               {"emptyRounds", empty_auto_streak_}});
     }
+  } else if (turn_had_tools) {
+    empty_auto_streak_ = 0;
   }
 
   // ---- auto mode: continue while the plan is still open ----

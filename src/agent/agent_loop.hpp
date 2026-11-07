@@ -328,6 +328,11 @@ class AgentLoop {
   int64_t last_in_tokens_ = 0;
   int64_t last_out_tokens_ = 0;
   int auto_continues_ = 0;
+  // Consecutive auto rounds that executed NO tool. An open todo used to override
+  // the empty-round guard forever; a real session accumulated dozens of
+  // SYSTEM-continue rounds with empty answers (and the UI re-rendered every one)
+  // until the machine ran out of memory. Cap the STREAK, not the work.
+  int empty_auto_streak_ = 0;
   std::string last_text_;
   Json last_messages_ = Json::array();
   std::atomic<bool> compress_requested_{false};

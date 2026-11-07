@@ -139,7 +139,9 @@ class WhaleDom : public IDom {
  public:
   WhaleDom(whaleui_app_t* app, whaleui_window_t* win) : app_(app), win_(win) {
     doc_ = whaleui_window_get_document(win_);
-    slots_.resize(2);  // 0 unused; 1 = root
+    // Node slots are a MAP: ids are monotonic and never reused, so a vector
+    // indexed by id kept every node ever created (the WebView build reached
+    // tens of GB this way). Only live nodes need a slot.
     // The shell HTML carries an empty <div id="fs-root">; the app renders the
     // whole UI inside it (same contract as the browser backend).
     root_el_ = whaleui_dom_get_element_by_id(doc_, "fs-root");
@@ -205,8 +207,7 @@ class WhaleDom : public IDom {
     drop_aux_listeners_for(s.el);
     whaleui_dom_remove(s.el);
     whaleui_dom_element_destroy(s.el);
-    s.el = nullptr;
-    s.is_text = false;
+    slots_.erase(node.id);
   }
 
   void clear(Node parent) override {
@@ -545,6 +546,14 @@ class WhaleDom : public IDom {
     // Needs a scrollTop/scrollTo element API in WhaleUI; see the doc.
   }
 
+  std::string debug_stats() const override {
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "dom_slots=%zu dom_nodes_made=%llu dom_handlers=%zu",
+                  slots_.size(), static_cast<unsigned long long>(next_id_ - 2),
+                  bus().size());
+    return std::string(buf);
+  }
+
   void copy_text(const std::string& text) override {
     // WhaleUI exposes the system clipboard through its C API (SDL-backed), so
     // copy works even though the engine has no element value/selection API.
@@ -727,13 +736,11 @@ class WhaleDom : public IDom {
 
   // ---- slot bookkeeping ---------------------------------------------------
 
-  Slot& slot(Node n) {
-    if (n.id >= slots_.size()) slots_.resize(static_cast<size_t>(n.id) + 1);
-    return slots_[static_cast<size_t>(n.id)];
-  }
+  Slot& slot(Node n) { return slots_[n.id]; }
   whaleui_dom_element_t* el_of(Node n) {
-    if (!n.valid() || n.id >= slots_.size()) return nullptr;
-    return slots_[static_cast<size_t>(n.id)].el;
+    if (!n.valid()) return nullptr;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(n.id);
+    return it == slots_.end() ? nullptr : it->second.el;
   }
   Node adopt(whaleui_dom_element_t* el, bool is_text) {
     if (!el) return Node{0};
@@ -1062,7 +1069,7 @@ class WhaleDom : public IDom {
   whaleui_window_t* win_ = nullptr;
   whaleui_dom_document_t* doc_ = nullptr;
   whaleui_dom_element_t* root_el_ = nullptr;
-  std::vector<Slot> slots_;
+  std::map<uint64_t, Slot> slots_;
   uint64_t next_id_ = 2;
 
   std::map<uint64_t, std::map<int, Listener*> > kind_l_;

@@ -11,6 +11,7 @@
 #include "ui_app.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdarg>
@@ -20,6 +21,12 @@
 #include <map>
 #include <regex>
 #include <set>
+
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include <windows.h>
+#include <psapi.h>
+#include <tlhelp32.h>
+#endif
 
 #include "core/settings_store.hpp"
 #include "fs_highlight.hpp"
@@ -76,6 +83,122 @@ class SlowEventLog {
   std::string name_;
   int64_t t0_;
 };
+
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+// Process + system memory, for the resource log. The previous incident was
+// diagnosed only from function timings and handle counts, which cannot show a
+// 54 GB commit leak. These numbers make that visible on the next run.
+std::atomic<int> g_render_stack_peak_kb(0);
+
+void note_render_stack() {
+  ULONG_PTR low = 0, high = 0;
+  ::GetCurrentThreadStackLimits(&low, &high);
+  if (high <= low) return;
+  uintptr_t sp = reinterpret_cast<uintptr_t>(&low);
+  int used_kb = high > sp ? static_cast<int>((high - sp) / 1024) : 0;
+  int old = g_render_stack_peak_kb.load(std::memory_order_relaxed);
+  while (used_kb > old &&
+         !g_render_stack_peak_kb.compare_exchange_weak(old, used_kb)) {
+  }
+}
+
+std::string process_memory_stats() {
+  char buf[640];
+  PROCESS_MEMORY_COUNTERS_EX pmc;
+  std::memset(&pmc, 0, sizeof(pmc));
+  const bool have_proc =
+      ::GetProcessMemoryInfo(::GetCurrentProcess(),
+                             reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                             sizeof(pmc)) != 0;
+  MEMORYSTATUSEX ms;
+  std::memset(&ms, 0, sizeof(ms));
+  ms.dwLength = sizeof(ms);
+  const bool have_sys = ::GlobalMemoryStatusEx(&ms) != 0;
+  DWORD gdi = ::GetGuiResources(::GetCurrentProcess(), GR_GDIOBJECTS);
+  DWORD user = ::GetGuiResources(::GetCurrentProcess(), GR_USEROBJECTS);
+  const unsigned long long mb = 1024ULL * 1024ULL;
+  // The WebView2 renderer/GPU processes are where a DOM/GPU leak would actually
+  // live; the host process alone looks innocent. Sum their private commit so
+  // the next incident has a number instead of "the main process is small".
+  unsigned long long webview_mb = 0;
+  int webview_count = 0;
+  int thread_count = 0;
+  {
+    HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+      PROCESSENTRY32 pe;
+      std::memset(&pe, 0, sizeof(pe));
+      pe.dwSize = sizeof(pe);
+      if (::Process32First(snap, &pe)) {
+        do {
+          if (::_stricmp(pe.szExeFile, "msedgewebview2.exe") != 0) continue;
+          HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                   pe.th32ProcessID);
+          if (!h) continue;
+          PROCESS_MEMORY_COUNTERS_EX c;
+          std::memset(&c, 0, sizeof(c));
+          if (::GetProcessMemoryInfo(h,
+                                     reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&c),
+                                     sizeof(c))) {
+            webview_mb += static_cast<unsigned long long>(c.PrivateUsage) / mb;
+            ++webview_count;
+          }
+          ::CloseHandle(h);
+        } while (::Process32Next(snap, &pe));
+      }
+      ::CloseHandle(snap);
+    }
+    HANDLE tsnap = ::CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (tsnap != INVALID_HANDLE_VALUE) {
+      THREADENTRY32 te;
+      std::memset(&te, 0, sizeof(te));
+      te.dwSize = sizeof(te);
+      DWORD self = ::GetCurrentProcessId();
+      if (::Thread32First(tsnap, &te)) {
+        do {
+          if (te.th32OwnerProcessID == self) ++thread_count;
+        } while (::Thread32Next(tsnap, &te));
+      }
+      ::CloseHandle(tsnap);
+    }
+  }
+  if (have_proc && have_sys) {
+    std::snprintf(
+        buf, sizeof(buf),
+        "mem_ws_mb=%llu mem_peak_ws_mb=%llu mem_private_mb=%llu "
+        "mem_commit_mb=%llu "
+        "sys_avail_mb=%llu sys_commit_mb=%llu sys_limit_mb=%llu "
+        "webview_procs=%d webview_mb=%llu threads=%d "
+        "gdi=%lu user=%lu stack_peak_kb=%d",
+        static_cast<unsigned long long>(pmc.WorkingSetSize) / mb,
+        static_cast<unsigned long long>(pmc.PeakWorkingSetSize) / mb,
+        static_cast<unsigned long long>(pmc.PrivateUsage) / mb,
+        static_cast<unsigned long long>(pmc.PagefileUsage) / mb,
+        static_cast<unsigned long long>(ms.ullAvailPageFile) / mb,
+        static_cast<unsigned long long>(ms.ullTotalPageFile - ms.ullAvailPageFile) / mb,
+        static_cast<unsigned long long>(ms.ullTotalPageFile) / mb,
+        webview_count, webview_mb, thread_count,
+        static_cast<unsigned long>(gdi), static_cast<unsigned long>(user),
+        g_render_stack_peak_kb.load(std::memory_order_relaxed));
+    return std::string(buf);
+  }
+  if (have_proc) {
+    std::snprintf(buf, sizeof(buf),
+                  "mem_ws_mb=%llu mem_private_mb=%llu mem_commit_mb=%llu "
+                  "gdi=%lu user=%lu stack_peak_kb=%d",
+                  static_cast<unsigned long long>(pmc.WorkingSetSize) / mb,
+                  static_cast<unsigned long long>(pmc.PrivateUsage) / mb,
+                  static_cast<unsigned long long>(pmc.PagefileUsage) / mb,
+                  static_cast<unsigned long>(gdi), static_cast<unsigned long>(user),
+                  g_render_stack_peak_kb.load(std::memory_order_relaxed));
+    return std::string(buf);
+  }
+  return std::string("mem=unavailable");
+}
+#else
+void note_render_stack() {}
+std::string process_memory_stats() { return std::string(); }
+#endif
 
 // Normalise a shortcut string for comparison: trim, drop spaces around "+",
 // lowercase the key name. "Ctrl+W", "ctrl+w" and "Ctrl + W" are the same binding.
@@ -4261,28 +4384,64 @@ void UiApp::toast(const std::string& text) {
 
 std::string UiApp::debug_stats() const {
   size_t tools = 0;
-  for (size_t i = 0; i < st_.messages.size(); ++i) tools += st_.messages[i].tools.size();
+  size_t msg_bytes = 0;
+  size_t tool_bytes = 0;
+  for (size_t i = 0; i < st_.messages.size(); ++i) {
+    const comp::ChatMsg& m = st_.messages[i];
+    msg_bytes += m.text.size();
+    for (size_t k = 0; k < m.interim.size(); ++k) msg_bytes += m.interim[k].size();
+    tools += m.tools.size();
+    for (size_t k = 0; k < m.tools.size(); ++k) {
+      tool_bytes += m.tools[k].input.size() + m.tools[k].detail.size();
+    }
+  }
   size_t term_bytes = 0;
   for (std::map<std::string, std::string>::const_iterator it = st_.term_outputs.begin();
        it != st_.term_outputs.end(); ++it) {
     term_bytes += it->second.size();
   }
-  char buf[512];
-  std::snprintf(buf, sizeof(buf),
-                "msgs=%d tools=%d msg_nodes=%d views=%d details=%d subagents=%d "
-                "ops=%d todos=%d terms=%d term_bytes=%d",
-                static_cast<int>(st_.messages.size()), static_cast<int>(tools),
-                static_cast<int>(msg_nodes_.size()), static_cast<int>(views_.size()),
-                static_cast<int>(st_.subagent_details.size()),
-                static_cast<int>(st_.subagents.size()),
-                static_cast<int>(st_.session_ops.size()),
-                static_cast<int>(st_.todos.size()),
-                static_cast<int>(st_.terminals.size()),
-                static_cast<int>(term_bytes));
-  return std::string(buf);
+  size_t grid_bytes = 0;
+  for (std::map<std::string, Json>::const_iterator it = st_.term_grids.begin();
+       it != st_.term_grids.end(); ++it) {
+    grid_bytes += it->second.dump().size();
+  }
+  size_t sessions = 0;
+  for (size_t i = 0; i < st_.projects.size(); ++i) {
+    sessions += st_.projects[i].sessions.size();
+  }
+  char buf[768];
+  std::snprintf(
+      buf, sizeof(buf),
+      "msgs=%d tools=%d msg_bytes=%d tool_bytes=%d msg_nodes=%d views=%d "
+      "details=%d subagents=%d ops=%d todos=%d terms=%d term_bytes=%d "
+      "term_grids=%d grid_bytes=%d term_order=%d term_hidden=%d "
+      "projects=%d sessions=%d tabs=%d side_tabs=%d wakes=%d "
+      "auto_round=%d turn_running=%d",
+      static_cast<int>(st_.messages.size()), static_cast<int>(tools),
+      static_cast<int>(msg_bytes), static_cast<int>(tool_bytes),
+      static_cast<int>(msg_nodes_.size()), static_cast<int>(views_.size()),
+      static_cast<int>(st_.subagent_details.size()),
+      static_cast<int>(st_.subagents.size()),
+      static_cast<int>(st_.session_ops.size()),
+      static_cast<int>(st_.todos.size()),
+      static_cast<int>(st_.terminals.size()), static_cast<int>(term_bytes),
+      static_cast<int>(st_.term_grids.size()), static_cast<int>(grid_bytes),
+      static_cast<int>(st_.term_order.size()),
+      static_cast<int>(st_.term_hidden.size()),
+      static_cast<int>(st_.projects.size()), static_cast<int>(sessions),
+      static_cast<int>(st_.sessions.size()), static_cast<int>(st_.side_tabs.size()),
+      static_cast<int>(st_.pending_wakes.size()), st_.auto_round,
+      st_.turn_running ? 1 : 0);
+  std::string out(buf);
+  const std::string mem = process_memory_stats();
+  if (!mem.empty()) out += " " + mem;
+  const std::string dom = dom_.debug_stats();
+  if (!dom.empty()) out += " " + dom;
+  return out;
 }
 
 void UiApp::render() {
+  note_render_stack();
   // With synchronous backends (NativeBackend), a loader triggered from inside
   // a build can complete and call update()->render() while we are still
   // building. Defer that nested render instead of patching mid-build.

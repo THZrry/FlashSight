@@ -111,8 +111,8 @@ const char* kGlueJs = R"JS(
 (function () {
   if (globalThis.__fsDom) return;
   var S = {
-    nodes: [null],   // id -> DOM node (id 1 = root)
-    handlers: [],    // id -> { kind -> [eventName, listener] }
+    nodes: Object.create(null),   // id -> DOM node (id 1 = root)
+    handlers: Object.create(null),// id -> { kind -> [eventName, listener] }
     outside: Object.create(null),  // popup node id -> element awaiting outside click
     // The element that was right-clicked. Menu items are buttons: focusing them
     // moved focus off the text field, so paste/cut/copy ran against <body>.
@@ -410,8 +410,8 @@ const char* kGlueJs = R"JS(
       case 'remove':
         if (el) {
           if (el.parentNode) el.parentNode.removeChild(el);
-          S.nodes[i] = null;
-          S.handlers[i] = null;
+          delete S.nodes[i];
+          delete S.handlers[i];
           delete S.outside[i];
         }
         return;
@@ -913,7 +913,11 @@ class WebViewDom : public IDom {
     // the first document load); binding the callbacks is all that is left.
     install_bindings();
     call("root", 0, 0, "", "");
-    slots_.resize(2);
+    // Node 1 is the root. Slots are a MAP, not a vector indexed by a monotonic
+    // id: the old vector grew forever because ids are never reused. A long
+    // session created tens of millions of nodes; the vector alone reached tens
+    // of GB and exhausted the system commit (Event 2004: flashsight-webview.exe
+    // at 54-59 GB). Only LIVE nodes need a slot.
     slots_[1].valid = true;
     probe();
   }
@@ -932,8 +936,9 @@ class WebViewDom : public IDom {
   Node create_text(const std::string& text) override {
     uint64_t id = alloc();
     enqueue("text", static_cast<int>(id), 0, text, "");
-    slots_[id].is_text = true;
-    slots_[id].text = text;
+    Slot& s = slots_[id];
+    s.is_text = true;
+    s.text = text;
     return Node{id};
   }
   void append(Node parent, Node child) override {
@@ -949,12 +954,9 @@ class WebViewDom : public IDom {
   void remove(Node node) override {
     if (!node.valid()) return;
     enqueue("remove", idx(node), 0, "", "");
-    if (node.id < slots_.size()) {
-      // RELEASE the mirror strings. Keeping them on a dead slot meant every node
-      // ever created still carried its last text/value - the transcript re-creates
-      // nodes for growing content, so this grew with the length of a session.
-      slots_[node.id] = Slot();
-    }
+    // Erase the slot. Keeping a default Slot in a vector indexed by node id was
+    // the unbounded growth; a map drops the entry completely.
+    slots_.erase(node.id);
     // A popup that is gone must not keep its dismissal callback alive either.
     std::map<uint64_t, int>::iterator ob = outside_by_node_.find(node.id);
     if (ob != outside_by_node_.end()) {
@@ -969,18 +971,23 @@ class WebViewDom : public IDom {
 
   void set_text(Node node, const std::string& text) override {
     enqueue("textSet", idx(node), 0, text, "");
-    if (node.id < slots_.size()) slots_[node.id].text = text;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    if (it != slots_.end()) it->second.text = text;
   }
   void set_html(Node node, const std::string& html) override {
     enqueue("html", idx(node), 0, html, "");
   }
   void set_attr(Node node, const std::string& key, const std::string& value) override {
     enqueue("attr", idx(node), 0, key, value);
-    if (key == "value" && node.id < slots_.size()) slots_[node.id].value = value;
+    if (key != "value") return;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    if (it != slots_.end()) it->second.value = value;
   }
   void remove_attr(Node node, const std::string& key) override {
     enqueue("attrRemove", idx(node), 0, key, "");
-    if (key == "value" && node.id < slots_.size()) slots_[node.id].value.clear();
+    if (key != "value") return;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    if (it != slots_.end()) it->second.value.clear();
   }
   void set_style(Node node, const std::string& key, const std::string& value) override {
     enqueue("style", idx(node), 0, key, value);
@@ -989,7 +996,8 @@ class WebViewDom : public IDom {
     enqueue("visible", idx(node), 0, visible ? "1" : "0", "");
   }
   std::string get_value(Node node) override {
-    return node.id < slots_.size() ? slots_[node.id].value : std::string();
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    return it == slots_.end() ? std::string() : it->second.value;
   }
   bool is_focused(Node node) override { return focused_ == node.id; }
 
@@ -1115,7 +1123,8 @@ class WebViewDom : public IDom {
     call("scrollEdges", idx(node), 0, "1", "");
   }
   int scroll_top(Node node) override {
-    return node.id < slots_.size() ? slots_[node.id].scroll_top : 0;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    return it == slots_.end() ? 0 : it->second.scroll_top;
   }
   void set_scroll_top(Node node, int top) override {
     call("scrollTop", idx(node), 0, std::to_string(top), "");
@@ -1125,13 +1134,16 @@ class WebViewDom : public IDom {
     // saves the offset by reading exactly this. Switching away right after a
     // restore therefore persisted the OLD position, which is the "滚动状态没保存"
     // report. The wasm adapter reads el.scrollTop directly and never had this.
-    if (node.id < slots_.size()) slots_[node.id].scroll_top = top;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    if (it != slots_.end()) it->second.scroll_top = top;
   }
   int scroll_height(Node node) override {
-    return node.id < slots_.size() ? slots_[node.id].scroll_height : 0;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    return it == slots_.end() ? 0 : it->second.scroll_height;
   }
   int client_height(Node node) override {
-    return node.id < slots_.size() ? slots_[node.id].client_height : 0;
+    std::map<uint64_t, Slot>::iterator it = slots_.find(node.id);
+    return it == slots_.end() ? 0 : it->second.client_height;
   }
 
   // ---- clipboard / files -------------------------------------------------
@@ -1168,6 +1180,16 @@ class WebViewDom : public IDom {
     return std::string();
 #endif
   }
+  std::string debug_stats() const override {
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "dom_slots=%zu dom_nodes_made=%llu dom_batch=%zu "
+                  "dom_handlers=%zu",
+                  slots_.size(), static_cast<unsigned long long>(next_id_ - 2),
+                  batch_.size(), bus().size());
+    return std::string(buf);
+  }
+
   void insert_text_at_caret(const std::string& text) override {
     call("insertText", 0, 0, text, "");
   }
@@ -1259,8 +1281,11 @@ class WebViewDom : public IDom {
   }
 
   void on_push(const std::string& what, int id, const std::string& v) {
-    if (id <= 0 || static_cast<size_t>(id) >= slots_.size()) return;
-    Slot& s = slots_[static_cast<size_t>(id)];
+    if (id <= 0) return;
+    std::map<uint64_t, Slot>::iterator sit =
+        slots_.find(static_cast<uint64_t>(id));
+    if (sit == slots_.end()) return;
+    Slot& s = sit->second;
     if (what == "value") {
       s.value = v;
     } else if (what == "focus") {
@@ -1371,12 +1396,12 @@ class WebViewDom : public IDom {
 
   uint64_t alloc() {
     uint64_t id = next_id_++;
-    if (slots_.size() <= id) slots_.resize(static_cast<size_t>(id) + 1);
     slots_[id].valid = true;
     return id;
   }
   int idx(Node n) {
-    return (n.valid() && n.id < slots_.size() && slots_[n.id].valid)
+    std::map<uint64_t, Slot>::iterator it = slots_.find(n.id);
+    return (n.valid() && it != slots_.end() && it->second.valid)
                ? static_cast<int>(n.id)
                : 0;
   }
@@ -1437,7 +1462,7 @@ class WebViewDom : public IDom {
                  "var nodes=0,binds=0;"
                  "for(var k in S.handlers){var h=S.handlers[k];"
                  "for(var q in h){if(h[q])binds++;}}"
-                 "for(var i=1;i<S.nodes.length;i++){if(S.nodes[i])nodes++;}"
+                 "for(var i in S.nodes){if(S.nodes[i])nodes++;}"
                  "fs_ui_fire(-4,'nodes='+nodes+' binds='+binds);"
                  "var tabs=document.querySelectorAll('.title-btn');"
                  "fs_ui_fire(-5,'titleBtns='+tabs.length);"
@@ -1460,7 +1485,7 @@ class WebViewDom : public IDom {
   void install_bindings();
 
   webview_t w_ = nullptr;
-  std::vector<Slot> slots_;
+  std::map<uint64_t, Slot> slots_;
   // Buffered DOM writes for the current frame (see enqueue/flush).
   std::string batch_;
   uint64_t next_id_ = 2;

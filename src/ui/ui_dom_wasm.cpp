@@ -13,6 +13,7 @@
 #include <emscripten.h>
 #include <emscripten/val.h>
 
+#include <cstdio>
 #include <map>
 
 #include "fs_json.hpp"
@@ -29,8 +30,8 @@ using emscripten::val;
 //                the previous listener (the framework mints new handler ids on
 //                every render; without this, clicks would fire stale handlers).
 EM_JS(void, fs_dom_boot, (), {
-  if (!globalThis.__fsNodes) globalThis.__fsNodes = [null];
-  if (!globalThis.__fsHandlers) globalThis.__fsHandlers = [];
+  if (!globalThis.__fsNodes) globalThis.__fsNodes = {};
+  if (!globalThis.__fsHandlers) globalThis.__fsHandlers = {};
   // The browser's context menu is a document-level default: a per-node
   // contextmenu listener never fires on nodes without one, so right-clicking
   // anywhere popped "Back / Reload / Save as / Inspect". Swallow it globally and
@@ -131,8 +132,8 @@ EM_JS(void, fs_dom_off, (int node_id, int kind), {  var h = globalThis.__fsHandl
 
 // drop a removed node from the JS-side tables (called after removeChild)
 EM_JS(void, fs_dom_forget, (int node_id), {
-  if (globalThis.__fsNodes) globalThis.__fsNodes[node_id] = undefined;
-  if (globalThis.__fsHandlers) globalThis.__fsHandlers[node_id] = undefined;
+  if (globalThis.__fsNodes) delete globalThis.__fsNodes[node_id];
+  if (globalThis.__fsHandlers) delete globalThis.__fsHandlers[node_id];
   if (globalThis.__fsOutside) delete globalThis.__fsOutside[node_id];
 });
 
@@ -1239,7 +1240,8 @@ class WasmDom : public IDom {
   WasmDom() {
     fs_dom_boot();
     doc_ = val::global("document");
-    nodes_.resize(2);  // index 0 unused; 1 = root
+    // A MAP, not a vector indexed by the monotonic node id: the old vector kept
+    // a slot for every node ever created, so a long session grew without bound.
     int rid = fs_dom_root();
     (void)rid;
     val r = doc_.call<val>("getElementById", std::string("fs-root"));
@@ -1293,7 +1295,7 @@ class WasmDom : public IDom {
     if (n.isNull() || n.isUndefined()) return;
     val p = n["parentNode"];
     if (!p.isNull() && !p.isUndefined()) p.call<void>("removeChild", n);
-    nodes_[static_cast<size_t>(node.id)] = val::undefined();
+    nodes_.erase(node.id);
     int nid = static_cast<int>(node.id);
     std::map<int, int>::iterator ob = outside_by_node().find(nid);
     if (ob != outside_by_node().end()) {
@@ -1591,19 +1593,25 @@ class WasmDom : public IDom {
 
  private:
   val at(Node n) {
-    if (n.id >= nodes_.size()) return val::undefined();
-    return nodes_[static_cast<size_t>(n.id)];
+    std::map<uint64_t, val>::iterator it = nodes_.find(n.id);
+    return it == nodes_.end() ? val::undefined() : it->second;
   }
   Node adopt(val el) {
     Node n{next_id_++};
-    if (nodes_.size() <= n.id) nodes_.resize(static_cast<size_t>(n.id) + 1);
-    nodes_[static_cast<size_t>(n.id)] = el;
+    nodes_[n.id] = el;
     val::global("__fsNodes").set(static_cast<unsigned>(n.id), el);
     return n;
   }
 
+  std::string debug_stats() const override {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "dom_slots=%zu dom_nodes_made=%llu",
+                  nodes_.size(), static_cast<unsigned long long>(next_id_ - 2));
+    return std::string(buf);
+  }
+
   val doc_;
-  std::vector<val> nodes_;
+  std::map<uint64_t, val> nodes_;
   uint64_t next_id_ = 2;
 };
 

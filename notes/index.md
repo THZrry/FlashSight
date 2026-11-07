@@ -1622,3 +1622,13 @@ The process of project: P0 环境搭建
   - **自动轮硬上限**：`max_auto_continues` 默认改为 0（不设硬上限），停止交给 todo/plan/空轮/重复守卫。直接把 12→无限会让原来的 `return run_loop(next)` 递归无限加深（测试直接 `0xC00000FD` 栈溢出）；现在 `run_loop` 用 trampoline：自动轮把下一轮 messages/model/tools 放进 `auto_pending_*` 并返回，外层循环继续，不递归。测试里会无限产生工具调用的桩显式设 cap。
   - **崩溃溯源**：最新的 `110726-42171-01.dmp` 是 `0x10e`，参数 1 = `0x2D`；按 Microsoft 文档这是 `DdiMapCpuHostAperture` 失败，属于**显卡驱动**不可恢复错误，不是应用异常（Application 日志无 FlashSight Error/WER）。最后一条资源日志 21:23:56：tools 318→359、terms 0→11、handles 478→561（没有失控增长）、pump_gap 53–70ms；21:39:20 系统 bugcheck 后重启。GPU：NVIDIA RTX 4060 Laptop 32.0.15.9174（2025-12-30）/ Intel Iris Xe 32.0.101.7076。建议更新显卡驱动；应用侧无法捕获 kernel bugcheck。资源日志与用户描述的 20:31 有一小时差，以事件日志时间为准。
   - **测试/构建**：454 用例 4223 断言全过（新增压缩持久化/重开不短视图/短视图状态复用/陈旧状态忽略/loop 复用摘要、tab 缩进行号、自动轮 cap 用例）。web / webview / whaleui 三变体编译通过。
+
+
+<122>(ROOT CAUSE/FIX): 任务完成后的自动轮空转把系统 commit 耗尽；不是“驱动背锅”。
+  - **现场数据**：逐轮检查 `s_fdd...` 会话的 12 个 turn shard（182 turns）：**49 条 `SYSTEM: 继续` 用户轮，46 条 assistant 文本为空且 0 工具调用**。任务已经被认为完成，但 open todo 让空轮守卫豁免，自动轮继续反复唤醒/请求/重渲染，直到旧 cap。这正是“每轮结束后迅速卡死”的急性路径。
+  - **系统证据**：21:33:10 Resource-Exhaustion Detector 1003：commit limit `68,438,171,648`，commit charge `68,419,985,408`（99.97%）；21:33:16 1007：申请 `582,000` 字节失败，`0x8007000E`（ERROR_NOT_ENOUGH_MEMORY）；21:38:05 再次 1003。系统是**commit 耗尽**，不是单纯驱动故障。`0x10e / 0x2D DdiMapCpuHostAperture` 是后续：内存无法映射/提交时 GPU 驱动报错，所以之前“只说更新驱动”是错的。
+  - **自动轮修复**：新增 `empty_auto_streak_`。连续 2 个 auto round 没有任何工具调用就停止，即使 todo 仍未清空；工具轮清零，用户手动发起的新轮也清零。保留无硬 cap + trampoline；旧的“open todo 无限续跑”不再成立。测试把 todo 空轮用例的 cap 改成 10，仍应只剩 2 个 auto.next。
+  - **真实内存增长路径**：WebView / WhaleUI / Wasm 三个适配器的 node slot 表原先都是按单调 node id 索引的 vector：节点删除只把值置空，vector 不缩，永远保留“曾经创建过”的每个节点。JS 侧 `__fsNodes`/`__fsHandlers` 也是数组置 null，同样只增不减。改成 map/object + erase/delete，只保留存活节点。长会话/反复自动轮渲染会累积这条路径。
+  - **资源记录升级（这次有测量）**：两个 native host 每 30 秒写 `[res]`，字段包括 `mem_ws/peak/private/commit`、`sys_avail/commit/limit`、WebView2 子进程数+commit 总和、`threads`、`handles`、`gdi/user`、render 线程 `stack_peak_kb`、消息/工具/终端字节数、`dom_slots/live/made/handlers`、`auto_round/turn_running`。之前只有函数耗时和 handles，无法验证内存理论；以后崩溃后有 commit/线程/自动轮状态。
+  - **基线实测**：原生窗口打开 30 条消息/349 工具块：main private 12→20MB、WebView2 组 1.30→1.40GB、system commit 14.5GB/41.7GB、threads 15、dom_slots 2655（nodes_made 2676）。这是正常基线；下次事件按日志中的 commit/threads/auto_round 判断是否复发。
+  - **测试/构建**：454 用例 4223 断言全过；web / webview / whaleui 三变体编译通过。

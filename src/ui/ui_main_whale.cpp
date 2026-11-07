@@ -21,8 +21,10 @@
 #include <windows.h>
 #endif
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -232,12 +234,45 @@ int run_whale_ui(FsApi* api) {
         [](double, void* ud) { static_cast<UiApp*>(ud)->pump(); }, &ui, 250);
     long long term = whaleui_set_interval(
         [](double, void* ud) { static_cast<UiApp*>(ud)->tick_terminal(); }, &ui, 50);
+    // Resource log for the WhaleUI host too: the earlier freeze diagnostics only
+    // covered the WebView build, so a WhaleUI incident had no memory/object data.
+    // One line every 30 s with process+system memory, DOM slot count and the
+    // app's arrays; FS_RES_LOG=0 opts out.
+    long long res = whaleui_set_interval(
+        [](double, void* ud) {
+          const char* env = std::getenv("FS_RES_LOG");
+          if (env && std::strcmp(env, "0") == 0) return;
+          UiApp* app = static_cast<UiApp*>(ud);
+          if (!app) return;
+          const char* tmp = std::getenv("TEMP");
+          if (!tmp || !*tmp) tmp = std::getenv("TMPDIR");
+          std::string dir = tmp && *tmp ? tmp : "/tmp";
+          std::string path = dir + "/flashsight_res.log";
+          int64_t sec = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+          unsigned long handles = 0;
+#if defined(_WIN32)
+          DWORD wh = 0;
+          ::GetProcessHandleCount(::GetCurrentProcess(), &wh);
+          handles = static_cast<unsigned long>(wh);
+#endif
+          if (FILE* f = std::fopen(path.c_str(), "a")) {
+            std::fprintf(f, "[res] %lld ui=whale handles=%lu %s\n",
+                         static_cast<long long>(sec),
+                         static_cast<unsigned long>(handles),
+                         app->debug_stats().c_str());
+            std::fclose(f);
+          }
+        },
+        &ui, 30000);
 
     whaleui_window_show(win);
     rc = whaleui_app_run(app);  // blocks until the window closes
 
     whaleui_clear_interval(tick);
     whaleui_clear_interval(term);
+    whaleui_clear_interval(res);
   }
 
   // Order matters: the DOM adapter's destructor removes its listeners, which

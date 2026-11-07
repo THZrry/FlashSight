@@ -438,7 +438,7 @@ FS_TEST(loop_auto_continues_with_open_todos_after_empty_round) {
   opts.sid = "s_auto_todos";
   opts.permission = "full";
   opts.context.auto_mode = true;
-  opts.max_auto_continues = 2;
+  opts.max_auto_continues = 10;
   Recorder rec;
   opts.event = rec.fn();
   AgentLoop loop(std::move(opts));
@@ -454,10 +454,11 @@ FS_TEST(loop_auto_continues_with_open_todos_after_empty_round) {
     return FsResult::success(Json::object());
   };
   ASSERT_TRUE(loop.send("go").ok());
-  // First turn + 2 auto rounds (the cap), all because the checklist is open.
+  // First turn + 2 auto rounds. The checklist stays open, so this is the
+  // empty-round STREAK guard (not the cap) stopping the wake/render loop.
   EXPECT_EQ((int)model.seen_messages.size(), 3);
   EXPECT_EQ(rec.count("auto.next"), 2);
-  // The halt is the CAP, not the empty-round guard: 3 calls happened.
+  // A single empty round continues while todos are open; the second stops it.
   EXPECT_TRUE(rec.saw("auto.halted"));
 }
 
