@@ -451,9 +451,9 @@ FS_TEST(loop_continue_with_empty_guidance) {
 }
 
 
-// edit_file 的 expect 校验要跨换行风格：CRLF 文件 + 模型写的 \n 不该被判为不符
-// （"expected text does not match"）。写入默认改成 LF，避免这类兼容问题。
-FS_TEST(edit_file_matches_expect_across_line_endings) {
+// A range edit does not compare old text. CRLF/LF differences therefore cannot
+// reject a valid edit; only the file hash is checked.
+FS_TEST(edit_file_range_replaces_regardless_of_old_text) {
   fstest::TempDir td("editeol");
   ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
   ghc::filesystem::create_directories(proj);
@@ -471,22 +471,20 @@ FS_TEST(edit_file_matches_expect_across_line_endings) {
       ctx, "edit_file",
       Json{{"path", "crlf.txt"},
            {"hash", rr.data["hash"]},
-           {"edits", Json::array({Json{{"start", 2}, {"expect", "beta"}, {"newText", "BETA"}}})}});
+           {"edits", Json::array({Json{{"start", 2}, {"end", 2}, {"newText", "BETA"}}})}});
   ASSERT_TRUE(er.ok());
   FsResult r2 = reg.invoke(ctx, "read_file", Json{{"path", "crlf.txt"}});
   ASSERT_TRUE(r2.ok());
   std::string out = r2.data["content"].get<std::string>();
   EXPECT_TRUE(out.find("BETA") != std::string::npos);
-  // Default lineEnding is lf now: the file no longer carries CR.
   EXPECT_TRUE(out.find('\r') == std::string::npos);
 }
 
-// edit_file 的 start 可以省略：模型经常只给 {end, expect, newText}。以前这被当成
-// start=0 直接拒绝（"bad line range: start=0 end=7051"），模型于是退回用更不安全的
-// file_regex 改文件。现在省略 start 时按 expect 的行数推导起点，没有 expect 就只改
-// end 那一行；start=0 视为第 1 行。
-FS_TEST(edit_file_derives_missing_start) {
-  fstest::TempDir td("editnostart");
+// STRICT edit protocol: {start,end,newText} exactly. A misspelled/renamed field
+// is an ERROR, not a silent no-op; the model once sent {count,ranges} and
+// believed it had edited the file.
+FS_TEST(edit_file_requires_exact_range_fields) {
+  fstest::TempDir td("editstrict");
   ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
   ghc::filesystem::create_directories(proj);
   {
@@ -500,39 +498,43 @@ FS_TEST(edit_file_derives_missing_start) {
   FsResult rr = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
   ASSERT_TRUE(rr.ok());
   std::string hash = rr.data["hash"].get<std::string>();
-  // Multi-line block ending at 3, start omitted: the two lines of `expect`
-  // decide the range (2..3).
-  FsResult er = reg.invoke(
+  // Wrong shape (the exact mistake reported): must fail loudly.
+  FsResult bad = reg.invoke(
       ctx, "edit_file",
       Json{{"path", "a.txt"},
            {"hash", hash},
-           {"edits", Json::array({Json{{"end", 3},
-                                       {"expect", "beta\ngamma"},
-                                       {"newText", "BETA\nGAMMA"}}})}});
-  ASSERT_TRUE(er.ok());
-  EXPECT_EQ(er.data["changes"][0]["start"].get<int64_t>(), int64_t(2));
-  FsResult r2 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
-  ASSERT_TRUE(r2.ok());
-  EXPECT_TRUE(r2.data["content"].get<std::string>().find("BETA\nGAMMA") !=
+           {"edits", Json::array({Json{{"count", 1},
+                                       {"ranges", Json::array({Json{{"start", 2},
+                                                                    {"end", 2},
+                                                                    {"newBytes", 4}}})}}})}});
+  EXPECT_FALSE(bad.ok());
+  EXPECT_TRUE(bad.message.find("unknown field") != std::string::npos ||
+              bad.message.find("start") != std::string::npos);
+  // start without end must fail too.
+  FsResult half = reg.invoke(
+      ctx, "edit_file",
+      Json{{"path", "a.txt"},
+           {"hash", hash},
+           {"edits", Json::array({Json{{"start", 2}, {"newText", "B"}}})}});
+  EXPECT_FALSE(half.ok());
+  // Correct range succeeds and returns both hashes.
+  FsResult ok = reg.invoke(
+      ctx, "edit_file",
+      Json{{"path", "a.txt"},
+           {"hash", hash},
+           {"edits", Json::array({Json{{"start", 2}, {"end", 2}, {"newText", "BETA"}}})}});
+  ASSERT_TRUE(ok.ok());
+  EXPECT_TRUE(ok.data.contains("hash"));
+  EXPECT_TRUE(ok.data.contains("beforeHash"));
+  // read_file shows real line numbers by default; numbers=false is raw.
+  FsResult numbered = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(numbered.ok());
+  EXPECT_TRUE(numbered.data["content"].get<std::string>().find("2\tBETA") !=
               std::string::npos);
-  // Single line, start omitted, no expect: end is that line.
-  FsResult er2 = reg.invoke(
-      ctx, "edit_file",
-      Json{{"path", "a.txt"},
-           {"hash", r2.data["hash"]},
-           {"edits", Json::array({Json{{"end", 1}, {"newText", "ALPHA"}}})}});
-  ASSERT_TRUE(er2.ok());
-  EXPECT_EQ(er2.data["changes"][0]["start"].get<int64_t>(), int64_t(1));
-  // start: 0 means "from the beginning", not an error.
-  FsResult r3 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
-  ASSERT_TRUE(r3.ok());
-  FsResult er3 = reg.invoke(
-      ctx, "edit_file",
-      Json{{"path", "a.txt"},
-           {"hash", r3.data["hash"]},
-           {"edits", Json::array({Json{{"start", 0}, {"end", 1}, {"newText", "ALPHA2"}}})}});
-  ASSERT_TRUE(er3.ok());
-  EXPECT_EQ(er3.data["changes"][0]["start"].get<int64_t>(), int64_t(1));
+  FsResult raw = reg.invoke(ctx, "read_file",
+                            Json{{"path", "a.txt"}, {"numbers", false}});
+  ASSERT_TRUE(raw.ok());
+  EXPECT_EQ(raw.data["content"].get<std::string>(), std::string("alpha\nBETA\ngamma\ndelta\n"));
 }
 
 
@@ -745,7 +747,7 @@ FS_TEST(file_tools_flow) {
   rargs["limit"] = 1;
   FsResult rr = reg.invoke(ctx, "read_file", rargs);
   ASSERT_TRUE(rr.ok());
-  EXPECT_EQ(rr.data["content"].get<std::string>(), std::string("line2\n"));
+  EXPECT_EQ(rr.data["content"].get<std::string>(), std::string("2\tline2\n"));
   // Three lines, not four: the trailing newline terminates line 3 rather than
   // starting an empty line 4 (an edit addressed at line 4 would otherwise
   // silently append instead of failing).
@@ -838,7 +840,10 @@ FS_TEST(file_tools_flow) {
   }
   Json hargs = Json::object();
   hargs["path"] = "huge.bin";
-  hargs["edits"] = Json::array({Json{{"start", 1}, {"newText", "x"}}});
+  // The size guard fires before the hash is checked, but the schema still
+  // requires a hash; any non-empty value gets us to the guard.
+  hargs["hash"] = "0000000000000000";
+  hargs["edits"] = Json::array({Json{{"start", 1}, {"end", 1}, {"newText", "x"}}});
   FsResult hr = reg.invoke(ctx, "edit_file", hargs);
   EXPECT_FALSE(hr.ok());
   EXPECT_TRUE(hr.message.find("too large") != std::string::npos);
@@ -851,11 +856,11 @@ FS_TEST(file_tools_flow) {
   ASSERT_TRUE(wr.ok());
   EXPECT_EQ(wr.data["after"].get<std::string>(), std::string("hello"));
 
-  // edit：行号 + hash + expect
+  // edit：行号 + hash
   Json e1 = Json::object();
   e1["path"] = "a.txt";
   e1["hash"] = file_hash;
-  e1["edits"] = Json::array({Json{{"start", 2}, {"expect", "line2"}, {"newText", "LINE2"}}});
+  e1["edits"] = Json::array({Json{{"start", 2}, {"end", 2}, {"newText", "LINE2"}}});
   FsResult er = reg.invoke(ctx, "edit_file", e1);
   ASSERT_TRUE(er.ok());
   EXPECT_EQ((int)er.data["changes"].size(), 1);
@@ -873,29 +878,30 @@ FS_TEST(file_tools_flow) {
   Json e2 = Json::object();
   e2["path"] = "a.txt";
   e2["hash"] = hash2;
-  e2["edits"] = Json::array({Json{{"start", 1}, {"newText", "X"}}});
+  e2["edits"] = Json::array({Json{{"start", 1}, {"end", 1}, {"newText", "X"}}});
   FsResult er2 = reg.invoke(ctx, "edit_file", e2);
   EXPECT_FALSE(er2.ok());
   EXPECT_TRUE(er2.data.contains("stale"));
 
-  // 重新读取后再改：区间替换只校验 hash，stale 的 expect 文本不能阻止写入
+  // 重新读取后再改：区间替换只校验 hash
   FsResult rr2 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
   ASSERT_TRUE(rr2.ok());
   Json e3 = Json::object();
   e3["path"] = "a.txt";
   e3["hash"] = rr2.data["hash"];
-  e3["edits"] = Json::array({Json{{"start", 1}, {"expect", "WRONG"}, {"newText", "X"}}});
+  e3["edits"] = Json::array({Json{{"start", 1}, {"end", 1}, {"newText", "X"}}});
   FsResult er3 = reg.invoke(ctx, "edit_file", e3);
   ASSERT_TRUE(er3.ok());
   EXPECT_EQ(er3.data["changes"][0]["before"].get<std::string>(), std::string("line1"));
   FsResult rr3a = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});
   ASSERT_TRUE(rr3a.ok());
-  EXPECT_TRUE(rr3a.data["content"].get<std::string>().find("X") == 0);
+  EXPECT_TRUE(rr3a.data["content"].get<std::string>().find("1\tX") == 0);
 
   // 行号越界 -> 拒绝（不会静默追加）
   Json e4 = Json::object();
   e4["path"] = "a.txt";
-  e4["edits"] = Json::array({Json{{"start", 999}, {"newText", "X"}}});
+  e4["hash"] = rr3a.data["hash"];
+  e4["edits"] = Json::array({Json{{"start", 999}, {"end", 999}, {"newText", "X"}}});
   EXPECT_FALSE(reg.invoke(ctx, "edit_file", e4).ok());
 
   // 重叠编辑 -> 拒绝（顺序歧义）
@@ -912,7 +918,7 @@ FS_TEST(file_tools_flow) {
   Json e6 = Json::object();
   e6["path"] = "a.txt";
   e6["hash"] = rr3.data["hash"];
-  e6["edits"] = Json::array({Json{{"start", 3}, {"expect", "line3"}, {"newText", ""}}});
+  e6["edits"] = Json::array({Json{{"start", 3}, {"end", 3}, {"newText", ""}}});
   FsResult er6 = reg.invoke(ctx, "edit_file", e6);
   ASSERT_TRUE(er6.ok());
   FsResult rr4 = reg.invoke(ctx, "read_file", Json{{"path", "a.txt"}});

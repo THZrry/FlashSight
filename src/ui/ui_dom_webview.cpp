@@ -340,6 +340,7 @@ const char* kGlueJs = R"JS(
       bar['__init_' + cbName] = 1;
       bar.style.cursor = axis ? 'row-resize' : 'col-resize';
       bar.addEventListener('mousedown', function (down) {
+        if (down.button !== 0) return;
         var cb = bar['__cb_' + cbName];
         var panel = bar['__panel_' + cbName];
         if (!cb || !panel) return;
@@ -591,6 +592,7 @@ const char* kGlueJs = R"JS(
                    (t.classList.contains('tab') || t.classList.contains('ptab'));
           }
           el.addEventListener('mousedown', function (ev) {
+            if (ev.button !== 0) return;
             // The press usually lands on the tab's TEXT span, not the tab div.
             // The old `isTab(ev.target)` check rejected that and drag never
             // started ("鼠标放文字上甚至都拖不了"). Climb to the tab like the

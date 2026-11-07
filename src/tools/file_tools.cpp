@@ -20,6 +20,9 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -41,6 +44,97 @@ namespace {
 constexpr int64_t kHardMaxBytes = 32LL * 1024 * 1024;   // absolute refusal
 constexpr int64_t kSoftMaxBytes = 1024LL * 1024;        // needs explicit paging
 constexpr size_t kMaxLineChars = 4000;                  // per-line output cap
+
+// Reject misspelled/renamed fields instead of silently accepting them. The
+// model once sent {count, ranges:[{end,newBytes,start}]} to edit_file; the old
+// handler ignored all of it and applied nothing, then the model believed it had
+// edited the file. That is worse than a hard error.
+bool only_keys(const Json& obj, std::initializer_list<const char*> allowed,
+               std::string* bad) {
+  if (!obj.is_object()) {
+    if (bad) *bad = "expected an object";
+    return false;
+  }
+  for (Json::const_iterator it = obj.begin(); it != obj.end(); ++it) {
+    bool ok = false;
+    for (const char* k : allowed) {
+      if (it.key() == k) {
+        ok = true;
+        break;
+      }
+    }
+    if (!ok) {
+      if (bad) *bad = "unknown field: " + it.key();
+      return false;
+    }
+  }
+  return true;
+}
+
+// Cheap balance warnings for inserted text. A range replacement can be a partial
+// snippet, so these are warnings, never a refusal. They catch the exact failure
+// the user hit twice: an inserted block was missing a closing brace / comment
+// terminator and the file stopped compiling.
+std::vector<std::string> balance_warnings(const std::string& s) {
+  std::vector<std::string> out;
+  int brace = 0, paren = 0;
+  bool block_comment = false;
+  bool in_str = false, in_line = false;
+  char quote = 0;
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i], n = i + 1 < s.size() ? s[i + 1] : '\0';
+    if (in_line) {
+      if (c == '\n') in_line = false;
+      continue;
+    }
+    if (block_comment) {
+      if (c == '*' && n == '/') { block_comment = false; ++i; }
+      continue;
+    }
+    if (in_str) {
+      if (c == '\\') { ++i; continue; }
+      if (c == quote) in_str = false;
+      continue;
+    }
+    if (c == '/' && n == '/') { in_line = true; ++i; continue; }
+    if (c == '/' && n == '*') { block_comment = true; ++i; continue; }
+    if (c == '"' || c == '\'') { in_str = true; quote = c; continue; }
+    if (c == '{') ++brace;
+    if (c == '}') --brace;
+    if (c == '(') ++paren;
+    if (c == ')') --paren;
+  }
+  if (block_comment) out.push_back("newText ends inside an unterminated /* comment");
+  if (in_str) out.push_back("newText ends inside an unterminated string");
+  if (brace != 0) out.push_back("newText has unbalanced braces (delta " +
+                                std::to_string(brace) + ")");
+  if (paren != 0) out.push_back("newText has unbalanced parentheses (delta " +
+                                std::to_string(paren) + ")");
+  return out;
+}
+
+// Last successful edit/write content, for a one-step undo. Scoped to the
+// process and keyed by canonical path; a failed write never replaces it.
+struct UndoSnapshot {
+  std::string before;
+  bool valid = false;
+};
+std::mutex& undo_mu() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, UndoSnapshot>& undo_map() {
+  static std::map<std::string, UndoSnapshot> m;
+  return m;
+}
+void remember_undo(const ghc::filesystem::path& p, const std::string& before) {
+  if (before.size() > static_cast<size_t>(kHardMaxBytes)) return;
+  std::lock_guard<std::mutex> lk(undo_mu());
+  UndoSnapshot s;
+  s.before = before;
+  s.valid = true;
+  undo_map()[p.lexically_normal().string()] = std::move(s);
+}
 
 // 二进制守卫：前 4KB 含 NUL 即判二进制
 bool is_binary(const std::string& content) {
@@ -234,16 +328,21 @@ void register_file_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "read_file";
     def.description =
-        "读取文件（按行分页；返回 hash 供 edit_file 校验）. Read a file by lines. "
-        "Returns {hash, content, startLine, totalLines, truncated}; pass `hash` to "
-        "edit_file so a concurrent change is caught instead of overwritten. "
-        "Files >1MB need an explicit offset/limit.";
+        "读取文件（按行分页；content 每行带真实行号；返回 hash 供 edit_file）. "
+        "Read a file by lines. `content` is prefixed with the REAL 1-based line "
+        "number (`N<TAB>line`) so edit_file start/end can be copied exactly - do "
+        "not count lines yourself. Returns {hash, content, startLine, endLine, "
+        "totalLines, truncated}; pass `hash` to edit_file. Pass numbers=false only "
+        "when you need the exact bytes. Files >1MB need explicit offset/limit.";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
     props["path"] = Json{{"type", "string"}, {"description", "项目内相对路径"}};
     props["offset"] = Json{{"type", "integer"}, {"description", "起始行（1-based，默认1）"}};
     props["limit"] = Json{{"type", "integer"}, {"description", "最大行数（默认2000）"}};
+    props["numbers"] = Json{
+        {"type", "boolean"},
+        {"description", "是否在 content 每行前加行号（默认true；false 返回原始文本）"}};
     params["properties"] = props;
     params["required"] = Json::array({"path"});
     def.parameters = params;
@@ -252,6 +351,7 @@ void register_file_tools(ToolRegistry* registry) {
         std::string rel = jsonutil::get<std::string>(args, "path", "");
         int offset = static_cast<int>(jsonutil::get_int(args, "offset", 1));
         int limit = static_cast<int>(jsonutil::get_int(args, "limit", 2000));
+        bool numbers = jsonutil::get<bool>(args, "numbers", true);
         bool explicit_page = args.contains("offset") || args.contains("limit");
         ghc::filesystem::path p = resolve_in(ctx.cwd, rel);
         if (p.empty()) {
@@ -318,6 +418,7 @@ void register_file_tools(ToolRegistry* registry) {
             line = utf8::truncate(line, kMaxLineChars, " …(line truncated)");
             clipped = true;
           }
+          if (numbers) out += std::to_string(i + 1) + "\t";
           out += line;
           out += "\n";
         }
@@ -339,6 +440,8 @@ void register_file_tools(ToolRegistry* registry) {
         // The hash covers the WHOLE file, not the slice: it is an identity for
         // "the file I read", which is what the edit protocol needs.
         data["hash"] = hash::short_hex(hash::xxh64_hex(content));
+        data["summary"] = rel + " " + std::to_string(start + 1) + "-" +
+                          std::to_string(end) + "/" + std::to_string(total) + " lines";
         return FsResult::success(data);
       });
   }
@@ -565,11 +668,13 @@ void register_file_tools(ToolRegistry* registry) {
         if (!write_text_file(p, out)) {
           return FsResult::error(ErrCode::kIo, "write failed: " + rel);
         }
+        remember_undo(p, before);
         Json data = Json::object();
         data["path"] = rel;
         data["before"] = before;
         data["after"] = out;
         data["hash"] = hash::short_hex(hash::xxh64_hex(out));
+        data["summary"] = rel;
         return FsResult::success(data);
       });
   }
@@ -580,41 +685,53 @@ void register_file_tools(ToolRegistry* registry) {
     def.name = "edit_file";
     def.description =
         "按行号区间替换（只校验文件 hash；不做文本匹配）. Replace a LINE RANGE. "
-        "Args: path, hash (from read_file), edits:[{start, end, newText}]. "
-        "`start`/`end` are 1-based inclusive line numbers in the file AS READ; "
-        "`end` defaults to `start` (a single line). The range is replaced "
-        "unconditionally as long as `hash` matches - there is NO expected-text "
-        "comparison (a stale line's wording must not block a range edit). "
-        "Multiple edits use the original line numbers and are applied bottom-up, "
-        "so they never shift each other.";
+        "Args EXACTLY: path, hash (required; from read_file), "
+        "edits:[{start,end,newText}] (start/end both required, 1-based inclusive). "
+        "The range is replaced unconditionally as long as `hash` matches - there "
+        "is NO expected-text comparison. Multiple edits use the original line "
+        "numbers and are applied bottom-up. AFTER ANY EDIT the line numbers below "
+        "the change shift: re-read the file before another edit. Unknown fields "
+        "are rejected (do not send count/ranges/expect).";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
     props["path"] = Json{{"type", "string"}, {"description", "项目内相对路径"}};
     props["hash"] = Json{{"type", "string"},
-                         {"description", "read_file 返回的 hash（强烈建议传；不符则拒绝）"}};
+                         {"description", "read_file 返回的 hash（必填；不符则拒绝写入）"}};
     Json edit = Json::object();
     edit["type"] = "object";
     edit["properties"] = Json{
-        {"start", Json{{"type", "integer"}, {"description", "起始行（1-based，含）"}}},
-        {"end", Json{{"type", "integer"}, {"description", "结束行（含；默认=start）"}}},
+        {"start", Json{{"type", "integer"}, {"description", "起始行（1-based，含；必填）"}}},
+        {"end", Json{{"type", "integer"}, {"description", "结束行（含；必填）"}}},
         {"newText", Json{{"type", "string"},
                          {"description", "替换后的内容；空串=删除这些行"}}},
     };
-    edit["required"] = Json::array({"start", "newText"});
+    edit["required"] = Json::array({"start", "end", "newText"});
     props["edits"] = Json{{"type", "array"}, {"items", edit},
                           {"description", "要应用的行替换列表"}};
     props["lineEnding"] = Json{{"type", "string"},
                                {"description", "lf(默认)|crlf|preserve（保留原样）"}};
     params["properties"] = props;
-    params["required"] = Json::array({"path", "edits"});
+    params["required"] = Json::array({"path", "hash", "edits"});
     def.parameters = params;
     registry->register_tool("edit_file", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {
+        std::string bad;
+        if (!only_keys(args, {"path", "hash", "edits", "lineEnding"}, &bad)) {
+          return FsResult::error(
+              ErrCode::kInvalidArg,
+              "edit_file: " + bad +
+                  "; expected exactly {path, hash, edits:[{start,end,newText}]}");
+        }
         std::string rel = jsonutil::get<std::string>(args, "path", "");
         std::string want_hash = jsonutil::get<std::string>(args, "hash", "");
         std::string le = jsonutil::get<std::string>(args, "lineEnding", "lf");
         if (rel.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty path");
+        if (want_hash.empty()) {
+          return FsResult::error(
+              ErrCode::kInvalidArg,
+              "edit_file requires hash from read_file; re-read the file first");
+        }
         if (!args.contains("edits") || !args["edits"].is_array() ||
             args["edits"].empty()) {
           return FsResult::error(ErrCode::kInvalidArg, "edits must be a non-empty array");
@@ -670,43 +787,29 @@ void register_file_tools(ToolRegistry* registry) {
           std::string after;
         };
         std::vector<Edit> edits;
+        std::vector<std::string> warnings;
+        int edit_index = 0;
         for (auto& e : args["edits"]) {
+          ++edit_index;
           if (!e.is_object()) {
             return FsResult::error(ErrCode::kInvalidArg, "each edit must be an object");
           }
-          // `start` is OPTIONAL in practice: the model regularly sends only
-          // {end, expect, newText} (the line it quoted decides where the block
-          // begins). Requiring start silently turned every such call into
-          // "bad line range: start=0 end=7051", and the model then fell back to
-          // a regex replace - a less safe edit - which is exactly what the user
-          // saw. Derive it:
-          //   * start present: use it; a 0/negative start means line 1.
-          //   * start missing + expect: start = end - lines(expect) + 1.
-          //   * start missing, no expect: end is the single line to replace.
-          const std::string expect = jsonutil::get<std::string>(e, "expect", "");
-          const bool has_start = e.contains("start") && !e["start"].is_null();
-          const bool has_end = e.contains("end") && !e["end"].is_null();
-          int end = has_end ? static_cast<int>(jsonutil::get_int(e, "end", 0)) : 0;
-          int start = has_start ? static_cast<int>(jsonutil::get_int(e, "start", 0)) : 0;
-          if (!has_start) {
-            if (!expect.empty()) {
-              // Legacy calls that quoted text but omitted start: derive the
-              // range from the quote (the text is NOT compared any more).
-              int expect_lines = 1;
-              for (size_t c = 0; c < expect.size(); ++c) {
-                if (expect[c] == '\n') ++expect_lines;
-              }
-              start = has_end ? end - expect_lines + 1 : 1;
-              if (start < 1) start = 1;
-            } else {
-              // A range edit with only `end`: replace that single line.
-              start = has_end ? end : 1;
-            }
-          } else if (start < 1) {
-            start = 1;
+          if (!only_keys(e, {"start", "end", "newText"}, &bad)) {
+            return FsResult::error(
+                ErrCode::kInvalidArg,
+                "edit " + std::to_string(edit_index) + ": " + bad +
+                    "; expected exactly {start, end, newText}");
           }
-          if (!has_end) end = start;
-          if (end < start) {
+          if (!e.contains("start") || !e["start"].is_number() ||
+              !e.contains("end") || !e["end"].is_number()) {
+            return FsResult::error(
+                ErrCode::kInvalidArg,
+                "edit " + std::to_string(edit_index) +
+                    " needs BOTH start and end (1-based inclusive line numbers)");
+          }
+          int start = static_cast<int>(jsonutil::get_int(e, "start", 0));
+          int end = static_cast<int>(jsonutil::get_int(e, "end", 0));
+          if (start < 1 || end < start) {
             return FsResult::error(ErrCode::kInvalidArg,
                                    "bad line range: start=" + std::to_string(start) +
                                        " end=" + std::to_string(end));
@@ -724,11 +827,11 @@ void register_file_tools(ToolRegistry* registry) {
               std::vector<std::string>(lines.begin() + (start - 1),
                                        lines.begin() + end),
               eol, false);
-          // NO expected-text comparison. The range + file hash is the whole
-          // contract: the user asked for line-range replacement, and a stale
-          // quote must not turn a valid range into "nothing was written".
-          (void)expect;
           std::string new_text = jsonutil::get<std::string>(e, "newText", "");
+          std::vector<std::string> bw = balance_warnings(new_text);
+          for (size_t w = 0; w < bw.size(); ++w) {
+            warnings.push_back("edit " + std::to_string(edit_index) + ": " + bw[w]);
+          }
           FsResult noise = check_noise(new_text);
           if (!noise.ok()) return noise;
           ed.before = actual;
@@ -778,6 +881,52 @@ void register_file_tools(ToolRegistry* registry) {
         if (!write_text_file(p, after)) {
           return FsResult::error(ErrCode::kIo, "write failed: " + rel);
         }
+        remember_undo(p, content);
+        // Read the file back. The write helper succeeded, but this is the only
+        // check that the bytes on disk are the ones we intended (another process
+        // may have overwritten it between write and read).
+        std::string verified;
+        if (read_text_file(p, &verified) != ReadStatus::kOk) {
+          warnings.push_back("could not read the file back after writing");
+        } else {
+          TextFile vf = split_text(verified);
+          if (static_cast<int>(vf.lines.size()) !=
+              static_cast<int>(out_lines.size())) {
+            warnings.push_back("totalLines after readback (" +
+                               std::to_string(vf.lines.size()) + ") differs from the "
+                               "edited result (" + std::to_string(out_lines.size()) +
+                               "); re-read before the next edit");
+          } else {
+            // Report the text that is ACTUALLY on disk for each range, not just
+            // the newText we were asked to write. EOL normalisation, trailing
+            // newline handling or a concurrent writer can make them differ, and
+            // the model reads this back as the truth.
+            int delta = 0;
+            for (size_t i = 0; i < edits.size(); ++i) {
+              Edit& ed = edits[i];
+              size_t at = static_cast<size_t>(ed.start - 1 + delta);
+              size_t count = ed.replacement.size();
+              std::string actual_after;
+              if (at <= vf.lines.size() && count <= vf.lines.size() - at) {
+                actual_after = join_text(
+                    std::vector<std::string>(vf.lines.begin() + at,
+                                             vf.lines.begin() + at + count),
+                    vf.eol, false);
+              }
+              std::string wanted =
+                  join_text(split_text(ed.after).lines, vf.eol, false);
+              if (actual_after != wanted) {
+                warnings.push_back(
+                    "edit " + std::to_string(i + 1) +
+                    ": text read back from disk differs from newText; use the "
+                    "returned after text");
+              }
+              ed.after = actual_after;
+              delta += static_cast<int>(ed.replacement.size()) -
+                       (ed.end - ed.start + 1);
+            }
+          }
+        }
         Json changes = Json::array();
         for (auto& ed : edits) {
           Json c = Json::object();
@@ -792,10 +941,70 @@ void register_file_tools(ToolRegistry* registry) {
         Json data = Json::object();
         data["path"] = rel;
         data["changes"] = changes;
+        data["totalLinesBefore"] = total;
         data["totalLines"] = static_cast<int>(out_lines.size());
         data["hash"] = hash::short_hex(hash::xxh64_hex(after));
         data["beforeHash"] = cur_hash;
-        data["summary"] = std::to_string(edits.size()) + " edit(s) applied";
+        if (!warnings.empty()) {
+          Json w = Json::array();
+          for (size_t i = 0; i < warnings.size(); ++i) w.push_back(warnings[i]);
+          data["warnings"] = w;
+        }
+        data["summary"] = std::to_string(edits.size()) + " edit(s) applied; line "
+                          "numbers below the change shifted - re-read before the "
+                          "next edit" +
+                          (warnings.empty() ? "" : "; WARNINGS - re-read the file");
+        return FsResult::success(data);
+      });
+  }
+
+  // ----- edit_revert (one-step undo for write_file/edit_file) --------------
+  {
+    ToolDef def;
+    def.name = "edit_revert";
+    def.description =
+        "撤销本进程最近一次对该文件的 write_file/edit_file（一步）。Undo the LAST "
+        "write/edit of this file in this process. Use it right after a bad edit "
+        "instead of git checkout; it restores the exact previous content.";
+    Json params = Json::object();
+    params["type"] = "object";
+    Json props = Json::object();
+    props["path"] = Json{{"type", "string"}, {"description", "项目内相对路径"}};
+    params["properties"] = props;
+    params["required"] = Json::array({"path"});
+    def.parameters = params;
+    registry->register_tool("edit_revert", def,
+      [](const ToolContext& ctx, const Json& args) -> FsResult {
+        std::string rel = jsonutil::get<std::string>(args, "path", "");
+        if (rel.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty path");
+        FsResult perm = check_write_perm(ctx, ghc::filesystem::path(rel), rel);
+        if (!perm.ok()) return perm;
+        ghc::filesystem::path p = resolve_by_perm(ctx, rel);
+        if (p.empty()) {
+          return FsResult::error(ErrCode::kInvalidArg, "path escapes project: " + rel);
+        }
+        std::string key = p.lexically_normal().string();
+        UndoSnapshot snap;
+        {
+          std::lock_guard<std::mutex> lk(undo_mu());
+          std::map<std::string, UndoSnapshot>::iterator it = undo_map().find(key);
+          if (it == undo_map().end() || !it->second.valid) {
+            return FsResult::error(
+                ErrCode::kNotFound,
+                "no undo snapshot for " + rel +
+                    " (only the most recent successful write/edit is kept)");
+          }
+          snap = it->second;
+          undo_map().erase(it);
+        }
+        if (!write_text_file(p, snap.before)) {
+          return FsResult::error(ErrCode::kIo, "revert write failed: " + rel);
+        }
+        Json data = Json::object();
+        data["path"] = rel;
+        data["hash"] = hash::short_hex(hash::xxh64_hex(snap.before));
+        data["totalLines"] = static_cast<int>(split_text(snap.before).lines.size());
+        data["summary"] = "reverted " + rel;
         return FsResult::success(data);
       });
   }

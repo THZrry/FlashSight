@@ -523,9 +523,41 @@ FS_TEST(addon2_todo_tool_layer) {
   FsResult lst = host.tools().invoke(ctx, "todo_list", Json::object());
   ASSERT_TRUE(lst.ok());
   EXPECT_EQ((int)lst.data["items"].size(), 1);
+  // The model can drop an obsolete item itself, not only clear everything.
+  FsResult add2 = host.tools().invoke(ctx, "todo_add", Json{{"task", "obsolete"}});
+  ASSERT_TRUE(add2.ok());
+  int id2 = static_cast<int>(add2.data["id"].get<int>());
+  FsResult ers = host.tools().invoke(ctx, "todo_erase", Json{{"id", id2}});
+  ASSERT_TRUE(ers.ok());
+  EXPECT_EQ((int)host.tools().invoke(ctx, "todo_list", Json::object()).data["items"].size(), 1);
   FsResult clr = host.tools().invoke(ctx, "todo_clear", Json::object());
   ASSERT_TRUE(clr.ok());
   EXPECT_EQ((int)host.tools().invoke(ctx, "todo_list", Json::object()).data["items"].size(), 0);
+}
+
+// A reopened session must show the WHOLE checklist, including items already
+// marked done. Hydration used to be tested only for an empty store, so a
+// completed item could be persisted correctly and still vanish on reopen.
+FS_TEST(addon2_todo_hydrates_completed_items) {
+  AgentHostDeps deps;
+  deps.todo_load = [](const std::string& owner) -> Json {
+    if (owner != "s_done") return Json::array();
+    return Json::array({Json{{"id", 1}, {"task", "finished"}, {"done", true},
+                             {"doneAt", 123}},
+                        Json{{"id", 2}, {"task", "still open"}, {"done", false},
+                             {"doneAt", 0}}});
+  };
+  AgentHost host(std::move(deps));
+  Json items = host.todos_for("s_done");
+  ASSERT_TRUE(items.is_array());
+  EXPECT_EQ((int)items.size(), 2);
+  EXPECT_EQ(items[0]["task"].get<std::string>(), std::string("finished"));
+  EXPECT_TRUE(items[0]["done"].get<bool>());
+  EXPECT_FALSE(items[1]["done"].get<bool>());
+  // The next id continues after the restored maximum, not from 1.
+  FsResult add = host.todo_op("s_done", Json{{"op", "add"}, {"task", "next"}});
+  ASSERT_TRUE(add.ok());
+  EXPECT_EQ(add.data["id"].get<int>(), 3);
 }
 
 // ---------- FsApi 层：skill.* / thinkingLang / browser-load ----------

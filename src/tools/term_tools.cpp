@@ -1,6 +1,8 @@
 // term_tools.cpp - terminal_exec/spawn/kill/poll（回调式实现）
 #include "term_tools.hpp"
 
+#include "fs_utf8.hpp"
+
 namespace fs {
 
 void register_term_tools(ToolRegistry* registry) {
@@ -27,6 +29,10 @@ void register_term_tools(ToolRegistry* registry) {
         }
         Json out;
         FsResult r = ctx.terminal_spawn(args, &out);
+        if (r.ok() && !out.contains("summary")) {
+          std::string command = jsonutil::get<std::string>(args, "command", "");
+          out["summary"] = utf8::truncate(command, 80, "…");
+        }
         return r.ok() ? FsResult::success(out) : r;
       });
   }
@@ -56,13 +62,13 @@ void register_term_tools(ToolRegistry* registry) {
         Json out;
         FsResult r = ctx.terminal_spawn(spawn_args, &out);
         if (!r.ok()) return r;
-        // 前台：立即 poll 一次拿结果（宿主负责等）
-        if (!ctx.terminal_poll) return FsResult::success(out);
-        std::string tid = jsonutil::get<std::string>(out, "tid", "");
-        Json poll_out;
-        FsResult pr = ctx.terminal_poll(Json{{"tid", tid}}, &poll_out);
-        if (!pr.ok()) return FsResult::success(out);
-        out["poll"] = poll_out;
+        // The host's foreground spawn already waits for the process and returns
+        // the final output/status. Polling here duplicated the same output under
+        // `poll.output` (the user saw both) and could contradict the spawn result.
+        if (!out.contains("summary")) {
+          std::string command = jsonutil::get<std::string>(args, "command", "");
+          out["summary"] = utf8::truncate(command, 80, "…");
+        }
         return FsResult::success(out);
       });
   }

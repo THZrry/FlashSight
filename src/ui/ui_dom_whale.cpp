@@ -546,9 +546,9 @@ class WhaleDom : public IDom {
   }
 
   void copy_text(const std::string& text) override {
-    // WhaleUI has no clipboard API yet (see doc-internal/ui-whaleui.md);
-    // reporting a copy that did not happen would be worse than doing nothing.
-    (void)text;
+    // WhaleUI exposes the system clipboard through its C API (SDL-backed), so
+    // copy works even though the engine has no element value/selection API.
+    whaleui_clipboard_set_text(text.c_str());
   }
 
   // ---- file picker (upload) ----------------------------------------------
@@ -834,6 +834,9 @@ class WhaleDom : public IDom {
     d.target = target;
     d.cb = on_resize;
     bind_aux(slot_ref, bar, "mousedown", [this, vertical](whaleui_dom_event_t* ev) {
+      // Left button only: right/middle press must not start a resize drag (the
+      // same rule the browser and WebView adapters apply).
+      if (whaleui_dom_event_mouse_button(ev) != 0) return;
       Drag& dr = vertical ? vdrag_ : hdrag_;
       if (!dr.target || !dr.cb) return;
       whaleui_dom_rect_t r;
@@ -864,6 +867,7 @@ class WhaleDom : public IDom {
     d.target = nav;
     d.cb = on_resize;
     bind_aux(navbar_, bar, "mousedown", [this](whaleui_dom_event_t* ev) {
+      if (whaleui_dom_event_mouse_button(ev) != 0) return;  // left button only
       Drag& dr = navdrag_;
       if (!dr.target || !dr.cb) return;
       whaleui_dom_rect_t r;

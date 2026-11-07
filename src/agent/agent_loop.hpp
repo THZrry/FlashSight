@@ -93,7 +93,10 @@ class AgentLoop {
     // in one line, and the user can continue.
     int max_tool_rounds = 200;              // 单轮最多模型往返次数（安全上限）
     int max_repeat_calls = 3;               // 连续相同调用上限
-    int max_auto_continues = 12;            // 自动模式最多自动续跑轮数
+    // 12 stopped long tasks midway ("自动12轮后没有继续发起了"). The cap is only a
+    // runaway guard, not a work budget; open todos/plan should be allowed to
+    // finish. 50 rounds still bounds a runaway loop.
+    int max_auto_continues = 50;            // 自动模式最多自动续跑轮数
     // 无人值守（子代理）：需要批准的动作直接拒绝并回填原因，而不是进入
     // waiting 等一个不会有人按的按钮。
     bool unattended = false;

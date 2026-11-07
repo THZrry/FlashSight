@@ -889,26 +889,24 @@ html, body {
 .proj-right .proj-sessions { display: flex; flex: none; }
 
 @container (max-width: 699px) {
-  /* STACKED layout: the list is EXPANDED and shows every session - no inner
-     scroll. The header collapses the whole block instead ("上下两栏保持展开并允许
-     整体折叠"). */
+  /* STACKED layout: the header collapses/expands the whole block; a long list
+     is additionally capped to 10 rows by the renderer until expanded. */
   .proj-right:not(.open) .proj-sessions { display: none; }
   .proj-right:not(.open) { min-height: 0; }
   .proj-right.open { min-height: 0; }
   .proj-right .proj-sessions { max-height: none; overflow: visible; }
-  /* in the narrow layout the header IS the control, so keep it clickable */
   .proj-right-head { cursor: pointer; }
   .proj-right-head:hover { background: var(--hover); color: var(--text); }
 }
 
 @container (min-width: 700px) {
-  /* SIDE-BY-SIDE layout: a fixed maximum height with its own scroll, so a
-     project with 40 sessions does not push the card into a wall of rows. */
+  /* SIDE-BY-SIDE layout: the renderer caps a >10-row list until the header is
+     clicked; expanded keeps its own scroll so one project cannot push the rest
+     of the page away. */
   .proj-right .proj-sessions { max-height: 360px; overflow-y: auto; }
-  /* the list is always shown, so the header is a label, not a control */
-  .proj-right .prh-toggle { display: none; }
-  .proj-right-head { cursor: default; }
-  .proj-right-head:hover { background: transparent; color: var(--text-dim); }
+  .proj-right-head { cursor: pointer; }
+  .proj-right-head:hover { background: var(--hover); color: var(--text); }
+  .proj-right .prh-toggle { display: inline; }
   .proj-right { min-height: 0; }
 }
 

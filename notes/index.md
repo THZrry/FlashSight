@@ -1586,3 +1586,26 @@ The process of project: P0 环境搭建
   - **终端编号**：短前台命令即使记录被裁剪也消耗 tid，列表会显示 #107。UI 现在显示终端在用户列表中的序号（1..N），不再显示后端 tid；新增用例。
   - **语义确认**：todo 是列表（未清空自动轮继续），plan 是文档（未 done 自动轮继续，用于产出 todo），workflow 是并行大流水线；WhaleUI 那次 plan_update done 但 todo 还有未完成项，所以自动轮继续是符合规则的，不是把 plan 当成 todo。
   - **测试**：445 用例 4150 断言全过；web / webview 双变体编译通过。原生窗口实测：供应商模板 26 张、选择器单击切换/外部关闭焦点保留、右键粘贴、空模型 Enter 打开选择器。另：清理了此前验证时误写进 new1 会话 111 的两条测试消息。
+
+
+<120>(FIXED/AUDIT): 切页实时工具/气泡、会话排序与长列表、终端标签、edit_file 读回/撤销/行号、自动轮上限、todo 回收；CI 变体改为布尔开关。
+  - **切页后工具调用消失**：运行中的工具行只存在 loop 内存里，切页重建 transcript 时只从磁盘读，于是只剩思考。`live_state()` 现在带 `tools`（每完成一次工具就更新、上限 200），UI `attach_live_turn` 用它重建 ToolBlock（name/summary/detail/args/subagentId），不再依赖本地临时气泡。
+  - **SYSTEM: 原文与 User-User**：自动轮的 userText 是 "SYSTEM: continue"；如果末尾没有 system 分隔条，现在创建“自动继续 · 第 N 轮”标记，绝不把它渲染成用户气泡；分隔条存在时不重复追加。
+  - **会话排序**：`session_list` 按 `updatedAt` 降序、sid 次序稳定排序，更新的会话回到项目列表顶部。
+  - **>10 会话**：项目卡片新增独立的 `sessions_open`，默认只显示 10 行并给“展开/收起”；它和窄屏的整块展开分开，长项目不会再挤掉其他项目。原生窗口实测 17 个会话的 new1 默认 10 行、展开后 17 行。
+  - **左键拖动**：wasm/webview 的分隔条与标签拖动只接受 `button === 0`；WhaleUI 的 `bind_drag`/`bind_nav_drag` 加 `whaleui_dom_event_mouse_button(ev) != 0` 拦截。原生窗口实测右键拖动宽度 240→240，左键 240→300。
+  - **终端标签**：`terminal.list` 里 model-fg/model-bg 只进“所有终端”，不再自动成为标签；`load_terminals` 只把 user 终端清出 `term_hidden`，并通过 `terminal.output` 先出现的终端先隐藏；tab strip 真正按 `term_hidden` 过滤（之前只收集没消费）；`terminal.exit` 重新拉列表，短记录被裁剪后标签/计数同步；当前标签被隐藏时回退“所有终端”。原生窗口实测修复后只剩“所有终端/新增”，从概览点开才出现标签。另把此前测试写进 whaleui 会话的 6 条测试终端记录（150/257/269/276/335/365）连同日志移到 `temp/whaleui_test_terminals_backup/`，不再污染列表。
+  - **终端返回重复**：`terminal_exec` 不再自己 poll，foreground spawn 已返回最终输出，结果里不再出现 `output` + `poll.output` 两份；collapsed 行 summary 是命令前 80 字节。
+  - **edit_file 协议重做**：
+    - 只接受 `{path,hash,edits:[{start,end,newText}],lineEnding}`；未知字段（count/ranges/expect…）直接报错，不再静默通过；start/end 必须同时出现且有 1-based 整数；hash 必填且校验。
+    - 写入后读回文件，按每段实际落盘内容返回 `before/after`（不是只回显 newText）；行数不符或读回文本与 newText 不同会进 `warnings`。`newText` 的括号/花括号不平衡、块注释未闭合也会警告。
+    - 返回 `totalLinesBefore/totalLines/hash/beforeHash`；summary 明确提醒“改动以下的编号已移位，下一次编辑前重新读”。
+    - read_file 默认返回带真实行号的内容（`N\tline`），`numbers=false` 才是原文；summary 是 `path start-end/total lines`，collapsed 行直接显示路径。
+    - 新增 `edit_revert`：一步恢复本进程最近一次对该文件的 write/edit，不用退回 git checkout；用完即失效。
+    - 历史重放仍只保留路径+区间（before/after/newText 不进后续上下文），同一内容不会每轮重复。
+  - **自动轮 12→50**：`Options::max_auto_continues` 默认 50；空轮/计划完成仍会停，重复守卫不变。
+  - **todo**：`todo_list`/`todo_check` 能带出已完成项；新增 `todo_erase` 让模型删除单条不需要的任务（不是只能清空）；新增“重启后已完成项还在、下一 id 接续”用例。
+  - **CI 变体选择**：`workflow_dispatch` 从 `variant: all|web|webview` 三选一改成 `web`/`webview`/`whaleui` 三个独立布尔开关；tag/release 仍默认编 web+webview，WhaleUI 额外受 `ENABLE_WHALEUI` 控制。
+  - **跨平台**：新逻辑都在共享 UI/工具层；WhaleUI 的拖动加左键判断，`copy_text` 走 `whaleui_clipboard_set_text`（不再空实现）；Win32 剪贴板仍只在 `_WIN32` 分支，非 Windows 保留 `navigator.clipboard` 回退。
+  - **测试/构建**：448 用例 4186 断言全过（含严格 edit schema、读回编号、revert、长列表、todo 恢复/erase）。web / webview / whaleui 三变体编译通过；原生窗口实测右键拖动无效左键有效、17 会话默认 10 行、终端只剩“所有终端/新增”。live 工具快照路径未在真实模型回合复测（当时没有可跑的回合），由代码路径与快照用例覆盖。
+  - **闪退**：事件日志里没有 FlashSight 的 Application Error；同一时间只有 0x10e GPU bugcheck / BlueScreen 记录，应用侧无崩溃转储，无法本地复现。已保留/加强 WebView 批量与 UTF-8 防护，但没有证据把那次退出归到具体代码路径。

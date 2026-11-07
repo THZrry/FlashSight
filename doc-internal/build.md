@@ -67,8 +67,9 @@ flashsight*"**，那个 fallback 正是错的二进制进发布包的原因。
 `build/<plat>/<arch>/release` 查找，可执行文件名按平台带不带 `.exe`，所以
 macOS / Linux 的 job 也适用。
 
-`workflow_dispatch` 支持只编一个变体（`variant: all|web|webview`），迭代时省
-一半时间。
+`workflow_dispatch` 用三个独立的布尔开关（`web` / `webview` / `whaleui`）选择
+编译哪些变体，而不是一个三选一的下拉：可以只编 webview 迭代，也可以两个都编。
+`whaleui` 开关还要同时设置仓库变量 `ENABLE_WHALEUI=true` 才会生效。
 
 WhaleUI 是**可选的独立 job**（`whaleui`），默认跳过：它需要 clone WhaleUI
 仓库、先用它自己的 xmake 构建 `libwhaleui-full`，再让 xmake 装 lexbor /

@@ -2,22 +2,24 @@ name: build
 
 # Releases are cut from tags: `v0.1.0` (and pre-releases like `v0.2.0-rc1`).
 # Publishing a GitHub Release also triggers a build, so assets can be attached
-# to it after the fact. workflow_dispatch builds without publishing, and can
-# build a single variant (`variant` input) to iterate faster.
+# to it after the fact. workflow_dispatch builds without publishing; each
+# variant is its OWN on/off input, so a manual run compiles exactly the
+# variants it asks for instead of picking one value from a three-way list.
 #
 #   Web      : one self-contained executable per platform (wasm UI embedded,
 #              served over the embedded HTTP server)
 #   Webview  : one executable per platform (native window via the OS web engine)
 #
-# Both are built in ONE job: they share the output directory and the executable
-# name carries the variant (flashsight-web / flashsight-webview), and switching
-# variants only recompiles the two backend files plus main.cpp. Building them
-# separately would compile the whole project twice.
+# Web and webview are built in ONE job: they share the output directory and the
+# executable name carries the variant (flashsight-web / flashsight-webview),
+# and switching variants only recompiles the two backend files plus main.cpp.
+# Building them separately would compile the whole project twice.
 #
 # WhaleUI needs a WhaleUI checkout and a build of its engine, which this repo
 # does not vendor. It therefore runs in its own opt-in job: set the repository
 # variable ENABLE_WHALEUI=true (and WHALEUI_REPO if the fork differs) to turn it
-# on. See doc-internal/ui-whaleui.md.
+# on, and use the `whaleui` dispatch input to include it in a manual run.
+# See doc-internal/ui-whaleui.md.
 on:
   push:
     tags:
@@ -26,14 +28,18 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      variant:
-        description: "Which UI variant(s) to build"
-        type: choice
-        default: all
-        options:
-          - all
-          - web
-          - webview
+      web:
+        description: "Build the Web variant (browser + embedded HTTP server)"
+        type: boolean
+        default: true
+      webview:
+        description: "Build the WebView variant (native window, OS web engine)"
+        type: boolean
+        default: true
+      whaleui:
+        description: "Build the WhaleUI variant (needs ENABLE_WHALEUI=true)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -225,19 +231,32 @@ jobs:
       # variant macro only applies to the two backend files plus main.cpp, so
       # the second configure recompiles three files instead of the project.
       #
-      # `want_*` mirrors the optional workflow_dispatch input so a manual run
-      # can build just one variant while iterating.
+      # `want_*` comes from the boolean dispatch inputs. On tag/release events
+      # there are no inputs, so both desktop variants build (the historical
+      # release set); WhaleUI stays governed by the repository variable.
       - name: Select variants
         id: want
         run: |
-          v="${{ github.event.inputs.variant }}"
-          if [ -z "$v" ] || [ "$v" = "all" ]; then v=all; fi
-          case "$v" in
-            all)     echo "web=1" >> "$GITHUB_OUTPUT"; echo "webview=1" >> "$GITHUB_OUTPUT" ;;
-            web)     echo "web=1" >> "$GITHUB_OUTPUT"; echo "webview=0" >> "$GITHUB_OUTPUT" ;;
-            webview) echo "web=0" >> "$GITHUB_OUTPUT"; echo "webview=1" >> "$GITHUB_OUTPUT" ;;
-            *) echo "unknown variant '$v'"; exit 1 ;;
-          esac
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            web="${{ github.event.inputs.web }}"
+            webview="${{ github.event.inputs.webview }}"
+            whaleui="${{ github.event.inputs.whaleui }}"
+          else
+            web=true
+            webview=true
+            whaleui=false
+          fi
+          [ "$web" = "true" ] && web=1 || web=0
+          [ "$webview" = "true" ] && webview=1 || webview=0
+          [ "$whaleui" = "true" ] && whaleui=1 || whaleui=0
+          if [ "$web" = "0" ] && [ "$webview" = "0" ]; then
+            echo "at least one of web/webview must be enabled"
+            exit 1
+          fi
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "webview=$webview" >> "$GITHUB_OUTPUT"
+          echo "whaleui=$whaleui" >> "$GITHUB_OUTPUT"
+          echo "selected: web=$web webview=$webview whaleui=$whaleui"
 
       - name: Configure (web)
         if: steps.want.outputs.web == '1'
@@ -392,7 +411,9 @@ jobs:
   # ------------------------------------------------------------------------
   whaleui:
     needs: prepare
-    if: vars.ENABLE_WHALEUI == 'true'
+    if: |
+      vars.ENABLE_WHALEUI == 'true' &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.whaleui == 'true')
     name: windows-x86_64-whaleui
     runs-on: windows-latest
     defaults:

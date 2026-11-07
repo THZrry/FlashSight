@@ -322,6 +322,7 @@ EM_JS(void, fs_dom_splitter, (int split_node, int side_node, int cb_id), {
   if (bar.__fsSplitInit) return;
   bar.__fsSplitInit = true;
   bar.addEventListener('mousedown', function (down) {
+    if (down.button !== 0) return;         // left button only
     if (!bar.__fsSplitCb) return;          // not bound (panel collapsed)
     var side = bar.__fsSplitSide;
     if (!side) return;
@@ -376,6 +377,7 @@ EM_JS(void, fs_dom_nav_splitter, (int split_node, int nav_node, int cb_id), {
   if (bar.__fsNavSplitInit) return;
   bar.__fsNavSplitInit = true;
   bar.addEventListener('mousedown', function (down) {
+    if (down.button !== 0) return;
     if (!bar.__fsNavSplitCb) return;
     var nav = bar.__fsNavSplitNav;
     if (!nav) return;
@@ -514,6 +516,7 @@ EM_JS(void, fs_dom_tab_drag, (int strip_node, int cb_id), {
     }
   }
   strip.addEventListener('mousedown', function (down) {
+    if (down.button !== 0) return;         // right/middle clicks must not drag
     var t = down.target;
     while (t && t !== strip && !isTab(t)) t = t.parentElement;
     if (!t || t === strip) return;
@@ -623,6 +626,7 @@ EM_JS(void, fs_dom_vsplitter, (int split_node, int panel_node, int cb_id), {
   bar.__fsVSplitInit = true;
   bar.style.cursor = 'row-resize';
   bar.addEventListener('mousedown', function (down) {
+    if (down.button !== 0) return;
     down.preventDefault();
     var startY = down.clientY;
     var startH = panel.getBoundingClientRect().height;

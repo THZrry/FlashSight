@@ -436,6 +436,29 @@ FS_TEST(uiapp_project_card_actions) {
   EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
 }
 
+FS_TEST(uiapp_long_session_list_is_capped) {
+  NullDom dom;
+  AppState st = AppState::make();
+  seed_project(st);
+  st.projects[0].sessions.clear();
+  for (int i = 0; i < 11; ++i) {
+    ProjectCard::SessionRow row;
+    row.sid = "s" + std::to_string(i);
+    row.title = "SESSION_" + std::to_string(i);
+    st.projects[0].sessions.push_back(row);
+  }
+  st.projects[0].session_count = 11;
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  // >10 rows are capped by default; the explicit toggle is present and the
+  // 11th row is not rendered yet.
+  EXPECT_TRUE(dump_has(dom, "展开"));
+  EXPECT_FALSE(dump_has(dom, "SESSION_10"));
+  app.update([](AppState& s) { s.projects[0].sessions_open = true; });
+  EXPECT_TRUE(dump_has(dom, "收起"));
+  EXPECT_TRUE(dump_has(dom, "SESSION_10"));
+}
+
 FS_TEST(uiapp_splitter_bound) {
   NullDom dom;
   AppState st = AppState::make();

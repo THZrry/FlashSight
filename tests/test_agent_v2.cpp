@@ -341,7 +341,7 @@ FS_TEST(edit_preserves_trailing_newline) {
   FsResult e = f.edit(Json{{"path", "a.txt"},
                            {"hash", r.data["hash"]},
                            {"edits", Json::array({Json{{"start", 2},
-                                                       {"expect", "beta"},
+                                                       {"end", 2},
                                                        {"newText", "BETA"}}})}});
   ASSERT_TRUE(e.ok());
   EXPECT_EQ(f.text(), std::string("alpha\nBETA\ngamma\n"));
@@ -355,7 +355,7 @@ FS_TEST(edit_does_not_add_trailing_newline) {
   ASSERT_TRUE(f.edit(Json{{"path", "a.txt"},
                           {"hash", r.data["hash"]},
                           {"edits", Json::array({Json{{"start", 1},
-                                                      {"expect", "alpha"},
+                                                      {"end", 1},
                                                       {"newText", "ALPHA"}}})}})
                   .ok());
   EXPECT_EQ(f.text(), std::string("ALPHA\nbeta"));
@@ -373,7 +373,7 @@ FS_TEST(edit_normalises_crlf_to_lf) {
   ASSERT_TRUE(f.edit(Json{{"path", "a.txt"},
                           {"hash", r.data["hash"]},
                           {"edits", Json::array({Json{{"start", 2},
-                                                      {"expect", "beta"},
+                                                      {"end", 2},
                                                       {"newText", "BETA"}}})}})
                   .ok());
   EXPECT_EQ(f.text(), std::string("alpha\nBETA\n"));
@@ -387,7 +387,7 @@ FS_TEST(edit_inserts_multiple_lines) {
   ASSERT_TRUE(f.edit(Json{{"path", "a.txt"},
                           {"hash", r.data["hash"]},
                           {"edits", Json::array({Json{{"start", 2},
-                                                      {"expect", "two"},
+                                                      {"end", 2},
                                                       {"newText", "two\nthree\nfour"}}})}})
                   .ok());
   EXPECT_EQ(f.text(), std::string("one\ntwo\nthree\nfour\n"));
@@ -402,12 +402,32 @@ FS_TEST(edit_multiple_edits_use_original_line_numbers) {
       Json{{"path", "a.txt"},
            {"hash", r.data["hash"]},
            {"edits", Json::array({
-               Json{{"start", 1}, {"expect", "l1"}, {"newText", "L1"}},
-               Json{{"start", 3}, {"expect", "l3"}, {"newText", "L3\nL3b"}},
-               Json{{"start", 5}, {"expect", "l5"}, {"newText", "L5"}},
+               Json{{"start", 1}, {"end", 1}, {"newText", "L1"}},
+               Json{{"start", 3}, {"end", 3}, {"newText", "L3\nL3b"}},
+               Json{{"start", 5}, {"end", 5}, {"newText", "L5"}},
            })}});
   ASSERT_TRUE(e.ok());
   EXPECT_EQ(f.text(), std::string("L1\nl2\nL3\nL3b\nl4\nL5\n"));
+}
+
+// ---------- 一步撤销：改错后不必退回 git checkout ----------
+FS_TEST(edit_revert_restores_the_previous_content) {
+  FileFixture f("alpha\nbeta\n");
+  FsResult r = f.read();
+  ASSERT_TRUE(r.ok());
+  ASSERT_TRUE(f.edit(Json{{"path", "a.txt"},
+                          {"hash", r.data["hash"]},
+                          {"edits", Json::array({Json{{"start", 2},
+                                                      {"end", 2},
+                                                      {"newText", "BROKEN("}}})}})
+                  .ok());
+  EXPECT_EQ(f.text(), std::string("alpha\nBROKEN(\n"));
+  FsResult u = f.reg.invoke(f.ctx, "edit_revert", Json{{"path", "a.txt"}});
+  ASSERT_TRUE(u.ok());
+  EXPECT_EQ(f.text(), std::string("alpha\nbeta\n"));
+  EXPECT_TRUE(u.data.contains("hash"));
+  // The snapshot is one-shot: a second revert has nothing left to restore.
+  EXPECT_FALSE(f.reg.invoke(f.ctx, "edit_revert", Json{{"path", "a.txt"}}).ok());
 }
 
 // ---------- hash 过期 -> 拒绝且不写盘 ----------
@@ -424,6 +444,7 @@ FS_TEST(edit_stale_hash_refuses_and_keeps_file) {
   FsResult e = f.edit(Json{{"path", "a.txt"},
                            {"hash", r.data["hash"]},
                            {"edits", Json::array({Json{{"start", 1},
+                                                       {"end", 1},
                                                        {"newText", "hijacked"}}})}});
   EXPECT_FALSE(e.ok());
   EXPECT_TRUE(e.data.value("stale", false));

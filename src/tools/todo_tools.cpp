@@ -82,6 +82,28 @@ void register_todo_tools(ToolRegistry* registry) {
       });
   }
 
+  // todo_erase
+  {
+    ToolDef def;
+    def.name = "todo_erase";
+    def.description =
+        "删除一条进程任务（不做完也不要了）. Remove ONE task from the current "
+        "process list by id. Use it to drop an obsolete/duplicate item instead of "
+        "marking it done or clearing the whole list.";
+    Json params = base_params();
+    Json props = Json::object();
+    props["id"] = Json{{"type", "integer"}, {"description", "任务 id"}};
+    params["properties"] = props;
+    params["required"] = Json::array({"id"});
+    def.parameters = params;
+    registry->register_tool("todo_erase", def,
+      [](const ToolContext& ctx, const Json& args) -> FsResult {
+        Json a = args;
+        a["op"] = "erase";
+        return forward(ctx, a);
+      });
+  }
+
   // todo_clear
   {
     ToolDef def;

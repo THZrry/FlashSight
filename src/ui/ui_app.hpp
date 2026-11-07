@@ -45,6 +45,11 @@ struct ProjectCard {
   // directly, narrow collapses it behind the header), so it is always loaded.
   bool sessions_loaded = false;
   bool expanded = true;            // narrow layout: list revealed? (wide ignores it)
+  // A project with >10 sessions keeps the list capped until this is switched
+  // on. It is SEPARATE from `expanded`: the narrow layout's reveal and the
+  // "show all N sessions" control are different questions, and tying them
+  // together let one long project push every other project off the page.
+  bool sessions_open = false;
   // A session row carries more than a title: the card shows WHEN it last
   // changed and WHETHER it is running, and both have to be deletable.
   struct SessionRow {
@@ -171,6 +176,9 @@ struct TermItem {
   std::string shell;
   std::string label;   // user-given name ("" for model-started terminals)
   std::string status;  // "running" | "exited"
+  // "user" | "model-fg" | "model-bg". Model foreground commands are results,
+  // not windows: they belong in 所有终端, not as open tabs by default.
+  std::string kind;
 };
 
 // A wake-up the backend will fire for this session (auto mode). Declared at

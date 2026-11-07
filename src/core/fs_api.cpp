@@ -1118,7 +1118,20 @@ FsResult FsApi::session_list(const std::string& pid) {
     if (mt > 0) m["updatedAt"] = mt;
     out.push_back(m);
   }
-  return FsResult::success(out);
+  // Most-recently-updated first. list_sessions() returns sids alphabetically
+  // (a directory scan); the sidebar showed that raw order, so a session that
+  // just finished a turn stayed buried between old ones.
+  std::vector<Json> rows(out.begin(), out.end());
+  std::sort(rows.begin(), rows.end(), [](const Json& a, const Json& b) {
+    int64_t ta = jsonutil::get_int(a, "updatedAt", 0);
+    int64_t tb = jsonutil::get_int(b, "updatedAt", 0);
+    if (ta != tb) return ta > tb;
+    return jsonutil::get<std::string>(a, "sid", "") <
+           jsonutil::get<std::string>(b, "sid", "");
+  });
+  Json sorted = Json::array();
+  for (size_t i = 0; i < rows.size(); ++i) sorted.push_back(rows[i]);
+  return FsResult::success(sorted);
 }
 FsResult FsApi::session_delete(const std::string& sid) {
   return sessions_->delete_session(sid);

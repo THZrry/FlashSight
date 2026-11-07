@@ -911,12 +911,48 @@ void UiApp::load_terminals(const std::string& sid) {
       it.shell = jsonutil::get<std::string>(t, "shell", "");
       it.label = jsonutil::get<std::string>(t, "label", "");
       it.status = jsonutil::get<std::string>(t, "status", "running");
+      it.kind = jsonutil::get<std::string>(t, "kind", "user");
       // A closed terminal is still LISTED (it keeps running; closing only
       // removed its tab), so it is not filtered out here - the tab strip skips
       // it and the overview shows it as an inactive row.
       terms.push_back(it);
     }
     st_.terminals.swap(terms);
+    // A model `terminal_exec` is a command result, not a terminal the user
+    // opened. Do not push every one of them into the tab strip; they remain in
+    // 所有终端 and can be opened deliberately. Only NEW tids are hidden, so a
+    // tab the user already opened stays open. Do this BEFORE term_order is
+    // rebuilt (the rebuild appends every terminal).
+    for (size_t k = 0; k < st_.terminals.size(); ++k) {
+      const TermItem& t = st_.terminals[k];
+      if (t.kind == "user") {
+        // A user terminal is a tab by definition. Clear a mark added
+        // speculatively when its output arrived before this list did.
+        for (size_t i = 0; i < st_.term_hidden.size();) {
+          if (st_.term_hidden[i] == t.tid) {
+            st_.term_hidden.erase(st_.term_hidden.begin() + static_cast<long>(i));
+          } else {
+            ++i;
+          }
+        }
+        continue;
+      }
+      // Every model terminal - foreground command results AND long-running
+      // background jobs - is a record in 所有终端, not a tab the user opened.
+      // Auto-opening all of them is what put four stale test terminals on the
+      // right of a WhaleUI session every time it was opened.
+      if (t.kind != "model-fg" && t.kind != "model-bg") continue;
+      bool known = false;
+      for (size_t i = 0; i < st_.term_order.size(); ++i) {
+        if (st_.term_order[i] == t.tid) { known = true; break; }
+      }
+      if (known) continue;
+      bool hidden = false;
+      for (size_t i = 0; i < st_.term_hidden.size(); ++i) {
+        if (st_.term_hidden[i] == t.tid) { hidden = true; break; }
+      }
+      if (!hidden) st_.term_hidden.push_back(t.tid);
+    }
     // The backend sorts by tid; the strip shows them in the user's own order
     // (see term_order). tids not seen before are appended, and tids that are
     // gone are dropped, so the order stays in sync without re-sorting what the
@@ -942,6 +978,16 @@ void UiApp::load_terminals(const std::string& sid) {
     }
     if (!st_.terminals.empty() && st_.active_term.empty()) {
       st_.active_term = st_.terminals[0].tid;
+    }
+    // The selected tab may have been a model terminal that is now hidden; fall
+    // back to the overview instead of showing a pane whose tab does not exist.
+    if (!st_.term_tab.empty() && st_.term_tab != "all") {
+      for (size_t i = 0; i < st_.term_hidden.size(); ++i) {
+        if (st_.term_hidden[i] == st_.term_tab) {
+          st_.term_tab = "all";
+          break;
+        }
+      }
     }
     render();
     // The terminal drawer can be opened on a terminal that has never been
@@ -2191,12 +2237,15 @@ void UiApp::attach_live_turn(const std::string& sid) {
     bool crashed = jsonutil::get<bool>(r.data, "crashed", false);
     std::string text = jsonutil::get<std::string>(r.data, "text", "");
     std::string user_text = jsonutil::get<std::string>(r.data, "userText", "");
+    int auto_round = static_cast<int>(jsonutil::get_int(r.data, "autoRound", 0));
     int64_t started = jsonutil::get_int(r.data, "startedAt", 0);
     // Narration from completed rounds travels with the live snapshot so a tab
     // reopened mid-turn still shows it in the WORK LOG, not concatenated into
     // the answer. Without this, switching pages turned thinking into output.
     std::vector<std::string> interim;
     std::vector<size_t> interim_after;
+    Json live_tools = r.data.contains("tools") && r.data["tools"].is_array()
+                          ? r.data["tools"] : Json::array();
     if (r.data.contains("interim") && r.data["interim"].is_array()) {
       const Json& arr = r.data["interim"];
       for (size_t i = 0; i < arr.size(); ++i) {
@@ -2219,6 +2268,26 @@ void UiApp::attach_live_turn(const std::string& sid) {
       a->text = text;   // current round only; narration is in `interim`
       a->interim = interim;
       a->interim_after = interim_after;
+      // Rebuild the running turn's tool rows. They live only in the loop's
+      // memory until the turn persists, so a tab switch used to lose them.
+      a->tools.clear();
+      for (size_t i = 0; i < live_tools.size(); ++i) {
+        const Json& t = live_tools[i];
+        if (!t.is_object()) continue;
+        comp::ToolBlock tb;
+        tb.name = jsonutil::get<std::string>(t, "name", "");
+        tb.summary = jsonutil::get<std::string>(t, "summary", "");
+        tb.detail = jsonutil::get<std::string>(t, "detail", "");
+        tb.ok = jsonutil::get<bool>(t, "ok", true);
+        tb.running = false;
+        tb.subagent_id = jsonutil::get<std::string>(t, "subagentId", "");
+        if (t.contains("args") && t["args"].is_object() && !t["args"].empty()) {
+          tb.input = cut_display(dump_safe(t["args"], 2), 6000,
+                                 "\n… (输入已截断)");
+        }
+        tb.rev = next_msg_rev_++;
+        if (!tb.name.empty()) a->tools.push_back(tb);
+      }
       a->streaming = running;  // a crashed turn is not still being written
       // Do not force a fold the user closed during the turn.
       if (!a->work_touched) a->work_open = running;
@@ -2240,11 +2309,22 @@ void UiApp::attach_live_turn(const std::string& sid) {
           }
         }
         // An AUTO round is stored as a user turn but renders as a SYSTEM
-        // divider. Appending the raw "SYSTEM: continue" prompt after that
-        // divider produced User-User after a page switch. The divider already
-        // represents it.
-        if (!have_user && user_text.compare(0, 7, "SYSTEM:") == 0 &&
-            !s.messages.empty() && s.messages.back().role == "system") {
+        // divider. NEVER show the raw "SYSTEM: continue" prompt as a user
+        // bubble: if there is no divider yet, create the marker instead.
+        const bool system_nudge = user_text.compare(0, 7, "SYSTEM:") == 0;
+        if (!have_user && system_nudge) {
+          bool marker_at_end = !s.messages.empty() &&
+                               s.messages.back().role == "system";
+          if (!marker_at_end) {
+            comp::ChatMsg sys;
+            sys.role = "system";
+            sys.text = auto_round > 0
+                           ? tr("自动继续 · 第 ") + itos(auto_round) + tr(" 轮")
+                           : tr("自动继续");
+            sys.rev = next_msg_rev_++;
+            sys.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+            s.messages.push_back(sys);
+          }
           have_user = true;
         }
         if (!have_user) {
@@ -3847,6 +3927,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     for (size_t i = 0; i < terms.size(); ++i) {
       if (terms[i].tid == tid) terms[i].status = "exited";
     }
+    // Resync the LIST: a short foreground command is pruned from the records on
+    // exit, so keeping only the status left stale tab counts/labels (the user
+    // saw 1/5 become 0/4 with the removed tab still on screen).
+    if (is_active && !sid.empty()) load_terminals(sid);
     // The screen itself lives in the backend (that is where the VT parser is),
     // and pump() re-reads the visible terminal's grid, so nothing to do here -
     // the accumulated text above is only for the overview and for copy.
@@ -3863,9 +3947,11 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // A terminal the model started shows up here first: register it so the tab
     // strip lists it without waiting for a manual refresh. A terminal the user
     // closed the tab for is not resurrected by its own output.
+    std::vector<std::string>& hidden_list =
+        is_active ? st_.term_hidden : vp->term_hidden;
     bool hidden = false;
-    for (size_t i = 0; i < st_.term_hidden.size(); ++i) {
-      if (st_.term_hidden[i] == tid) { hidden = true; break; }
+    for (size_t i = 0; i < hidden_list.size(); ++i) {
+      if (hidden_list[i] == tid) { hidden = true; break; }
     }
     std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
     bool known = hidden;
@@ -3878,6 +3964,11 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       it.shell = "shell";
       it.status = "running";
       terms.push_back(it);
+      // Its kind is not on this event; a terminal that first appears through
+      // output is a model command until terminal.list says otherwise, so it must
+      // not pop a tab on the right. load_terminals() clears the mark when the
+      // record turns out to be a user terminal.
+      hidden_list.push_back(tid);
       // register it in the display order too, or the strip would show it at a
       // position the order list does not know about
       std::vector<std::string>& order = is_active ? st_.term_order : vp->term_order;
@@ -5441,11 +5532,30 @@ VNodePtr UiApp::build_home_projects() {
     rhead.add(el("span", "prh-title").text(tr("会话")));
     rhead.add(el("span", "prh-count").text(itos(p.session_count)));
     rhead.add(el("span", "grow"));
-    rhead.add(el("span", "prh-toggle").text(p.expanded ? tr("收起 \u25be")
-                                                       : tr("展开 \u25b8")));
+    // A project with dozens of sessions must not push every other project off
+    // the page. Above 10 rows the list is capped and its own toggle expands it;
+    // the toggle is independent of the narrow layout's header reveal.
+    const bool long_list = p.sessions.size() > 10;
+    if (long_list) {
+      H tg = el("span", "prh-toggle").text(p.sessions_open ? tr("收起 \u25be")
+                                                          : tr("展开 \u25b8"));
+      tg.on(EventKind::kClick, [this, i](const std::string&) {
+        update([&](AppState& s) {
+          if (i < s.projects.size()) s.projects[i].sessions_open = !s.projects[i].sessions_open;
+        });
+      });
+      rhead.add(tg);
+    } else {
+      // Short list: the header is the narrow layout's reveal control. It has
+      // no own click handler, so the press reaches the header's toggle.
+      rhead.add(el("span", "prh-toggle").text(p.expanded ? tr("收起 \u25be")
+                                                         : tr("展开 \u25b8")));
+    }
     right.add(rhead);
     H list = el("div", "proj-sessions");
-    for (size_t k = 0; k < p.sessions.size(); ++k) {
+    const size_t visible_rows =
+        (long_list && !p.sessions_open) ? 10 : p.sessions.size();
+    for (size_t k = 0; k < visible_rows; ++k) {
       const ProjectCard::SessionRow& s = p.sessions[k];
       std::string sid = s.sid;
       if (s.renaming) {
@@ -8488,6 +8598,15 @@ VNodePtr UiApp::build_terminal_drawer() {
     const TermItem& t = *strip[i];
     std::string tid = t.tid;
     if (term_tab_closed(tid)) continue;
+    // A model `terminal_exec` record is meaningful in 所有终端 but is not a tab
+    // the user asked for. load_terminals() collects those tids in term_hidden;
+    // the strip must honour it (opening the row clears the mark), otherwise a
+    // session with 100 command records opens 100 tabs on the right.
+    bool hidden = false;
+    for (size_t h = 0; h < st_.term_hidden.size(); ++h) {
+      if (st_.term_hidden[h] == tid) { hidden = true; break; }
+    }
+    if (hidden) continue;
     if (st_.term_renaming == tid) {
       // renaming in place: the terminal keeps running, only the label changes.
       // Losing focus commits (the same as Enter) - a rename field that keeps

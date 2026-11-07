@@ -705,6 +705,13 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
     if (!sub_id.empty()) call["subagentId"] = sub_id;
   }
   executed_calls_.push_back(call);
+  {
+    // A tab reopened mid-turn rebuilds its work log from this snapshot; without
+    // it the completed tool rows vanished when switching away and back.
+    std::lock_guard<std::mutex> lk(live_mu_);
+    live_tools_.push_back(call);
+    while (live_tools_.size() > 200) live_tools_.erase(live_tools_.begin());
+  }
 
   emit("tool.update", Json{{"sid", opts_.sid}, {"name", name}, {"ok", r.ok()},
                            {"summary", summary}, {"detail", body},
