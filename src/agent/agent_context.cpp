@@ -143,9 +143,12 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "（todo_add），每完成一项就 todo_check。**尽量让清单一直存在**：不要因为"
         "任务看起来小就跳过；纯问答可以没有清单。清单对用户可见，是进度条而不是形式。");
     out.push_back(
-        "- 步骤会变：发现新信息就增删/重排 todo，不要为了让旧清单成立而绕路。");
+        "- 步骤会变：发现新信息就增删/重排 todo，不要为了让旧清单成立而绕路。"
+        "开始一个**新任务**前先 todo_clear（或用 todo_erase 删掉过时项），不要把上一任务的"
+        "已完成/无关条目留在新清单里；只有明确是同一任务的延续时才复用旧清单。");
     out.push_back(
-        "- 单步能做完的小事不要建清单；清单本身也是 token。");
+        "- 只有纯问答（不读文件、不改文件、不跑命令）可以没有清单；只要动手，"
+        "就先 todo_add 一条再开始。清单本身也是 token。");
     out.push_back(
         "- 三层任务，不要混：① 任务列表（todo_add/todo_check）是**本轮**的活；"
         "② 规划（plan_update）是一篇你负责的文档 `.flashsight/sessions/<sid>/plans/`："
@@ -185,10 +188,14 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "small; only pure Q&A may have no list. The list is visible to the user: "
         "it is a progress bar, not paperwork.");
     out.push_back(
-        "- The plan is allowed to change. When you learn something new, add, remove "
-        "or reorder steps instead of contorting the work to fit a stale list.");
+        "- The list is allowed to change. When you learn something new, add, remove "
+        "or reorder steps instead of contorting the work to fit a stale list. Before "
+        "starting a NEW task, clear the old list (todo_clear) or erase stale items; "
+        "only reuse it when this really is a continuation of the same task.");
     out.push_back(
-        "- Do not create a list for a one-step task; the list itself costs tokens.");
+        "- Only pure Q&A (no file reads, writes or commands) may have no list. As "
+        "soon as you act, add one todo_add item before starting; the list itself "
+        "also costs tokens.");
     out.push_back(
         "- Three layers, never mixed: (1) the TASK LIST (todo_add/todo_check) is "
         "the work of THIS round; (2) the PLAN (plan_update) is a DOCUMENT you own "

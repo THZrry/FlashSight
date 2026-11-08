@@ -103,6 +103,41 @@ FS_TEST(terminal_poll_and_kill) {
   EXPECT_TRUE(e->status == TermStatus::kExited || e->status == TermStatus::kKilled);
 }
 
+// A BACKGROUND terminal has no reproc_wait waiter, so timeoutMs used to be read
+// and ignored: the process ran until the app closed. tick() must enforce the
+// deadline for it too, otherwise the "60000 ms terminal still running after 30
+// minutes" report is unfixable.
+FS_TEST(terminal_background_timeout_kills) {
+  WallClock clock;
+  TerminalRegistry reg(&clock);
+  TerminalManager mgr(&reg, &clock);
+#if defined(_WIN32)
+  std::string cmd = "ping -n 20 127.0.0.1 > nul";
+#else
+  std::string cmd = "sleep 20";
+#endif
+  Json args = Json::object();
+  args["command"] = cmd;
+  args["background"] = true;
+  args["timeoutMs"] = 200;
+  Json out;
+  FsResult r = mgr.spawn(args, &out);
+  ASSERT_TRUE(r.ok());
+  std::string tid = jsonutil::get<std::string>(out, "tid", "");
+  ASSERT_TRUE(!tid.empty());
+  // tick drives the deadline; give terminate + kill two cycles to land.
+  bool exited = false;
+  for (int i = 0; i < 20 && !exited; ++i) {
+    mgr.tick();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const TermEntry* e = reg.find(tid);
+    exited = e && e->status != TermStatus::kRunning;
+  }
+  const TermEntry* e = reg.find(tid);
+  ASSERT_TRUE(e != nullptr);
+  EXPECT_TRUE(e->status != TermStatus::kRunning);
+}
+
 // A foreground command must NOT hold the manager lock while it waits: tick()
 // (the wake scheduler's clock), other spawns and poll/kill all share it. The
 // two-session freeze was `terminal_exec sleep 60` blocking every one of them for

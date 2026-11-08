@@ -38,6 +38,16 @@ struct TerminalManager::Proc {
   // the registry transition belong to that waiter; otherwise both would mark
   // the terminal exited and the event would race the tool result.
   bool fg_wait = false;
+  // A BACKGROUND model terminal used to ignore timeoutMs completely: only the
+  // foreground waiter called reproc_wait with a deadline, so `terminal_spawn`
+  // with timeoutMs=60000 stayed alive for half an hour. Keep the deadline here
+  // and enforce it in tick() (the only clock a background process has).
+  int64_t timeout_ms = 0;
+  int64_t started_ms = 0;
+  int64_t kill_deadline_ms = 0;
+  bool timeout_sent = false;
+  bool hard_killed = false;
+  bool timed_out = false;
   // Which manager owns this process: feed_screen is static and needs it to reach
   // the per-instance output sink (a static sink outlived its FsApi and called
   // into a destroyed object in the unit test).
@@ -271,9 +281,17 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
   p->rows = rows;
   p->screen.resize(cols, rows);
   std::string tid = e.tid;
+  // Foreground commands already get a deadline from reproc_wait below. A
+  // background command has no waiter, so only an EXPLICIT timeoutMs starts a
+  // clock: an omitted value must mean "unlimited" (a long build must not die
+  // because the model did not repeat the 60 s default).
+  if (background && !interactive && args.contains("timeoutMs")) {
+    p->timeout_ms = timeout_ms > 0 ? timeout_ms : 0;
+    p->started_ms = e.started_at;
+  }
   procs_[tid] = std::move(p);
 
-  // 前台：等结果（超时返回已收集输出 + timeout 标记，宿主可转后台）
+  // 前台：等结果（超时终止并返回 timedOut，绝不转后台）
   // 交互式终端永远立即返回：它的生命周期由用户/UI 控制
   if (!background && !interactive) {
     Proc& pr = *procs_[tid];
@@ -490,6 +508,25 @@ std::vector<Json> TerminalManager::tick() {
        it != procs_.end(); ++it) {
     Proc& p = *it->second;
     bool was_exited = p.exited;
+    // Background timeout (no waiter exists). terminate first, then kill if the
+    // process ignores it; both phases are non-blocking so tick() never parks the
+    // terminal manager behind a hung child.
+    int64_t now_ms = clock_->now_ms();
+    if (!p.exited && !p.fg_wait && p.timeout_ms > 0 && p.started_ms > 0 &&
+        now_ms - p.started_ms >= p.timeout_ms) {
+      p.timed_out = true;
+      if (!p.timeout_sent) {
+        p.timeout_sent = true;
+        p.kill_deadline_ms = now_ms + 1500;
+        if (p.pty) p.pty->terminate();
+        if (p.h) reproc_terminate(p.h);
+      } else if (!p.hard_killed && p.kill_deadline_ms > 0 &&
+                 now_ms >= p.kill_deadline_ms) {
+        p.hard_killed = true;
+        if (p.pty) p.pty->terminate();
+        if (p.h) reproc_kill(p.h);
+      }
+    }
     size_t before = p.out.size();
     drain(p);
     bool new_out = p.out.size() > before;
@@ -525,6 +562,18 @@ std::vector<Json> TerminalManager::tick() {
     e["status"] = p.exited ? "exited" : "running";
     e["exitCode"] = p.exit_code;
     e["justExited"] = (p.exited && !was_exited);
+    if (p.timed_out) e["timedOut"] = true;
+    // The UI must know whether this is a terminal the user should see. Without
+    // the kind it registered EVERY model `terminal_exec` on its first output
+    // chunk as a tab, gave it a number, and counted it in the session badge -
+    // then terminal.list (which filters short model commands) returned only the
+    // handful of real terminals, so "十几个" appeared to collapse into "几个".
+    if (TermEntry* te = reg_->find(p.tid)) {
+      e["kind"] = te->kind == TermKind::kUser
+                      ? "user"
+                      : (te->kind == TermKind::kModelBg ? "model-bg" : "model-fg");
+      if (!te->label.empty()) e["label"] = te->label;
+    }
     out.push_back(e);
   }
   return out;

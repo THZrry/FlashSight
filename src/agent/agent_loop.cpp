@@ -164,8 +164,12 @@ bool AgentLoop::apply_steering(Json* messages) {
   std::string combined;
   if (drain_steering) {
     combined = drain_steering();
-  } else {
-    if (steering_queue_.empty()) return false;
+  }
+  // ALWAYS drain the loop's own queue too. When the host installed a queue
+  // callback, this branch used to be skipped, so a `send()` that raced a running
+  // turn (it pushes here) was queued and then never read - the guidance simply
+  // vanished. Host and embedded callers share one injection point.
+  if (!steering_queue_.empty()) {
     for (size_t i = 0; i < steering_queue_.size(); ++i) {
       if (!combined.empty()) combined += "\n";
       combined += steering_queue_[i];
@@ -216,12 +220,25 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
   // 中止 (the hard stop) aborts the transfer; 挂起 does NOT - it lets the round
   // finish and parks before the next model call (run_tool_group checks
   // suspend_requested_). One flag could not mean both.
-  req.cancel = [this]() { return abort_requested_.load(); };
+  //
+  // A second, automatic stop: no token progress for 10 minutes. The HTTP read
+  // timeout only covers an idle socket; a relay that sends heartbeat comments
+  // forever kept the turn "running" with no answer (the WhaleJS session showed
+  // 工作完成 and stayed there). progress is stamped on every delta below.
+  int64_t started = WallClock().now_ms();
+  model_activity_ms_.store(started);
+  req.cancel = [this, started]() {
+    if (abort_requested_.load()) return true;
+    int64_t last = model_activity_ms_.load();
+    if (last <= 0) last = started;
+    return WallClock().now_ms() - last > 10LL * 60 * 1000;
+  };
 
   bool streamed = false;
   auto on_delta = [this, &streamed](const std::string& piece) {
     if (piece.empty()) return;
     streamed = true;
+    model_activity_ms_.store(WallClock().now_ms());
     // Mirror the text into the live snapshot BEFORE emitting: a UI that opens
     // the session right after this event must see the same text the event
     // carried, not a version that is one delta behind.
@@ -1338,7 +1355,21 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   // is told to review progress first, so the model does not lose the thread.
   if (stop_note.empty()) {
     auto_continue = should_auto_continue(&auto_why);
-  } else if (stop_code == "round-limit") {
+    // The model is supposed to keep a todo/list, but it often forgets. In AUTO
+    // mode a turn that actually executed tools is unfinished work: continue even
+    // without a plan/todo. A text-only Q&A still stops (and the empty-round
+    // guard handles a model that only narrates), so this cannot spin forever.
+    if (!auto_continue && opts_.context.auto_mode && !opts_.unattended &&
+        runtime_state && turn_had_tools) {
+      auto_continue = true;
+      auto_why = zh ? "本轮执行了工具，任务可能尚未完成（未建 todo/plan 也继续）"
+                    : "tool work ran without a plan/todo; continuing";
+    }
+  } else if (stop_code == "round-limit" && opts_.context.auto_mode &&
+             !opts_.unattended) {
+    // A manual-mode turn that hits the tool-round limit must STOP, not start
+    // another round behind the switch's back. This branch used to ignore
+    // auto_mode, which is why turning 自动 off still continued.
     auto_continue = true;
     auto_why = zh ? "工具调用达到上限，开新一轮继续" : "tool-call limit reached; continuing";
   }

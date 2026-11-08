@@ -2649,6 +2649,7 @@ FS_TEST(uiapp_nav_dot_follows_live_state) {
     s.turn_running = false;
     TermItem t;
     t.tid = "t1";
+    t.kind = "user";  // terminal.list marks every entry; a ghost has no kind
     t.status = "running";
     s.terminals.push_back(t);
   });
@@ -2660,6 +2661,32 @@ FS_TEST(uiapp_nav_dot_follows_live_state) {
     s.interrupt_reason = "http 400";
   });
   EXPECT_TRUE(dump_has(dom, "ps-dot failed"));
+}
+
+// A model `terminal_exec` is a tool result, not a terminal the user can open.
+// Its output event used to register a ghost tab (with a number and a badge),
+// while terminal.list pruned it - so the sidebar showed 13 and the drawer 4.
+FS_TEST(uiapp_terminal_output_ghost_is_not_a_terminal) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    seed_session(s, "sess_a");
+  });
+  app.on_backend_event_for_test(
+      "terminal.output", Json{{"sid", "sess_a"}, {"tid", "t9"},
+                              {"text", "short command output"},
+                              {"kind", "model-fg"}});
+  EXPECT_EQ(app.state().terminals.size(), size_t(0));
+  // A USER terminal is a real terminal and must appear immediately.
+  app.on_backend_event_for_test(
+      "terminal.output", Json{{"sid", "sess_a"}, {"tid", "t10"},
+                              {"text", "shell"},
+                              {"kind", "user"}});
+  ASSERT_TRUE(app.state().terminals.size() == 1);
+  EXPECT_EQ(app.state().terminals[0].tid, std::string("t10"));
 }
 
 // The blue "done" dot means "news since you last looked". The backend's loopState

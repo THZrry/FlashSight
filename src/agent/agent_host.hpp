@@ -58,8 +58,10 @@ struct AgentHostDeps {
   std::function<std::string(const std::string& cwd)> instructions_source;
   // git 摘要（branch/dirty/...）；空 = 不显示
   std::function<Json(const std::string& cwd)> git_summary;
-  // 上下文窗口（token）：模型表查询；0 = 未知
-  std::function<int64_t(const std::string& model)> context_limit;
+  // 上下文窗口（token）：按会话选中的 (provider, model) 查询；0 = 未知。
+  // 只按模型名查会拿到另一个供应商同名的较小窗口，水位/短视图判断随之错误。
+  std::function<int64_t(const std::string& provider,
+                        const std::string& model)> context_limit;
   // 上一次请求的 prompt tokens（从用量日志读；重启后水位仍可用）
   std::function<int64_t(const std::string& sid)> last_prompt_tokens;
   // 规划树（PlanStore）；空 = 无规划

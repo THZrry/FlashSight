@@ -567,6 +567,37 @@ FS_TEST(compaction_state_prevents_short_view_after_reopen) {
   EXPECT_EQ(short_view.mode, std::string("short-view"));
 }
 
+// The window decision must use the PROJECTED replay, not the stored turn JSON.
+// A terminal result stores the whole output in `detail`; replay replaces it with
+// a bounded summary. Counting the raw JSON made a 180k-token session look like
+// several hundred thousand and triggered a short view on a window that was not
+// full.
+FS_TEST(short_view_uses_projected_history_not_raw_turn_json) {
+  Json calls = Json::array();
+  Json call = Json::object();
+  call["name"] = "terminal_exec";
+  call["id"] = "c1";
+  call["args"] = Json{{"command", "build"}};
+  call["detail"] = std::string(200000, 'y');  // stored only; replay truncates
+  calls.push_back(call);
+  Json turns = Json::array({
+      Json{{"role", "user"}, {"turnId", "t0"}, {"promptRaw", "run the build"}},
+      Json{{"role", "assistant"},
+           {"turnId", "t1"},
+           {"streamSummary", "build finished"},
+           {"toolCalls", calls}},
+  });
+  Json full = Json::object();
+  full["turns"] = turns;
+  HistoryBuilder::Options opts;
+  opts.system_prefix = "sys";
+  opts.context_limit = 10000;      // projected history fits easily
+  opts.last_prompt_tokens = 100;   // the last real request was far below 80%
+  HistoryResult hr = HistoryBuilder(opts).build_neutral(full);
+  EXPECT_FALSE(hr.compressed);
+  EXPECT_TRUE(hr.mode.empty());
+}
+
 // A fork/rollback changes turn ids; a summary bound to the old turns must be
 // ignored rather than applied to different content.
 FS_TEST(stale_compaction_state_is_ignored) {

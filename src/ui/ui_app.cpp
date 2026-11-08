@@ -2198,10 +2198,18 @@ ProjectCard::SessionRow UiApp::live_session_row(ProjectCard::SessionRow row) con
   if (st_.turn_running || st_.auto_round > 0) row.running = true;
   if (st_.auto_round > 0) row.auto_round = st_.auto_round;
   // Terminal count from the LIVE list: opening one shows immediately, and a
-  // closed one stops counting even before the next refresh.
+  // closed one stops counting even before the next refresh. Count only what the
+  // list can actually show: an unlabelled model `terminal_exec` is a tool result
+  // (`terminal.list` prunes it), so counting its output event made the badge say
+  // 13 while the drawer held 4.
   int running_terms = 0;
   for (size_t i = 0; i < st_.terminals.size(); ++i) {
-    if (st_.terminals[i].status == "running") ++running_terms;
+    const TermItem& t = st_.terminals[i];
+    if (t.status != "running") continue;
+    bool visible = t.kind == "user" ||
+                   ((t.kind == "model-fg" || t.kind == "model-bg") &&
+                    !t.label.empty());
+    if (visible) ++running_terms;
   }
   row.terminal_count = running_terms;
   // An interrupted turn is a failure the list cannot know about yet.
@@ -3725,6 +3733,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         s.toast = "自动继续（第 " + itos(round) + " 轮）" +
                   (reason.empty() ? "" : "：" + reason);
         s.toast_deadline_ms = now_ms() + kToastMs;
+        ensure_turn_message(s.messages, s.history_total, &next_msg_rev_, now_ms());
       });
       if (!sid.empty()) {
         for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
@@ -3733,6 +3742,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       vp->auto_round = round;
       vp->turn_running = true;
       vp->suspended = false;
+      ensure_turn_message(vp->messages, vp->history_total, &next_msg_rev_, now_ms());
     }
     return;
   }
@@ -3782,12 +3792,17 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         s.suspended = false;
         s.interrupted = false;
         s.interrupt_reason.clear();
+        // The optimistic assistant bubble is created here, not in the send
+        // click: a send that the backend turned into guidance starts no turn,
+        // and an eager bubble would remain as a phantom empty answer.
+        ensure_turn_message(s.messages, s.history_total, &next_msg_rev_, now_ms());
       });
     } else {
       vp->turn_running = true;
       vp->suspended = false;
       vp->interrupted = false;
       vp->interrupt_reason.clear();
+      ensure_turn_message(vp->messages, vp->history_total, &next_msg_rev_, now_ms());
     }
   } else if (event == "loop.resumed") {
     // 继续 starts a turn WITHOUT turn.started, so the interrupt bar used to stay
@@ -4147,34 +4162,67 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         is_active ? st_.term_outputs : vp->term_outputs;
     outs[tid] += text;
     if (outs[tid].size() > (1u << 20)) outs[tid].erase(0, outs[tid].size() - (1u << 20));
-    // A terminal the model started shows up here first: register it so the tab
-    // strip lists it without waiting for a manual refresh. A terminal the user
-    // closed the tab for is not resurrected by its own output.
+    // A terminal the model started shows up here first. BUT only a terminal the
+    // user can actually open belongs in the list: `terminal.list` prunes short
+    // model commands (they are tool results, not terminals), so registering
+    // every output stream here made the sidebar count and the tab numbers include
+    // ghosts that vanished on the next list refresh ("十几个点进去变成几个").
+    std::string kind = jsonutil::get<std::string>(payload, "kind", "");
+    std::string label = jsonutil::get<std::string>(payload, "label", "");
+    bool user_visible = kind == "user" ||
+                        ((kind == "model-fg" || kind == "model-bg") &&
+                         !label.empty());
     std::vector<std::string>& hidden_list =
         is_active ? st_.term_hidden : vp->term_hidden;
+    std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
+    std::vector<std::string>& order = is_active ? st_.term_order : vp->term_order;
+    bool known = false;
+    for (size_t i = 0; i < terms.size(); ++i) {
+      if (terms[i].tid == tid) { known = true; break; }
+    }
+    if (!user_visible) {
+      // Remove a ghost an older build registered before it knew the kind.
+      if (known) {
+        for (size_t i = 0; i < terms.size(); ++i) {
+          if (terms[i].tid == tid) {
+            terms.erase(terms.begin() + static_cast<long>(i));
+            break;
+          }
+        }
+        for (size_t i = 0; i < order.size(); ++i) {
+          if (order[i] == tid) {
+            order.erase(order.begin() + static_cast<long>(i));
+            break;
+          }
+        }
+        for (size_t i = 0; i < hidden_list.size();) {
+          if (hidden_list[i] == tid) {
+            hidden_list.erase(hidden_list.begin() + static_cast<long>(i));
+          } else {
+            ++i;
+          }
+        }
+      }
+      return;  // text is still in term_outputs, but it is not a terminal
+    }
     bool hidden = false;
     for (size_t i = 0; i < hidden_list.size(); ++i) {
       if (hidden_list[i] == tid) { hidden = true; break; }
     }
-    std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
-    bool known = hidden;
-    for (size_t i = 0; i < terms.size(); ++i) {
-      if (terms[i].tid == tid) { known = true; break; }
-    }
     if (!known && !tid.empty()) {
+      if (hidden) return;  // the user closed its tab; output must not reopen it
       TermItem it;
       it.tid = tid;
       it.shell = "shell";
       it.status = "running";
+      it.kind = kind;
+      it.label = label;
       terms.push_back(it);
-      // Its kind is not on this event; a terminal that first appears through
-      // output is a model command until terminal.list says otherwise, so it must
-      // not pop a tab on the right. load_terminals() clears the mark when the
-      // record turns out to be a user terminal.
-      hidden_list.push_back(tid);
+      // A USER terminal is a tab by definition. A model command stays a record
+      // in 所有终端 until the user opens it - it must not pop a tab on the right.
+      if (kind != "user") hidden_list.push_back(tid);
       // register it in the display order too, or the strip would show it at a
       // position the order list does not know about
-      std::vector<std::string>& order = is_active ? st_.term_order : vp->term_order;
       bool in_order = false;
       for (size_t i = 0; i < order.size(); ++i) {
         if (order[i] == tid) { in_order = true; break; }
@@ -11726,27 +11774,13 @@ void UiApp::send_message() {
 
 void UiApp::dispatch_message(const std::string& sid, const std::string& text,
                              const std::string& shown, const Json& attachments) {
-  // SENDING WHILE A TURN RUNS IS GUIDANCE, NOT A NEW CONVERSATION.
-  // The old path appended a user bubble plus an assistant streaming bubble and
-  // called session.send; the backend queued the text, but the UI had already
-  // opened a second turn. The old turn stayed open, its terminals/tools reported
-  // into the new turn's work log, and a page switch restored the wrong live
-  // transcript. Queue it into the CURRENT turn instead; the loop injects it
-  // before its next model call.
-  if (!sid.empty() && backend_ && st_.turn_running) {
-    call_async("session.append", Json{{"sid", sid}, {"text", shown}},
-               [this](const BackendResult& r) {
-      if (!r.ok) toast(tr("引导失败：") + r.message);
-    });
-    update([&](AppState& s) {
-      s.session_input.clear();
-      s.attachments.clear();
-    });
-    VNodePtr ta = find_by_key(tree_, "session-input");
-    if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", "");
-    toast(tr("已加入本轮引导，将在下一次调用带上"));
-    return;
-  }
+  // SENDING WHILE A TURN RUNS IS GUIDANCE, NOT A NEW CONVERSATION. The decision
+  // belongs to the backend (`session.send` knows the loop's real state); this
+  // function always posts one user bubble and lets the reply say whether it was
+  // queued. The old UI-side `st_.turn_running` branch was a race: a missed
+  // turn.done made the UI open a second conversation while the backend appended
+  // the text to the old turn, so the old turn's terminal output landed in the
+  // "new" turn's work log and a page switch rendered the wrong one.
   // echo the user's message immediately (optimistic; the assistant text streams in)
   // A message sent now is newer than everything loaded from disk. Its uid is
   // derived from the absolute history position so it stays distinct from the
@@ -11789,14 +11823,13 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   // user picked, or the backend routes it to the first provider that has it.
   if (!st_.model_provider.empty()) args["providerId"] = st_.model_provider;
   if (!st_.thinking.empty()) args["thinking"] = st_.thinking;
-  // SHOW THE WAIT IMMEDIATELY. The first token can take seconds (a reasoning
-  // model, a cold endpoint); until then the assistant message did not exist, so
-  // the screen looked exactly like a dead app. The message's own live timer
-  // (spinner + counting seconds) is what shows the wait - no extra sentence.
+  // Sending from the composer means the user is at the END of the transcript;
+  // pin the view there so the question and the answer are visible without a
+  // manual scroll. The assistant bubble is the WAIT indicator (the first token
+  // can take seconds); if the backend turns this send into guidance, both
+  // optimistic bubbles are removed again below.
+  int64_t wait_uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
   update([&](AppState& s) {
-    // Sending from the composer means the user is at the END of the transcript;
-    // pin the view there so the question and the answer are visible without a
-    // manual scroll.
     s.hist_follow = true;
     if (!s.messages.empty() && s.messages.back().role == "assistant" &&
         s.messages.back().streaming) {
@@ -11808,13 +11841,38 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
     a.work_open = true;
     a.rev = next_msg_rev_++;
     a.started_at = now_ms();
-    a.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+    a.uid = wait_uid;
     s.messages.push_back(a);
   });
   follow_history_if_pinned();
   call_async("session.send", args,
-             [this](const BackendResult& r) {
-    if (!r.ok) toast(tr("发送失败：") + r.message);
+             [this, sid, next_live_uid, wait_uid](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("发送失败：") + r.message);
+      return;
+    }
+    if (jsonutil::get<bool>(r.data, "queued", false)) {
+      // The backend appended it to the turn that is ALREADY running. Take the
+      // optimistic bubbles back out; the item now lives in the guidance queue
+      // above the composer, where it can be edited or sent now.
+      update([&](AppState& s) {
+        for (size_t i = 0; i < s.messages.size();) {
+          const comp::ChatMsg& m = s.messages[i];
+          bool user_echo = m.uid == next_live_uid && m.role == "user";
+          bool wait_echo = m.uid == wait_uid && m.role == "assistant" &&
+                           m.text.empty() && m.tools.empty() &&
+                           m.interim.empty() && m.thinking.empty();
+          if (user_echo || wait_echo) {
+            s.messages.erase(s.messages.begin() + static_cast<long>(i));
+            if (user_echo && s.history_total > 0) s.history_total -= 1;
+          } else {
+            ++i;
+          }
+        }
+      });
+      refresh_steering(sid);
+      toast(tr("已加入本轮引导，将在下一次调用带上"));
+    }
   });
 }
 

@@ -1666,3 +1666,27 @@ The process of project: P0 环境搭建
   - **上下文审计**：usage 行显示 in≈180,892 / cache≈179,456（A6/deepseek-v4.1-flash），说明实际发送并未“异常少”；水位低是因为窗口大（1M 量级），不是提前压缩。历史重放只过滤空自动轮，真实 user/assistant/tool 内容仍保留；新增 `empty_auto_rounds_are_not_replayed` 和 first-short-view 持久化用例。
   - **xmake**：新增 `--web/--webview/--whaleui` 独立开关；单变体仍由 `--variant` 选择（一个 target 不能同时链接两个 host），多选编译用 `scripts/build_all.py`（项目级 xmake.lua 不能注册 task，之前的 `xmake build-all` 已移除）；文档更新。
   - **测试/构建**：460 用例 4313 断言全过；web / webview / whaleui 三变体编译通过。
+
+
+<126>(FIXUP/AUDIT): 补上一轮漏掉的新反馈：无 todo 时自动轮终止、旧 todo 清理、xmake 多编译的真实边界。
+  - **自动轮没有 todo/plan 也继续**：以前 `should_auto_continue` 只看 todo/plan，模型不建清单时自动轮直接结束。现在 AUTO 模式下，一个**实际执行过工具**的回合会继续（`turn_had_tools`，仅主 loop、非 unattended）；下一轮如果只有文本/无工具，空轮守卫停止；不会把纯问答无限续。新增 `loop_auto_continues_after_tool_work_without_todo`。
+  - **旧 todo 清理规则**：全局规则新增“开始新任务前先 `todo_clear` 或 `todo_erase` 过时项；只有同一任务延续才复用旧清单”，避免模型把上一任务的完成项留在新清单里。
+  - **xmake 的真实边界**：`xmake f` 已新增 `--web/--webview/--whaleui` 三个独立开关，但单个 target 图只能链接一个 host（web exe 和 WebView 窗口是不同二进制）。项目级 `xmake.lua` 不能注册 task，`xmake build-all` 已删除；多选编译用 `scripts/build_all.py --web --webview [--whaleui]`，逐个 configure/build 到同一输出目录。未把它伪装成真正的三 target 同时链接。
+  - **WhaleJS 卡住**：现有证据是 `running=true`、`auto_round=3`、13 个工具、provider=A6API，usage `in≈180k/cache≈179k`；没有可复现的阻塞栈。已排除“上下文异常少”；本次已修前台 terminal 真正超时 kill、自动轮空转/无 todo 继续和 markdown 死循环，需用新构建复测。若仍卡，`[res]` 会显示 `turn_running`/`auto_round`/threads/终端状态，可直接区分 API 等待、终端子进程或 UI。
+  - **上下文审计**：`[usage]` 的实际 prompt 约 180k（cache 179k），不是漏发/提前压缩；历史过滤只跳过空自动轮，真实 user/assistant/tool 内容保留（`empty_auto_rounds_are_not_replayed`）。水位低是窗口大，不是信息被吞。
+  - **测试/构建**：461 用例 4317 断言全过；web / webview / whaleui 三变体编译通过。
+
+
+<127>(ROOT CAUSE/FIX): 逐条重审上一轮反馈；修掉此前误当成“已解决”的新问题。
+  - **终端“十几个点进去变几个”**：真因不是列表过滤，而是 `terminal.output` 事件不带 kind。UI 在第一条输出时把每个 model `terminal_exec` 都注册成 TermItem、塞进 `term_order`（于是有编号），会话圆点计数也把它算进去；下一次 `terminal.list` 按“user 或带 label 的 model 终端”过滤，幽灵记录消失，于是计数/编号与列表对不上。现在 tick 事件带 `kind`/`label`；UI 只注册可打开的终端，旧的幽灵记录在收到同一 tid 的输出时移除；活动会话计数也只数 user/labelled。新增 `uiapp_terminal_output_ghost_is_not_a_terminal`。
+  - **timeoutMs 30 分钟不生效**：前台超时已经改为 terminate→2s→kill；但**后台终端根本没有 waiter**，`timeoutMs` 只在 `reproc_wait` 分支读取，`terminal_spawn` 的 60000ms 被完全忽略。现在 Proc 保存 deadline，`tick()` 到期先 terminate、1.5s 后 kill，全程非阻塞；省略 timeoutMs=不限（长构建不会被默认值杀掉）。工具描述同步改为“到时终止，不转后台”。新增 `terminal_background_timeout_kills`。
+  - **短视图误判（关键）**：窗口判断用的是**原始 turn JSON** token 数，而实际重放会把 tool `detail`（完整命令输出/编辑 before-after）投影成 2400 字节以内。一个 180k token 的会话在原始 JSON 里可能几十万，窗口没满也会触发短视图，把早期历史换成摘要。现在 `raw_tokens_all`、`effective_tokens`、短视图保留轮的收缩全部用 `replay_tokens()`（真正送出的中性消息）计算；`keepTurns`（默认 8）先保留，只有“摘要 + 最近轮”仍超窗口时才逐轮多折一条。新增 `short_view_uses_projected_history_not_raw_turn_json`。
+  - **上下文窗口按错 provider 取**：`deps.context_limit(model)` 遍历所有供应商，返回第一个同名模型的窗口。A6API 的 deepseek-v4.1-flash（1M）可能读到另一家同名条目的 128k，水位和短视图一起错。签名改成 `(provider, model)`；会话 provider 精确优先，provider 已选但模型未知时返回 0（不借别家的窗口）。标题请求也优先用 session provider，摘要模型被覆盖时才按“实际提供该模型的连接”解析。
+  - **关自动仍续跑**：`stop_code=="round-limit"` 分支直接 `auto_continue=true`，绕过了 `auto_mode`。之前只修了 `should_auto_continue`，所以工具轮达到上限时仍会继续。现在该分支要求 `auto_mode && !unattended`；新增 `loop_round_limit_does_not_auto_continue_in_manual_mode`。
+  - **引导不是双模式**：`AgentLoop::send` 在运行中把文本压进内部 `steering_queue_`，但 host 装了 `drain_steering` 后 `apply_steering` 只读 host queue，内部队列永远不 drain——引导静默消失。现在两处都 drain。更根本的是“发送还是引导”改由后端在真实 loop 状态上决定：`AgentHost::send` 发现回合在跑就 `steering_push(round-end)` 并返回 `{queued:true}`；UI 不再用可能过期的 `st_.turn_running` 预判，先显示乐观气泡，收到 queued 后把 user+空的 assistant 气泡都撤回、刷新队列并提示。这样旧任务不会被误判结束，terminal/tool 不会写进“新任务”，切页也不会恢复错的任务。`turn.started`/`auto.next` 负责保证等待气泡存在。
+  - **provider 503 与“同时发两家”**：503 是标题请求（后台独立调用）缺 provider，按名称落到 HappyAPI 的 `selfdeploy/...`，主回合仍走 A6，所以报错但没停。现在标题请求带 session provider；主回合/子代理/标题每次只发一个连接，不存在同一请求并发发两家。残留：真正的多供应商并发只出现在余额探测（设计如此）。
+  - **WhaleJS 一直卡住**：现有 `runtime.json` 是 `running=true`、`autoRound=0`、13 个工具、最后一条 usage ~180k，说明不是上下文小；更像 provider 长等待/心跳把回合挂住（旧 HTTP timeout 是 per-read，不是总时长）。新增模型调用**无进展看门狗**：10 分钟没有任何 delta 就通过 `req.cancel` 中止，`ProviderRuntime` 对取消不再重试，回合成失败而不是永远 running。这不是已复现根因，只是把“半小时间一直 running”封住；新构建仍需在 WhaleJS 会话复测。若复现，`[res]` + usage 可区分 API 等待/终端/UI。
+  - **todo 规则矛盾**：旧规则一边说“任务小就不建清单”，一边说“尽量保持清单”。删掉前者：只有纯问答可以没有清单，只要动手就先 `todo_add`；开始新任务先清旧清单。
+  - **xmake 多编译边界**：`--web/--webview/--whaleui` 三个开关在 `xmake f` 里可见，但单个 target 图只能链接一个 host；`scripts/build_all.py` 逐变体 configure/build 到带变体名的产物。本次已用它实际构建 web/webview/whaleui 三个 exe，但这不是“一个 xmake 调用同时编三个 target”，不伪装成那样。
+  - **仍未闭环/诚实边界**：多规划只有“当前篇”直开按钮，`plans[]` 列表在后端可用但 UI 没有历史列表；短视图修复是单元测试+代码路径，未在真实长会话端到端复测；引导队列 UI 未在原生窗口手测；WhaleJS 卡住未复现出新栈，看门狗是缓解不是根因证明。
+  - **测试/构建**：465 用例 4328 断言全过；web / webview / whaleui 三变体实际编译通过（`build_all.py`）。

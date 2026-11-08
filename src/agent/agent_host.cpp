@@ -863,6 +863,26 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
                          const std::string& thinking,
                          const std::string& provider) {
   (void)attachments;
+  // A turn in flight turns `session.send` into GUIDANCE for that turn. Doing
+  // this in the caller (the UI's `turn_running` flag) was a race: a missed
+  // turn.done made the UI think the old turn had ended, so it opened a new
+  // conversation while the backend appended the text to the old one. Decide it
+  // here, where the loop's real state lives.
+  {
+    std::lock_guard<std::recursive_mutex> host_lock(lock());
+    std::map<std::string, std::unique_ptr<AgentLoop> >::iterator it = loops_.find(sid);
+    if (it != loops_.end() && it->second) {
+      LoopState ls = it->second->state();
+      bool busy = ls != LoopState::kIdle && ls != LoopState::kTurnDone &&
+                  !it->second->parked();
+      if (busy) {
+        FsResult q = steering_push(sid, "round-end", text);
+        q.data["queued"] = true;
+        q.data["mode"] = "guidance";
+        return q;
+      }
+    }
+  }
   // Setup under the lock (loop lookup, context rebuild), then RELEASE it for
   // the turn itself. Holding it across loop.send() would block every other
   // call - suspend, approve, panel loads - for the whole model round trip,
@@ -917,7 +937,9 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
       if (kt.is_number()) hopts.keep_turns = static_cast<int>(kt.get<int64_t>());
       loop->set_history_options(hopts);
     }
-    if (deps_.context_limit) loop->context_limit = deps_.context_limit(ctx.model);
+    if (deps_.context_limit) {
+      loop->context_limit = deps_.context_limit(ctx.provider, ctx.model);
+    }
     // The water level is the LAST request's prompt tokens, which lives in the
     // usage log (it survives a restart).
     if (deps_.last_prompt_tokens) {

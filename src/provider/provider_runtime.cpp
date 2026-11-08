@@ -87,6 +87,15 @@ FsResult ProviderRuntime::call(const ChatRequest& req, ChatResponse* out,
     }
     FsResult r = client.chat(req, &attempt_out, attempt_delta);
     record_usage(req, attempt_out, r.ok() && attempt_out.error.empty());
+    // A cancelled transfer (user 中止, or the no-progress watchdog) must not be
+    // retried: the caller asked to stop, and retrying a hung relay just restarts
+    // the same ten-minute wait.
+    if (req.cancel && req.cancel()) {
+      out->error = attempt_out.error.empty()
+                       ? std::string("request cancelled or made no progress")
+                       : attempt_out.error;
+      return r.ok() ? FsResult::error(ErrCode::kCancelled, out->error) : r;
+    }
     if (r.ok() && attempt_out.error.empty()) {
       failures_.consecutive_failures = 0;
       *out = std::move(attempt_out);

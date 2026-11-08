@@ -265,6 +265,10 @@ class AgentLoop {
   // Hard stop (中止): aborts the streaming reply itself. Kept apart from
   // suspend_requested_ so 挂起 can mean "finish this round, then wait".
   std::atomic<bool> abort_requested_{false};
+  // Last time the model produced ANY token for this turn. A relay that keeps an
+  // SSE connection open with heartbeats but never answers used to hold a turn
+  // for half an hour; the request's cancel callback treats this as a deadline.
+  std::atomic<int64_t> model_activity_ms_{0};
   // Set when the loop parks because of a suspend (it returned at a tool-batch
   // boundary with the transcript saved). Distinguishes "parked by the user from
   // a still-running turn" - only the former needs resume_task to continue.

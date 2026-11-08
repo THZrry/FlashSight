@@ -21,8 +21,9 @@ Webview 变体另有 `webview_host`。
 xmake f --variant=web      -y --toolchain=mingw && xmake b   # 默认，单变体
 xmake f --variant=webview  -y --toolchain=mingw && xmake b
 xmake f --variant=whaleui  -y --toolchain=mingw && xmake b
-# 一次编译多个：xmake.lua 里另有 --web/--webview/--whaleui 三个独立开关，
-# 由脚本按开关逐个 configure/build（xmake 的项目级 xmake.lua 不能注册 task）：
+# 一次编译多个（脚本按变体逐个 configure/build；项目级 xmake.lua 不能注册 task）。
+# xmake f 里也暴露了同名开关 --web/--webview/--whaleui 供配置查看/记录，
+# 但真正一次跑多个变体仍由脚本完成：
 python scripts/build_all.py --web --webview -- --toolchain=mingw --mingw="C:/Program Files/mingw64"
 ```
 
@@ -33,9 +34,9 @@ python scripts/build_all.py --web --webview -- --toolchain=mingw --mingw="C:/Pro
 产物都在同一个输出目录，**文件名带变体**：
 `flashsight-web[.exe]` / `flashsight-webview[.exe]` / `flashsight-whaleui[.exe]`。
 
-单变体构建仍然用 `--variant`；多选编译由 `scripts/build_all.py` 读取三个独立
-开关并按变体逐个 configure/build。脚本不会把多个 host 混进一个 target，也不会
-让缓存的旧开关决定另一个变体的产物。
+单变体构建仍然用 `--variant`；多选编译由 `scripts/build_all.py` 的命令行开关选择
+变体并逐个 configure/build。`xmake f --web/--webview/--whaleui` 只是把同一组
+变体意图记录在配置里，单个 target 图不会因此变成三个可执行文件。
 
 为什么切变体只重编几个文件：变体宏（`FS_UI_WHALEUI` / `FS_UI_WEBVIEW`）
 **不再项目级 `add_defines`**，而是只加在真正分叉的目标上：

@@ -96,27 +96,28 @@ option("variant")
     set_default("web")
     set_values("web", "webview", "whaleui")
     set_showmenu(true)
-    set_description("UI host for a PLAIN `xmake` build; see --web/--webview/--whaleui + `xmake build-all`")
+    set_description("UI host for a PLAIN `xmake` build; build every enabled variant with scripts/build_all.py")
 option_end()
 
 -- Independent compile switches. `variant` still selects the one host a single
 -- target graph can link (a web exe and a native WebView exe are different
--- binaries), but these decide which variants `xmake build-all` compiles, and
--- they are visible in `xmake f` without a three-way choice.
+-- binaries); these expose the same three switches in `xmake f` (so a release
+-- config is self-describing), while scripts/build_all.py takes them on its own
+-- command line and runs one configure+build per selected host.
 option("web")
     set_default(true)
     set_showmenu(true)
-    set_description("Build the Web variant in `xmake build-all`")
+    set_description("Include the Web variant when building all variants")
 option_end()
 option("webview")
     set_default(true)
     set_showmenu(true)
-    set_description("Build the WebView variant in `xmake build-all`")
+    set_description("Include the WebView variant when building all variants")
 option_end()
 option("whaleui")
     set_default(false)
     set_showmenu(true)
-    set_description("Build the WhaleUI variant in `xmake build-all`")
+    set_description("Include the WhaleUI variant when building all variants")
 option_end()
 
 -- path to a WhaleUI build (the directory holding libwhaleui-*.a); only used with

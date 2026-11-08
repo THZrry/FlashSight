@@ -6,7 +6,7 @@
 namespace fs {
 
 void register_term_tools(ToolRegistry* registry) {
-  // terminal_spawn（模型后台任务；前台 exec 超 5min 由宿主转后台）
+  // terminal_spawn（模型后台任务；显式 timeoutMs 到时终止，不自动转前台）
   {
     ToolDef def;
     def.name = "terminal_spawn";
@@ -18,7 +18,7 @@ void register_term_tools(ToolRegistry* registry) {
     props["shell"] = Json{{"type", "string"}, {"description", "shell（空=自动）"}};
     props["cwd"] = Json{{"type", "string"}, {"description", "工作目录（空=项目根）"}};
     props["wakeOnExit"] = Json{{"type", "boolean"}, {"description", "退出时自动唤醒"}};
-    props["timeoutMs"] = Json{{"type", "integer"}, {"description", "超时毫秒（0=不限）"}};
+    props["timeoutMs"] = Json{{"type", "integer"}, {"description", "运行上限毫秒；到时终止，省略/0=不限"}};
     params["properties"] = props;
     params["required"] = Json::array({"command"});
     def.parameters = params;
@@ -37,11 +37,11 @@ void register_term_tools(ToolRegistry* registry) {
       });
   }
 
-  // terminal_exec（前台执行，带超时；宿主可转后台）
+  // terminal_exec（前台执行；超时终止并返回 timedOut）
   {
     ToolDef def;
     def.name = "terminal_exec";
-    def.description = "前台执行命令（高风险；timeoutMs 超时；超 5min 宿主自动转后台）";
+    def.description = "前台执行命令（高风险；timeoutMs 到时直接终止并返回 timedOut）";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();

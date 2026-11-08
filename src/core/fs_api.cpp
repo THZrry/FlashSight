@@ -393,8 +393,18 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   // the endpoint-reported context length.
   ModelTable* mt2 = model_table_.get();
   ProviderStore* ps2 = providers_.get();
-  deps.context_limit = [mt2, ps2](const std::string& model) -> int64_t {
+  deps.context_limit = [mt2, ps2](const std::string& provider,
+                                  const std::string& model) -> int64_t {
     if (model.empty()) return 0;
+    // The SESSION's provider wins. Iterating every provider and returning the
+    // first model-id match let an unrelated provider that serves the same id win
+    // - e.g. A6API/deepseek-v4.1-flash (1M) read the window of a 128k reseller
+    // entry, so the water level and the short-view fallback were both wrong.
+    if (!provider.empty()) {
+      ModelEntry e = mt2->resolve(provider, model);
+      if (e.id == model && e.caps.context_len > 0) return e.caps.context_len;
+      return 0;  // provider chosen but model unknown: do not borrow another
+    }
     for (auto& c : ps2->list()) {
       ModelEntry e = mt2->resolve(c.id, model);
       if (e.id == model && e.caps.context_len > 0) return e.caps.context_len;
@@ -1232,8 +1242,29 @@ FsResult FsApi::session_ai_title(const std::string& sid) {
   // provider identity as the session. Leaving it empty routed a selected
   // A6API/deepseek-v4.1-flash title call to the first provider that knew a
   // similar name (HappyAPI), producing a 503 "selfdeploy/..." while the main
-  // turn correctly used A6. A different summary model is resolved by name.
-  if (!model_overridden) req.provider = provider;
+  // turn correctly used A6. A different summary model is resolved by name, but
+  // the session's provider still wins when it serves that model.
+  req.provider = provider;
+  if (model_overridden && providers_ && model_table_) {
+    auto serves = [this, &model](const std::string& pid) {
+      std::vector<ModelEntry> models = model_table_->list_models(pid);
+      for (size_t i = 0; i < models.size(); ++i) {
+        if (models[i].id == model) return true;
+      }
+      return false;
+    };
+    if (!req.provider.empty() && serves(req.provider)) {
+      // keep the session provider
+    } else {
+      req.provider.clear();
+      for (auto& c : providers_->list()) {
+        if (c.enabled && serves(c.id)) {
+          req.provider = c.id;
+          break;
+        }
+      }
+    }
+  }
   req.messages = Json::array({
       Json{{"role", "system"},
            {"content", "You name coding sessions. Reply with ONLY the title: one "

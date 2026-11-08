@@ -608,7 +608,25 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   bool prior_ok = false;
   // Full transcript size, used to decide whether a persisted SHORT VIEW is
   // still necessary (the user may have switched to a bigger-window model).
-  int64_t raw_tokens_all = estimate_tokens(turns);
+  //
+  // Count the messages the REPLAY will actually contain, not the raw turn JSON:
+  // a stored turn keeps the complete tool result/interim text, while replay
+  // projects it down to a bounded summary. Using raw JSON here overestimated a
+  // 180k-token session as several hundred thousand, so a window that was nowhere
+  // near full produced a short view and threw the early conversation away.
+  auto replay_tokens = [this](const Json& arr, size_t from, size_t to) -> int64_t {
+    int64_t sum = 0;
+    for (size_t i = from; i < to && i < arr.size(); ++i) {
+      if (!arr[i].is_object()) continue;
+      if (is_auto_nudge(arr[i]) || is_empty_auto_answer(arr[i])) continue;
+      if (jsonutil::get<bool>(arr[i], "forgotten", false)) continue;
+      Json group = Json::array();
+      turn_to_neutral(arr[i], &group);
+      sum += estimate_tokens(group);
+    }
+    return sum;
+  };
+  int64_t raw_tokens_all = replay_tokens(turns, 0, total);
   if (!prior.empty() && opts_.compacted_turns > 0 &&
       opts_.compacted_turns <= static_cast<int64_t>(total)) {
     size_t c = static_cast<size_t>(opts_.compacted_turns);
@@ -644,20 +662,11 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
 
   // Effective history = the durable summary + turns not yet folded. Using the
   // FULL transcript here was the "reopen at 16%, send says over window" bug:
-  // the turns the summary already replaced were counted again.
-  auto range_tokens = [](const Json& arr, size_t from, size_t to) -> int64_t {
-    int64_t sum = 0;
-    for (size_t i = from; i < to && i < arr.size(); ++i) {
-      if (!arr[i].is_object()) continue;
-      if (is_auto_nudge(arr[i]) || is_empty_auto_answer(arr[i])) continue;
-      if (jsonutil::get<bool>(arr[i], "forgotten", false)) continue;
-      sum += estimate_tokens(arr[i]);
-    }
-    return sum;
-  };
+  // the turns the summary already replaced were counted again. The token count
+  // comes from the projected replay (see replay_tokens), not from the stored JSON.
   int64_t prior_tokens = prior.empty() ? 0 : estimate_tokens(prior);
   int64_t raw_tokens = raw_tokens_all;
-  int64_t effective_tokens = prior_tokens + range_tokens(turns, start, total);
+  int64_t effective_tokens = prior_tokens + replay_tokens(turns, start, total);
   CompressDecision dec = should_compress(opts_, raw_tokens);
   bool window_short = false;
   if (opts_.context_limit > 0) {
@@ -670,7 +679,11 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   if (fold) {
     size_t keep = 0;  // full compression: no turn stays verbatim
     if (window_short) {
-      keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 1;
+      // A short view is a fallback, not "keep one turn": retaining the user's
+      // configured keepTurns (8 by default) is what stops a 1M-window session
+      // from collapsing to 9% of context. The fold loop below shrinks it only
+      // when the projected summary + suffix really cannot fit.
+      keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 8;
       if (keep >= total) keep = total > 1 ? total - 1 : total;
     }
     size_t fold_to = total > keep ? total - keep : start;
@@ -684,6 +697,21 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
       size_t digest_cap = window_short ? 6000 : 32000;
       std::string fold = make_fold(turns, start, fold_to, prior,
                                    opts_.max_fold_points, digest_cap);
+      // Honor keepTurns when it fits, but never emit a short view that the
+      // window still cannot hold: fold one more turn at a time until the
+      // projected summary + suffix is inside the limit. Measuring the actual
+      // fold (not a guessed 7k) is what lets a 4k window keep 4 tiny turns
+      // instead of collapsing to one.
+      if (window_short && opts_.context_limit > 0) {
+        while (fold_to + 1 < total) {
+          int64_t cand = estimate_tokens(fold) +
+                         replay_tokens(turns, fold_to, total);
+          if (cand <= opts_.context_limit) break;
+          ++fold_to;
+          fold = make_fold(turns, start, fold_to, prior,
+                           opts_.max_fold_points, digest_cap);
+        }
+      }
       Json summary = Json::object();
       summary["role"] = "user";
       summary["content"] = fold;

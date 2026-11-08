@@ -860,6 +860,84 @@ FS_TEST(loop_auto_stop_brake) {
   EXPECT_EQ(calls, 1);  // no auto round after the brake
 }
 
+// Auto mode must not END just because the model forgot to create a todo/plan:
+// a turn that actually ran tools continues, then the empty-round guard stops
+// when the next round only narrates.
+FS_TEST(loop_auto_continues_after_tool_work_without_todo) {
+  AgentLoop::Options opts;
+  opts.sid = "s_auto_notodo";
+  opts.permission = "full";
+  opts.context.auto_mode = true;
+  opts.max_auto_continues = 5;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;  // no plan, no todos
+    return st;
+  };
+  int calls = 0;
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out,
+                             const std::function<void(const std::string&)>&) {
+    ++calls;
+    if (calls == 1) {
+      Json c = Json::object();
+      c["name"] = "read_file";
+      c["id"] = "call_1";
+      c["args"] = Json{{"path", "a.txt"}};
+      out->tool_calls = Json::array({c});
+    } else {
+      out->text = "done";
+    }
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json{{"ok", true}});
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  EXPECT_EQ(calls, 3);  // initial + after-tool call + one auto round
+  EXPECT_EQ(rec.count("auto.next"), 1);
+}
+
+// AUTO OFF must stay off even when a tool-heavy turn hits the per-turn round
+// limit. This branch used to start a new round without consulting auto_mode.
+FS_TEST(loop_round_limit_does_not_auto_continue_in_manual_mode) {
+  AgentLoop::Options opts;
+  opts.sid = "s_manual_round_limit";
+  opts.permission = "full";
+  opts.context.auto_mode = false;
+  opts.max_tool_rounds = 1;
+  opts.max_auto_continues = 5;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;
+    return st;
+  };
+  int calls = 0;
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out,
+                             const std::function<void(const std::string&)>&) {
+    ++calls;
+    Json c = Json::object();
+    c["name"] = "read_file";
+    c["id"] = "call_1";
+    c["args"] = Json{{"path", "a.txt"}};
+    out->tool_calls = Json::array({c});
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json{{"ok", true}});
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  // Two model calls: the first requests a tool, the second trips the round
+  // limit. What matters is that the turn ENDS there in manual mode.
+  EXPECT_EQ(calls, 2);
+  EXPECT_EQ(rec.count("auto.next"), 0);
+}
+
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------
 FS_TEST(loop_unattended_denies_instead_of_waiting) {
   AgentLoop::Options opts;
