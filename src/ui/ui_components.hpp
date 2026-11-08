@@ -161,6 +161,10 @@ struct ChatMsg {
   // the model thinking out loud while it works - so it belongs in the work log and
   // used to be dropped entirely (only the final round's text was kept).
   std::vector<std::string> interim;
+  // Guidance the user injected while this turn was running. It is the USER's
+  // voice, not model narration: rendered in its own block in the work log, never
+  // appended to the answer or mixed with `interim`.
+  std::vector<std::string> guidance;
   // How many tool calls had already run when each note arrived (parallel to
   // `interim`). The work stream places note k immediately before tool
   // interim_after[k]; a round with several tool calls made the old "note index

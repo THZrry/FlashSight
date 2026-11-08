@@ -761,6 +761,16 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       // for that comparison (the old rule) broke the moment one round issued
       // several tool calls: the next round's thought landed above tools that had
       // already run ("新的思考跑到了上一个工具下面").
+      // Guidance is the USER's voice. It lives in the work log but in its own
+      // block, never mixed with the model's narration or appended to the answer.
+      if (!m.guidance.empty()) {
+        inner.add(el("div", "work-label").text(tr("本轮引导")));
+        for (size_t gi = 0; gi < m.guidance.size(); ++gi) {
+          if (!m.guidance[gi].empty()) {
+            inner.add(el("div", "work-guidance").text(m.guidance[gi]));
+          }
+        }
+      }
       size_t interim_at = 0;
       for (size_t i = 0; i < m.tools.size(); ++i) {
         while (interim_at < m.interim.size()) {

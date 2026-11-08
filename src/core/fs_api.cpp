@@ -1649,7 +1649,8 @@ FsResult FsApi::session_todos(const std::string& sid) {
 }
 
 // addon2 任务健壮性：打断后续接
-FsResult FsApi::session_continue(const std::string& sid, const std::string& guidance) {
+FsResult FsApi::session_continue(const std::string& sid, const std::string& guidance,
+                                 bool suppress_queue_once) {
   // A continuation is a NEW turn: pick up the model the session is set to now.
   // Continuing with the model captured at send time ignored a model switch made
   // while the task was parked.
@@ -1664,7 +1665,7 @@ FsResult FsApi::session_continue(const std::string& sid, const std::string& guid
     }
   }
   // AgentHost::continue_task releases the host lock for the turn, like send().
-  return agent_host_->continue_task(sid, guidance);
+  return agent_host_->continue_task(sid, guidance, suppress_queue_once);
 }
 
 // approve 档权限门
@@ -1792,6 +1793,9 @@ FsResult FsApi::steering_edit(const std::string& sid, int id, const std::string&
 }
 FsResult FsApi::steering_erase(const std::string& sid, int id) {
   return agent_host_->steering_erase(sid, id);
+}
+FsResult FsApi::steering_take(const std::string& sid, int id) {
+  return agent_host_->steering_take(sid, id);
 }
 FsResult FsApi::steering_reorder(const std::string& sid, const std::vector<int>& order) {
   return agent_host_->steering_reorder(sid, order);

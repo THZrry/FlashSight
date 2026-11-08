@@ -600,6 +600,34 @@ FS_TEST(short_view_uses_projected_history_not_raw_turn_json) {
   EXPECT_TRUE(hr.mode.empty());
 }
 
+// Compaction asks the MODEL to summarise the whole session; it does not spend a
+// per-turn byte budget. The material must contain the user requirements.
+FS_TEST(compaction_uses_model_summary_not_a_per_turn_budget) {
+  Json full = Json::object();
+  full["turns"] = Json::array({
+      Json{{"role", "user"}, {"promptRaw", "LONG TERM: never touch prod"}},
+      Json{{"role", "assistant"}, {"streamSummary", "noted"}},
+      Json{{"role", "user"}, {"promptRaw", "recent: fix the parser"}},
+      Json{{"role", "assistant"}, {"streamSummary", "fixed"}},
+  });
+  std::string material_seen;
+  HistoryBuilder::Options opts;
+  opts.system_prefix = "sys";
+  opts.force_compress = true;
+  opts.model_summarizer = [&material_seen](const std::string& material) {
+    material_seen = material;
+    return std::string("MODEL-SUMMARY");
+  };
+  HistoryResult hr = HistoryBuilder(opts).build_neutral(full);
+  ASSERT_TRUE(hr.compressed);
+  EXPECT_EQ(hr.mode, std::string("full"));
+  EXPECT_TRUE(material_seen.find("LONG TERM: never touch prod") != std::string::npos);
+  EXPECT_TRUE(material_seen.find("recent: fix the parser") != std::string::npos);
+  std::string all;
+  for (auto& m : hr.messages) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find("MODEL-SUMMARY") != std::string::npos);
+}
+
 // A fork/rollback changes turn ids; a summary bound to the old turns must be
 // ignored rather than applied to different content.
 FS_TEST(stale_compaction_state_is_ignored) {
@@ -650,9 +678,9 @@ FS_TEST(short_view_state_is_reused_until_the_window_grows) {
   ASSERT_TRUE(first.compressed);
   EXPECT_EQ(first.mode, std::string("short-view"));
   EXPECT_TRUE(first.compacted_turns > 0);
-  // EVERY turn is folded; the short view does not keep a raw suffix.
+  // EVERY turn is represented: user inputs + assistant answers, no tool calls.
   EXPECT_EQ(first.compacted_turns, int64_t(20));
-  EXPECT_EQ((int)first.messages.size(), 2);  // system + full-history summary
+  EXPECT_TRUE(first.messages.size() > 2);
   EXPECT_FALSE(first.summary.empty());
 
   HistoryBuilder::Options reuse = tight;

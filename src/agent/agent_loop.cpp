@@ -161,6 +161,10 @@ FsResult AgentLoop::append(const std::string& text) {
 // turn, and a page switch showed the wrong live transcript.
 bool AgentLoop::apply_steering(Json* messages) {
   if (!messages) return false;
+  if (suppress_steering_once_) {
+    suppress_steering_once_ = false;
+    return false;
+  }
   std::string combined;
   if (drain_steering) {
     combined = drain_steering();
@@ -202,6 +206,141 @@ std::string AgentLoop::runtime_block() {
   if (st.context_limit <= 0) st.context_limit = context_limit;
   if (st.context_tokens <= 0) st.context_tokens = last_in_tokens_;
   return AgentContext::build_runtime(opts_.context, st);
+}
+
+std::string AgentLoop::summarize_session(const std::string& material) {
+  if (!call_model || material.empty()) return std::string();
+  bool zh = opts_.context.lang == ContextLang::kZh;
+  std::string sys = zh
+      ? "你在压缩一个编码会话，供后续上下文使用。必须保留：1) 用户的长期要求、约束和偏好；"
+        "2) 用户当前和近期的需求；3) 之前摘要里记录的问题和未决点；4) 关键决定、文件、命令和结果。"
+        "删除工具调用细节和过程叙述。不要编造。只输出摘要。"
+      : "You compress a coding session for future context. Preserve exactly: "
+        "(1) the user's long-term requirements, constraints and preferences; "
+        "(2) their current and recent needs; (3) unresolved questions and issues "
+        "recorded in the previous summary; (4) key decisions, files, commands and "
+        "outcomes. Omit tool-call payloads and narration. Do not invent. Output "
+        "the summary only.";
+  ModelCallRequest req;
+  req.model = opts_.model;
+  req.provider = opts_.provider;
+  // A separate usage bucket: the summary call must not become the session's
+  // "last prompt" and corrupt the water-level calculation.
+  req.session_id = opts_.sid + "#summary";
+  req.messages = Json::array({Json{{"role", "system"}, {"content", sys}},
+                              Json{{"role", "user"}, {"content", material}}});
+  req.auto_mode = false;
+  ModelCallResult out;
+  FsResult r = call_model(req, &out, nullptr);
+  if (!r.ok() || !out.error.empty() || out.text.empty()) return std::string();
+  return out.text;
+}
+
+bool AgentLoop::compress_durable_history(Json* rebuilt) {
+  if (!load_history || context_limit <= 0 || last_in_tokens_ <= 0) {
+    return false;
+  }
+  HistoryBuilder::Options hopts = opts_.history;
+  hopts.last_prompt_tokens = last_in_tokens_;
+  hopts.context_limit = context_limit;
+  if (call_model) {
+    hopts.model_summarizer = [this](const std::string& material) {
+      return summarize_session(material);
+    };
+  }
+  if (compaction_load) {
+    Json st = compaction_load(opts_.sid);
+    if (st.is_object()) {
+      hopts.prior_summary = jsonutil::get<std::string>(st, "summary", "");
+      hopts.compacted_turns = jsonutil::get_int(st, "compactedTurns", 0);
+      hopts.prior_turn_id = jsonutil::get<std::string>(st, "lastTurnId", "");
+      hopts.prior_mode = jsonutil::get<std::string>(st, "mode", "");
+    }
+  }
+  HistoryBuilder::CompressDecision dec = HistoryBuilder::should_compress(hopts, 0);
+  if (!dec.compress) return false;
+  Json full;
+  if (!load_history(&full).ok()) return false;
+  HistoryResult hist = HistoryBuilder(hopts).build_neutral(full);
+  if (!hist.compressed || hist.summary.empty()) return false;
+  Json state = Json::object();
+  state["summary"] = hist.summary;
+  state["compactedTurns"] = hist.compacted_turns;
+  state["lastTurnId"] = hist.compacted_turn_id;
+  state["mode"] = hist.mode;
+  state["savedAt"] = WallClock().now_ms();
+  if (compaction_save) compaction_save(opts_.sid, state);
+  compact_pending_ = false;
+  if (rebuilt) *rebuilt = hist.messages;
+  emit("context.compressed", Json{
+          {"sid", opts_.sid},
+          {"mode", hist.mode},
+          {"from", hist.compressed_from},
+          {"to", hist.compressed_to},
+          {"droppedTurns", hist.dropped_turns},
+          {"keptTurns", 0},
+          {"reason", dec.reason},
+          {"waterPct", dec.pct},
+          {"promptTokens", last_in_tokens_},
+          {"contextLimit", context_limit.load()}});
+  return true;
+}
+
+bool AgentLoop::compact_in_memory(Json* messages) {
+  if (!messages || !messages->is_array() || messages->empty()) return false;
+  Json system = Json::object();
+  std::string material;
+  for (auto& m : *messages) {
+    if (!m.is_object()) continue;
+    std::string role = jsonutil::get<std::string>(m, "role", "");
+    if (role == "system") {
+      system = m;
+      continue;
+    }
+    std::string content = jsonutil::get<std::string>(m, "content", "");
+    if (!content.empty()) material += role + ":\n" + content + "\n\n";
+    if (m.contains("toolCalls") && m["toolCalls"].is_array()) {
+      for (auto& c : m["toolCalls"]) {
+        std::string n = jsonutil::get<std::string>(c, "name", "");
+        if (n.empty()) continue;
+        material += "TOOL " + n;
+        std::string summary = jsonutil::get<std::string>(c, "summary", "");
+        if (!summary.empty()) material += ": " + summary;
+        material += "\n";
+      }
+    }
+  }
+  if (material.empty()) return false;
+  std::string summary = summarize_session(material);
+  Json rebuilt = Json::array();
+  if (!system.empty()) rebuilt.push_back(system);
+  if (!summary.empty()) {
+    rebuilt.push_back(Json{{"role", "user"},
+                           {"content", "[Earlier conversation was compacted]\n" + summary}});
+  } else {
+    // Fallback the user specified: keep each user input / assistant answer and
+    // drop tool calls/results.
+    for (auto& m : *messages) {
+      if (!m.is_object()) continue;
+      std::string role = jsonutil::get<std::string>(m, "role", "");
+      if (role != "user" && role != "assistant") continue;
+      std::string content = jsonutil::get<std::string>(m, "content", "");
+      if (content.empty()) continue;
+      rebuilt.push_back(Json{{"role", role}, {"content", content}});
+    }
+  }
+  if (rebuilt.size() <= (system.empty() ? size_t(0) : size_t(1))) return false;
+  *messages = rebuilt;
+  compact_pending_ = true;
+  emit("context.compressed", Json{{"sid", opts_.sid},
+                                  {"mode", summary.empty() ? "short-view" : "full"},
+                                  {"droppedTurns", 0},
+                                  {"keptTurns", 0},
+                                  {"reason", "water-level-mid-turn"},
+                                  {"waterPct", 0},
+                                  {"promptTokens", last_in_tokens_},
+                                  {"contextLimit", context_limit.load()}});
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -808,6 +947,11 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   // history through HistoryBuilder after crossing the watermark, and it must
   // carry the same system prompt instead of an empty one.
   opts_.history.system_prefix = hopts.system_prefix;
+  if (call_model) {
+    hopts.model_summarizer = [this](const std::string& material) {
+      return summarize_session(material);
+    };
+  }
 
   // Compaction decision inputs. The water level is the LAST request's prompt
   // tokens against the model window - a fact, not an estimate - so a session
@@ -815,9 +959,10 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   // turn count.
   hopts.last_prompt_tokens = last_in_tokens_;
   hopts.context_limit = context_limit;
-  if (compress_requested_) {
+  if (compress_requested_ || compact_pending_) {
     hopts.force_compress = true;
     compress_requested_ = false;
+    compact_pending_ = false;
   }
 
   Json messages = Json::array();
@@ -1105,6 +1250,20 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   std::string stop_note;   // set when the tool loop had to be cut short
   std::string stop_code;   // machine-readable reason ("round-limit"|"repeat")
   bool zh = opts_.context.lang == ContextLang::kZh;
+  bool mid_turn_compacted = false;
+  // "Every call is followed by a decision": the last response's prompt tokens
+  // are a fact. Before the NEXT call, if the water level has crossed the
+  // threshold, compress the in-memory request now instead of waiting for the
+  // turn to end. `compact_pending_` makes the next user turn compress the disk
+  // history too, so a low summary prompt cannot hide the full transcript.
+  auto maybe_compact = [&]() {
+    if (mid_turn_compacted || context_limit <= 0 || last_in_tokens_ <= 0) return;
+    int at = opts_.history.compress_at_pct;
+    if (at <= 0) return;
+    if (last_in_tokens_ * 100 < static_cast<int64_t>(at) * context_limit) return;
+    mid_turn_compacted = true;
+    compact_in_memory(&messages);
+  };
   while (true) {
     if (result.tool_calls.empty()) {
       // Guidance that arrived while the final answer streamed deserves one more
@@ -1112,6 +1271,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
       // conversation with the old turn left open.
       if (apply_steering(&messages)) {
         state_ = LoopState::kPlanning;
+        maybe_compact();
         ModelCallResult next;
         FsResult nr = call_model_once(messages, tools, &next);
         if (!nr.ok() || !next.error.empty()) {
@@ -1238,6 +1398,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     // User guidance that arrived during the tool work is carried into the next
     // model call of THIS turn.
     apply_steering(&messages);
+    maybe_compact();
 
     ModelCallResult next;
     FsResult nr = call_model_once(messages, tools, &next);
@@ -1440,57 +1601,10 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
                              {"maxRounds", opts_.max_auto_continues}});
       // The auto round must not start on an already-full prompt. A user turn
       // only compacts at its START; a long tool chain can cross the threshold
-      // mid-turn, and the next auto call used to go out at 81%+ with no
-      // compression (the "81% and still not compressed" report). Persist just
-      // happened, so rebuild the request from the durable history: every turn is
-      // folded into one summary (no raw suffix, no truncation).
+      // mid-turn. Persist just happened, so rebuild the request from the durable
+      // history: every turn is folded into one model summary (no raw suffix).
       Json msgs = messages;
-      if (load_history && opts_.history.compress_at_pct > 0 && context_limit > 0 &&
-          last_in_tokens_ > 0) {
-        HistoryBuilder::Options hopts = opts_.history;
-        hopts.last_prompt_tokens = last_in_tokens_;
-        hopts.context_limit = context_limit;
-        if (compaction_load) {
-          Json st = compaction_load(opts_.sid);
-          if (st.is_object()) {
-            hopts.prior_summary = jsonutil::get<std::string>(st, "summary", "");
-            hopts.compacted_turns = jsonutil::get_int(st, "compactedTurns", 0);
-            hopts.prior_turn_id = jsonutil::get<std::string>(st, "lastTurnId", "");
-            hopts.prior_mode = jsonutil::get<std::string>(st, "mode", "");
-          }
-        }
-        HistoryBuilder::CompressDecision dec =
-            HistoryBuilder::should_compress(hopts, 0);
-        if (dec.compress) {
-          Json full;
-          if (load_history(&full).ok()) {
-            HistoryResult hist = HistoryBuilder(hopts).build_neutral(full);
-            if (hist.compressed && !hist.summary.empty()) {
-              msgs = hist.messages;
-              if (compaction_save) {
-                Json state = Json::object();
-                state["summary"] = hist.summary;
-                state["compactedTurns"] = hist.compacted_turns;
-                state["lastTurnId"] = hist.compacted_turn_id;
-                state["mode"] = hist.mode;
-                state["savedAt"] = WallClock().now_ms();
-                compaction_save(opts_.sid, state);
-              }
-              emit("context.compressed", Json{
-                      {"sid", opts_.sid},
-                      {"mode", hist.mode},
-                      {"from", hist.compressed_from},
-                      {"to", hist.compressed_to},
-                      {"droppedTurns", hist.dropped_turns},
-                      {"keptTurns", 0},
-                      {"reason", dec.reason},
-                      {"waterPct", dec.pct},
-                      {"promptTokens", last_in_tokens_},
-                      {"contextLimit", context_limit.load()}});
-            }
-          }
-        }
-      }
+      compress_durable_history(&msgs);
       // Continue on the same conversation. The model's OWN last answer must be
       // in the history first: without it the continuation request looks like
       // "user said: continue" out of nowhere and the model repeats the work.
@@ -1545,6 +1659,11 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
                              {"reason", "auto-continue limit reached"},
                              {"rounds", auto_continues_}});
   }
+  // The turn is over. If this last call crossed the water level and no auto
+  // round will compress it, do it NOW: the next send must start compressed, and
+  // the user sees the notice while the context is at 81% rather than after the
+  // next manual send.
+  if (!auto_continue) compress_durable_history(nullptr);
   current_auto_round_.store(0);
   auto_continues_ = 0;
   return FsResult::success();
@@ -1648,7 +1767,9 @@ void AgentLoop::maybe_persist_live() {
 }
 
 // addon2 任务健壮性：打断后续接
-FsResult AgentLoop::continue_task(const std::string& guidance) {
+FsResult AgentLoop::continue_task(const std::string& guidance,
+                                  bool suppress_queue_once) {
+  suppress_steering_once_ = suppress_queue_once;
   if (!saved_valid_) {
     if (guidance.empty()) {
       // Nothing saved and nothing typed: there is nothing to continue. The UI's

@@ -287,6 +287,85 @@ std::string tail_of(const std::string& s, size_t max_bytes) {
   return "…" + s.substr(cut);
 }
 
+// Material for the MODEL summary: user requirements verbatim, assistant answers,
+// tool names and bounded outcomes, plus the previous summary. There is no
+// per-turn byte budget - the model decides how to compress the session.
+std::string summary_material(const Json& turns, size_t from, size_t to,
+                             const std::string& prior) {
+  std::string out;
+  if (!prior.empty()) out += "[Previous summary]\n" + prior + "\n\n";
+  for (size_t i = from; i < to && i < turns.size(); ++i) {
+    const Json& t = turns[i];
+    if (!t.is_object()) continue;
+    if (is_auto_nudge(t) || is_empty_auto_answer(t)) continue;
+    if (jsonutil::get<bool>(t, "forgotten", false)) continue;
+    std::string role = jsonutil::get<std::string>(t, "role", "");
+    if (role == "user") {
+      std::string text = jsonutil::get<std::string>(t, "promptRaw", "");
+      if (text.empty()) text = jsonutil::get<std::string>(t, "content", "");
+      if (text.empty()) continue;
+      out += "USER:\n" + text + "\n\n";
+    } else if (role == "assistant") {
+      std::string text = jsonutil::get<std::string>(t, "streamSummary", "");
+      if (text.empty()) text = jsonutil::get<std::string>(t, "content", "");
+      if (!text.empty()) out += "ASSISTANT:\n" + text + "\n";
+      if (t.contains("toolCalls") && t["toolCalls"].is_array()) {
+        for (auto& c : t["toolCalls"]) {
+          std::string name = jsonutil::get<std::string>(c, "name", "");
+          if (name.empty()) continue;
+          out += "TOOL " + name;
+          std::string summary = jsonutil::get<std::string>(c, "summary", "");
+          if (!summary.empty()) out += ": " + summary;
+          out += "\n";
+        }
+      }
+      out += "\n";
+    }
+  }
+  return out;
+}
+
+// The short-view fallback the user asked for: drop tool calls and their output,
+// keep every round's user input and assistant answer. This is a conversation,
+// not a per-turn token budget.
+Json short_view_messages(const Json& turns, size_t from, size_t to,
+                         const std::string& prior) {
+  Json out = Json::array();
+  if (!prior.empty()) {
+    out.push_back(Json{{"role", "user"},
+                       {"content", "[Earlier conversation was compacted]\n" + prior}});
+  }
+  for (size_t i = from; i < to && i < turns.size(); ++i) {
+    const Json& t = turns[i];
+    if (!t.is_object()) continue;
+    if (is_auto_nudge(t) || is_empty_auto_answer(t)) continue;
+    if (jsonutil::get<bool>(t, "forgotten", false)) continue;
+    std::string role = jsonutil::get<std::string>(t, "role", "");
+    std::string text;
+    if (role == "user") {
+      text = jsonutil::get<std::string>(t, "promptRaw", "");
+      if (text.empty()) text = jsonutil::get<std::string>(t, "content", "");
+    } else if (role == "assistant") {
+      text = jsonutil::get<std::string>(t, "streamSummary", "");
+      if (text.empty()) text = jsonutil::get<std::string>(t, "content", "");
+    }
+    if (text.empty()) continue;  // a tool-only assistant turn has no answer
+    out.push_back(Json{{"role", role}, {"content", text}});
+  }
+  return out;
+}
+
+std::string short_view_summary(const Json& turns, size_t from, size_t to,
+                               const std::string& prior) {
+  Json msgs = short_view_messages(turns, from, to, prior);
+  std::string out = "[Short view: tool calls omitted]\n";
+  for (auto& m : msgs) {
+    out += (jsonutil::get<std::string>(m, "role", "") == "user" ? "U: " : "A: ");
+    out += jsonutil::get<std::string>(m, "content", "") + "\n";
+  }
+  return out;
+}
+
 }  // namespace
 
 std::string HistoryBuilder::project_tool_result(const std::string& name,
@@ -699,34 +778,50 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
     // it from the last real prompt (a fact) instead of guessing.
     int64_t overhead = opts_.last_prompt_tokens - effective_tokens;
     if (overhead < 0) overhead = 0;
-    const size_t caps[] = {32000, 12000, 4000, 1000};
+    // Let the MODEL summarize the whole session. No per-turn byte budget: the
+    // material carries the user's requirements and the assistant's answers, and
+    // the prompt says what to preserve. The deterministic digest is only the
+    // fallback for embedded/test callers without a summariser.
     std::string fold_text;
-    bool short_fallback = false;
-    for (size_t ci = 0; ci < sizeof(caps) / sizeof(caps[0]); ++ci) {
-      fold_text = make_fold(turns, start, total, prior, opts_.max_fold_points,
-                            caps[ci]);
-      if (opts_.context_limit <= 0) break;
-      int64_t projected = overhead + estimate_tokens(fold_text);
-      if (projected <= opts_.context_limit) break;
-      short_fallback = true;
+    if (opts_.model_summarizer) {
+      fold_text = opts_.model_summarizer(
+          summary_material(turns, start, total, prior));
     }
-    Json summary = Json::object();
-    summary["role"] = "user";
-    summary["content"] = fold_text;
-    Json with_fold = messages;
-    with_fold.push_back(summary);
-    out.messages = with_fold;
-    out.est_tokens = estimate_tokens(fold_text);
+    if (fold_text.empty()) {
+      fold_text = make_fold(turns, start, total, prior, opts_.max_fold_points,
+                            32000);
+    }
+    const bool short_view =
+        opts_.context_limit > 0 &&
+        overhead + estimate_tokens(fold_text) > opts_.context_limit;
     out.compressed = true;
-    out.mode = short_fallback ? "short-view" : "full";
+    out.mode = short_view ? "short-view" : "full";
     out.compressed_from = static_cast<int64_t>(start);
     out.compressed_to = static_cast<int64_t>(total);
     out.dropped_turns = static_cast<int64_t>(total - start);
-    out.summary = fold_text;
     out.compacted_turns = static_cast<int64_t>(total);
     if (total > 0 && turns[total - 1].is_object()) {
       out.compacted_turn_id =
           jsonutil::get<std::string>(turns[total - 1], "turnId", "");
+    }
+    if (short_view) {
+      // The fallback the user asked for: drop tool calls and their output, keep
+      // every round's user input and assistant answer. No raw-message suffix,
+      // no per-turn budget.
+      out.messages = messages;
+      Json sv = short_view_messages(turns, start, total, prior);
+      for (auto& m : sv) out.messages.push_back(m);
+      out.summary = short_view_summary(turns, start, total, prior);
+      out.est_tokens = estimate_tokens(out.messages);
+    } else {
+      if (fold_text.rfind("[Earlier conversation was compacted]", 0) != 0) {
+        fold_text = "[Earlier conversation was compacted]\n" + fold_text;
+      }
+      out.messages = messages;
+      out.messages.push_back(
+          Json{{"role", "user"}, {"content", fold_text}});
+      out.summary = fold_text;
+      out.est_tokens = estimate_tokens(fold_text);
     }
     return out;
   }

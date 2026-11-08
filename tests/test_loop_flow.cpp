@@ -754,7 +754,7 @@ FS_TEST(loop_reuses_durable_compaction_state) {
   EXPECT_EQ((int)seen.size(), 3);  // system + summary + the new user turn
   std::string all;
   for (auto& m : seen) all += jsonutil::get<std::string>(m, "content", "");
-  EXPECT_TRUE(all.find("compacted") != std::string::npos);
+  EXPECT_TRUE(all.find("first") != std::string::npos);
   EXPECT_TRUE(all.find("next") != std::string::npos);
 }
 
@@ -784,9 +784,20 @@ FS_TEST(loop_persists_first_short_view) {
     return FsResult::success();
   };
   loop.compaction_save = [&saved](const std::string&, const Json& s) { saved = s; };
-  loop.call_model = [](const ModelCallRequest&, ModelCallResult* out,
+  loop.call_model = [](const ModelCallRequest& req, ModelCallResult* out,
                        const std::function<void(const std::string&)>&) {
-    out->text = "ok";
+    // The summary request must be bigger than this deliberately tiny window,
+    // otherwise a compact summary would legitimately fit and mode would be full.
+    std::string sys;
+    if (!req.messages.empty()) {
+      sys = jsonutil::get<std::string>(req.messages[0], "content", "");
+    }
+    if (sys.find("compress") != std::string::npos ||
+        sys.find("压缩") != std::string::npos) {
+      out->text = std::string(4000, 's');
+    } else {
+      out->text = "ok";
+    }
     return FsResult::success();
   };
   ASSERT_TRUE(loop.send("go").ok());
@@ -970,6 +981,15 @@ FS_TEST(loop_compacts_between_auto_rounds_at_water_level) {
   int calls = 0;
   loop.call_model = [&](const ModelCallRequest& req, ModelCallResult* out,
                         const std::function<void(const std::string&)>&) {
+    std::string sys;
+    if (!req.messages.empty()) {
+      sys = jsonutil::get<std::string>(req.messages[0], "content", "");
+    }
+    if (sys.find("compress") != std::string::npos ||
+        sys.find("压缩") != std::string::npos) {
+      out->text = "SUMMARY old question";  // the model summary call
+      return FsResult::success();
+    }
     ++calls;
     seen.push_back(req.messages);
     out->in_tokens = 8500;  // 85% of 10k -> threshold
@@ -998,6 +1018,50 @@ FS_TEST(loop_compacts_between_auto_rounds_at_water_level) {
   // System prefix survives the rebuild (an empty one made the auto round blind).
   ASSERT_TRUE(!seen[2].empty());
   EXPECT_FALSE(jsonutil::get<std::string>(seen[2][0], "content", "").empty());
+}
+
+// A call that crosses the watermark is followed by a compaction decision even
+// when the turn simply ENDS (no auto continuation, no next user send).
+FS_TEST(loop_compresses_after_a_final_call_at_water_level) {
+  AgentLoop::Options opts;
+  opts.sid = "s_end_compact";
+  opts.permission = "full";
+  opts.context.auto_mode = false;
+  opts.history.compress_at_pct = 80;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.context_limit = 10000;
+  Json full = Json::object();
+  full["turns"] = Json::array({
+      Json{{"role", "user"}, {"promptRaw", "old requirement"}},
+      Json{{"role", "assistant"}, {"streamSummary", "old answer"}},
+  });
+  loop.load_history = [&full](Json* out) -> FsResult {
+    *out = full;
+    return FsResult::success();
+  };
+  Json saved;
+  loop.compaction_save = [&saved](const std::string&, const Json& s) { saved = s; };
+  loop.call_model = [](const ModelCallRequest& req, ModelCallResult* out,
+                       const std::function<void(const std::string&)>&) {
+    std::string sys;
+    if (!req.messages.empty()) {
+      sys = jsonutil::get<std::string>(req.messages[0], "content", "");
+    }
+    if (sys.find("compress") != std::string::npos ||
+        sys.find("压缩") != std::string::npos) {
+      out->text = "SUMMARY old requirement";
+      return FsResult::success();
+    }
+    out->text = "done";
+    out->in_tokens = 8500;  // 85%
+    return FsResult::success();
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  EXPECT_TRUE(rec.count("context.compressed") >= 1);
+  ASSERT_TRUE(saved.is_object());
+  EXPECT_TRUE(saved.contains("summary"));
 }
 
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------

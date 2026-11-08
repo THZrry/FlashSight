@@ -109,24 +109,24 @@ FS_TEST(compress_defaults_to_full_at_water_level) {
   EXPECT_TRUE(fold.find("U: question 5 with") != std::string::npos);
 }
 
-// Short view is reserved for a too-small CURRENT window (model switch), never
-// for the normal threshold. Here the last actual request exceeded the new
-// model's window, so keep the newest turns and say it was automatic.
+// Short view is reserved for a too-small CURRENT window. It drops tool calls
+// but keeps EVERY round's user input and assistant answer (no raw suffix, no
+// per-turn budget).
 FS_TEST(window_too_small_uses_short_view) {
   HistoryBuilder::Options opts;
   opts.system_prefix = "sys";
   opts.context_limit = 4000;
   opts.compress_at_pct = 80;
   opts.last_prompt_tokens = 12000;  // measured on the PREVIOUS, larger model
-  opts.keep_turns = 4;
   HistoryResult hr = HistoryBuilder(opts).build_neutral(make_full(20));
   EXPECT_TRUE(hr.compressed);
   EXPECT_EQ(hr.mode, std::string("short-view"));
-  EXPECT_EQ(hr.dropped_turns, int64_t(40));  // all 40 turns are compressed
-  EXPECT_EQ((int)hr.messages.size(), 2);     // system + full-history summary
-  std::string fold = jsonutil::get<std::string>(hr.messages[1], "content", "");
-  EXPECT_TRUE(fold.find("compacted") != std::string::npos);
-  EXPECT_TRUE(fold.find("U: question 0 with") != std::string::npos);
+  EXPECT_EQ(hr.dropped_turns, int64_t(40));
+  EXPECT_TRUE(hr.messages.size() > 2);  // system + every U/A round
+  std::string all;
+  for (auto& m : hr.messages) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find("question 0 with") != std::string::npos);
+  EXPECT_TRUE(all.find("answer 19") != std::string::npos);
 }
 
 // ---------- 水位触发时压缩确实发生，且是全量（不保留最近轮原文） ----------

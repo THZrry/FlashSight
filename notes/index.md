@@ -1704,3 +1704,15 @@ The process of project: P0 环境搭建
     2. `HttpRequest` 增加 `cancel` 回调；`HttplibNetClient` 起一个 50ms 轮询的 watcher，取消时直接 `Client::stop()` 关闭 socket。`ProviderRuntime` 对取消不再重试，所以中止是“标记结束 + 断连接”，不需要等流返回。
   - **仍未完成/边界**：webview 变体因用户正在运行 `flashsight-webview.exe`（PID 9480）导致输出文件被占用，`build_all.py` 链接失败；已在 `build_verify` 目录完成同一份代码的 webview 链接，并把新二进制放到 `temp/flashsight-webview-new.exe`。关闭正在运行的窗口后重跑 `build_all.py` 即可覆盖正式产物。中止的 socket watcher 没有自动化网络测试（单测不碰真网），只做了编译与路径审查；需要在真实模型流上复测“点中止→立即停”。
   - **测试/构建**：467 用例 4344 断言全过；web / whaleui 实际编译通过；webview 在备用 builddir 编译链接通过。
+
+
+<129>(ROOT CAUSE/FIX): 每次调用后判断；模型总结代替逐轮预算；短视图丢工具保留每轮输入/回复；引导队列/立即单条；中止去掉继续；不再向模型报上下文占用。
+  - **每次调用后判断**：`run_loop_impl` 在工具轮之间的下一次调用前检查 `last_in_tokens / context_limit`；超过阈值就把当前内存 messages 交给模型总结（`compact_in_memory`），替换成 system + 全历史摘要，并置 `compact_pending_` 使下一次用户轮强制压缩磁盘历史。回合结束时（没有 auto 续跑）再调用 `compress_durable_history`：从刚持久化的完整历史生成摘要、写 `compaction.json`、发 `context.compressed`，不用等下一次手动发送。auto 续跑边界也走同一个 helper。
+  - **不再按轮给预算**：压缩摘要由模型生成。`HistoryBuilder::Options::model_summarizer` 接收完整 material（上一条摘要 + 每一轮 user 原文 + assistant 回复 + 工具名/摘要），prompt 明确要求保留：用户长期要求/约束/偏好、当前和近期需求、上一摘要里的未决问题、关键决定/文件/命令/结果。生产路径由 `AgentLoop::summarize_session` 调模型（独立的 `sid#summary` 用量桶，不污染水位）；只有单元测试/嵌入调用没有 summarizer 时才用确定性 digest fallback。
+  - **短视图改为丢工具调用**：窗口连摘要都放不下时，`short_view_messages` 保留 system + 每一条 user 输入 + 每一条 assistant 回复，丢掉全部 toolCalls/tool 结果，不按轮截断预算。短视图的 `summary` 也保存这些 U/A 行，重开可复用。
+  - **引导队列新语义**：队列里的全部条目在下一次模型调用一次性带上（`drain_all`）；点“立即”只 `take` 这一条，打断当前调用，等 loop park 后用 `session.continue(suppressQueue=true)` 只发送这一条，其余队列保留到后续调用。`AgentHost::send` 在 parked 时会把队列 + 输入一起续跑，所以挂起期间写的引导也会在继续时发送。
+  - **引导显示**：`ChatMsg::guidance` + `work-guidance` 独立块，工作过程里用户引导和模型 narration/tool 分开；stored turn 的 `guidance` 重开也恢复。运行中 composer 增加“引导”按钮（`comment-dots`，与正常 `paper-plane` 发送不同图标）；正常的发送在运行中仍然按队列处理。
+  - **去掉继续按钮**：中止后不再显示“任务已中断 [继续][忽略]”条；仅保留短暂的“正在停止…”，随后正常发送（或队列续跑）即可。`stop_pending` 期间不显示继续，避免和 abort 赛跑。
+  - **不向模型报上下文占用**：`build_runtime` 删除 context% / tokens 行。模型无法利用这个数字（压缩由宿主自动做），UI 仍显示给用户。
+  - **仍未验证**：中止的 socket watcher 仍无真实网络单测；引导“立即”打断→单条续跑、压缩后的模型摘要、工作过程引导块都需要在新构建里手测。webview 正式产物仍被正在运行的 `flashsight-webview.exe` 占用，最新二进制在 `temp/flashsight-webview-new.exe`；关闭窗口后跑 `build_all.py` 覆盖。
+  - **测试/构建**：470 用例 4359 断言全过；web / whaleui 最新代码编译通过；webview 在备用 builddir 编译通过。

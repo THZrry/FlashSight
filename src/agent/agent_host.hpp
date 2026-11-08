@@ -122,7 +122,8 @@ class AgentHost {
   FsResult append(const std::string& sid, const std::string& text);
 
   // 打断后续接（addon2 任务健壮性）：给原任务发送特定引导并续跑
-  FsResult continue_task(const std::string& sid, const std::string& guidance);
+  FsResult continue_task(const std::string& sid, const std::string& guidance,
+                         bool suppress_queue_once = false);
   // Route the parked/next turn with the session's CURRENT model (a model switch
   // while parked must not be ignored by 继续). `provider` may be empty (resolve
   // by name); two providers can serve the same model id.
@@ -177,6 +178,9 @@ class AgentHost {
                          const std::string& text);
   FsResult steering_edit(const std::string& sid, int id, const std::string& text);
   FsResult steering_erase(const std::string& sid, int id);
+  // Remove one item and return its text; the UI then interrupts the turn and
+  // sends exactly THIS text, leaving the other queued items alone.
+  FsResult steering_take(const std::string& sid, int id);
   FsResult steering_reorder(const std::string& sid, const std::vector<int>& order);
   FsResult steering_list(const std::string& sid);
 

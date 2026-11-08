@@ -408,6 +408,21 @@ FS_TEST(steering_queue_ops) {
   EXPECT_TRUE(j.is_array());
 }
 
+// The new steering contract: the NEXT call carries the WHOLE queue; "send now"
+// takes exactly ONE item (the other queued items stay).
+FS_TEST(steering_queue_drain_all_and_take_one) {
+  SteeringQueue q;
+  int a = q.push(SteeringKind::kRoundEnd, "one");
+  int b = q.push(SteeringKind::kRoundEnd, "two");
+  std::string taken;
+  EXPECT_TRUE(q.take(a, &taken));
+  EXPECT_EQ(taken, std::string("one"));
+  EXPECT_EQ((int)q.items().size(), 1);
+  EXPECT_EQ(q.drain_all(), std::string("two"));
+  EXPECT_TRUE(q.empty());
+  EXPECT_FALSE(q.take(b, &taken));
+}
+
 #include "agent/overfit.hpp"
 #include "agent/subagent.hpp"
 #include "common/fs_simhash.hpp"

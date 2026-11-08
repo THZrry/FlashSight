@@ -673,12 +673,9 @@ std::string AgentContext::build_runtime(const ContextInput& in, const RuntimeSta
     }
   }
 
-  if (st.context_limit > 0 && st.context_tokens > 0) {
-    int pct = static_cast<int>(st.context_tokens * 100 / st.context_limit);
-    lines.push_back((zh(in) ? "上下文水位: " : "context: ") + std::to_string(pct) + "% (" +
-                    std::to_string(st.context_tokens) + "/" +
-                    std::to_string(st.context_limit) + " tokens)");
-  }
+  // The model does not need the context percentage/tokens: it cannot act on
+  // them (the host compacts automatically), and repeating them every round adds
+  // noise to the prompt. The UI still shows the water level to the USER.
 
   if (!st.turn_note.empty()) lines.push_back(st.turn_note);
 

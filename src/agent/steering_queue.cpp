@@ -77,6 +77,27 @@ std::string SteeringQueue::drain_immediate(char sep) {
   return out;
 }
 
+std::string SteeringQueue::drain_all(char sep) {
+  std::string out;
+  for (auto& it : items_) {
+    if (!out.empty()) out.push_back(sep);
+    out += it.text;
+  }
+  items_.clear();
+  return out;
+}
+
+bool SteeringQueue::take(int id, std::string* text) {
+  for (auto it = items_.begin(); it != items_.end(); ++it) {
+    if (it->id == id) {
+      if (text) *text = it->text;
+      items_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
 std::vector<SteeringItem> SteeringQueue::round_end_items() const {
   std::vector<SteeringItem> out;
   for (auto& it : items_) {

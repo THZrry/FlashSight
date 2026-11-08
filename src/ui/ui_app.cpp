@@ -1653,6 +1653,13 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       }
     }
   }
+  if (m.role == "assistant" && t.contains("guidance") && t["guidance"].is_array()) {
+    for (size_t k = 0; k < t["guidance"].size(); ++k) {
+      if (t["guidance"][k].is_string()) {
+        m.guidance.push_back(t["guidance"][k].get<std::string>());
+      }
+    }
+  }
   return m;
 }
 
@@ -3915,8 +3922,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       if (m.back().started_at <= 0) m.back().started_at = m.back().ended_at;
       m.back().rev = next_msg_rev_++;
     }
-    // The turn just spent tokens, so the side panel's cost/context numbers are
-    // stale. Refresh them for the session that actually ran.
+    // A "send now" guidance whose turn finished before the abort landed: send
+    // it as the next continuation now (only that item; the queue is untouched).
+    if (is_active) flush_pending_now(sid.empty() ? st_.active_tab : sid);
     std::string usage_sid = sid.empty() ? st_.active_tab : sid;
     if (!usage_sid.empty()) {
       if (is_active) {
@@ -4387,6 +4395,14 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "steering.applied") {
+    std::string text = jsonutil::get<std::string>(payload, "text", "");
+    if (!text.empty() && !st_.messages.empty() &&
+        st_.messages.back().role == "assistant") {
+      comp::ChatMsg& m = st_.messages.back();
+      m.guidance.push_back(text);
+      m.work_open = true;
+      m.rev = next_msg_rev_++;
+    }
     st_.toast = "已把本轮引导带入下一次模型调用";
     st_.toast_deadline_ms = now_ms() + kToastMs;
     if (!sid.empty()) refresh_steering(sid);
@@ -4466,6 +4482,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // Ask the backend too: the click/state we set above is our best guess, and
     // the fresh reply also invalidates any older in-flight one.
     if (!st_.active_tab.empty()) refresh_loop_state(st_.active_tab);
+    flush_pending_now(st_.active_tab.empty() ? sid : st_.active_tab);
   } else if (event == "loop.state") {
     std::string state = jsonutil::get<std::string>(payload, "state", "");
     if (state == "resumed" || state == "turnDone" || state == "idle") {
@@ -4500,6 +4517,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       }
     }
     if (!sid.empty()) {
+      flush_pending_now(sid);
       refresh_loop_state(sid);
       refresh_pending_wakes();
     }
@@ -4537,6 +4555,7 @@ std::string UiApp::debug_stats() const {
     const comp::ChatMsg& m = st_.messages[i];
     msg_bytes += m.text.size();
     for (size_t k = 0; k < m.interim.size(); ++k) msg_bytes += m.interim[k].size();
+    for (size_t k = 0; k < m.guidance.size(); ++k) msg_bytes += m.guidance[k].size();
     tools += m.tools.size();
     for (size_t k = 0; k < m.tools.size(); ++k) {
       tool_bytes += m.tools[k].input.size() + m.tools[k].detail.size();
@@ -6665,15 +6684,30 @@ VNodePtr UiApp::build_session() {
         row.add(el("span", "steer-q-text").text(cut_display(text, 240, "…")));
         H send = el("button", "mini-btn");
         send.attr("type", "button");
-        send.text(tr("发送"));
-        send.on(EventKind::kClick, [this, id, text](const std::string&) {
+        send.text(tr("立即"));
+        send.attr("title", tr("打断当前调用，只发送这一条引导（其余队列保留）"));
+        send.on(EventKind::kClick, [this, id](const std::string&) {
           std::string sid = active_sid();
-          call_async("steering.erase", Json{{"sid", sid}, {"id", id}},
-                     [this, sid, text](const BackendResult& r) {
-            if (!r.ok) return;
-            call_async("steering.push",
-                       Json{{"sid", sid}, {"kind", "immediate"}, {"text", text}},
-                       [this, sid](const BackendResult&) { refresh_steering(sid); }, true);
+          if (sid.empty()) return;
+          call_async("steering.take", Json{{"sid", sid}, {"id", id}},
+                     [this, sid](const BackendResult& r) {
+            if (!r.ok) {
+              toast(tr("发送引导失败：") + r.message);
+              return;
+            }
+            pending_now_sid_ = sid;
+            pending_now_text_ = jsonutil::get<std::string>(r.data, "text", "");
+            // Stop the current call; the flush happens on the parked/done event.
+            call_async("session.interrupt", Json{{"sid", sid}},
+                       [this, sid](const BackendResult& ir) {
+              if (!ir.ok) {
+                pending_now_sid_.clear();
+                pending_now_text_.clear();
+                toast(tr("打断失败：") + ir.message);
+                refresh_steering(sid);
+              }
+            });
+            refresh_steering(sid);
           }, true);
         });
         H edit = el("button", "mini-btn");
@@ -6801,9 +6835,9 @@ VNodePtr UiApp::build_session() {
       comp_box.add(bar);
     }
   }
-  // Interrupted task: a persistent bar with the action that actually helps.
-  // The loop can continue from its saved point, so this is one click instead of
-  // retyping the request.
+  // Interrupted task: informational only. Continuing is the normal composer
+  // send (the host resumes a parked loop); a separate 继续 button was redundant
+  // and competed with the send the user actually wants.
   if (st_.stop_pending) {
     H bar = el("div", "interrupt-bar");
     bar.add(el("i", "fa fa-circle-notch fa-spin"));
@@ -6816,35 +6850,6 @@ VNodePtr UiApp::build_session() {
     if (!st_.interrupt_reason.empty()) {
       bar.add(el("span", "ib-reason dim").text(st_.interrupt_reason));
     }
-    bar.add(el("span", "grow"));
-    bar.add(comp::button(tr("继续"), [this, reason = st_.interrupt_reason](const std::string&) {
-      std::string sid = active_sid();
-      if (sid.empty()) return;
-      // Optimistic: hide the bar NOW. The request runs the continuation turn and
-      // only answers when it ENDS, so waiting for the callback kept the bar on
-      // screen for the whole turn - clicking again started yet another continue
-      // ("点很多次才好"). A failure puts it back with the original reason.
-      update([&](AppState& s) {
-        s.interrupted = false;
-        s.interrupt_reason.clear();
-      });
-      call_async("session.continue", Json{{"sid", sid}, {"guidance", ""}},
-                 [this, reason](const BackendResult& r) {
-        if (!r.ok) {
-          update([&](AppState& s) {
-            s.interrupted = true;
-            s.interrupt_reason = reason;
-          });
-          toast(tr("继续失败：") + r.message);
-        }
-      });
-    }, "primary"));
-    bar.add(comp::button(tr("忽略"), [this](const std::string&) {
-      update([&](AppState& s) {
-        s.interrupted = false;
-        s.interrupt_reason.clear();
-      });
-    }, "ghost"));
     comp_box.add(bar);
   }
   // ---- attachments: ABOVE the input, never inside it ----
@@ -7461,6 +7466,16 @@ VNodePtr UiApp::build_session() {
   // streamed and parks it, keeping the transcript. 挂起 next to it is the
   // graceful one - finish this round, then wait.
   if (st_.turn_running) {
+    // While a turn runs, the composer's normal send becomes "add guidance": the
+    // text joins the queue and ALL queued guidance goes out at the next model
+    // call. Different icon from the normal send so the two actions cannot be
+    // confused; 中止 stays next to it.
+    H guide = comp::icon_text_button("comment-dots", tr("引导"),
+                                     [this](const std::string&) { send_message(); },
+                                     "ghost");
+    guide.key("guide-btn").cls("text-wide");
+    guide.attr("title", tr("加入引导队列：下一次模型调用带上队列里的全部引导"));
+    right_tools.add(guide);
     H stop = comp::icon_text_button("stop", tr("中止"), [this](const std::string&) {
       std::string sid = active_sid();
       if (sid.empty()) return;
@@ -7474,7 +7489,9 @@ VNodePtr UiApp::build_session() {
         s.turn_running = false;
         s.auto_round = 0;
         s.suspend_pending = false;
-        s.interrupted = true;
+        // No "继续" bar after 中止: the turn is simply stopped. The user sends
+        // again (or a queued guidance resumes) when they want to continue.
+        s.interrupted = false;
         s.interrupt_reason.clear();
         for (size_t i = s.messages.size(); i-- > 0;) {
           comp::ChatMsg& m = s.messages[i];
@@ -9571,6 +9588,7 @@ void UiApp::refresh_loop_state(const std::string& sid) {
       // flight. Clearing here also recovers from a missed turn.done/auto.halted.
       if (!running) s.auto_round = 0;
     });
+    if (!running) flush_pending_now(sid);
   }, true);  // watchdog; a failed poll must not pop an error toast
 }
 
@@ -11936,6 +11954,46 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   });
 }
 
+void UiApp::continue_with_guidance(const std::string& sid,
+                                   const std::string& text) {
+  if (sid.empty() || text.empty()) return;
+  int64_t user_uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
+  update([&](AppState& s) {
+    comp::ChatMsg u;
+    u.role = "user";
+    u.text = text;
+    u.time = "刚刚";
+    u.rev = next_msg_rev_++;
+    u.uid = user_uid;
+    s.messages.push_back(u);
+    s.history_total += 1;
+    s.hist_follow = true;
+    comp::ChatMsg a;
+    a.role = "assistant";
+    a.streaming = true;
+    a.work_open = true;
+    a.rev = next_msg_rev_++;
+    a.started_at = now_ms();
+    a.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+    s.messages.push_back(a);
+  });
+  follow_history_if_pinned();
+  call_async("session.continue",
+             Json{{"sid", sid}, {"guidance", text}, {"suppressQueue", true}},
+             [this](const BackendResult& r) {
+    if (!r.ok) toast(tr("继续失败：") + r.message);
+  });
+}
+
+void UiApp::flush_pending_now(const std::string& sid) {
+  if (pending_now_text_.empty()) return;
+  if (!pending_now_sid_.empty() && pending_now_sid_ != sid) return;
+  std::string text = pending_now_text_;
+  pending_now_text_.clear();
+  pending_now_sid_.clear();
+  continue_with_guidance(sid, text);
+}
+
 std::string UiApp::rel_time_for_test(int64_t ms) { return rel_time(ms); }
 
 // Fingerprint of everything that changes a message's rendered output. Sizes and
@@ -11970,6 +12028,8 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   // length in, a new narration line could land under an unchanged signature and
   // the cached node would be reused, silently hiding it.
   for (size_t i = 0; i < m.interim.size(); ++i) mix(m.interim[i].size());
+  // Guidance blocks are part of the work log too.
+  for (size_t i = 0; i < m.guidance.size(); ++i) mix(m.guidance[i].size());
   // ...and so is WHERE each note sits relative to the calls (see interim_after).
   for (size_t i = 0; i < m.interim_after.size(); ++i) mix(m.interim_after[i] + 1);
   return h;

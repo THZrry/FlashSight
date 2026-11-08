@@ -167,7 +167,8 @@ class FsApi {
   // host, and the floating todo panel has to show them.
   FsResult session_todos(const std::string& sid);
   // addon2 任务健壮性：打断后续接（给原任务发引导并续跑）
-  FsResult session_continue(const std::string& sid, const std::string& guidance);
+  FsResult session_continue(const std::string& sid, const std::string& guidance,
+                            bool suppress_queue_once = false);
   // approve 档权限门：批准/拒绝当前等待的 tool
   FsResult session_approve(const std::string& sid, bool yes);
   // 上下文压缩：强制压缩一次 / 查询水位（含阈值与"是否该压缩"）
@@ -304,6 +305,7 @@ class FsApi {
   FsResult steering_list(const std::string& sid);
   FsResult steering_edit(const std::string& sid, int id, const std::string& text);
   FsResult steering_erase(const std::string& sid, int id);
+  FsResult steering_take(const std::string& sid, int id);
   FsResult steering_reorder(const std::string& sid, const std::vector<int>& order);
   FsResult provider_list_providers();
   FsResult provider_add_provider(const Json& conn);

@@ -204,7 +204,8 @@ class AgentLoop {
   bool parked() const { return parked_.load(); }
 
   // 中断后续接（addon2）：给原任务发送特定引导，从保存点继续
-  FsResult continue_task(const std::string& guidance);
+  FsResult continue_task(const std::string& guidance,
+                         bool suppress_queue_once = false);
 
   // 最后一轮的文本输出 / 消息数组（子代理摘要用）
   const std::string& last_text() const { return last_text_; }
@@ -275,6 +276,10 @@ class AgentLoop {
   std::atomic<bool> parked_{false};
 
   std::vector<std::string> steering_queue_;
+  // "Send now" already put its text directly into the resumed messages; do not
+  // also drain the remaining queue on that first call. The rest go at the NEXT
+  // call, as the queue contract says.
+  bool suppress_steering_once_ = false;
 
   // 等待中的工具（approve 门）
   std::string pending_tool_;
@@ -398,6 +403,18 @@ class AgentLoop {
   const Json& active_tools() const;
   // 上下文水位 + 本轮状态块
   std::string runtime_block();
+  // Model-backed summary of the whole session. Empty on failure (caller falls
+  // back to the deterministic digest).
+  std::string summarize_session(const std::string& material);
+  // Compact the IN-MEMORY messages after a call crosses the watermark. Used
+  // between tool rounds and before an auto round; the next user turn force-
+  // compresses the on-disk history (compact_pending_).
+  bool compact_in_memory(Json* messages);
+  // Rebuild the durable history from disk when the last call crossed the water
+  // level. Optionally returns the rebuilt request messages (used by an auto
+  // round). Saves compaction.json and emits context.compressed.
+  bool compress_durable_history(Json* rebuilt);
+  bool compact_pending_ = false;
 };
 
 }  // namespace fs

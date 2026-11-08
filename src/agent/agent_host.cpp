@@ -321,20 +321,14 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
   loop->compaction_save = [this](const std::string& s, const Json& state) {
     if (deps_.compaction_save) deps_.compaction_save(s, state);
   };
-  // Guidance is HOST-owned so the UI can list/edit/delete it. The loop drains
-  // it before the next model call; immediate items go first.
+  // Guidance is HOST-owned so the UI can list/edit/delete it. The NEXT model
+  // call carries THE WHOLE QUEUE (the user's requested model: write guidance
+  // while the turn runs, all of it lands at the next call). "Send now" is a
+  // separate action that interrupts the turn and sends one item.
   std::string steer_sid = sid;
   loop->drain_steering = [this, steer_sid]() -> std::string {
     std::lock_guard<std::recursive_mutex> host_lock(lock());
-    SteeringQueue& q = steering_[steer_sid];
-    std::string out = q.drain_immediate('\n');
-    std::vector<SteeringItem> round = q.round_end_items();
-    for (size_t i = 0; i < round.size(); ++i) {
-      if (!out.empty()) out += "\n";
-      out += round[i].text;
-    }
-    q.clear_kind(SteeringKind::kRoundEnd);
-    return out;
+    return steering_[steer_sid].drain_all('\n');
   };
   loop->persist_turn = [this, hist_sid](const Json& turn) {
     persist_turn(hist_sid, turn);
@@ -887,9 +881,11 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
   // callbacks (persist_turn, invoke_tool) take the same recursive lock.
   AgentLoop* loop = nullptr;
   ContextInput ctx;
+  bool was_parked = false;
   {
     std::lock_guard<std::recursive_mutex> host_lock(lock());
     loop = &loop_for(sid, auto_mode, permission);
+    was_parked = loop->parked();
     if (!model.empty()) loop->set_model(model);
     // Always set it (empty clears): switching from a provider-qualified pick to a
     // plain one must not keep routing through the previous provider.
@@ -941,6 +937,21 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
     }
     loop->set_tools(ctx.tools);
   }
+  if (was_parked) {
+    // Resuming a parked task carries the queued guidance: the user wrote it
+    // while suspended and expects it on continue.
+    std::string queued;
+    {
+      std::lock_guard<std::recursive_mutex> host_lock(lock());
+      queued = steering_[sid].drain_all('\n');
+    }
+    std::string combined = queued;
+    if (!text.empty()) {
+      if (!combined.empty()) combined += "\n";
+      combined += text;
+    }
+    return loop->continue_task(combined);
+  }
   return loop->send(text);
 }
 
@@ -950,7 +961,8 @@ FsResult AgentHost::append(const std::string& sid, const std::string& text) {
 }
 
 // addon2 任务健壮性：打断后续接（给原任务发引导，从断点续跑）
-FsResult AgentHost::continue_task(const std::string& sid, const std::string& guidance) {
+FsResult AgentHost::continue_task(const std::string& sid, const std::string& guidance,
+                                  bool suppress_queue_once) {
   // Same rule as send(): look the loop up under the lock, then RUN the turn
   // outside it. Holding the host lock across a whole continuation blocked every
   // other call (todos_for, is_running, session.list enrichment) for its entire
@@ -964,7 +976,7 @@ FsResult AgentHost::continue_task(const std::string& sid, const std::string& gui
     }
     loop = it->second.get();
   }
-  return loop->continue_task(guidance);
+  return loop->continue_task(guidance, suppress_queue_once);
 }
 
 void AgentHost::set_session_model(const std::string& sid, const std::string& model,
@@ -1520,6 +1532,14 @@ FsResult AgentHost::steering_erase(const std::string& sid, int id) {
   std::lock_guard<std::recursive_mutex> host_lock(lock());
   bool ok = steering_[sid].erase(id);
   return ok ? FsResult::success()
+            : FsResult::error(ErrCode::kNotFound, "steering item not found");
+}
+
+FsResult AgentHost::steering_take(const std::string& sid, int id) {
+  std::lock_guard<std::recursive_mutex> host_lock(lock());
+  std::string text;
+  bool ok = steering_[sid].take(id, &text);
+  return ok ? FsResult::success(Json{{"text", text}})
             : FsResult::error(ErrCode::kNotFound, "steering item not found");
 }
 

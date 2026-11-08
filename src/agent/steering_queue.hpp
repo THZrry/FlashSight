@@ -36,6 +36,10 @@ class SteeringQueue {
 
   // 取出全部当前传递（合并输入，>1 合并）；清空 immediate
   std::string drain_immediate(char sep = '\n');
+  // 下一次模型调用带上队列里的全部引导；清空队列。
+  std::string drain_all(char sep = '\n');
+  // Remove ONE item, returning its text (the "send now" action).
+  bool take(int id, std::string* text);
   // 取出本轮结束传递（不清队列，由调用方显式清）
   std::vector<SteeringItem> round_end_items() const;
   void clear_kind(SteeringKind kind);

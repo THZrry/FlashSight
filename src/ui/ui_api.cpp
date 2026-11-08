@@ -127,7 +127,8 @@ UiApi::UiApi(FsApi* api) : api_(api) {
     return api->session_trim_history(s(a, "sid"), s(a, "turnId"));
   });
   reg("session.continue", [api](const Json& a) {
-    return api->session_continue(s(a, "sid"), s(a, "guidance"));
+    return api->session_continue(s(a, "sid"), s(a, "guidance"),
+                                 b(a, "suppressQueue", false));
   });
   reg("session.approve", [api](const Json& a) {
     return api->session_approve(s(a, "sid"), b(a, "yes", true));
@@ -380,6 +381,9 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   });
   reg("steering.erase", [api](const Json& a) {
     return api->steering_erase(s(a, "sid"), static_cast<int>(i(a, "id", 0)));
+  });
+  reg("steering.take", [api](const Json& a) {
+    return api->steering_take(s(a, "sid"), static_cast<int>(i(a, "id", 0)));
   });
   reg("steering.reorder", [api](const Json& a) {
     std::vector<int> order;

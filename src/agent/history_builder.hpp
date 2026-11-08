@@ -7,6 +7,7 @@
 // re-sent after the user switches models mid-session.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -76,6 +77,12 @@ class HistoryBuilder {
     // Deprecated: compaction no longer keeps a suffix of raw turns. The field is
     // kept for source compatibility with older callers and is ignored.
     int keep_turns = 0;
+    // Model-backed summariser: takes the whole session material (prior summary
+    // + every user requirement + assistant answer + tool outcome) and returns a
+    // model-written summary. Compaction must preserve meaning, not spend a
+    // hard-coded byte budget per turn. Empty callback = deterministic fallback
+    // (unit tests / embedded callers).
+    std::function<std::string(const std::string& material)> model_summarizer;
     // 强制压缩（用户点"压缩"/UI 提示时）。
     bool force_compress = false;
   };

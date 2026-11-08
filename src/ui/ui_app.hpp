@@ -1160,6 +1160,11 @@ class UiApp {
   // only then send, so its callback needs to run exactly this.
   void dispatch_message(const std::string& sid, const std::string& text,
                         const std::string& shown, const Json& attachments);
+  // After 中止 / send-now parks the loop: continue with exactly this guidance
+  // (not the rest of the queue).
+  void continue_with_guidance(const std::string& sid, const std::string& text);
+  // Flush pending_now_text_ once the old call is really over.
+  void flush_pending_now(const std::string& sid);
   void send_message();
   void open_new_session();
   // native folder dialog -> register as project (opened project list refresh)
@@ -1360,6 +1365,11 @@ class UiApp {
   // switch / click - focusing every render would fight the composer, since
   // pump() re-renders several times a second)
   bool term_focus_pending_ = false;
+  // "Send now" on a queued guidance: the item was taken out of the queue and
+  // the loop was interrupted; once the turn parks, this text is sent as the
+  // next continuation. Only this item - the rest of the queue remains.
+  std::string pending_now_sid_;
+  std::string pending_now_text_;
   // Build-driven loads (the explore page needs the skill/MCP lists) must not
   // re-request on every render while the first reply is still in flight - that
   // request storm starved the event loop and made clicks look dead.
