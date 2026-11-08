@@ -238,6 +238,9 @@ struct AppState {
   // mixing it into the message made it impossible to tell what was attached).
   std::vector<std::string> attachments;
   std::vector<comp::ChatMsg> messages;
+  // Plan document of this session, project-relative ("" = none). Shown as a
+  // direct link in the work-log header.
+  std::string plan_path;
   // Paging: a session can hold hundreds of turns, so only the newest
   // `kHistoryPage` are loaded initially. Scrolling to the top asks for the
   // previous page; those turns are then FROZEN (one rev each, never re-parsed).
@@ -811,6 +814,9 @@ struct AppState {
 struct SessionView {
   bool loaded = false;  // history/panels fetched from the backend yet?
   std::vector<comp::ChatMsg> messages;
+  // Plan document of this session, project-relative ("" = none). Shown as a
+  // direct link in the work-log header.
+  std::string plan_path;
   bool session_loaded = false;
   int history_total = 0;
   // Absolute index (into the stored turn array) of the OLDEST loaded turn. This
@@ -1064,6 +1070,9 @@ class UiApp {
   // mirror it into `suspended`. The button label follows the BACKEND, not the
   // click: suspension is a request that the loop may take a moment to honour.
   void refresh_loop_state(const std::string& sid);
+  // Load the session's plan document path and put a direct "规划" link on every
+  // work-log header.
+  void refresh_plan_path(const std::string& sid);
   // Replies to session.loopState arrive asynchronously and can be OLDER than an
   // event that already changed the state (a `loop.interrupted` that cleared
   // 中止). Only the reply to the LATEST request is applied.

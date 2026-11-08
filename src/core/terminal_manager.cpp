@@ -289,13 +289,27 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
     pr.fg_wait = false;
     drain(pr);
     if (w == REPROC_ETIMEDOUT) {
-      // 转后台继续跑（terminal.md：前台超时由宿主转后台）
-      reg_->promote_to_background(tid, clock_->now_ms());
+      // A foreground `terminal_exec` timeout is a TIMEOUT, not permission to
+      // leave the process running forever. It used to be promoted to background;
+      // a command with timeoutMs=60000 then stayed alive for half an hour and the
+      // session looked stuck. Kill it, drain what it produced, and mark it exited.
+      reproc_terminate(handle);
+      int killed = reproc_wait(handle, 2000);
+      if (killed == REPROC_ETIMEDOUT) {
+        reproc_kill(handle);
+        killed = reproc_wait(handle, 2000);
+      }
+      drain(pr);
+      pr.exited = true;
+      pr.exit_code = -1;
+      reg_->mark_exited(tid, -1, clock_->now_ms());
       Json o = Json::object();
       o["tid"] = tid;
-      o["status"] = "running";
+      o["status"] = "exited";
+      o["exitCode"] = -1;
       o["output"] = pr.out;
       o["timedOut"] = true;
+      o["summary"] = "timed out after " + std::to_string(wait_ms) + " ms (killed)";
       if (out) *out = o;
       return FsResult::success(o);
     }

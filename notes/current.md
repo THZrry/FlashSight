@@ -3272,3 +3272,15 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **这次不是内存**：23:43:17 的 `[res]` 是 main private 44MB、WebView2 组 1.39GB、system commit 13.7/41.7GB、threads 20；没有 commit 压力。0x10e 崩溃和自动轮空转是另一条线（<122>）。内存日志保留，但本次根因是纯 CPU 死循环。
   - **顺手**：WebView2 子进程/线程枚举移出 UI 线程，改成后台线程每 10 秒刷新原子缓存；避免新加的内存日志本身成为潜在阻塞点。
   - **测试/构建**：455 用例 4285 断言全过；web / webview / whaleui 三变体编译通过。
+
+
+<124>(FIXED): 终端数量/超时、短视图持久化、空自动轮历史、引导归属、provider 串线、规划直开、todo 规则。
+  - **终端列表/计数**：`terminal_list` 和 `terminalCount` 现在同一口径：只列/只数 **user 终端和带 label 的 model 终端**；未标记的 model-fg/bg 记录（891 条里绝大多数）不再进入终端列表，也不再让会话圆点显示“十几个”。标签、概览、计数一致。
+  - **terminal timeout**：`timeoutMs` 确实是毫秒，之前超时分支是 `promote_to_background`，所以命令表面“超时”却继续跑半小时。现在前台超时会 terminate→2s→kill，drain 输出、`mark_exited`、返回 `exited/timedOut/exitCode=-1`；新增 `terminal_foreground_timeout_kills`。后台命令仍用 background 显式启动。
+  - **短视图一直触发**：`AgentLoop` 读 compaction 时把缺省 `mode` 设成了 `"full"`，导致“没有全量摘要时短视图也要落盘”的守卫条件 `prior_mode != "full"` 永远为假——第一次短视图从来没写过 `compaction.json`，下一次又从头重放完整历史。默认改成 `""`；新增 `loop_persists_first_short_view`。现在首個短视图会留下 `{summary,compactedTurns,lastTurnId,mode}`，下一轮按摘要+未折叠轮次构建。
+  - **空自动轮污染历史**：旧会话里存着几十条 `SYSTEM: 继续` + 空 assistant 回合。`HistoryBuilder` 的 token 估算、fold、正常 replay 现在都跳过 `autoRound>0` 的 SYSTEM nudge 和空 assistant；有内容的自动轮保留。新增 `empty_auto_rounds_are_not_replayed`。
+  - **引导（steering）**：UI 在一轮运行时发送不再乐观追加 user+assistant 气泡、不再调 `session.send`；改为 `session.append` 进入当前 loop 的引导队列，并在下一次模型调用前以 user 消息注入（工具轮之间/最终回答之后都可再调一次），同时 toast“下一次调用带上”。guidance 写入 assistant turn 的 `guidance`，历史重放会作为 user 消息重新出现。这样旧任务不会被误判结束，terminal/tool 不会跑到新任务的工作过程里；新增 `loop_steering_is_applied_to_the_next_call`。
+  - **provider 503 串线**：标题生成请求没有带 `req.provider`，按模型名路由到了第一个匹配连接（HappyAPI 的 selfdeploy...），但主回合仍用 A6；报错来自标题请求，所以会话没停。现在标题请求带 session provider（摘要模型被显式覆盖时才按名字解析）；subagent 继承 `ContextInput.provider`，`AgentLoop::Options.provider` 一起传递。
+  - **规划直开**：`plan.get` 在打开会话/plan.update 时读取；工作记录头增加“规划”按钮，点击用 `open_file_preview(".flashsight/plans/<sid>.md")` 直接打开文档。
+  - **todo 规则**：全局规则从“3 步以上才建”改成“需要动手或超过一次工具调用就建，尽量让清单一直存在”；运行时块每轮在清单为空时追加提醒，纯问答才可跳过。
+  - **测试/构建**：459 用例 4300 断言全过；web / webview / whaleui 三变体编译通过。

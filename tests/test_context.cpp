@@ -51,7 +51,7 @@ FS_TEST(context_planning_and_workflow_guidance_present) {
   // stable marker the runtime nudge can refer to ("Remember the [RULES] above").
   EXPECT_TRUE(sys.find("[RULES]") != std::string::npos);
   EXPECT_TRUE(sys.find("todo_add") != std::string::npos);
-  EXPECT_TRUE(sys.find("3+ steps") != std::string::npos);
+  EXPECT_TRUE(sys.find("more than one tool call") != std::string::npos);
   // Workflow advice: when NOT to use it (the important half).
   EXPECT_TRUE(sys.find("Workflows") != std::string::npos);
   EXPECT_TRUE(sys.find("one-off") != std::string::npos);
@@ -637,6 +637,37 @@ FS_TEST(short_view_state_is_reused_until_the_window_grows) {
   for (auto& m : restored.messages) all += jsonutil::get<std::string>(m, "content", "");
   EXPECT_TRUE(all.find(std::string(2000, 'x')) != std::string::npos);
   EXPECT_TRUE(restored.messages.size() > again.messages.size());
+}
+
+// Empty auto-continue rounds are stored noise. They must not consume the
+// window or dilute the digest; meaningful turns must remain.
+FS_TEST(empty_auto_rounds_are_not_replayed) {
+  Json turns = Json::array();
+  turns.push_back(Json{{"role", "user"}, {"promptRaw", "real question"}});
+  turns.push_back(Json{{"role", "assistant"}, {"streamSummary", "real answer"}});
+  for (int i = 0; i < 5; ++i) {
+    Json u = Json::object();
+    u["role"] = "user";
+    u["promptRaw"] = "SYSTEM: continue";
+    u["autoRound"] = i + 1;
+    turns.push_back(u);
+    Json a = Json::object();
+    a["role"] = "assistant";
+    a["streamSummary"] = "";
+    a["autoRound"] = i + 1;
+    a["toolCalls"] = Json::array();
+    turns.push_back(a);
+  }
+  Json full = Json::object();
+  full["turns"] = turns;
+  HistoryBuilder::Options opts;
+  opts.system_prefix = "sys";
+  HistoryResult hr = HistoryBuilder(opts).build_neutral(full);
+  std::string all;
+  for (auto& m : hr.messages) all += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(all.find("real answer") != std::string::npos);
+  EXPECT_TRUE(all.find("SYSTEM: continue") == std::string::npos);
+  EXPECT_TRUE(all.find("real question") != std::string::npos);
 }
 
 // ---------- 遗忘 / keyPoints 折叠 ----------

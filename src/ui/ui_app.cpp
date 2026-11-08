@@ -1180,6 +1180,7 @@ void UiApp::save_session_view(const std::string& sid) {
   if (sid.empty()) return;
   SessionView& v = views_.get_or_create(sid);
   v.messages = st_.messages;
+  v.plan_path = st_.plan_path;
   v.session_loaded = st_.session_loaded;
   v.hist_scroll = st_.hist_scroll;
   v.hist_follow = st_.hist_follow;
@@ -1285,6 +1286,7 @@ void UiApp::load_session_view(const std::string& sid) {
   }
   if (v.active_side.empty()) v.active_side = v.side_tabs[0].id;
   st_.messages = v.messages;
+  st_.plan_path = v.plan_path;
   st_.session_loaded = v.session_loaded;
   st_.hist_scroll = v.hist_scroll;
   st_.hist_anchor_uid = v.hist_anchor_uid;
@@ -1751,6 +1753,7 @@ void UiApp::load_session(const std::string& sid) {
   // is open, so a missed todo.updated event cannot leave a stale checklist that
   // disagrees with the loop's auto-continue decision.
   refresh_session_todos(sid);
+  refresh_plan_path(sid);
   call_async("session.turns", Json{{"sid", sid}, {"before", -1}, {"limit", kHistoryPage}},
              [this, sid](const BackendResult& r) {
     if (!r.ok) return;
@@ -1840,6 +1843,30 @@ void UiApp::load_session(const std::string& sid) {
 // auto-continue asks the HOST for open items, so a checklist the UI only believes
 // is open (a missed todo.updated) would show "清单没清空" while auto mode stops.
 // Sharing this one function between session-open and the pump keeps them in step.
+void UiApp::refresh_plan_path(const std::string& sid) {
+  if (!backend_ || sid.empty()) return;
+  call_async("plan.get", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    bool exists = jsonutil::get<bool>(r.data, "exists", false);
+    std::string path = exists ? (".flashsight/plans/" + sid + ".md") : std::string();
+    auto stamp = [&](std::vector<comp::ChatMsg>& msgs) {
+      for (size_t i = 0; i < msgs.size(); ++i) {
+        if (msgs[i].role != "assistant") continue;
+        if (msgs[i].plan_path != path) msgs[i].plan_path = path;
+      }
+    };
+    if (st_.active_tab == sid) {
+      st_.plan_path = path;
+      stamp(st_.messages);
+      render();
+    } else {
+      SessionView& v = views_.get_or_create(sid);
+      v.plan_path = path;
+      stamp(v.messages);
+    }
+  }, true);
+}
+
 void UiApp::refresh_session_todos(const std::string& sid) {
   if (!backend_ || sid.empty()) return;
   call_async("session.todos", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
@@ -4277,10 +4304,14 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   } else if (event == "subagent.steered") {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
+  } else if (event == "steering.applied") {
+    st_.toast = "已把本轮引导带入下一次模型调用";
+    st_.toast_deadline_ms = now_ms() + kToastMs;
   } else if (event == "plan.update") {
     // `plan.update` carries the DOCUMENT (path/status/content), not a step tree
-    // to draw. There is no plan panel: the file is the plan, and progress is the
-    // task list. Nothing to do here - the event is informational.
+    // to draw. Refresh the header link so the plan can be opened from the work
+    // log without hunting for the file.
+    if (!sid.empty()) refresh_plan_path(sid);
   } else if (event == "loop.paused") {
     // A guard tripped (tool-call limit / repeated call). The turn still produced
     // output, so this is a notice, not the "interrupted, continue?" bar: that bar
@@ -6302,7 +6333,10 @@ VNodePtr UiApp::build_session() {
     if (st_.messages[i].role == "user") last_user_index = static_cast<int>(i);
   }
   for (size_t i = 0; i < st_.messages.size(); ++i) {
-    const comp::ChatMsg& m = st_.messages[i];
+    comp::ChatMsg& m = st_.messages[i];
+    // The plan link is session-scoped, not stored per turn; stamp it before the
+    // signature so a plan appearing/disappearing invalidates the cached row.
+    if (m.role == "assistant") m.plan_path = st_.plan_path;
     // Identity: the message's own uid when it has one (loaded turns), else a
     // position-derived fallback for live messages appended this session. Live
     // messages are always at the END, so their position is stable.
@@ -11580,6 +11614,27 @@ void UiApp::send_message() {
 
 void UiApp::dispatch_message(const std::string& sid, const std::string& text,
                              const std::string& shown, const Json& attachments) {
+  // SENDING WHILE A TURN RUNS IS GUIDANCE, NOT A NEW CONVERSATION.
+  // The old path appended a user bubble plus an assistant streaming bubble and
+  // called session.send; the backend queued the text, but the UI had already
+  // opened a second turn. The old turn stayed open, its terminals/tools reported
+  // into the new turn's work log, and a page switch restored the wrong live
+  // transcript. Queue it into the CURRENT turn instead; the loop injects it
+  // before its next model call.
+  if (!sid.empty() && backend_ && st_.turn_running) {
+    call_async("session.append", Json{{"sid", sid}, {"text", shown}},
+               [this](const BackendResult& r) {
+      if (!r.ok) toast(tr("引导失败：") + r.message);
+    });
+    update([&](AppState& s) {
+      s.session_input.clear();
+      s.attachments.clear();
+    });
+    VNodePtr ta = find_by_key(tree_, "session-input");
+    if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", "");
+    toast(tr("已加入本轮引导，将在下一次调用带上"));
+    return;
+  }
   // echo the user's message immediately (optimistic; the assistant text streams in)
   // A message sent now is newer than everything loaded from disk. Its uid is
   // derived from the absolute history position so it stays distinct from the
@@ -11667,6 +11722,7 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   mix(m.thinking.size());
   mix(m.tools.size());
   mix(m.summary.size());
+  mix(m.plan_path.size());
   mix(m.time.size());
   mix(m.interim.size());
   mix(static_cast<uint64_t>(m.work_open));

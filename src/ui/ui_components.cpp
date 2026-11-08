@@ -730,6 +730,16 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       whead.add(el("span").text(label));
     }
     whead.add(el("span", "grow"));
+    if (!m.plan_path.empty() && on_link) {
+      H pl = el("button", "mini-btn work-plan");
+      pl.attr("type", "button");
+      pl.attr("title", tr("打开本会话的规划文档"));
+      pl.text(tr("规划"));
+      EventFn open = on_link;
+      std::string path = m.plan_path;
+      pl.on(EventKind::kClick, [open, path](const std::string&) { open(path); });
+      whead.add(pl);
+    }
     // When + how long: the wall-clock facts of this turn.
     if (m.ended_at > 0) {
       bool ok_turn = nfail == 0;

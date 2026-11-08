@@ -870,6 +870,7 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
     // DeepSeek subagent ended up posted at an Anthropic endpoint (403).
     ctx = build_context(sid, auto_mode, permission, loop->model(),
                         loop->context().thinking);
+    ctx.provider = loop->provider();  // provider identity travels to subagents
     if (!ctx.cwd.empty()) loop->set_cwd(ctx.cwd);
     loop->set_context(ctx);
     session_ctx_[sid] = ctx;  // subagents inherit this session's environment
@@ -1165,6 +1166,7 @@ FsResult AgentHost::run_subagent(const Json& req, const ContextInput& seed, Json
   opts.sid = id;
   opts.cwd = ctx.cwd;
   opts.model = ctx.model;
+  opts.provider = ctx.provider;
   // A subagent's permission never exceeds its parent's. A read-only preset is
   // clamped further: it may not write at all, regardless of the parent.
   opts.permission = read_only ? "permissive" : seed.permission;

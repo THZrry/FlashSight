@@ -26,6 +26,31 @@ int64_t HistoryBuilder::estimate_tokens(const Json& j) {
 namespace {
 Json compact_value(const Json& v, int depth);  // defined below
 
+// Auto-continue rounds that produced nothing are noise, not conversation. A
+// real session accumulated 49 `SYSTEM: continue` turns with empty assistant
+// answers; replaying them wasted the window and pushed the meaningful history
+// out. They stay in full.json but never enter the model context.
+bool is_auto_nudge(const Json& t) {
+  if (!t.is_object() || jsonutil::get<std::string>(t, "role", "") != "user") {
+    return false;
+  }
+  if (jsonutil::get_int(t, "autoRound", 0) <= 0) return false;
+  std::string text = jsonutil::get<std::string>(t, "promptRaw", "");
+  if (text.empty()) text = jsonutil::get<std::string>(t, "content", "");
+  return text.compare(0, 7, "SYSTEM:") == 0;
+}
+
+bool is_empty_auto_answer(const Json& t) {
+  if (!t.is_object() || jsonutil::get<std::string>(t, "role", "") != "assistant") {
+    return false;
+  }
+  if (jsonutil::get_int(t, "autoRound", 0) <= 0) return false;
+  if (!jsonutil::get<std::string>(t, "streamSummary", "").empty()) return false;
+  if (!jsonutil::get<std::string>(t, "content", "").empty()) return false;
+  return !t.contains("toolCalls") || !t["toolCalls"].is_array() ||
+         t["toolCalls"].empty();
+}
+
 // Tool ARGUMENTS are replayed on every later turn. The fresh result may be
 // complete (the model needs it while it is working), but the historical copy
 // must not re-send whole file contents / diff bodies: that is what made a long
@@ -142,6 +167,16 @@ void HistoryBuilder::turn_to_neutral(const Json& turn, Json* out) {
     return;
   }
   if (role != "assistant") return;
+
+  // Mid-turn user guidance was applied to the next model call of this turn. On
+  // replay it must be a user message again, not vanish from the transcript.
+  if (turn.contains("guidance") && turn["guidance"].is_array()) {
+    for (auto& g : turn["guidance"]) {
+      if (!g.is_string()) continue;
+      std::string text = g.get<std::string>();
+      if (!text.empty()) out->push_back(Json{{"role", "user"}, {"content", text}});
+    }
+  }
 
   std::string text = jsonutil::get<std::string>(turn, "streamSummary", "");
   Json calls = Json::array();
@@ -426,6 +461,7 @@ std::string HistoryBuilder::make_fold(const Json& turns, size_t from, size_t to,
   for (size_t i = from; i < to && i < turns.size(); ++i) {
     const Json& t = turns[i];
     if (!t.is_object()) continue;
+    if (is_auto_nudge(t) || is_empty_auto_answer(t)) continue;
     // A forgotten turn is dropped from context, not summarised.
     if (jsonutil::get<bool>(t, "forgotten", false)) continue;
     if (t.contains("keyPoints") && t["keyPoints"].is_array()) {
@@ -613,6 +649,7 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
     int64_t sum = 0;
     for (size_t i = from; i < to && i < arr.size(); ++i) {
       if (!arr[i].is_object()) continue;
+      if (is_auto_nudge(arr[i]) || is_empty_auto_answer(arr[i])) continue;
       if (jsonutil::get<bool>(arr[i], "forgotten", false)) continue;
       sum += estimate_tokens(arr[i]);
     }
@@ -656,6 +693,7 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
       for (size_t i = fold_to; i < total; ++i) {
         const Json& t = turns[i];
         if (!t.is_object()) continue;
+        if (is_auto_nudge(t) || is_empty_auto_answer(t)) continue;
         if (jsonutil::get<bool>(t, "forgotten", false)) continue;
         Json group = Json::array();
         turn_to_neutral(t, &group);
@@ -691,6 +729,7 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   for (size_t i = start; i < total; ++i) {
     const Json& t = turns[i];
     if (!t.is_object()) continue;
+    if (is_auto_nudge(t) || is_empty_auto_answer(t)) continue;
     if (jsonutil::get<bool>(t, "forgotten", false)) continue;
     Json group = Json::array();
     turn_to_neutral(t, &group);

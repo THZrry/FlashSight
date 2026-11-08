@@ -758,6 +758,78 @@ FS_TEST(loop_reuses_durable_compaction_state) {
   EXPECT_TRUE(all.find("next") != std::string::npos);
 }
 
+// A first short view (no prior full summary) must be persisted too: otherwise
+// an existing long session regenerates the same lossy short view on every send.
+FS_TEST(loop_persists_first_short_view) {
+  Json turns = Json::array();
+  for (int i = 0; i < 20; ++i) {
+    Json t = Json::object();
+    t["role"] = i % 2 == 0 ? "user" : "assistant";
+    t["turnId"] = "t" + std::to_string(i);
+    t["promptRaw"] = std::string(2000, 'x');
+    t["streamSummary"] = std::string(2000, 'x');
+    turns.push_back(t);
+  }
+  Json full = Json::object();
+  full["turns"] = turns;
+  Json saved;
+  AgentLoop::Options opts;
+  opts.sid = "s_short";
+  opts.permission = "full";
+  AgentLoop loop(std::move(opts));
+  loop.context_limit = 1500;
+  loop.set_last_prompt_tokens(100);
+  loop.load_history = [&full](Json* out) {
+    *out = full;
+    return FsResult::success();
+  };
+  loop.compaction_save = [&saved](const std::string&, const Json& s) { saved = s; };
+  loop.call_model = [](const ModelCallRequest&, ModelCallResult* out,
+                       const std::function<void(const std::string&)>&) {
+    out->text = "ok";
+    return FsResult::success();
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  ASSERT_TRUE(saved.is_object());
+  EXPECT_EQ(saved.value("mode", ""), std::string("short-view"));
+  EXPECT_TRUE(saved.contains("compactedTurns"));
+}
+
+// Steering sent while a turn runs belongs to the CURRENT turn: it is injected
+// before the next model call, not stored as a second user conversation.
+FS_TEST(loop_steering_is_applied_to_the_next_call) {
+  AgentLoop::Options opts;
+  opts.sid = "s_steer";
+  opts.permission = "full";
+  AgentLoop loop(std::move(opts));
+  std::vector<Json> seen;
+  int calls = 0;
+  loop.call_model = [&](const ModelCallRequest& req, ModelCallResult* out,
+                        const std::function<void(const std::string&)>&) {
+    seen.push_back(req.messages);
+    ++calls;
+    if (calls == 1) {
+      Json c = Json::object();
+      c["name"] = "read_file";
+      c["id"] = "call_1";
+      c["args"] = Json{{"path", "a.txt"}};
+      out->tool_calls = Json::array({c});
+      loop.append("also check b.txt");
+    } else {
+      out->text = "done";
+    }
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json{{"ok", true}});
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  ASSERT_TRUE(seen.size() >= 2);
+  std::string second;
+  for (auto& m : seen[1]) second += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(second.find("also check b.txt") != std::string::npos);
+}
+
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------
 FS_TEST(loop_unattended_denies_instead_of_waiting) {
   AgentLoop::Options opts;

@@ -197,6 +197,9 @@ struct ChatMsg {
   // on every render while anything streams; 0 means "do not show a live timer".
   int64_t now_ms = 0;
   std::string summary;           // turn summary (not folded, no border)
+  // Project-relative path to this session's plan document. The work-log header
+  // offers a direct "规划" link when set (no need to find the file elsewhere).
+  std::string plan_path;
   // Why a turn stopped early (provider error, tool crash). A failed turn still
   // has its partial answer and work log; this line says what broke instead of
   // leaving a permanently "streaming" bubble or a silent truncation.

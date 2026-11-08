@@ -155,6 +155,26 @@ FsResult AgentLoop::append(const std::string& text) {
   return FsResult::success();
 }
 
+// Apply guidance that arrived while the turn was running: it becomes a user
+// message before the NEXT model call in the SAME turn. Starting a new turn from
+// the UI was the bug: the old turn stayed open, its tools reported into the new
+// turn, and a page switch showed the wrong live transcript.
+bool AgentLoop::apply_steering(Json* messages) {
+  if (!messages || steering_queue_.empty()) return false;
+  std::string combined;
+  for (size_t i = 0; i < steering_queue_.size(); ++i) {
+    if (!combined.empty()) combined += "\n";
+    combined += steering_queue_[i];
+  }
+  steering_queue_.clear();
+  messages->push_back(Json{{"role", "user"},
+                           {"content", AgentContext::wrap_user_turn(
+                                           runtime_block(), combined)}});
+  applied_steering_.push_back(combined);
+  emit("steering.applied", Json{{"sid", opts_.sid}, {"text", combined}});
+  return true;
+}
+
 const Json& AgentLoop::active_tools() const {
   if (opts_.context.tools.is_array() && !opts_.context.tools.empty()) {
     return opts_.context.tools;
@@ -725,6 +745,7 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
 FsResult AgentLoop::run_turn(const std::string& user_text) {
   state_ = LoopState::kPlanning;
   HistoryBuilder::Options hopts = opts_.history;
+  applied_steering_.clear();
   if (current_auto_round_.load() == 0) empty_auto_streak_ = 0;
   // Reuse the durable summary from a previous run/turn. Without this a reopened
   // session starts from the full transcript, which no longer fits the window
@@ -735,7 +756,10 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
       hopts.prior_summary = jsonutil::get<std::string>(st, "summary", "");
       hopts.compacted_turns = jsonutil::get_int(st, "compactedTurns", 0);
       hopts.prior_turn_id = jsonutil::get<std::string>(st, "lastTurnId", "");
-      hopts.prior_mode = jsonutil::get<std::string>(st, "mode", "full");
+      // No state at all => empty, NOT "full". Defaulting to full made the
+      // short-view save guard (`prior_mode != "full"`) reject the very first
+      // short view, so a long session never got a durable baseline.
+      hopts.prior_mode = jsonutil::get<std::string>(st, "mode", "");
     }
   }
   // The system prefix is owned by AgentContext, which is refreshed by the host
@@ -1052,7 +1076,34 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   std::string stop_code;   // machine-readable reason ("round-limit"|"repeat")
   bool zh = opts_.context.lang == ContextLang::kZh;
   while (true) {
-    if (result.tool_calls.empty()) break;
+    if (result.tool_calls.empty()) {
+      // Guidance that arrived while the final answer streamed deserves one more
+      // model call in the same turn; it must not be turned into a new
+      // conversation with the old turn left open.
+      if (apply_steering(&messages)) {
+        state_ = LoopState::kPlanning;
+        ModelCallResult next;
+        FsResult nr = call_model_once(messages, tools, &next);
+        if (!nr.ok() || !next.error.empty()) {
+          saved_messages_ = messages;
+          saved_valid_ = true;
+          std::string why = next.error.empty() ? nr.message : next.error;
+          persist_failed_turn(why.empty() ? "provider error" : why, result.text);
+          {
+            std::lock_guard<std::mutex> lk(live_mu_);
+            live_running_ = false;
+          }
+          if (persist_live) persist_live(opts_.sid, Json{{"running", false}});
+          emit("loop.interrupted", Json{{"sid", opts_.sid}, {"resumable", true},
+                                        {"error", why}});
+          state_ = LoopState::kTurnDone;
+          return nr;
+        }
+        result = next;
+        continue;
+      }
+      break;
+    }
     if (++rounds > opts_.max_tool_rounds) {
       // A safety stop, not a design feature. Instead of just stopping, the turn
       // ENDS normally and a NEW auto round starts with an explicit instruction
@@ -1154,6 +1205,10 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     }
     if (state_ == LoopState::kIdle) return FsResult::success();  // suspended
 
+    // User guidance that arrived during the tool work is carried into the next
+    // model call of THIS turn.
+    apply_steering(&messages);
+
     ModelCallResult next;
     FsResult nr = call_model_once(messages, tools, &next);
     if (!nr.ok() || !next.error.empty()) {
@@ -1221,6 +1276,13 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
       for (size_t i = 0; i < interim_after_.size(); ++i) afters.push_back(interim_after_[i]);
       asst_turn["interimAfter"] = afters;
     }
+  }
+  // Guidance injected mid-turn is part of the conversation; persist it so a
+  // replay does not silently lose what the user told the model.
+  if (!applied_steering_.empty()) {
+    Json g = Json::array();
+    for (size_t i = 0; i < applied_steering_.size(); ++i) g.push_back(applied_steering_[i]);
+    asst_turn["guidance"] = g;
   }
   asst_turn["startedAt"] = turn_started_ms_ > 0 ? turn_started_ms_ : ended_ms;
   asst_turn["ts"] = ended_ms;

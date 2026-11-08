@@ -45,6 +45,28 @@ FS_TEST(terminal_spawn_captures_output) {
   EXPECT_TRUE(e->status == TermStatus::kExited);
 }
 
+// A foreground timeout must KILL the command, not promote it to a background
+// terminal that keeps running for half an hour.
+FS_TEST(terminal_foreground_timeout_kills) {
+  WallClock clock;
+  TerminalRegistry reg(&clock);
+  TerminalManager mgr(&reg, &clock);
+  std::string cmd = "ping 127.0.0.1";
+  Json args = Json::object();
+  args["command"] = cmd;
+  args["background"] = false;
+  args["timeoutMs"] = 200;
+  Json out;
+  FsResult r = mgr.spawn(args, &out);
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(jsonutil::get<std::string>(out, "status", ""), std::string("exited"));
+  EXPECT_TRUE(jsonutil::get<bool>(out, "timedOut", false));
+  std::string tid = jsonutil::get<std::string>(out, "tid", "");
+  const TermEntry* e = reg.find(tid);
+  ASSERT_TRUE(e != nullptr);
+  EXPECT_TRUE(e->status == TermStatus::kExited);
+}
+
 FS_TEST(terminal_poll_and_kill) {
   WallClock clock;
   TerminalRegistry reg(&clock);

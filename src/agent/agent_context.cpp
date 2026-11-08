@@ -139,8 +139,9 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
   if (zh(in)) {
     out.push_back("## 【准则】任务列表 · 规划 · 工作流");
     out.push_back(
-        "- 任何需要 3 步以上、或要改多个文件的任务，先把步骤写进 todo（todo_add），"
-        "每完成一项就 todo_check。清单对用户可见，是进度条而不是形式。");
+        "- 任何需要动手、或预计超过 1 次工具调用的任务，先把步骤写进 todo"
+        "（todo_add），每完成一项就 todo_check。**尽量让清单一直存在**：不要因为"
+        "任务看起来小就跳过；纯问答可以没有清单。清单对用户可见，是进度条而不是形式。");
     out.push_back(
         "- 步骤会变：发现新信息就增删/重排 todo，不要为了让旧清单成立而绕路。");
     out.push_back(
@@ -173,9 +174,11 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
   } else {
     out.push_back("## [RULES] task list · plan · workflow");
     out.push_back(
-        "- For any task needing 3+ steps or touching several files, put the steps "
-        "into todo (todo_add) and tick them off (todo_check) as you go. The list is "
-        "visible to the user: it is a progress bar, not paperwork.");
+        "- For any task that requires action or more than one tool call, put the "
+        "steps into todo (todo_add) and tick them off (todo_check) as you go. "
+        "**Keep a checklist present** - do not skip it because the task looks "
+        "small; only pure Q&A may have no list. The list is visible to the user: "
+        "it is a progress bar, not paperwork.");
     out.push_back(
         "- The plan is allowed to change. When you learn something new, add, remove "
         "or reorder steps instead of contorting the work to fit a stale list.");
@@ -614,6 +617,12 @@ std::string AgentContext::build_runtime(const ContextInput& in, const RuntimeSta
     lines.push_back((zh(in) ? "本轮清单（剩 " : "checklist (") + std::to_string(pending) +
                     (zh(in) ? " 项）:" : " open):"));
     for (auto& x : tl) lines.push_back(x);
+  } else if (zh(in)) {
+    lines.push_back("本轮还没有 todo：动手前先用 todo_add 建至少 1 项，"
+                    "并保持到任务结束；纯问答可跳过。");
+  } else {
+    lines.push_back("No todo yet: add at least one todo_add item before working "
+                    "and keep the list until the task is done (pure Q&A may skip).");
   }
 
   if (st.subagents.is_array() && !st.subagents.empty()) {

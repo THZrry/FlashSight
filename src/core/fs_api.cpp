@@ -1133,7 +1133,12 @@ FsResult FsApi::session_list(const std::string& pid) {
     int64_t live_terms = 0;
     if (terminals_) {
       for (auto& te : terminals_->list_for_session(sid)) {
-        if (te.status == TermStatus::kRunning) ++live_terms;
+        bool user_visible =
+            te.kind == TermKind::kUser ||
+            ((te.kind == TermKind::kModelBg ||
+              te.kind == TermKind::kModelFg) &&
+             !te.label.empty());
+        if (user_visible && te.status == TermStatus::kRunning) ++live_terms;
       }
     }
     m["terminalCount"] = live_terms;
@@ -1193,6 +1198,8 @@ FsResult FsApi::session_ai_title(const std::string& sid) {
   }
   Json ss = full.value("sessionSettings", Json::object());
   std::string model = jsonutil::get<std::string>(ss, "model", "");
+  std::string provider = jsonutil::get<std::string>(ss, "provider", "");
+  bool model_overridden = false;
   if (settings_) {
     // The settings UI stores this as the dotted key "model.pref.summary.model"
     // (a plain string), while this code read an OBJECT at "model.pref.summary".
@@ -1205,13 +1212,22 @@ FsResult FsApi::session_ai_title(const std::string& sid) {
     } else if (flat.is_object()) {
       m = jsonutil::get<std::string>(flat, "model", "");
     }
-    if (!m.empty()) model = m;
+    if (!m.empty()) {
+      model_overridden = m != model;
+      model = m;
+    }
   }
   if (model.empty()) {
     return FsResult::error(ErrCode::kInvalidArg, "no model selected");
   }
   ModelCallRequest req;
   req.model = model;
+  // The title request is a model call like any other: it must carry the same
+  // provider identity as the session. Leaving it empty routed a selected
+  // A6API/deepseek-v4.1-flash title call to the first provider that knew a
+  // similar name (HappyAPI), producing a 503 "selfdeploy/..." while the main
+  // turn correctly used A6. A different summary model is resolved by name.
+  if (!model_overridden) req.provider = provider;
   req.messages = Json::array({
       Json{{"role", "system"},
            {"content", "You name coding sessions. Reply with ONLY the title: one "
@@ -2258,17 +2274,20 @@ FsResult FsApi::terminal_list(const std::string& sid) {
   std::vector<Json> real;
   for (auto& e : terminals_->list_for_session(sid)) {
     std::error_code lec;
+    // Only USER terminals (and a deliberately labelled background job) are
+    // user-facing terminals. Model `terminal_exec` records - even long ones -
+    // live in the transcript as tool results; listing them here made a session
+    // show "十几 terminals" that were only command history, and the count did
+    // not match the tabs.
+    bool user_visible = e.kind == TermKind::kUser ||
+                        ((e.kind == TermKind::kModelBg ||
+                          e.kind == TermKind::kModelFg) &&
+                         !e.label.empty());
+    if (!user_visible) continue;
     bool live = e.status == TermStatus::kRunning;
     bool has_log = !e.log_path.empty() &&
                    ghc::filesystem::is_regular_file(e.log_path, lec);
     if (!live && !has_log) continue;
-    // Only MEANINGFUL records: user terminals, background/labelled ("marked")
-    // ones, and commands that ran for a long time. A model `terminal_exec` that
-    // finished in two seconds is not a transcript anyone will reopen.
-    bool marked = e.kind == TermKind::kUser || e.kind == TermKind::kModelBg ||
-                  !e.label.empty();
-    int64_t dur = e.ended_at > e.started_at ? e.ended_at - e.started_at : 0;
-    if (!live && !marked && dur < 60 * 1000) continue;
     Json j = e.to_json();
     j["logExists"] = has_log;
     real.push_back(j);

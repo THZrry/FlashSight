@@ -267,12 +267,18 @@ class AgentLoop {
   std::string pending_call_id_;
   std::string current_call_id_;
   Json pending_tool_results_ = Json::array();
-  // Auto-continue trampoline (see run_loop): a round that wants another one
-  // records the next conversation here instead of recursing into run_loop.
+  // 自动轮空续跑（见 run_loop）：本轮要再来一轮时把下一轮消息放这里，避免
+  // run_loop 递归。
   bool auto_pending_ = false;
   Json auto_pending_messages_ = Json::array();
   std::string auto_pending_model_;
   Json auto_pending_tools_ = Json::array();
+
+  // Guidance appended by the user WHILE this turn runs. It is injected as a user
+  // message before the next model call and persisted with the assistant turn, so
+  // it is not lost when the transcript is replayed.
+  std::vector<std::string> applied_steering_;
+  bool apply_steering(Json* messages);
 
   // Approval gate state. A model reply can carry several tool calls; when one
   // of them needs the user's yes, the rest must not be lost. `gate_messages_`

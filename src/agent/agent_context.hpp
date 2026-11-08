@@ -49,6 +49,10 @@ struct ContextInput {
   bool auto_mode = false;
   std::string permission = "permissive";  // approve | permissive | full
   std::string model;
+  // Provider identity of the selected model. Same-id models can live on two
+  // providers; subagents must inherit this or they route by name to the first
+  // matching connection.
+  std::string provider;
   std::string thinking;             // level; "" = disabled
   std::string thinking_lang;        // "zh" | "en" | "" (no explicit request)
   // The language the ANSWER should be written in ("zh" | "en" | "" = let the
