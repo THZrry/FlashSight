@@ -115,7 +115,7 @@ SettingValue SettingsStore::get(const std::string& key) const {
   else if (key == kKeyHistoryRecentTurns) sv.value = 20;
   else if (key == kKeyHistoryTokenBudget) sv.value = 32000;
   else if (key == kKeyHistoryCompressAtPct) sv.value = 80;
-  else if (key == kKeyHistoryKeepTurns) sv.value = 8;
+  else if (key == kKeyHistoryKeepTurns) sv.value = 0;
   else if (key == kKeyOverfitEnabled) sv.value = false;
   else if (key == kKeySubagentMaxParallel) sv.value = 4;
   else if (key == kKeySubagentMaxDepth) sv.value = 3;

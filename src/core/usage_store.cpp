@@ -73,9 +73,16 @@ UsageSummary UsageStore::query(const UsageFilter& filter) const {
     if (filter.from && r.ts < filter.from) continue;
     if (filter.to && r.ts > filter.to) continue;
     ++sum.calls;
-    if (!sum.has_last || r.ts >= sum.last.ts) {
-      sum.last = r;
-      sum.has_last = true;
+    // The water level / last-model panel need the last call that actually
+    // reported usage. A failed call is written without `in`/`out` (provider
+    // error or aborted stream); letting it become `sum.last` made the next
+    // compaction check read 0 tokens even though the session sat at 81% - the
+    // UI showed 81% while no compression ever fired.
+    if (r.in > 0 || r.out > 0) {
+      if (!sum.has_last || r.ts >= sum.last.ts) {
+        sum.last = r;
+        sum.has_last = true;
+      }
     }
     sum.total_in += r.in;
     sum.total_out += r.out;

@@ -804,6 +804,10 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   opts_.history.tools = hopts.tools;
   std::string built = AgentContext::build_system(opts_.context);
   if (!built.empty()) hopts.system_prefix = built;
+  // Keep the prefix on the OWNER Options too: an auto round can rebuild the
+  // history through HistoryBuilder after crossing the watermark, and it must
+  // carry the same system prompt instead of an empty one.
+  opts_.history.system_prefix = hopts.system_prefix;
 
   // Compaction decision inputs. The water level is the LAST request's prompt
   // tokens against the model window - a fact, not an estimate - so a session
@@ -852,16 +856,16 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
       compaction_save(opts_.sid, state);
     }
     if (hist.compressed) {
-      int64_t total_turns = full.contains("turns") && full["turns"].is_array()
-                                ? static_cast<int64_t>(full["turns"].size())
-                                : 0;
       emit("context.compressed", Json{
               {"sid", opts_.sid},
               {"mode", hist.mode},
               {"from", hist.compressed_from},
               {"to", hist.compressed_to},
               {"droppedTurns", hist.dropped_turns},
-              {"keptTurns", total_turns - hist.dropped_turns},
+              // Compaction folds EVERY turn into the summary; it never keeps a
+              // raw suffix and never truncates messages. `keptTurns` stays 0 so
+              // old UI strings cannot claim "保留最近 N 轮".
+              {"keptTurns", 0},
               {"reason", hist.mode == "short-view" ? "window-too-small"
                                                    : dec.reason},
               {"waterPct", dec.pct},
@@ -1434,10 +1438,64 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
       emit("auto.next", Json{{"sid", opts_.sid}, {"reason", auto_why},
                              {"round", auto_continues_},
                              {"maxRounds", opts_.max_auto_continues}});
+      // The auto round must not start on an already-full prompt. A user turn
+      // only compacts at its START; a long tool chain can cross the threshold
+      // mid-turn, and the next auto call used to go out at 81%+ with no
+      // compression (the "81% and still not compressed" report). Persist just
+      // happened, so rebuild the request from the durable history: every turn is
+      // folded into one summary (no raw suffix, no truncation).
+      Json msgs = messages;
+      if (load_history && opts_.history.compress_at_pct > 0 && context_limit > 0 &&
+          last_in_tokens_ > 0) {
+        HistoryBuilder::Options hopts = opts_.history;
+        hopts.last_prompt_tokens = last_in_tokens_;
+        hopts.context_limit = context_limit;
+        if (compaction_load) {
+          Json st = compaction_load(opts_.sid);
+          if (st.is_object()) {
+            hopts.prior_summary = jsonutil::get<std::string>(st, "summary", "");
+            hopts.compacted_turns = jsonutil::get_int(st, "compactedTurns", 0);
+            hopts.prior_turn_id = jsonutil::get<std::string>(st, "lastTurnId", "");
+            hopts.prior_mode = jsonutil::get<std::string>(st, "mode", "");
+          }
+        }
+        HistoryBuilder::CompressDecision dec =
+            HistoryBuilder::should_compress(hopts, 0);
+        if (dec.compress) {
+          Json full;
+          if (load_history(&full).ok()) {
+            HistoryResult hist = HistoryBuilder(hopts).build_neutral(full);
+            if (hist.compressed && !hist.summary.empty()) {
+              msgs = hist.messages;
+              if (compaction_save) {
+                Json state = Json::object();
+                state["summary"] = hist.summary;
+                state["compactedTurns"] = hist.compacted_turns;
+                state["lastTurnId"] = hist.compacted_turn_id;
+                state["mode"] = hist.mode;
+                state["savedAt"] = WallClock().now_ms();
+                compaction_save(opts_.sid, state);
+              }
+              emit("context.compressed", Json{
+                      {"sid", opts_.sid},
+                      {"mode", hist.mode},
+                      {"from", hist.compressed_from},
+                      {"to", hist.compressed_to},
+                      {"droppedTurns", hist.dropped_turns},
+                      {"keptTurns", 0},
+                      {"reason", dec.reason},
+                      {"waterPct", dec.pct},
+                      {"promptTokens", last_in_tokens_},
+                      {"contextLimit", context_limit.load()}});
+            }
+          }
+        }
+      }
       // Continue on the same conversation. The model's OWN last answer must be
       // in the history first: without it the continuation request looks like
       // "user said: continue" out of nowhere and the model repeats the work.
-      Json msgs = messages;
+      // If the history was just compressed, the summary also carries a digest of
+      // that answer - the full text below is the authoritative recent half.
       if (!result.text.empty()) {
         Json asst = Json::object();
         asst["role"] = "assistant";

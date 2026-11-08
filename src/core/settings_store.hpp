@@ -81,11 +81,12 @@ constexpr char kKeyUsageRetainDays[] = "usage.retainDays";
 constexpr char kKeyHistoryRecentTurns[] = "history.recentTurns";  // 默认 20
 constexpr char kKeyHistoryTokenBudget[] = "history.tokenBudget";  // 默认 32000
 // 压缩阈值：上下文水位（上一次请求的 prompt tokens / 模型窗口）达到该百分比
-// 就**全量压缩**（所有旧轮折成摘要）。短视图不是阈值的一部分：只有当前窗口
-// 装不下（例如换到小窗模型）才自动短视图并提醒。
+// 就**全量压缩**（所有轮折成摘要，不保留原文、不截断消息）。短视图只是窗口
+// 装不下时把摘要进一步压小的 fallback。
 constexpr char kKeyHistoryCompressAtPct[] = "history.compressAtPct";  // 默认 80
-// 短视图回退时保留的最近轮数。
-constexpr char kKeyHistoryKeepTurns[] = "history.keepTurns";  // 默认 8
+// Deprecated: compaction no longer keeps a raw suffix. Kept for old config
+// files; the value is ignored.
+constexpr char kKeyHistoryKeepTurns[] = "history.keepTurns";  // ignored
 // 防过拟合开关（agent-loop.md 5；默认关）
 constexpr char kKeyOverfitEnabled[] = "session.overfitEnabled";
 // 子代理上限（agent-loop.md 6；默认并行 4/深度 3）

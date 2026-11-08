@@ -29,6 +29,11 @@ struct HttpRequest {
   // 预留代理（httplib 不读系统代理 env，见 notes <4>）
   std::string proxy_host;
   int proxy_port = 0;
+  // Polled while the request is blocked in a socket read. A watcher in the
+  // httplib implementation calls `Client::stop()` so an idle SSE stream can be
+  // aborted immediately (the on_chunk callback is not called when no bytes
+  // arrive, so checking cancellation only there waited for the read timeout).
+  std::function<bool()> cancel;
 };
 
 // 网络抽象接口：生产用 httplib+mbedTLS 实现（P2 接 provider 时落地），单测注入 FakeNet

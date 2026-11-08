@@ -1633,7 +1633,14 @@ FsResult FsApi::session_pending_wakes(const std::string& sid) {
 
 FsResult FsApi::session_loop_state(const std::string& sid) {
   std::string state = agent_host_ ? agent_host_->loop_state(sid) : "idle";
-  return FsResult::success(Json{{"sid", sid}, {"state", state}});
+  bool compacted = false;
+  if (!sid.empty()) {
+    std::error_code ec;
+    compacted = ghc::filesystem::is_regular_file(
+        sessions_->make_store(sid).compaction_path(sid), ec);
+  }
+  return FsResult::success(
+      Json{{"sid", sid}, {"state", state}, {"compacted", compacted}});
 }
 
 FsResult FsApi::session_todos(const std::string& sid) {

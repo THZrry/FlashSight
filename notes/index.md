@@ -1690,3 +1690,17 @@ The process of project: P0 环境搭建
   - **xmake 多编译边界**：`--web/--webview/--whaleui` 三个开关在 `xmake f` 里可见，但单个 target 图只能链接一个 host；`scripts/build_all.py` 逐变体 configure/build 到带变体名的产物。本次已用它实际构建 web/webview/whaleui 三个 exe，但这不是“一个 xmake 调用同时编三个 target”，不伪装成那样。
   - **仍未闭环/诚实边界**：多规划只有“当前篇”直开按钮，`plans[]` 列表在后端可用但 UI 没有历史列表；短视图修复是单元测试+代码路径，未在真实长会话端到端复测；引导队列 UI 未在原生窗口手测；WhaleJS 卡住未复现出新栈，看门狗是缓解不是根因证明。
   - **测试/构建**：465 用例 4328 断言全过；web / webview / whaleui 三变体实际编译通过（`build_all.py`）。
+
+
+<128>(ROOT CAUSE/FIX): 取消“保留最近 N 轮”的截断式短视图；改为全历史消息压缩；修复 81% 不压缩、自动轮压缩、中止延迟。
+  - **首先认错**：上一版把 short-view 的 `keepTurns` 默认设成 8，并把它当成窗口不足时的常规路径。这不是“压缩”，是丢弃最近 8 轮以外的消息，破坏记录也破坏前缀缓存。已删除该策略：`keep_turns` 现在只保留字段兼容，值被忽略（默认改 0）；压缩时**每一轮都折进摘要，不保留任何原文后缀**。
+  - **两套窗口**：`full.json` / turn shards 仍然是完整记录；`HistoryBuilder` 只构建“模型请求上下文”。压缩不再截断消息，而是把全部轮次写成逐轮 digest（每轮一小段，按轮数分配预算，保证**最新轮也在**）。只有“摘要 + system/tools”仍超过窗口时才进入 short-view fallback，fallback 只是进一步缩小摘要预算，不是丢消息。
+  - **81% 不触发压缩（真因）**：`UsageStore::query` 把最后一行（失败的流，没有 `in/out`）当成 `sum.last`，于是 `last_prompt_tokens=0`，下一次 `should_compress` 永远看不到 81%。UI 的水位来自上一次有 token 的请求，所以显示 81%，压缩却不发生。现在只有 `in>0 || out>0` 的行才能成为 last；新增 `usage_last_skips_rows_without_tokens`。81% 是简单除法（`last_in/context_limit`），没有额外门。
+  - **自动轮中途达到水位**：用户回合只在 `run_turn` 开始检查一次；长工具链在回合中途把水位推到 80%+ 时，下一次 auto round 仍带着旧的全量 messages 发出去。现在 auto 续跑前检查水位；达到阈值就从刚持久化的完整历史重建压缩请求（system + 全历史摘要 + 本轮回答 + 继续 nudge），保存 `compaction.json` 并发出 `context.compressed`。新增 `loop_compacts_between_auto_rounds_at_water_level`。
+  - **压缩提示**：`context.compressed` 的 toast 改为明确说“全部历史 → 摘要，完整记录仍在会话里，未截断消息”；上下文百分比旁边新增“摘要”badge（tooltip 说明 request context 与完整记录的区别）。`session.loopState` 返回 `compacted`，重开旧会话也显示。
+  - **拿不准的步骤**：旧规则让模型把不确定/有风险的步骤写成 todo 继续做，等于鼓励它执行风险行为。改成：**不要写成可执行 todo，不要猜**；把问题/原因/选项留在当前上下文和工作记录里，先做安全且独立的步骤，本轮最终回复明确报告未决点。只有完全没有安全下一步时才 `auto_stop`。
+  - **中止延迟**：按钮以前只设 `abort_requested_`，而 cancel 只在 SSE `on_chunk` 里检查；provider 没有数据时读阻塞到 HTTP read timeout，UI 要等几分钟才显示结束。现在两层：
+    1. UI 点击立即把当前 assistant 标记结束（streaming=false、ended_at）、`turn_running=false`、显示“正在停止…”，不再等后端回包；收到 `loop.interrupted/suspended` 后再清 `stop_pending`。“继续”在中止完成前不出现，避免和 abort 赛跑。
+    2. `HttpRequest` 增加 `cancel` 回调；`HttplibNetClient` 起一个 50ms 轮询的 watcher，取消时直接 `Client::stop()` 关闭 socket。`ProviderRuntime` 对取消不再重试，所以中止是“标记结束 + 断连接”，不需要等流返回。
+  - **仍未完成/边界**：webview 变体因用户正在运行 `flashsight-webview.exe`（PID 9480）导致输出文件被占用，`build_all.py` 链接失败；已在 `build_verify` 目录完成同一份代码的 webview 链接，并把新二进制放到 `temp/flashsight-webview-new.exe`。关闭正在运行的窗口后重跑 `build_all.py` 即可覆盖正式产物。中止的 socket watcher 没有自动化网络测试（单测不碰真网），只做了编译与路径审查；需要在真实模型流上复测“点中止→立即停”。
+  - **测试/构建**：467 用例 4344 断言全过；web / whaleui 实际编译通过；webview 在备用 builddir 编译链接通过。

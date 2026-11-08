@@ -458,6 +458,21 @@ std::string HistoryBuilder::make_fold(const Json& turns, size_t from, size_t to,
   // answers, one line each, so FULL compression still carries the thread.
   const size_t kMaxDigestBytes =
       max_digest_bytes > 512 ? max_digest_bytes : 512;
+  // Give EVERY turn a line. The old loop stopped appending once the byte cap was
+  // reached, so a long history's newest turns were the ones missing from the
+  // digest - exactly the information the model needs next. Divide the budget
+  // instead of truncating the tail.
+  size_t eligible = 0;
+  for (size_t i = from; i < to && i < turns.size(); ++i) {
+    const Json& t = turns[i];
+    if (!t.is_object()) continue;
+    if (is_auto_nudge(t) || is_empty_auto_answer(t)) continue;
+    if (jsonutil::get<bool>(t, "forgotten", false)) continue;
+    ++eligible;
+  }
+  size_t per_turn = eligible ? kMaxDigestBytes / eligible : 260;
+  if (per_turn < 24) per_turn = 24;
+  if (per_turn > 260) per_turn = 260;
   for (size_t i = from; i < to && i < turns.size(); ++i) {
     const Json& t = turns[i];
     if (!t.is_object()) continue;
@@ -471,7 +486,6 @@ std::string HistoryBuilder::make_fold(const Json& turns, size_t from, size_t to,
         ++collected;
       }
     }
-    if (digest.size() >= kMaxDigestBytes) continue;
     std::string role = jsonutil::get<std::string>(t, "role", "");
     std::string text;
     if (role == "user") {
@@ -483,7 +497,7 @@ std::string HistoryBuilder::make_fold(const Json& turns, size_t from, size_t to,
     }
     // The model's narration is process, not the answer; keep the answer line.
     if (text.empty()) continue;
-    text = utf8::truncate(text, 260, "…");
+    text = utf8::truncate(text, per_turn, "…");
     for (size_t k = 0; k < text.size(); ++k) {
       if (text[k] == '\n' || text[k] == '\r') text[k] = ' ';
     }
@@ -665,84 +679,56 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
   // the turns the summary already replaced were counted again. The token count
   // comes from the projected replay (see replay_tokens), not from the stored JSON.
   int64_t prior_tokens = prior.empty() ? 0 : estimate_tokens(prior);
-  int64_t raw_tokens = raw_tokens_all;
   int64_t effective_tokens = prior_tokens + replay_tokens(turns, start, total);
-  CompressDecision dec = should_compress(opts_, raw_tokens);
-  bool window_short = false;
+  CompressDecision dec = should_compress(opts_, effective_tokens);
+  bool over_limit = false;
   if (opts_.context_limit > 0) {
     int64_t need = effective_tokens > opts_.last_prompt_tokens
                        ? effective_tokens
                        : opts_.last_prompt_tokens;
-    if (need > opts_.context_limit) window_short = true;
+    over_limit = need > opts_.context_limit;
   }
-  const bool fold = opts_.force_compress || dec.compress || window_short;
-  if (fold) {
-    size_t keep = 0;  // full compression: no turn stays verbatim
-    if (window_short) {
-      // A short view is a fallback, not "keep one turn": retaining the user's
-      // configured keepTurns (8 by default) is what stops a 1M-window session
-      // from collapsing to 9% of context. The fold loop below shrinks it only
-      // when the projected summary + suffix really cannot fit.
-      keep = opts_.keep_turns > 0 ? static_cast<size_t>(opts_.keep_turns) : 8;
-      if (keep >= total) keep = total > 1 ? total - 1 : total;
+  // The threshold and the window are the only reasons to compress. NEVER drop a
+  // suffix of messages because "the window is tight": the request context must
+  // stay information-complete. Compression folds EVERY turn into the summary;
+  // the short-view fallback only makes that summary smaller when the full
+  // digest itself cannot fit. The stored transcript is never touched.
+  const bool fold = opts_.force_compress || dec.compress || over_limit;
+  if (fold && total > start) {
+    // What is left after the summary: system prompt + tool definitions. Derive
+    // it from the last real prompt (a fact) instead of guessing.
+    int64_t overhead = opts_.last_prompt_tokens - effective_tokens;
+    if (overhead < 0) overhead = 0;
+    const size_t caps[] = {32000, 12000, 4000, 1000};
+    std::string fold_text;
+    bool short_fallback = false;
+    for (size_t ci = 0; ci < sizeof(caps) / sizeof(caps[0]); ++ci) {
+      fold_text = make_fold(turns, start, total, prior, opts_.max_fold_points,
+                            caps[ci]);
+      if (opts_.context_limit <= 0) break;
+      int64_t projected = overhead + estimate_tokens(fold_text);
+      if (projected <= opts_.context_limit) break;
+      short_fallback = true;
     }
-    size_t fold_to = total > keep ? total - keep : start;
-    if (fold_to < start) fold_to = start;
-    // Nothing new to fold: every stored turn is already represented by the
-    // durable summary. Reuse it instead of reporting a compression that did
-    // not change anything.
-    if (!(prior_ok && fold_to == start)) {
-      // A short view is used precisely when the window is tight, so its summary
-      // must be small too; full compression can carry a richer digest.
-      size_t digest_cap = window_short ? 6000 : 32000;
-      std::string fold = make_fold(turns, start, fold_to, prior,
-                                   opts_.max_fold_points, digest_cap);
-      // Honor keepTurns when it fits, but never emit a short view that the
-      // window still cannot hold: fold one more turn at a time until the
-      // projected summary + suffix is inside the limit. Measuring the actual
-      // fold (not a guessed 7k) is what lets a 4k window keep 4 tiny turns
-      // instead of collapsing to one.
-      if (window_short && opts_.context_limit > 0) {
-        while (fold_to + 1 < total) {
-          int64_t cand = estimate_tokens(fold) +
-                         replay_tokens(turns, fold_to, total);
-          if (cand <= opts_.context_limit) break;
-          ++fold_to;
-          fold = make_fold(turns, start, fold_to, prior,
-                           opts_.max_fold_points, digest_cap);
-        }
-      }
-      Json summary = Json::object();
-      summary["role"] = "user";
-      summary["content"] = fold;
-      Json with_fold = messages;
-      with_fold.push_back(summary);
-      int64_t used = estimate_tokens(fold);
-      for (size_t i = fold_to; i < total; ++i) {
-        const Json& t = turns[i];
-        if (!t.is_object()) continue;
-        if (is_auto_nudge(t) || is_empty_auto_answer(t)) continue;
-        if (jsonutil::get<bool>(t, "forgotten", false)) continue;
-        Json group = Json::array();
-        turn_to_neutral(t, &group);
-        used += estimate_tokens(group);
-        for (auto& m : group) with_fold.push_back(m);
-      }
-      out.messages = with_fold;
-      out.est_tokens = used;
-      out.compressed = true;
-      out.mode = window_short ? "short-view" : "full";
-      out.compressed_from = static_cast<int64_t>(start);
-      out.compressed_to = static_cast<int64_t>(fold_to);
-      out.dropped_turns = static_cast<int64_t>(fold_to);
-      out.summary = fold;
-      out.compacted_turns = static_cast<int64_t>(fold_to);
-      if (fold_to > 0 && turns[fold_to - 1].is_object()) {
-        out.compacted_turn_id =
-            jsonutil::get<std::string>(turns[fold_to - 1], "turnId", "");
-      }
-      return out;
+    Json summary = Json::object();
+    summary["role"] = "user";
+    summary["content"] = fold_text;
+    Json with_fold = messages;
+    with_fold.push_back(summary);
+    out.messages = with_fold;
+    out.est_tokens = estimate_tokens(fold_text);
+    out.compressed = true;
+    out.mode = short_fallback ? "short-view" : "full";
+    out.compressed_from = static_cast<int64_t>(start);
+    out.compressed_to = static_cast<int64_t>(total);
+    out.dropped_turns = static_cast<int64_t>(total - start);
+    out.summary = fold_text;
+    out.compacted_turns = static_cast<int64_t>(total);
+    if (total > 0 && turns[total - 1].is_object()) {
+      out.compacted_turn_id =
+          jsonutil::get<std::string>(turns[total - 1], "turnId", "");
     }
+    return out;
   }
   // Normal replay: the durable summary (if any) followed by every turn it does
   // not cover. This is the path a reopened session takes when the summary makes

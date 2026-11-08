@@ -1,15 +1,45 @@
 // fs_net_http.cpp - httplib + mbedTLS based NetClient
 #include "fs_net_http.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 #include "httplib.h"
 
 namespace fs {
 
 namespace {
+
+// Closes the socket when the caller cancels. `on_chunk` is not invoked while a
+// read is blocked, so without this an idle/hung SSE stream could only be
+// stopped by the per-read timeout (minutes); 中止 looked dead for that long.
+class CancelWatch {
+ public:
+  CancelWatch(const std::function<bool()>& cancel, std::function<void()> stop) {
+    if (!cancel) return;
+    thread_ = std::thread([this, cancel, stop]() {
+      while (!done_.load()) {
+        if (cancel()) {
+          stop();
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    });
+  }
+  ~CancelWatch() {
+    done_.store(true);
+    if (thread_.joinable()) thread_.join();
+  }
+
+ private:
+  std::atomic<bool> done_{false};
+  std::thread thread_;
+};
 
 FsResult map_httplib_error(httplib::Error e) {
   // The mapped message says what the APP should do; the detail says what
@@ -116,6 +146,7 @@ FsResult HttplibNetClient::request(const HttpRequest& req, HttpResponse* out) co
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
+    CancelWatch watch(req.cancel, [&cli]() { cli.stop(); });
     r = execute(cli, req, path, out);
   } else {
     httplib::Client cli(host, port);
@@ -123,6 +154,7 @@ FsResult HttplibNetClient::request(const HttpRequest& req, HttpResponse* out) co
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
+    CancelWatch watch(req.cancel, [&cli]() { cli.stop(); });
     r = execute(cli, req, path, out);
   }
   // FS_NET_DEBUG=1 traces every request. A network failure reported by the UI
@@ -158,6 +190,7 @@ FsResult HttplibNetClient::request_stream(
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
+    CancelWatch watch(req.cancel, [&cli]() { cli.stop(); });
     r = execute_stream(cli, req, path, on_chunk, out);
   } else {
     httplib::Client cli(host, port);
@@ -165,6 +198,7 @@ FsResult HttplibNetClient::request_stream(
     cli.set_read_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     cli.set_write_timeout(req.timeout_ms / 1000, req.timeout_ms % 1000);
     if (!ph.empty() && pp > 0) cli.set_proxy(ph, pp);
+    CancelWatch watch(req.cancel, [&cli]() { cli.stop(); });
     r = execute_stream(cli, req, path, on_chunk, out);
   }
   if (std::getenv("FS_NET_DEBUG")) {

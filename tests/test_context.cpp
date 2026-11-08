@@ -557,14 +557,16 @@ FS_TEST(compaction_state_prevents_short_view_after_reopen) {
   EXPECT_FALSE(ok.compressed);        // summary fits; no short view
   EXPECT_TRUE(ok.mode.empty());
 
-  // Same window WITHOUT the durable summary: this is the old failure mode.
+  // Same window WITHOUT the durable summary: compression rebuilds a summary
+  // that fits. This is a FULL compression, not a raw-suffix short view.
   HistoryBuilder::Options bare = reopened;
   bare.prior_summary.clear();
   bare.compacted_turns = 0;
   bare.prior_turn_id.clear();
-  HistoryResult short_view = HistoryBuilder(bare).build_neutral(full2);
-  EXPECT_TRUE(short_view.compressed);
-  EXPECT_EQ(short_view.mode, std::string("short-view"));
+  HistoryResult compressed = HistoryBuilder(bare).build_neutral(full2);
+  EXPECT_TRUE(compressed.compressed);
+  EXPECT_EQ(compressed.mode, std::string("full"));
+  EXPECT_EQ(compressed.compacted_turns, int64_t(4));
 }
 
 // The window decision must use the PROJECTED replay, not the stored turn JSON.
@@ -642,13 +644,15 @@ FS_TEST(short_view_state_is_reused_until_the_window_grows) {
   full["turns"] = turns;
   HistoryBuilder::Options tight;
   tight.system_prefix = "sys";
-  tight.context_limit = 1500;
+  tight.context_limit = 600;  // even the compressed summary cannot fit
   tight.last_prompt_tokens = 100;
   HistoryResult first = HistoryBuilder(tight).build_neutral(full);
   ASSERT_TRUE(first.compressed);
   EXPECT_EQ(first.mode, std::string("short-view"));
   EXPECT_TRUE(first.compacted_turns > 0);
-  EXPECT_TRUE(first.compacted_turns < 20);
+  // EVERY turn is folded; the short view does not keep a raw suffix.
+  EXPECT_EQ(first.compacted_turns, int64_t(20));
+  EXPECT_EQ((int)first.messages.size(), 2);  // system + full-history summary
   EXPECT_FALSE(first.summary.empty());
 
   HistoryBuilder::Options reuse = tight;
@@ -706,8 +710,8 @@ FS_TEST(history_forget_and_keypoints) {
   HistoryBuilder::Options opts;
   opts.system_prefix = "sys";
   // Compaction is now triggered by the WATER LEVEL (or "compact now"), so ask for
-  // it explicitly. keep_turns=1 keeps one turn in full; everything older folds into
-  // the summary, which is where keyPoints surface.
+  // it explicitly. Every turn folds into the summary (keyPoints surface there);
+  // no suffix of raw messages is kept.
   opts.force_compress = true;
   opts.keep_turns = 1;
   HistoryBuilder hb(opts);

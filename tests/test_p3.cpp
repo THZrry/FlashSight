@@ -1369,7 +1369,8 @@ FS_TEST(settings_new_keys_defaults) {
   // The threshold triggers a FULL compression. There is no separate strategy
   // setting; short view is only the too-small-window fallback.
   EXPECT_EQ(s.get(kKeyHistoryCompressAtPct).value.get<int64_t>(), 80);
-  EXPECT_EQ(s.get(kKeyHistoryKeepTurns).value.get<int64_t>(), 8);
+  // Deprecated: compaction folds every turn, so no raw suffix is kept.
+  EXPECT_EQ(s.get(kKeyHistoryKeepTurns).value.get<int64_t>(), 0);
   EXPECT_EQ(s.get(kKeyOverfitEnabled).value.get<bool>(), false);
   EXPECT_EQ(s.get(kKeySubagentMaxParallel).value.get<int64_t>(), 4);
   EXPECT_EQ(s.get(kKeySubagentMaxDepth).value.get<int64_t>(), 3);

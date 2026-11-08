@@ -159,9 +159,10 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "③ 工作流（workflow_plan）是真正的大型流水线，要用户批准。"
         "规划不是另一个进度窗口，不要把它拆成 todo 之外的一套状态。");
     out.push_back(
-        "- 自动模式中遇到拿不准/暂时无法推进的步骤：把它写进规划或 todo 的待办，"
-        "先做其他不依赖它的工作，不要因此停下整轮。只有确实没有任何安全下一步、"
-        "必须由用户决定时，才调用 auto_stop（强制停止自动续跑；平常不要用）。");
+        "- 自动模式中遇到拿不准、需要用户确认或有风险的步骤：**不要把它写成 todo 项去执行**，"
+        "也不要猜。把问题、原因和可选项留在当前上下文/工作记录里，先做其他安全且独立的步骤；"
+        "本轮结束时在最终回复里明确报告这些未决点，让用户决定。只有确实没有任何安全下一步时"
+        "才调用 auto_stop（强制停止自动续跑；平常不要用）。");
     out.push_back(
         "- 先调查再动手：不确定的事实用 read_file / find_files / terminal 去确认，"
         "不要用\"应该\"\"通常\"代替验证。");
@@ -209,11 +210,13 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "user approval. The plan is not a second progress widget: do not keep a "
         "step tree beside the checklist.");
     out.push_back(
-        "- In auto mode, when a step is uncertain or temporarily blocked, put it "
-        "in the plan/todo as pending and work on something else that does not "
-        "depend on it. Do not stop the whole run for one unknown. Only when NO "
-        "safe next step exists and the user must decide, call auto_stop (the "
-        "emergency brake for auto rounds; do not use it normally).");
+        "- In auto mode, when a step is uncertain, risky, or needs the user's "
+        "decision: do NOT write it as a todo item to execute and do not guess. "
+        "Keep the question, the reason and the options in the current context / "
+        "work log, do other safe and independent work, and report the unresolved "
+        "points explicitly in the final reply so the user can decide. Only when NO "
+        "safe next step exists, call auto_stop (the emergency brake for auto "
+        "rounds; do not use it normally).");
     out.push_back(
         "- Investigate before acting. Confirm facts with read_file / find_files / "
         "terminal instead of substituting \"should be\" or \"usually\" for evidence.");
@@ -300,12 +303,14 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
           "recommended option. Do not pick for the user, and do not spin on guesses.");
   } else {
     out.push_back(zh(in)
-        ? "## 自动模式\n- ask 不可用。遇到不确定的分支：选择可逆的那条，"
-          "把假设写进回答里，并在需要用户拍板的地方停下等确认，不要武断下结论。"
-        : "## Auto mode\n- ask is unavailable. When a branch is uncertain, take the "
-          "reversible path, state the assumption in your reply, and stop for "
-          "confirmation where the user must decide. Never assert a conclusion you "
-          "have not verified.");
+        ? "## 自动模式\n- ask 不可用。遇到不确定或有风险的分支：不要猜、不要执行，"
+          "把问题、原因和可选项留在当前上下文/工作记录里，先做安全且独立的步骤，"
+          "并在最终回复里明确报告等待用户决定；只有完全没有安全下一步时才停。"
+        : "## Auto mode\n- ask is unavailable. When a branch is uncertain or risky, "
+          "do not guess and do not execute it: keep the question, reason and options "
+          "in the current context / work log, do safe independent work, and report "
+          "the unresolved points in your final reply for the user to decide. Never "
+          "assert a conclusion you have not verified.");
   }
   return join_lines(out);
 }

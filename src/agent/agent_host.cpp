@@ -293,14 +293,11 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
       opts.thinking = jsonutil::get<std::string>(ss, "thinking", "");
     }
   }
-  // Compaction: the threshold triggers a FULL compression. keepTurns is only
-  // the automatic short-view fallback when the current window cannot hold the
-  // prompt (e.g. the user switched to a smaller-window model).
+  // Compaction: the threshold triggers a FULL compression of every turn. The
+  // old keepTurns suffix was a truncation strategy and is no longer read.
   if (deps_.setting) {
     Json cp = deps_.setting(opts.pid, "history.compressAtPct", Json(80));
-    Json kt = deps_.setting(opts.pid, "history.keepTurns", Json(8));
     if (cp.is_number()) opts.history.compress_at_pct = static_cast<int>(cp.get<int64_t>());
-    if (kt.is_number()) opts.history.keep_turns = static_cast<int>(kt.get<int64_t>());
   }
   opts.event = [this](const std::string& e, const Json& p) { emit(e, p); };
   auto loop = std::unique_ptr<AgentLoop>(new AgentLoop(std::move(opts)));
@@ -926,15 +923,12 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
     if (!ctx.cwd.empty()) loop->set_cwd(ctx.cwd);
     loop->set_context(ctx);
     session_ctx_[sid] = ctx;  // subagents inherit this session's environment
-    // History thresholds are SETTINGS. They used to be read once at loop
-    // creation, so changing the compaction threshold or keep-turns in Settings
-    // did nothing until the app restarted - "the options have no effect".
+    // The compaction threshold is a SETTING. It used to be read once at loop
+    // creation, so changing it did nothing until the app restarted.
     if (deps_.setting) {
       HistoryBuilder::Options hopts = loop->history_options();
       Json cp = deps_.setting(ctx.pid, "history.compressAtPct", Json(80));
-      Json kt = deps_.setting(ctx.pid, "history.keepTurns", Json(8));
       if (cp.is_number()) hopts.compress_at_pct = static_cast<int>(cp.get<int64_t>());
-      if (kt.is_number()) hopts.keep_turns = static_cast<int>(kt.get<int64_t>());
       loop->set_history_options(hopts);
     }
     if (deps_.context_limit) {

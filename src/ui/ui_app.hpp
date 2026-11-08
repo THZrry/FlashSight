@@ -310,6 +310,10 @@ struct AppState {
   // backend decides when the loop actually parks (it finishes the current tool
   // first), so a second click before the reply sent the OPPOSITE request.
   bool suspend_pending = false;
+  // 中止 was pressed and the UI has already marked the turn finished. The
+  // network abort runs in parallel; loop-state polls must not flip the button
+  // back to 中止 while the loop is winding down.
+  bool stop_pending = false;
   // A turn is running for this session. The composer's primary button is 发送
   // while false and 中止 while true.
   bool turn_running = false;
@@ -340,6 +344,10 @@ struct AppState {
   // and 42% of a 32k window are different situations.
   int64_t context_tokens = -1;   // last request's prompt tokens
   int64_t context_window = 0;    // model context window (0 = unknown)
+  // The model request is currently using a compressed summary of the full
+  // transcript. This is a status badge, not a truncation flag: the stored
+  // session keeps every message.
+  bool context_compacted = false;
   // Cache: `cache_hit_pct` is -1 when the provider never reported cache fields
   // (that is not the same as a 0% hit rate).
   int cache_hit_pct = -1;
@@ -861,6 +869,7 @@ struct SessionView {
   bool suspended = false;
   // See AppState: a pending suspend/resume request, and whether a turn is running.
   bool suspend_pending = false;
+  bool stop_pending = false;
   bool turn_running = false;
   // Auto-continue round of this session while it is in the background. Kept
   // here (not only in AppState) so switching to the tab shows the round divider
@@ -877,6 +886,7 @@ struct SessionView {
   int context_pct = -1;
   int64_t context_tokens = -1;
   int64_t context_window = 0;
+  bool context_compacted = false;
   int cache_hit_pct = -1;
   int64_t session_cache_tokens = 0;
   bool cache_reported = false;

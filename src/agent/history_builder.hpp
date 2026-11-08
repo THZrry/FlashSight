@@ -69,12 +69,13 @@ class HistoryBuilder {
     int64_t last_prompt_tokens = 0;
     // 模型上下文窗口（0 = 未知）。未知时水位触发不可用，只有显式"立即压缩"。
     int64_t context_limit = 0;
-    // 水位阈值（百分比）。到达后**全量压缩**：所有旧轮折成摘要，不再保留最近几轮
-    // 的原文。短视图不是这个阈值的一部分——只有当前窗口装不下（例如换到小窗模型）
-    // 才自动退到短视图并提醒。<=0 关闭水位触发。
+    // 水位阈值（百分比）。到达后**全量压缩**：所有轮折成摘要，不保留任何轮的
+    // 原文，也不截断消息。短视图只是窗口装不下时把摘要进一步压小的 fallback
+    // （例如换到小窗模型），仍然覆盖全部历史。<=0 关闭水位触发。
     int compress_at_pct = 80;
-    // 压缩后至少保留的最近轮数：压缩不等于清空，最近几轮必须全量在。
-    int keep_turns = 8;
+    // Deprecated: compaction no longer keeps a suffix of raw turns. The field is
+    // kept for source compatibility with older callers and is ignored.
+    int keep_turns = 0;
     // 强制压缩（用户点"压缩"/UI 提示时）。
     bool force_compress = false;
   };

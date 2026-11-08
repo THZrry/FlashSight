@@ -777,7 +777,7 @@ FS_TEST(loop_persists_first_short_view) {
   opts.sid = "s_short";
   opts.permission = "full";
   AgentLoop loop(std::move(opts));
-  loop.context_limit = 1500;
+  loop.context_limit = 100;  // even the compressed summary cannot fit
   loop.set_last_prompt_tokens(100);
   loop.load_history = [&full](Json* out) {
     *out = full;
@@ -936,6 +936,68 @@ FS_TEST(loop_round_limit_does_not_auto_continue_in_manual_mode) {
   // limit. What matters is that the turn ENDS there in manual mode.
   EXPECT_EQ(calls, 2);
   EXPECT_EQ(rec.count("auto.next"), 0);
+}
+
+// The water level can cross the threshold MID-turn (a long tool chain). The next
+// auto round must start from a compressed request, not go out at 81%+.
+FS_TEST(loop_compacts_between_auto_rounds_at_water_level) {
+  AgentLoop::Options opts;
+  opts.sid = "s_auto_compact";
+  opts.permission = "full";
+  opts.context.auto_mode = true;
+  opts.max_tool_rounds = 50;
+  opts.max_auto_continues = 5;
+  opts.history.compress_at_pct = 80;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.context_limit = 10000;
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;  // no plan, no todos
+    return st;
+  };
+  Json full = Json::object();
+  full["turns"] = Json::array({
+      Json{{"role", "user"}, {"promptRaw", "old question"}},
+      Json{{"role", "assistant"}, {"streamSummary", "old answer"}},
+  });
+  loop.load_history = [&full](Json* out) -> FsResult {
+    *out = full;
+    return FsResult::success();
+  };
+  std::vector<Json> seen;
+  int calls = 0;
+  loop.call_model = [&](const ModelCallRequest& req, ModelCallResult* out,
+                        const std::function<void(const std::string&)>&) {
+    ++calls;
+    seen.push_back(req.messages);
+    out->in_tokens = 8500;  // 85% of 10k -> threshold
+    if (calls == 1) {
+      Json c = Json::object();
+      c["name"] = "read_file";
+      c["id"] = "call_1";
+      c["args"] = Json{{"path", "a.txt"}};
+      out->tool_calls = Json::array({c});
+    } else {
+      out->text = "done";
+    }
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json{{"ok", true}});
+  };
+  ASSERT_TRUE(loop.send("go").ok());
+  EXPECT_EQ(calls, 3);  // initial tool call + final call + one auto round
+  ASSERT_TRUE(rec.count("context.compressed") >= 1);
+  ASSERT_TRUE(seen.size() >= 3);
+  std::string round2;
+  for (auto& m : seen[2]) round2 += jsonutil::get<std::string>(m, "content", "");
+  EXPECT_TRUE(round2.find("compacted") != std::string::npos);
+  EXPECT_TRUE(round2.find("old question") != std::string::npos);
+  // System prefix survives the rebuild (an empty one made the auto round blind).
+  ASSERT_TRUE(!seen[2].empty());
+  EXPECT_FALSE(jsonutil::get<std::string>(seen[2][0], "content", "").empty());
 }
 
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------

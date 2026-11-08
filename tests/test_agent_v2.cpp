@@ -122,7 +122,8 @@ FS_TEST(window_too_small_uses_short_view) {
   HistoryResult hr = HistoryBuilder(opts).build_neutral(make_full(20));
   EXPECT_TRUE(hr.compressed);
   EXPECT_EQ(hr.mode, std::string("short-view"));
-  EXPECT_EQ(hr.dropped_turns, int64_t(36));  // make_full(20)=40 stored, 4 kept
+  EXPECT_EQ(hr.dropped_turns, int64_t(40));  // all 40 turns are compressed
+  EXPECT_EQ((int)hr.messages.size(), 2);     // system + full-history summary
   std::string fold = jsonutil::get<std::string>(hr.messages[1], "content", "");
   EXPECT_TRUE(fold.find("compacted") != std::string::npos);
   EXPECT_TRUE(fold.find("U: question 0 with") != std::string::npos);
@@ -253,9 +254,10 @@ FS_TEST(loop_short_views_when_window_too_small) {
             std::string("short-view"));
   EXPECT_EQ(jsonutil::get<std::string>(payloads[0], "reason", ""),
             std::string("window-too-small"));
-  EXPECT_EQ(jsonutil::get_int(payloads[0], "keptTurns", 0), int64_t(4));
-  EXPECT_EQ(jsonutil::get_int(payloads[0], "droppedTurns", 0), int64_t(36));
-  // The newest exchange is still verbatim in the request.
+  EXPECT_EQ(jsonutil::get_int(payloads[0], "keptTurns", 0), int64_t(0));
+  EXPECT_EQ(jsonutil::get_int(payloads[0], "droppedTurns", 0), int64_t(40));
+  // Compression does not truncate a suffix: the newest exchange is represented
+  // in the summary digest (the full transcript stays in full.json).
   ASSERT_TRUE(!requests.empty());
   std::string sent;
   for (auto& m : requests[0].messages) {
@@ -506,6 +508,27 @@ FS_TEST(usage_cache_unknown_is_minus_one) {
   UsageSummary sum = store.query(f);
   EXPECT_FALSE(sum.cache_reported);
   EXPECT_TRUE(sum.cache_hit_ratio < 0);
+}
+
+// ---------- 最后一次真实用量不能被无 token 的错误行覆盖 ----------
+// A failed/aborted call is written without in/out. It used to become sum.last,
+// so the next compaction check saw 0 tokens while the UI showed 81% and never
+// compressed. The water level must come from the last call that reported usage.
+FS_TEST(usage_last_skips_rows_without_tokens) {
+  fstest::TempDir td("usage_last");
+  ghc::filesystem::path file = ghc::filesystem::path(td.path()) / "calls.jsonl";
+  UsageStore store(file);
+  ASSERT_TRUE(store.record(Json{{"ts", 1000}, {"sid", "s4"}, {"provider", "p"},
+                                {"model", "m"}, {"in", 810000}, {"out", 200}}).ok());
+  ASSERT_TRUE(store.record(Json{{"ts", 2000}, {"sid", "s4"}, {"provider", "p"},
+                                {"model", "m"}, {"latency", 3000},
+                                {"error", "stream disconnected"}}).ok());
+  UsageFilter f;
+  f.sid = "s4";
+  UsageSummary sum = store.query(f);
+  ASSERT_TRUE(sum.has_last);
+  EXPECT_EQ(sum.last.in, static_cast<int64_t>(810000));
+  EXPECT_EQ(sum.last.ts, static_cast<int64_t>(1000));
 }
 
 // ---------- 会话成本按 provider 区分 money / quota ----------

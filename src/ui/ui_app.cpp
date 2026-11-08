@@ -1221,6 +1221,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.attachments = st_.attachments;
   v.suspended = st_.suspended;
   v.turn_running = st_.turn_running;
+  v.stop_pending = st_.stop_pending;
   v.auto_round = st_.auto_round;
   v.interrupted = st_.interrupted;
   v.interrupt_reason = st_.interrupt_reason;
@@ -1229,6 +1230,7 @@ void UiApp::save_session_view(const std::string& sid) {
   v.schedule_text = st_.schedule_text;
   v.enter_send = st_.enter_send;
   v.context_pct = st_.context_pct;
+  v.context_compacted = st_.context_compacted;
   v.context_tokens = st_.context_tokens;
   v.context_window = st_.context_window;
   v.cache_hit_pct = st_.cache_hit_pct;
@@ -1327,6 +1329,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.attachments = v.attachments;
   st_.suspended = v.suspended;
   st_.turn_running = v.turn_running;
+  st_.stop_pending = v.stop_pending;
   st_.suspend_pending = false;  // a request in flight does not survive a switch
   st_.interrupted = v.interrupted;
   st_.interrupt_reason = v.interrupt_reason;
@@ -1335,6 +1338,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.schedule_text = v.schedule_text;
   st_.enter_send = v.enter_send;
   st_.context_pct = v.context_pct;
+  st_.context_compacted = v.context_compacted;
   st_.context_tokens = v.context_tokens;
   st_.context_window = v.context_window;
   st_.cache_hit_pct = v.cache_hit_pct;
@@ -3752,6 +3756,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       update([&](AppState& s) {
         s.auto_round = 0;
         s.turn_running = false;
+        s.stop_pending = false;
         s.toast = reason.empty() ? tr("自动继续已停止")
                                  : (tr("自动继续已停止：") + reason);
         s.toast_deadline_ms = now_ms() + kToastMs;
@@ -3759,6 +3764,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     } else {
       vp->auto_round = 0;
       vp->turn_running = false;
+      vp->stop_pending = false;
     }
     return;
   }
@@ -3878,6 +3884,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     if (is_active) {
       update([&](AppState& s) {
         s.turn_running = false;
+        s.stop_pending = false;
         // The auto round that just ENDED is over. If another one follows,
         // auto.next (emitted right after turn.done) sets this again; leaving it
         // set made the session dot spin forever after the last auto round.
@@ -3885,6 +3892,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       });
     } else {
       vp->turn_running = false;
+      vp->stop_pending = false;
       vp->auto_round = 0;
     }
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
@@ -4364,16 +4372,17 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   } else if (event == "context.compressed") {
     std::string mode = jsonutil::get<std::string>(payload, "mode", "full");
     int dropped = static_cast<int>(jsonutil::get_int(payload, "droppedTurns", 0));
-    int kept = static_cast<int>(jsonutil::get_int(payload, "keptTurns", 0));
     if (mode == "short-view") {
-      // Automatic, not a setting: the current window cannot hold the prompt.
-      st_.toast = "上下文窗口不足，已自动改用短视图（保留最近 " + itos(kept) + " 轮）";
+      // Automatic fallback only when even the normal summary cannot fit. The
+      // transcript is NOT truncated: every turn is represented in the summary.
+      st_.toast = "上下文窗口不足：已把全部历史进一步压缩成摘要（完整记录仍在会话里，未截断消息）";
       st_.toast_deadline_ms = now_ms() + kToastMs * 2;
     } else {
-      st_.toast = "上下文已全量压缩" +
-                  (dropped > 0 ? "（" + itos(dropped) + " 条 → 摘要）" : "");
+      st_.toast = "上下文已压缩：全部历史 → 摘要（完整记录仍在会话里）" +
+                  (dropped > 0 ? "（本次折叠 " + itos(dropped) + " 条）" : "");
       st_.toast_deadline_ms = now_ms() + kToastMs;
     }
+    st_.context_compacted = true;
   } else if (event == "subagent.steered") {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
@@ -4403,6 +4412,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // cause is a rejected API key or a 429. The backend puts it in `error`.
     st_.interrupted = true;
     st_.turn_running = false;  // nothing is running after an interrupt
+    st_.stop_pending = false;
     // The turn ended (possibly mid auto-round) WITHOUT turn.done. Leaving the
     // auto-round marker set made the session dot spin forever after a failure -
     // the "没运行却一直显示运行中" report - because the live row treats
@@ -4461,6 +4471,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     if (state == "resumed" || state == "turnDone" || state == "idle") {
       st_.interrupted = false;
       st_.interrupt_reason.clear();
+      st_.stop_pending = false;
     }
     // PARKED = the turn stopped on purpose. It ends mid-stream, so no turn.done
     // follows - without this the last assistant message kept its "streaming"
@@ -4470,6 +4481,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // reloads the transcript from disk, where streaming is always false.
     if (state == "suspended") {
       st_.turn_running = false;
+      st_.stop_pending = false;
       std::vector<comp::ChatMsg>& m = st_.messages;
       if (!m.empty() && m.back().role == "assistant" && m.back().streaming) {
         // A park before the first token leaves an empty bubble behind; drop it
@@ -6792,7 +6804,12 @@ VNodePtr UiApp::build_session() {
   // Interrupted task: a persistent bar with the action that actually helps.
   // The loop can continue from its saved point, so this is one click instead of
   // retyping the request.
-  if (st_.interrupted) {
+  if (st_.stop_pending) {
+    H bar = el("div", "interrupt-bar");
+    bar.add(el("i", "fa fa-circle-notch fa-spin"));
+    bar.add(el("span", "ib-text").text(tr("正在停止…")));
+    comp_box.add(bar);
+  } else if (st_.interrupted) {
     H bar = el("div", "interrupt-bar");
     bar.add(el("i", "fa fa-circle-exclamation"));
     bar.add(el("span", "ib-text").text(tr("任务已中断")));
@@ -7279,6 +7296,12 @@ VNodePtr UiApp::build_session() {
       else if (st_.context_pct >= 60) txt.cls("warm");
       mb.add(txt);
     }
+    if (st_.context_compacted) {
+      H tag = el("span", "model-ctx-pct dim");
+      tag.text(tr("摘要"));
+      tag.attr("title", tr("模型请求使用全部历史的摘要；完整消息仍保存在会话里，没有被截断"));
+      mb.add(tag);
+    }
     right_tools.add(mb);
   }
   // 思考档位: ONE control. It used to be an icon button that did nothing plus a
@@ -7441,11 +7464,39 @@ VNodePtr UiApp::build_session() {
     H stop = comp::icon_text_button("stop", tr("中止"), [this](const std::string&) {
       std::string sid = active_sid();
       if (sid.empty()) return;
-      update([&](AppState& s) { s.suspend_pending = true; });
+      // 中止 is a LOCAL, immediate operation: mark the turn finished and stop
+      // painting the spinner NOW, then abort the socket in the background. The
+      // old path waited for the loop to return (up to the HTTP read timeout when
+      // the provider was idle), so the button looked dead for minutes.
+      int64_t now = now_ms();
+      update([&](AppState& s) {
+        s.stop_pending = true;
+        s.turn_running = false;
+        s.auto_round = 0;
+        s.suspend_pending = false;
+        s.interrupted = true;
+        s.interrupt_reason.clear();
+        for (size_t i = s.messages.size(); i-- > 0;) {
+          comp::ChatMsg& m = s.messages[i];
+          if (m.role != "assistant") continue;
+          if (m.streaming) {
+            m.streaming = false;
+            m.now_ms = 0;
+            m.ended_at = now;
+            if (m.started_at <= 0) m.started_at = now;
+            m.rev = next_msg_rev_++;
+          }
+          break;
+        }
+        s.toast = tr("已停止");
+        s.toast_deadline_ms = now + kToastMs;
+      });
       call_async("session.interrupt", Json{{"sid", sid}},
                  [this, sid](const BackendResult& r) {
-        update([&](AppState& s) { s.suspend_pending = false; });
-        if (!r.ok) toast(tr("取消失败：") + r.message);
+        if (!r.ok) {
+          update([&](AppState& s) { s.stop_pending = false; });
+          toast(tr("取消失败：") + r.message);
+        }
         refresh_loop_state(sid);
       });
     }, "danger");
@@ -9491,6 +9542,7 @@ void UiApp::refresh_loop_state(const std::string& sid) {
     if (!r.ok) return;
     if (seq != loop_state_seq_) return;  // a newer request supersedes this reply
     std::string state = jsonutil::get<std::string>(r.data, "state", "idle");
+    bool compacted = jsonutil::get<bool>(r.data, "compacted", false);
     bool suspended = state == "suspended";
     // A turn is "in flight" for anything except idle/turnDone - and NOT for
     // "suspended": a parked turn is not running, so the primary button has to be
@@ -9501,12 +9553,20 @@ void UiApp::refresh_loop_state(const std::string& sid) {
     if (st_.active_tab != sid) {
       SessionView& v = views_.get_or_create(sid);
       v.suspended = suspended;
+      // Do not resurrect 中止 after the user pressed it: the loop may still be
+      // winding down (tool or socket) while the UI already marked it finished.
+      if (v.stop_pending && running) running = false;
+      if (!running) v.stop_pending = false;
       v.turn_running = running;
+      v.context_compacted = compacted;
       return;
     }
     update([&](AppState& s) {
       s.suspended = suspended;
+      if (s.stop_pending && running) running = false;
+      if (!running) s.stop_pending = false;
       s.turn_running = running;
+      s.context_compacted = compacted;
       // The backend is the authority: a parked/idle loop has no auto round in
       // flight. Clearing here also recovers from a missed turn.done/auto.halted.
       if (!running) s.auto_round = 0;
