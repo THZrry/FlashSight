@@ -32,15 +32,19 @@ class PlanStore {
 
   void set_path_fn(PathFn fn) { path_fn_ = std::move(fn); }
 
-  // {exists, path, status, content, updatedAt}
+  // {exists, path, status, content, updatedAt, seq, turnId, plans:[...]}
   // status: "active" | "done" | "" (no document).
   Json get(const std::string& sid) const;
 
   // Replace the document body. `status` empty = keep the current status.
-  // The machine-readable header is written by the store, so the model never has
-  // to reproduce it (it says "done" through the tool argument instead).
+  // `new_plan` starts the next numbered plan; `turn_id` is recorded in the
+  // header so a plan can be traced to the turn that wrote it.
   FsResult update(const std::string& sid, const std::string& content,
-                  const std::string& status);
+                  const std::string& status, const std::string& turn_id = "",
+                  bool new_plan = false);
+
+  // Ordered plan documents of this session (oldest first).
+  Json list(const std::string& sid) const;
 
   bool del(const std::string& sid);
 

@@ -29,10 +29,11 @@ void register_orchestration_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "plan_update";
     def.description =
-        "写规划文档（.flashsight/plans/<sid>.md）。The plan is ONE markdown "
+        "写规划文档（会话目录 plans/ 下的编号 markdown）。The plan is a markdown "
         "document you own: write the whole task plan into it once (goal, approach, "
         "acceptance), then each round derive the next 任务列表 (todo_add) from it. "
-        "Update the document when the approach changes. When EVERYTHING in it is "
+        "Update the document when the approach changes. Start a NEW task plan with "
+        "new=true (numbered, old plans stay). When EVERYTHING in it is "
         "done, call this with status=\"done\" - an active document is what keeps "
         "auto mode going. content replaces the document; omit it to only change "
         "the status.";
@@ -48,6 +49,11 @@ void register_orchestration_tools(ToolRegistry* registry) {
                         {"description",
                          "active=还在做（默认，会让自动模式继续）；"
                          "done=规划完成（自动模式停止）. active is the default."}})},
+        {"new", obj({{"type", "boolean"},
+                     {"description",
+                      "true=开始下一篇规划（旧文档保留，编号+1）；默认 false. "
+                      "Use true when starting a NEW task plan instead of rewriting "
+                      "the current one."}})},
     });
     def.parameters = params;
     registry->register_tool("plan_update", def,
@@ -61,7 +67,8 @@ void register_orchestration_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "plan_get";
     def.description =
-        "读取规划文档（.flashsight/plans/<sid>.md）. Read the plan document: "
+        "读取当前规划文档（会话目录 plans/ 下编号最大的一篇）. Read the current plan "
+        "document: "
         "{exists, status, content, path}. Re-read it before deciding the next "
         "task list.";
     Json params = Json::object();
@@ -296,6 +303,40 @@ void register_orchestration_tools(ToolRegistry* registry) {
         Json req = args;
         req["op"] = "propose";
         return need(ctx, ctx.workflow_op, req);
+      });
+  }
+  {
+    // Emergency brake for an automatic run. This is deliberately a TOOL the
+    // model must call explicitly, not a normal control: it exists for the case
+    // where continuing would be wrong or impossible (the task cannot proceed,
+    // the plan is contradictory, the user must decide something). Ordinary
+    // uncertainty should be parked in the plan/todo and other work continued.
+    ToolDef def;
+    def.name = "auto_stop";
+    def.description =
+        "强制结束自动续跑（仅当确实无法继续或必须由用户决定时使用，平常不要用）。"
+        "Emergency stop for AUTO mode. Do NOT use it for ordinary uncertainty: put "
+        "the blocked item in the plan/todo and continue other work. Use it only "
+        "when no safe next step exists; the current turn finishes and no further "
+        "auto round starts.";
+    Json params = Json::object();
+    params["type"] = "object";
+    params["properties"] = obj({
+        {"reason", obj({{"type", "string"},
+                        {"description", "为什么必须停止 / why no safe step remains"}})},
+    });
+    params["required"] = Json::array({"reason"});
+    def.parameters = params;
+    registry->register_tool("auto_stop", def,
+      [](const ToolContext& ctx, const Json& args) -> FsResult {
+        if (!ctx.stop_auto) {
+          return FsResult::error(ErrCode::kNotSupported, "auto mode not wired");
+        }
+        FsResult r = ctx.stop_auto();
+        if (!r.ok()) return r;
+        return FsResult::success(
+            Json{{"stopped", true},
+                 {"reason", jsonutil::get<std::string>(args, "reason", "")}});
       });
   }
 }

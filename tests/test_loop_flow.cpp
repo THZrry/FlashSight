@@ -830,6 +830,36 @@ FS_TEST(loop_steering_is_applied_to_the_next_call) {
   EXPECT_TRUE(second.find("also check b.txt") != std::string::npos);
 }
 
+// The model's emergency brake stops further auto rounds after the current turn.
+FS_TEST(loop_auto_stop_brake) {
+  AgentLoop::Options opts;
+  opts.sid = "s_autostop";
+  opts.permission = "full";
+  opts.context.auto_mode = true;
+  opts.max_auto_continues = 5;
+  opts.event = [](const std::string&, const Json&) {};
+  AgentLoop loop(std::move(opts));
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;
+    st.plan = Json{{"exists", true}, {"status", "active"}, {"content", "# plan"}};
+    return st;
+  };
+  int calls = 0;
+  loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out,
+                             const std::function<void(const std::string&)>&) {
+    ++calls;
+    out->text = "still working";
+    return FsResult::success();
+  };
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json::object());
+  };
+  loop.request_auto_stop();
+  ASSERT_TRUE(loop.send("go").ok());
+  EXPECT_EQ(calls, 1);  // no auto round after the brake
+}
+
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------
 FS_TEST(loop_unattended_denies_instead_of_waiting) {
   AgentLoop::Options opts;

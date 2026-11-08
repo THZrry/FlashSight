@@ -1181,6 +1181,7 @@ void UiApp::save_session_view(const std::string& sid) {
   SessionView& v = views_.get_or_create(sid);
   v.messages = st_.messages;
   v.plan_path = st_.plan_path;
+  v.steering_items = st_.steering_items;
   v.session_loaded = st_.session_loaded;
   v.hist_scroll = st_.hist_scroll;
   v.hist_follow = st_.hist_follow;
@@ -1287,6 +1288,7 @@ void UiApp::load_session_view(const std::string& sid) {
   if (v.active_side.empty()) v.active_side = v.side_tabs[0].id;
   st_.messages = v.messages;
   st_.plan_path = v.plan_path;
+  st_.steering_items = v.steering_items;
   st_.session_loaded = v.session_loaded;
   st_.hist_scroll = v.hist_scroll;
   st_.hist_anchor_uid = v.hist_anchor_uid;
@@ -1754,6 +1756,7 @@ void UiApp::load_session(const std::string& sid) {
   // disagrees with the loop's auto-continue decision.
   refresh_session_todos(sid);
   refresh_plan_path(sid);
+  refresh_steering(sid);
   call_async("session.turns", Json{{"sid", sid}, {"before", -1}, {"limit", kHistoryPage}},
              [this, sid](const BackendResult& r) {
     if (!r.ok) return;
@@ -1843,12 +1846,34 @@ void UiApp::load_session(const std::string& sid) {
 // auto-continue asks the HOST for open items, so a checklist the UI only believes
 // is open (a missed todo.updated) would show "清单没清空" while auto mode stops.
 // Sharing this one function between session-open and the pump keeps them in step.
-void UiApp::refresh_plan_path(const std::string& sid) {
+void UiApp::refresh_steering(const std::string& sid) {
   if (!backend_ || sid.empty()) return;
+  call_async("steering.list", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
+    if (!r.ok) return;
+    Json items = r.data.is_array() ? r.data
+                   : (r.data.contains("items") && r.data["items"].is_array()
+                          ? r.data["items"] : Json::array());
+    if (st_.active_tab == sid) {
+      st_.steering_items = items;
+      render();
+    } else {
+      views_.get_or_create(sid).steering_items = items;
+    }
+  }, true);
+}
+
+void UiApp::refresh_plan_path(const std::string& sid) {  if (!backend_ || sid.empty()) return;
   call_async("plan.get", Json{{"sid", sid}}, [this, sid](const BackendResult& r) {
     if (!r.ok) return;
     bool exists = jsonutil::get<bool>(r.data, "exists", false);
-    std::string path = exists ? (".flashsight/plans/" + sid + ".md") : std::string();
+    std::string path;
+    if (exists) {
+      std::string abs = jsonutil::get<std::string>(r.data, "path", "");
+      std::string file = abs;
+      size_t slash = file.find_last_of("\\/");
+      if (slash != std::string::npos) file = file.substr(slash + 1);
+      path = ".flashsight/sessions/" + sid + "/plans/" + file;
+    }
     auto stamp = [&](std::vector<comp::ChatMsg>& msgs) {
       for (size_t i = 0; i < msgs.size(); ++i) {
         if (msgs[i].role != "assistant") continue;
@@ -4307,6 +4332,9 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   } else if (event == "steering.applied") {
     st_.toast = "已把本轮引导带入下一次模型调用";
     st_.toast_deadline_ms = now_ms() + kToastMs;
+    if (!sid.empty()) refresh_steering(sid);
+  } else if (event == "steering.queued") {
+    if (!sid.empty()) refresh_steering(sid);
   } else if (event == "plan.update") {
     // `plan.update` carries the DOCUMENT (path/status/content), not a step tree
     // to draw. Refresh the header link so the plan can be opened from the work
@@ -6527,6 +6555,90 @@ VNodePtr UiApp::build_session() {
       todo.add(row);
     }
     center.add(todo);
+  }
+  // ---- guidance queue (above the composer) --------------------------------
+  // Items are host-owned and editable. "发送" moves an item to the immediate
+  // queue, so the next model call carries it directly; the normal send button
+  // appends here while a turn is running.
+  if (!st_.steering_items.empty()) {
+    H q = el("div", "steer-queue");
+    q.add(el("div", "steer-q-head").text(tr("引导队列 · 下一次调用带上")));
+    for (size_t i = 0; i < st_.steering_items.size(); ++i) {
+      const Json& it = st_.steering_items[i];
+      if (!it.is_object()) continue;
+      int id = static_cast<int>(jsonutil::get_int(it, "id", 0));
+      std::string text = jsonutil::get<std::string>(it, "text", "");
+      std::string kind = jsonutil::get<std::string>(it, "kind", "round-end");
+      H row = el("div", "steer-q-row");
+      if (st_.steering_edit_id == id) {
+        H inp = comp::text_input(st_.steering_edit_text, tr("编辑引导…"),
+                                 [this](const std::string& v) {
+                                   st_.steering_edit_text = v;
+                                 });
+        inp.key("steer-edit:" + itos(id));
+        row.add(inp);
+        H save = el("button", "mini-btn");
+        save.attr("type", "button");
+        save.text(tr("保存"));
+        save.on(EventKind::kClick, [this, id](const std::string&) {
+          std::string sid = active_sid();
+          std::string body = st_.steering_edit_text;
+          call_async("steering.edit", Json{{"sid", sid}, {"id", id}, {"text", body}},
+                     [this, sid](const BackendResult& r) {
+            if (!r.ok) toast(tr("保存引导失败：") + r.message);
+            st_.steering_edit_id = 0;
+            refresh_steering(sid);
+          });
+        });
+        row.add(save);
+        H cancel = el("button", "mini-btn");
+        cancel.attr("type", "button");
+        cancel.text(tr("取消"));
+        cancel.on(EventKind::kClick, [this](const std::string&) {
+          st_.steering_edit_id = 0;
+          render();
+        });
+        row.add(cancel);
+      } else {
+        row.add(el("span", kind == "immediate" ? "steer-q-kind now" : "steer-q-kind")
+                    .text(kind == "immediate" ? tr("立即") : tr("队列")));
+        row.add(el("span", "steer-q-text").text(cut_display(text, 240, "…")));
+        H send = el("button", "mini-btn");
+        send.attr("type", "button");
+        send.text(tr("发送"));
+        send.on(EventKind::kClick, [this, id, text](const std::string&) {
+          std::string sid = active_sid();
+          call_async("steering.erase", Json{{"sid", sid}, {"id", id}},
+                     [this, sid, text](const BackendResult& r) {
+            if (!r.ok) return;
+            call_async("steering.push",
+                       Json{{"sid", sid}, {"kind", "immediate"}, {"text", text}},
+                       [this, sid](const BackendResult&) { refresh_steering(sid); }, true);
+          }, true);
+        });
+        H edit = el("button", "mini-btn");
+        edit.attr("type", "button");
+        edit.text(tr("编辑"));
+        edit.on(EventKind::kClick, [this, id, text](const std::string&) {
+          st_.steering_edit_id = id;
+          st_.steering_edit_text = text;
+          render();
+        });
+        H del = el("button", "mini-btn");
+        del.attr("type", "button");
+        del.text(tr("删除"));
+        del.on(EventKind::kClick, [this, id](const std::string&) {
+          std::string sid = active_sid();
+          call_async("steering.erase", Json{{"sid", sid}, {"id", id}},
+                     [this, sid](const BackendResult&) { refresh_steering(sid); }, true);
+        });
+        row.add(send);
+        row.add(edit);
+        row.add(del);
+      }
+      q.add(row);
+    }
+    center.add(q);
   }
   // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");

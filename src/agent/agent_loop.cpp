@@ -160,13 +160,19 @@ FsResult AgentLoop::append(const std::string& text) {
 // the UI was the bug: the old turn stayed open, its tools reported into the new
 // turn, and a page switch showed the wrong live transcript.
 bool AgentLoop::apply_steering(Json* messages) {
-  if (!messages || steering_queue_.empty()) return false;
+  if (!messages) return false;
   std::string combined;
-  for (size_t i = 0; i < steering_queue_.size(); ++i) {
-    if (!combined.empty()) combined += "\n";
-    combined += steering_queue_[i];
+  if (drain_steering) {
+    combined = drain_steering();
+  } else {
+    if (steering_queue_.empty()) return false;
+    for (size_t i = 0; i < steering_queue_.size(); ++i) {
+      if (!combined.empty()) combined += "\n";
+      combined += steering_queue_[i];
+    }
+    steering_queue_.clear();
   }
-  steering_queue_.clear();
+  if (combined.empty()) return false;
   messages->push_back(Json{{"role", "user"},
                            {"content", AgentContext::wrap_user_turn(
                                            runtime_block(), combined)}});
@@ -1021,6 +1027,9 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     live_started_ms_ = turn_started_ms_;
   }
   ModelCallResult result;
+  // Guidance queued before this turn (or while it was starting) rides on the
+  // first model call too.
+  apply_steering(&messages);
   FsResult r = call_model_once(messages, tools, &result);
   // 中止 during the reply: the transfer was aborted on purpose, so this is a
   // PARK, not a failure. Keep what the model already said as context (otherwise
@@ -1369,6 +1378,17 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     }
   } else if (turn_had_tools) {
     empty_auto_streak_ = 0;
+  }
+
+  // The model's emergency brake. It is consumed once: the current turn finishes
+  // normally, but no further auto round starts. Ordinary uncertainty must be
+  // parked in plan/todo instead of calling this.
+  if (auto_stop_requested_.exchange(false)) {
+    auto_continue = false;
+    emit("auto.halted", Json{{"sid", opts_.sid},
+                             {"reason", zh ? "模型请求强制停止自动轮"
+                                           : "model requested auto stop"},
+                             {"rounds", auto_continues_}});
   }
 
   // ---- auto mode: continue while the plan is still open ----

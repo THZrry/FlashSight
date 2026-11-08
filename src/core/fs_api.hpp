@@ -302,6 +302,9 @@ class FsApi {
   FsResult steering_push(const std::string& sid, const std::string& kind,
                          const std::string& text);
   FsResult steering_list(const std::string& sid);
+  FsResult steering_edit(const std::string& sid, int id, const std::string& text);
+  FsResult steering_erase(const std::string& sid, int id);
+  FsResult steering_reorder(const std::string& sid, const std::vector<int>& order);
   FsResult provider_list_providers();
   FsResult provider_add_provider(const Json& conn);
   FsResult provider_remove_provider(const std::string& providerId);

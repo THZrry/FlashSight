@@ -1654,3 +1654,15 @@ The process of project: P0 环境搭建
   - **规划直开**：`plan.get` 在打开会话/plan.update 时读取；工作记录头增加“规划”按钮，点击用 `open_file_preview(".flashsight/plans/<sid>.md")` 直接打开文档。
   - **todo 规则**：全局规则从“3 步以上才建”改成“需要动手或超过一次工具调用就建，尽量让清单一直存在”；运行时块每轮在清单为空时追加提醒，纯问答才可跳过。
   - **测试/构建**：459 用例 4300 断言全过；web / webview / whaleui 三变体编译通过。
+
+
+<125>(FIXED/AUDIT): 自动轮“拿不准就换活”/auto_stop、auto 关闭即时生效、引导队列 UI、多规划文档、provider 路由、xmake 独立开关与 build_all。
+  - **自动轮不让一个未知点停掉整轮**：全局规则新增“拿不准/被阻塞的步骤写进 plan/todo，先做不依赖它的工作；只有确实没有安全下一步才用 auto_stop”。运行时规则每轮也提醒建 todo。新增 `auto_stop` 工具（模型调用，非平常使用）：只结束后续自动续跑，当前回合正常收尾；subagent 工具集不暴露它。`empty_auto_streak`（连续 2 个无工具自动轮停止）继续作为兜底。
+  - **关掉自动却继续**：`session.setAutoMode` 以前只写 sessionSettings，没有更新已经存在的 AgentLoop；现在同步 `AgentHost::set_session_auto_mode`，运行中的回合结束时会看到关闭状态。
+  - **引导队列 UI**：发送在一轮运行时进入 host 的 `SteeringQueue`，不再产生新气泡；输入框上方显示队列，条目可“发送”（转 immediate，下次调用直接带上）、编辑、删除；后端 loop 在每次模型调用前 drain immediate+round-end，host queue 与 UI 共用同一份数据。`session.append` 现在写 host queue；guidance 仍持久化并在历史重放中作为 user 消息。
+  - **多规划文档**：规划改成会话目录 `sessions/<sid>/plans/plan-NNN.md`，头部记录 `status`、`seq`、`turn`（当前轮开始时间）；`plan_update(new=true)` 开下一篇，旧文档保留；`plan_get` 读编号最大的一篇并返回 `plans` 列表。当前同一篇可继续 status/content 更新；reject 会清掉该会话全部规划。工作记录头“规划”按钮打开当前篇。
+  - **provider 503**：标题生成请求带 session provider（摘要模型显式覆盖才按名字解析）；subagent 继承 `ContextInput.provider`，不再让标题/子代理按名称落到 HappyAPI 的 selfdeploy 模型。
+  - **WhaleJS 卡住**：日志显示该会话 live snapshot `running=true`、`auto_round=3`、13 个工具，provider 是 A6API；usage 里实际 prompt ~180k、cache ~179k，不是低上下文。当前可复现线索不足（可能是 API 长等待/终端工具），但本次已把前台 terminal 超时改成真正 kill、自动轮兜底和 markdown 死循环修好；需要新构建复测。
+  - **上下文审计**：usage 行显示 in≈180,892 / cache≈179,456（A6/deepseek-v4.1-flash），说明实际发送并未“异常少”；水位低是因为窗口大（1M 量级），不是提前压缩。历史重放只过滤空自动轮，真实 user/assistant/tool 内容仍保留；新增 `empty_auto_rounds_are_not_replayed` 和 first-short-view 持久化用例。
+  - **xmake**：新增 `--web/--webview/--whaleui` 独立开关；单变体仍由 `--variant` 选择（一个 target 不能同时链接两个 host），多选编译用 `scripts/build_all.py`（项目级 xmake.lua 不能注册 task，之前的 `xmake build-all` 已移除）；文档更新。
+  - **测试/构建**：460 用例 4313 断言全过；web / webview / whaleui 三变体编译通过。

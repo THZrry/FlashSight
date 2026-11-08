@@ -65,6 +65,9 @@ struct ToolContext {
   std::function<FsResult(const Json&, Json*)> plan_op;
   // 定时/事件唤醒（WakeScheduler）：{op:"schedule"|"cancel"|"list", delayMs, note}
   std::function<FsResult(const Json&, Json*)> wake_op;
+  // Emergency auto-mode brake: the model calls auto_stop only when no safe next
+  // step exists. Empty = not wired (tests/subagents without a loop).
+  std::function<FsResult()> stop_auto;
   // 子代理：{op:"spawn"|"list"|"cancel"|"steer", ...}
   std::function<FsResult(const Json&, Json*)> subagent_op;
   // 工作流：{op:"start"|"list"|"get", ...}

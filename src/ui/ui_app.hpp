@@ -241,6 +241,10 @@ struct AppState {
   // Plan document of this session, project-relative ("" = none). Shown as a
   // direct link in the work-log header.
   std::string plan_path;
+  // Host-owned guidance queue shown above the composer while a turn runs.
+  Json steering_items = Json::array();
+  int steering_edit_id = 0;
+  std::string steering_edit_text;
   // Paging: a session can hold hundreds of turns, so only the newest
   // `kHistoryPage` are loaded initially. Scrolling to the top asks for the
   // previous page; those turns are then FROZEN (one rev each, never re-parsed).
@@ -817,6 +821,10 @@ struct SessionView {
   // Plan document of this session, project-relative ("" = none). Shown as a
   // direct link in the work-log header.
   std::string plan_path;
+  // Host-owned guidance queue shown above the composer while a turn runs.
+  Json steering_items = Json::array();
+  int steering_edit_id = 0;
+  std::string steering_edit_text;
   bool session_loaded = false;
   int history_total = 0;
   // Absolute index (into the stored turn array) of the OLDEST loaded turn. This
@@ -1073,6 +1081,8 @@ class UiApp {
   // Load the session's plan document path and put a direct "规划" link on every
   // work-log header.
   void refresh_plan_path(const std::string& sid);
+  // Refresh the host guidance queue displayed above the composer.
+  void refresh_steering(const std::string& sid);
   // Replies to session.loopState arrive asynchronously and can be OLDER than an
   // event that already changed the state (a `loop.interrupted` that cleared
   // 中止). Only the reply to the LATEST request is applied.

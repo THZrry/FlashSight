@@ -65,7 +65,10 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     // only FsApi knows which project a session belongs to.
     SessionManager* sm = sessions_.get();
     plans_->set_path_fn([sm](const std::string& sid) {
-      return sm->project_store_of(sid).plan_file(sid);
+      // Plans live WITH the session (multiple, numbered), not in one
+      // project-wide file per sid. current.md is only the base path; PlanStore
+      // writes plan-001.md, plan-002.md, ... next to it.
+      return sm->project_store_of(sid).session_dir(sid) / "plans" / "current.md";
     });
   }
   workflows_.reset(new WorkflowStore(clock_));
@@ -417,10 +420,13 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     return sum.has_last ? sum.last.in : 0;
   };
   deps.plan_update = [plans2](const std::string& sid, const Json& plan) -> FsResult {
-    // The document is written to disk; `plan` carries {content, status}.
+    // The document is written to disk; `plan` carries
+    // {content, status, turnId, newPlan}.
     std::string content = jsonutil::get<std::string>(plan, "content", "");
     std::string status = jsonutil::get<std::string>(plan, "status", "");
-    return plans2->update(sid, content, status);
+    std::string turn_id = jsonutil::get<std::string>(plan, "turnId", "");
+    bool new_plan = jsonutil::get<bool>(plan, "newPlan", false);
+    return plans2->update(sid, content, status, turn_id, new_plan);
   };
   // The task list lives with the session (todos.json), not only in the host's
   // memory: reopening a session - or the app - must start from the checklist the
@@ -1406,7 +1412,10 @@ FsResult FsApi::session_request_permission_token(const std::string& sid,
       Json{{"token", sessions_->request_permission_change_token(sid, newPerm)}});
 }
 FsResult FsApi::session_set_auto_mode(const std::string& sid, bool autoMode) {
-  return sessions_->set_auto_mode(sid, autoMode);
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  FsResult r = sessions_->set_auto_mode(sid, autoMode);
+  if (r.ok() && agent_host_) agent_host_->set_session_auto_mode(sid, autoMode);
+  return r;
 }
 FsResult FsApi::session_set_enter_send(const std::string& sid, const std::string& enterSend) {
   return sessions_->set_enter_send(sid, enterSend);
@@ -1739,6 +1748,15 @@ FsResult FsApi::steering_push(const std::string& sid, const std::string& kind,
 
 FsResult FsApi::steering_list(const std::string& sid) {
   return agent_host_->steering_list(sid);
+}
+FsResult FsApi::steering_edit(const std::string& sid, int id, const std::string& text) {
+  return agent_host_->steering_edit(sid, id, text);
+}
+FsResult FsApi::steering_erase(const std::string& sid, int id) {
+  return agent_host_->steering_erase(sid, id);
+}
+FsResult FsApi::steering_reorder(const std::string& sid, const std::vector<int>& order) {
+  return agent_host_->steering_reorder(sid, order);
 }
 
 // ----- skill.*（addon2：中英双语 skill，按需加载）-----
@@ -2961,11 +2979,11 @@ FsResult FsApi::plan_get(const std::string& sid) {
   return FsResult::success(plans_->get(sid));
 }
 FsResult FsApi::plan_update(const std::string& sid, const Json& planTree) {
-  // API-compatible shape: {content, status}. The response is the stored document
-  // ({exists, path, status, content, updatedAt}).
   std::string content = jsonutil::get<std::string>(planTree, "content", "");
   std::string status = jsonutil::get<std::string>(planTree, "status", "");
-  return plans_->update(sid, content, status);
+  std::string turn_id = jsonutil::get<std::string>(planTree, "turnId", "");
+  bool new_plan = jsonutil::get<bool>(planTree, "newPlan", false);
+  return plans_->update(sid, content, status, turn_id, new_plan);
 }
 
 // addon2 长任务-计划：评审（approve/reject/revise + 评价建议）

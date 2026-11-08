@@ -126,6 +126,9 @@ class AgentHost {
   // by name); two providers can serve the same model id.
   void set_session_model(const std::string& sid, const std::string& model,
                          const std::string& provider = "");
+  // Turning auto mode off must affect the RUNNING loop immediately; writing only
+  // sessionSettings left a turn that was already in flight auto-continuing.
+  void set_session_auto_mode(const std::string& sid, bool on);
   // 子代理引导（addon2：子代理无轮概念，只需当前引导）
   FsResult subagent_steer(const std::string& id, const std::string& text);
   // 批准/拒绝（approve 档权限门）

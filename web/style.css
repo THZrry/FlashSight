@@ -2274,6 +2274,37 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .term-dot.running { color: var(--ok); }
 .term-name { font-family: var(--mono); }
 
+/* ============================ guidance queue ============================ */
+.steer-queue {
+  flex: none;
+  margin: 0 32px 6px;
+  max-width: calc(100% - 64px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.steer-q-head { color: var(--text-dim); padding: 2px 0 4px; }
+.steer-q-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border-top: 1px solid var(--border);
+}
+.steer-q-kind {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-dim);
+}
+.steer-q-kind.now { color: var(--accent); }
+.steer-q-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.steer-q-row .text-input { flex: 1; }
+
 /* ============================ composer ============================ */
 .composer {
   flex: none;

@@ -374,6 +374,22 @@ UiApi::UiApi(FsApi* api) : api_(api) {
     return api->steering_push(s(a, "sid"), s(a, "kind"), s(a, "text"));
   });
   reg("steering.list", [api](const Json& a) { return api->steering_list(s(a, "sid")); });
+  reg("steering.edit", [api](const Json& a) {
+    return api->steering_edit(s(a, "sid"), static_cast<int>(i(a, "id", 0)),
+                              s(a, "text"));
+  });
+  reg("steering.erase", [api](const Json& a) {
+    return api->steering_erase(s(a, "sid"), static_cast<int>(i(a, "id", 0)));
+  });
+  reg("steering.reorder", [api](const Json& a) {
+    std::vector<int> order;
+    if (a.contains("order") && a["order"].is_array()) {
+      for (auto& v : a["order"]) {
+        if (v.is_number()) order.push_back(static_cast<int>(v.get<int64_t>()));
+      }
+    }
+    return api->steering_reorder(s(a, "sid"), order);
+  });
   // Continue a FINISHED subagent with more work (same id, same context).
   reg("subagent.followUp", [api](const Json& a) {
     return api->subagent_follow_up(s(a, "id"), s(a, "text"));

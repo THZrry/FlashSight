@@ -324,6 +324,21 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
   loop->compaction_save = [this](const std::string& s, const Json& state) {
     if (deps_.compaction_save) deps_.compaction_save(s, state);
   };
+  // Guidance is HOST-owned so the UI can list/edit/delete it. The loop drains
+  // it before the next model call; immediate items go first.
+  std::string steer_sid = sid;
+  loop->drain_steering = [this, steer_sid]() -> std::string {
+    std::lock_guard<std::recursive_mutex> host_lock(lock());
+    SteeringQueue& q = steering_[steer_sid];
+    std::string out = q.drain_immediate('\n');
+    std::vector<SteeringItem> round = q.round_end_items();
+    for (size_t i = 0; i < round.size(); ++i) {
+      if (!out.empty()) out += "\n";
+      out += round[i].text;
+    }
+    q.clear_kind(SteeringKind::kRoundEnd);
+    return out;
+  };
   loop->persist_turn = [this, hist_sid](const Json& turn) {
     persist_turn(hist_sid, turn);
     // Title upkeep runs after a turn lands: the placeholder appears on the first
@@ -511,6 +526,15 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
     if (r.ok() && out) *out = r.data;
     return r;
   };
+  ctx.stop_auto = [this, sid]() -> FsResult {
+    std::lock_guard<std::recursive_mutex> host_lock(lock());
+    auto it = loops_.find(sid);
+    if (it == loops_.end() || !it->second) {
+      return FsResult::error(ErrCode::kNotFound, "no running loop for session");
+    }
+    it->second->request_auto_stop();
+    return FsResult::success();
+  };
   // 终端/网络回调由 FsApi 注入（reproc / NetClient）
   // 终端回调包一层：注入会话 sid（注册表按会话归属终端；工具层不感知）
   ctx.terminal_spawn = [this, sid](const Json& a, Json* out) -> FsResult {
@@ -564,6 +588,14 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
       Json plan = Json::object();
       plan["content"] = jsonutil::get<std::string>(args, "content", "");
       plan["status"] = jsonutil::get<std::string>(args, "status", "");
+      plan["newPlan"] = jsonutil::get<bool>(args, "new", false);
+      {
+        std::lock_guard<std::recursive_mutex> host_lock(lock());
+        auto it = loops_.find(sid);
+        if (it != loops_.end() && it->second) {
+          plan["turnId"] = std::to_string(it->second->current_turn_started_ms());
+        }
+      }
       FsResult r = deps_.plan_update(sid, plan);
       if (r.ok()) emit("plan.update", Json{{"sid", sid}, {"plan", r.data}});
       if (out) *out = r.data;
@@ -897,9 +929,8 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
 }
 
 FsResult AgentHost::append(const std::string& sid, const std::string& text) {
-  std::lock_guard<std::recursive_mutex> host_lock(lock());
-  AgentLoop& loop = loop_for(sid, false);
-  return loop.append(text);
+  // Host-owned queue: the UI lists/edits/deletes the same items.
+  return steering_push(sid, "round-end", text);
 }
 
 // addon2 任务健壮性：打断后续接（给原任务发引导，从断点续跑）
@@ -929,6 +960,12 @@ void AgentHost::set_session_model(const std::string& sid, const std::string& mod
     it->second->set_model(model);
     it->second->set_provider(provider);
   }
+}
+
+void AgentHost::set_session_auto_mode(const std::string& sid, bool on) {
+  std::lock_guard<std::recursive_mutex> host_lock(lock());
+  auto it = loops_.find(sid);
+  if (it != loops_.end() && it->second) it->second->set_auto_mode(on);
 }
 
 // addon2：子代理引导（子代理没有轮的概念，只需当前引导）
@@ -1146,6 +1183,7 @@ FsResult AgentHost::run_subagent(const Json& req, const ContextInput& seed, Json
   ctx.allow_ask = false;
   ctx.allow_workflow = false;  // no nested pipelines
   ctx.disabled_tools.push_back("ask");
+  ctx.disabled_tools.push_back("auto_stop");  // only the parent may stop auto
   ctx.model = model.empty() ? seed.model : model;
   if (ctx.cwd.empty()) ctx.cwd = seed.cwd;
 
@@ -1155,6 +1193,7 @@ FsResult AgentHost::run_subagent(const Json& req, const ContextInput& seed, Json
     std::string n = jsonutil::get<std::string>(t, "name", "");
     if (read_only && !read_only_tool(n)) continue;
     if (n == "ask") continue;
+    if (n == "auto_stop") continue;  // parent-level brake only
     tools.push_back(t);
   }
   ctx.tools = tools;

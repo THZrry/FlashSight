@@ -297,6 +297,18 @@ FS_TEST(addon2_plan_review) {
   again["status"] = "active";
   EXPECT_TRUE(api.plan_update(sid, again).ok());
 
+  // A second task plan is a NEW numbered document; the old one stays on disk.
+  Json next_plan = Json::object();
+  next_plan["content"] = "# second task\n\n- c\n";
+  next_plan["status"] = "active";
+  next_plan["newPlan"] = true;
+  FsResult np = api.plan_update(sid, next_plan);
+  ASSERT_TRUE(np.ok());
+  EXPECT_EQ(jsonutil::get_int(np.data, "seq", 0), int64_t(2));
+  EXPECT_TRUE(np.data.contains("plans") && np.data["plans"].size() >= 2);
+  EXPECT_TRUE(ghc::filesystem::exists(
+      ghc::filesystem::path(np.data["path"].get<std::string>())));
+
   // revise：保留计划并附 review 评价
   FsResult rv = api.plan_review(sid, "revise", "add a test step please");
   ASSERT_TRUE(rv.ok());

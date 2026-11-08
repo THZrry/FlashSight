@@ -158,9 +158,15 @@ class AgentLoop {
   // 用户点"压缩"/UI 提示时置位：下一轮构建 history 时强制压缩一次。
   void request_compress() { compress_requested_.store(true); }
   bool compress_requested() const { return compress_requested_.load(); }
+  // Model-called emergency brake (auto_stop): finish this turn, then do not
+  // start another auto round. Ordinary uncertainty belongs in plan/todo.
+  void request_auto_stop() { auto_stop_requested_.store(true); }
   // 上一次请求的 prompt tokens（水位），由 Host 持久化到用量后回灌。
   void set_last_prompt_tokens(int64_t t) { last_in_tokens_ = t; }
   int64_t last_prompt_tokens() const { return last_in_tokens_; }
+  // Start time of the turn in flight (0 = no turn). Used to tag the plan
+  // document with the turn that wrote it.
+  int64_t current_turn_started_ms() const { return turn_started_ms_; }
 
   // send：用户输入（含引导队列合并），进入 planning
   FsResult send(const std::string& text);
@@ -228,6 +234,10 @@ class AgentLoop {
   // instead of replaying a transcript that no longer fits the window.
   std::function<Json(const std::string& sid)> compaction_load;
   std::function<void(const std::string& sid, const Json& state)> compaction_save;
+  // Host-owned guidance queue. The host can list/edit/delete these items; the
+  // loop drains them before the next model call. Empty = use the internal queue
+  // (unit tests / direct AgentLoop users).
+  std::function<std::string()> drain_steering;
   // 落库一轮
   std::function<void(const Json&)> persist_turn;
   // Write the IN-FLIGHT turn to disk (a crash-safe snapshot), called every couple
@@ -251,6 +261,7 @@ class AgentLoop {
   // data race, and it is the one place a torn value would actually show.
   std::atomic<LoopState> state_{LoopState::kIdle};
   std::atomic<bool> suspend_requested_{false};
+  std::atomic<bool> auto_stop_requested_{false};
   // Hard stop (中止): aborts the streaming reply itself. Kept apart from
   // suspend_requested_ so 挂起 can mean "finish this round, then wait".
   std::atomic<bool> abort_requested_{false};

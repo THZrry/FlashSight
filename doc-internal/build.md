@@ -15,23 +15,27 @@
 （emcc，产物被 `fs_ui` 的 `before_build` 打包进 `ui_assets_gen.hpp`）；
 Webview 变体另有 `webview_host`。
 
-## 2.1 三个 UI 变体（一个单值选项，没有外部脚本）
+## 2.1 三个 UI 变体（独立开关 + build_all.py）
 
 ```sh
-xmake f --variant=web      -y --toolchain=mingw && xmake b   # 默认
+xmake f --variant=web      -y --toolchain=mingw && xmake b   # 默认，单变体
 xmake f --variant=webview  -y --toolchain=mingw && xmake b
 xmake f --variant=whaleui  -y --toolchain=mingw && xmake b
-xmake f --variant=web      -y --toolchain=mingw && xmake b && build/windows/x64/release/fs_tests.exe
+# 一次编译多个：xmake.lua 里另有 --web/--webview/--whaleui 三个独立开关，
+# 由脚本按开关逐个 configure/build（xmake 的项目级 xmake.lua 不能注册 task）：
+python scripts/build_all.py --web --webview -- --toolchain=mingw --mingw="C:/Program Files/mingw64"
 ```
+
+`--variant` 仍然只负责**单变体**的 target 图：web 可执行文件和 WebView 窗口是不同
+二进制，一个 xmake target 不能同时链接两个 host。`build_all.py` 用同一个输出目录
+逐个构建，产物名带变体，互不覆盖；不带参数时默认 web+webview。
 
 产物都在同一个输出目录，**文件名带变体**：
 `flashsight-web[.exe]` / `flashsight-webview[.exe]` / `flashsight-whaleui[.exe]`。
 
-为什么不是两个布尔开关（`--webview` / `--whaleui`）：布尔值会一起留在
-`.xmake` 缓存里，`xmake f --whaleui=y` 并不会清掉 `--webview`，于是"选了
-WhaleUI 却出来 Web 包"。单值选项不可能自相矛盾。之前还有一个 `build.bat`
-在外面切输出目录，那是多余的一层——xmake 里就能表达，而且脚本自己会和缓存
-配置漂移。
+单变体构建仍然用 `--variant`；多选编译由 `scripts/build_all.py` 读取三个独立
+开关并按变体逐个 configure/build。脚本不会把多个 host 混进一个 target，也不会
+让缓存的旧开关决定另一个变体的产物。
 
 为什么切变体只重编几个文件：变体宏（`FS_UI_WHALEUI` / `FS_UI_WEBVIEW`）
 **不再项目级 `add_defines`**，而是只加在真正分叉的目标上：

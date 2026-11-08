@@ -96,7 +96,27 @@ option("variant")
     set_default("web")
     set_values("web", "webview", "whaleui")
     set_showmenu(true)
-    set_description("UI host: web (browser + local server) | webview | whaleui")
+    set_description("UI host for a PLAIN `xmake` build; see --web/--webview/--whaleui + `xmake build-all`")
+option_end()
+
+-- Independent compile switches. `variant` still selects the one host a single
+-- target graph can link (a web exe and a native WebView exe are different
+-- binaries), but these decide which variants `xmake build-all` compiles, and
+-- they are visible in `xmake f` without a three-way choice.
+option("web")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Build the Web variant in `xmake build-all`")
+option_end()
+option("webview")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Build the WebView variant in `xmake build-all`")
+option_end()
+option("whaleui")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build the WhaleUI variant in `xmake build-all`")
 option_end()
 
 -- path to a WhaleUI build (the directory holding libwhaleui-*.a); only used with
@@ -171,8 +191,7 @@ end
 -- The variant used to be a PROJECT-WIDE add_defines(). A global define is part
 -- of every translation unit's command line, so switching variants invalidated
 -- every object and `xmake f --variant=whaleui && xmake b` recompiled the whole
--- world - the user's complaint was exactly this ("其实把 main 提出来只需要重编
--- 译一个文件才对").
+-- world - the user's complaint was exactly this ("鍏跺疄鎶?main 鎻愬嚭鏉ュ彧闇€瑕侀噸缂?-- 璇戜竴涓枃浠舵墠瀵?).
 --
 -- Now the macro is defined only on the targets that contain branching files:
 --
@@ -967,3 +986,7 @@ target("fs_tests")
     mbedtls_link()
 
 end  -- not wasm
+
+-- Build every enabled variant in ONE command: see scripts/build_all.py.
+-- (xmake only registers tasks from its plugin directories, not from a project
+-- xmake.lua, so this lives in a script rather than an `xmake build-all` task.)
