@@ -41,12 +41,12 @@ void register_term_tools(ToolRegistry* registry) {
   {
     ToolDef def;
     def.name = "terminal_exec";
-    def.description = "前台执行命令（高风险；timeoutMs 到时直接终止并返回 timedOut）";
+    def.description = "前台执行命令（高风险；timeoutMs 到时直接终止并返回 timedOut；0=默认60s，上限10min）";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
     props["command"] = Json{{"type", "string"}, {"description", "要执行的命令"}};
-    props["timeoutMs"] = Json{{"type", "integer"}, {"description", "超时毫秒（默认60000）"}};
+    props["timeoutMs"] = Json{{"type", "integer"}, {"description", "超时毫秒（0=默认60s，最大10min）"}};
     props["shell"] = Json{{"type", "string"}, {"description", "shell（空=自动）"}};
     params["properties"] = props;
     params["required"] = Json::array({"command"});

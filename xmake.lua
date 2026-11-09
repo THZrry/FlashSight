@@ -959,6 +959,5 @@ target("fs_tests")
 
 end  -- not wasm
 
--- Build every enabled variant in ONE command: see scripts/build_all.py.
--- (xmake only registers tasks from its plugin directories, not from a project
--- xmake.lua, so this lives in a script rather than an `xmake build-all` task.)
+-- Build every target in ONE command:
+--   xmake b flashsight-web flashsight-webview flashsight-whaleui

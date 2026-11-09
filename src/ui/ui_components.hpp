@@ -147,6 +147,17 @@ H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
 void tool_block_cache_clear();
 
 struct ChatMsg {
+  // One reasoning segment. `after` is the number of tool calls already executed
+  // when it started, so the work log can interleave thinking and tools in
+  // ARRIVAL order (notes <96>). `open` is user/auto fold state; reasoning is
+  // auto-folded when the segment ends.
+  struct ThinkBlock {
+    std::string text;
+    size_t after = 0;
+    bool open = true;
+    bool streaming = false;
+    uint64_t rev = 0;
+  };
   std::string role;      // "user" | "assistant" | "system"
   std::string text;
   std::string time;      // small, hover-revealed
@@ -156,6 +167,9 @@ struct ChatMsg {
   // answer, and it is long enough to bury the answer if shown open.
   std::string thinking;
   bool thinking_open = false;
+  // Reasoning segments in arrival order; rendered in the same stream as tools
+  // and interim notes. Empty => legacy `thinking` (one block at the end).
+  std::vector<ThinkBlock> thoughts;
   std::vector<ToolBlock> tools;  // flow blocks rendered after the text
   // Between-tools narration of the turn, in order. It is NOT the answer - it is
   // the model thinking out loud while it works - so it belongs in the work log and

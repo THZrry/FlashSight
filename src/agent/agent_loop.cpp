@@ -385,6 +385,19 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
     {
       std::lock_guard<std::mutex> lk(live_mu_);
       live_thinking_ += piece;
+      size_t after = executed_calls_.is_array() ? executed_calls_.size() : 0;
+      if (!live_thoughts_.empty() && live_thoughts_.back().is_object() &&
+          jsonutil::get_int(live_thoughts_.back(), "after", -1) ==
+              static_cast<int64_t>(after) &&
+          jsonutil::get<bool>(live_thoughts_.back(), "streaming", false)) {
+        live_thoughts_.back()["text"] =
+            jsonutil::get<std::string>(live_thoughts_.back(), "text", "") + piece;
+      } else {
+        live_thoughts_.push_back(Json{{"text", piece},
+                                      {"after", static_cast<int64_t>(after)},
+                                      {"open", true},
+                                      {"streaming", true}});
+      }
     }
     emit("thinking.delta", Json{{"text", piece}, {"sid", opts_.sid}});
     maybe_persist_live();
@@ -444,6 +457,16 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
 // tool group: execute every call of one assistant reply, in order
 // ---------------------------------------------------------------------------
 FsResult AgentLoop::run_tool_group(const Json& calls, Json* messages) {
+  {
+    // Reasoning ended when the model started calling tools: close (auto-fold)
+    // every open thinking segment so the work log and the live snapshot agree.
+    std::lock_guard<std::mutex> lk(live_mu_);
+    for (auto& t : live_thoughts_) {
+      if (!t.is_object()) continue;
+      t["open"] = false;
+      t["streaming"] = false;
+    }
+  }
   for (size_t i = 0; i < calls.size(); ++i) {
     Json call = calls[i];
     if (!call.is_object()) continue;
@@ -856,6 +879,7 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
   ctx.permission = opts_.permission;
   ctx.approved = true;  // 到达这里说明已放行（或不需要批准）
   ctx.thinking_lang = opts_.thinking_lang;
+  ctx.cancel = [this]() { return abort_requested_.load(); };
   ctx.emit = [this](const std::string& e, const Json& p) { emit(e, p); };
 
   emit("tool.start", Json{{"sid", opts_.sid}, {"name", name}, {"args", args},
@@ -1212,6 +1236,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     live_running_ = true;
     live_text_.clear();
     live_thinking_.clear();
+    live_thoughts_ = Json::array();
     live_interim_ = Json::array();
     live_interim_after_.clear();
     live_tools_ = Json::array();
@@ -1482,6 +1507,18 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   asst_turn["role"] = "assistant";
   asst_turn["streamSummary"] = result.text;
   if (!result.thinking.empty()) asst_turn["thinking"] = result.thinking;
+  {
+    std::lock_guard<std::mutex> lk(live_mu_);
+    if (!live_thoughts_.empty()) {
+      Json thoughts = live_thoughts_;
+      for (auto& t : thoughts) {
+        if (!t.is_object()) continue;
+        t["open"] = false;
+        t["streaming"] = false;
+      }
+      asst_turn["thoughts"] = thoughts;
+    }
+  }
   asst_turn["toolCalls"] = executed_calls_;
   // The between-tools narration: kept with the turn so the work log can render it
   // after a reload. Without it the model's own commentary on what it was doing
@@ -1534,6 +1571,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     live_running_ = false;
     live_text_.clear();
     live_thinking_.clear();
+    live_thoughts_ = Json::array();
     live_interim_ = Json::array();
     live_interim_after_.clear();
     live_tools_ = Json::array();
@@ -1756,6 +1794,7 @@ Json AgentLoop::live_state() const {
   j["running"] = live_running_;
   j["text"] = live_text_;
   j["thinking"] = live_thinking_;
+  j["thoughts"] = live_thoughts_;
   j["startedAt"] = live_started_ms_;
   j["autoRound"] = current_auto_round_.load();
   j["tools"] = live_tools_;

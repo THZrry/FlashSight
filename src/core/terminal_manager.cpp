@@ -173,7 +173,8 @@ void TerminalManager::drain(Proc& p) {
   }
 }
 
-FsResult TerminalManager::spawn(const Json& args, Json* out) {
+FsResult TerminalManager::spawn(const Json& args, Json* out,
+                                const std::function<bool()>& cancel) {
   // A foreground command waits HERE for its whole run, so mu_ must not be held
   // across that wait: it is the manager-wide lock shared by tick(), every other
   // terminal's spawn/poll/kill, and (through tick) the wake scheduler. A
@@ -193,6 +194,15 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
   std::string encoding = jsonutil::get<std::string>(args, "encoding", "");
   std::string label = jsonutil::get<std::string>(args, "label", "");
   int64_t timeout_ms = jsonutil::get_int(args, "timeoutMs", 60000);
+  // A foreground tool call blocks the whole turn. `timeoutMs: 0` means
+  // "unlimited" for a BACKGROUND job, but must never mean an unbounded
+  // foreground wait: a hung test binary held WhaleJS for hours. Neither can a
+  // huge model-supplied value: cap foreground commands at 10 minutes.
+  if (!background && !interactive) {
+    if (timeout_ms <= 0) timeout_ms = 60000;
+    const int64_t kFgMaxMs = 10LL * 60 * 1000;
+    if (timeout_ms > kFgMaxMs) timeout_ms = kFgMaxMs;
+  }
 
   // shell 解析：显式指定 > 探测最优（cmd 兜底）
   ShellInfo sh = ShellDetector::resolve(shell_name, ShellDetector::detect_all());
@@ -297,12 +307,28 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
     Proc& pr = *procs_[tid];
     pr.fg_wait = true;
     reproc_t* handle = pr.h;
-    int wait_ms = static_cast<int>(timeout_ms > 0 ? timeout_ms : REPROC_INFINITE);
+    int wait_ms = static_cast<int>(timeout_ms > 0 ? timeout_ms : 60000);
     // Release the manager lock for the wait. tick() keeps draining output for
     // the live panel (and skips exit detection while fg_wait is set); other
     // sessions can spawn their own terminals in parallel.
     lk.unlock();
-    int w = reproc_wait(handle, wait_ms);
+    // Wait in small slices so a user 中止 (cancel) is honored even when the
+    // child never exits; a single reproc_wait(60s+) made the button look dead.
+    int w = REPROC_ETIMEDOUT;
+    bool cancelled = false;
+    int remaining = wait_ms;
+    while (remaining > 0) {
+      int slice = remaining > 100 ? 100 : remaining;
+      w = reproc_wait(handle, slice);
+      if (w != REPROC_ETIMEDOUT) break;
+      if (cancel && cancel()) {
+        cancelled = true;
+        w = REPROC_ETIMEDOUT;
+        break;
+      }
+      remaining -= slice;
+    }
+    if (remaining <= 0) w = REPROC_ETIMEDOUT;
     lk.lock();
     pr.fg_wait = false;
     drain(pr);
@@ -326,8 +352,11 @@ FsResult TerminalManager::spawn(const Json& args, Json* out) {
       o["status"] = "exited";
       o["exitCode"] = -1;
       o["output"] = pr.out;
-      o["timedOut"] = true;
-      o["summary"] = "timed out after " + std::to_string(wait_ms) + " ms (killed)";
+      o["timedOut"] = !cancelled;
+      if (cancelled) o["cancelled"] = true;
+      o["summary"] = cancelled
+                         ? "cancelled by user (killed)"
+                         : ("timed out after " + std::to_string(wait_ms) + " ms (killed)");
       if (out) *out = o;
       return FsResult::success(o);
     }

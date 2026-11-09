@@ -355,6 +355,18 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
       ctx.pid = in.pid;
       ctx.approved = in.approved;
       ctx.thinking_lang = in.thinking_lang;
+      ctx.cancel = in.cancel;
+      // Rebind because make_ctx cannot see this call's cancel predicate.
+      if (deps_.terminal_spawn) {
+        std::function<bool()> cancel = in.cancel;
+        std::string call_sid = in.sid;
+        ctx.terminal_spawn = [this, call_sid, cancel](const Json& a,
+                                                      Json* out) -> FsResult {
+          Json args = a;
+          if (!args.contains("sid")) args["sid"] = call_sid;
+          return deps_.terminal_spawn(args, out, cancel);
+        };
+      }
     }
     return tools_.invoke(ctx, name, args);
   };
@@ -534,7 +546,7 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
     }
     Json args = a;
     if (!args.contains("sid")) args["sid"] = sid;
-    return deps_.terminal_spawn(args, out);
+    return deps_.terminal_spawn(args, out, nullptr);
   };
   ctx.terminal_poll = deps_.terminal_poll;
   ctx.terminal_kill = deps_.terminal_kill;

@@ -38,6 +38,9 @@ struct ToolContext {
   // "问完还是拒绝"——比不问更糟。
   bool approved = false;
   std::string thinking_lang = "";         // 思考语言（中英双语 skill；空=默认）
+  // User pressed 中止. Long-running tools (foreground terminal, builds) poll
+  // this and stop instead of holding the turn for their full timeout.
+  std::function<bool()> cancel;
   std::function<FsResult(const std::string&, const Json&)> invoke_tool;  // 递归调子代理等
   // 回调：向主会话发事件（terminal.output / truncate.hint 等）
   std::function<void(const std::string&, const Json&)> emit;

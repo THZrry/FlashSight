@@ -1660,6 +1660,18 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       }
     }
   }
+  if (m.role == "assistant" && t.contains("thoughts") && t["thoughts"].is_array()) {
+    for (auto& th : t["thoughts"]) {
+      if (!th.is_object()) continue;
+      comp::ChatMsg::ThinkBlock b;
+      b.text = jsonutil::get<std::string>(th, "text", "");
+      if (b.text.empty()) continue;
+      b.after = static_cast<size_t>(jsonutil::get_int(th, "after", 0));
+      b.open = jsonutil::get<bool>(th, "open", false);  // stored = folded
+      b.rev = next_msg_rev_++;
+      m.thoughts.push_back(b);
+    }
+  }
   return m;
 }
 
@@ -2459,6 +2471,20 @@ void UiApp::attach_live_turn(const std::string& sid) {
     bool crashed = jsonutil::get<bool>(r.data, "crashed", false);
     std::string text = jsonutil::get<std::string>(r.data, "text", "");
     std::string thinking = jsonutil::get<std::string>(r.data, "thinking", "");
+    std::vector<comp::ChatMsg::ThinkBlock> live_thoughts;
+    if (r.data.contains("thoughts") && r.data["thoughts"].is_array()) {
+      for (auto& th : r.data["thoughts"]) {
+        if (!th.is_object()) continue;
+        comp::ChatMsg::ThinkBlock b;
+        b.text = jsonutil::get<std::string>(th, "text", "");
+        if (b.text.empty()) continue;
+        b.after = static_cast<size_t>(jsonutil::get_int(th, "after", 0));
+        b.open = jsonutil::get<bool>(th, "open", true);
+        b.streaming = jsonutil::get<bool>(th, "streaming", false);
+        b.rev = next_msg_rev_++;
+        live_thoughts.push_back(b);
+      }
+    }
     std::string user_text = jsonutil::get<std::string>(r.data, "userText", "");
     int auto_round = static_cast<int>(jsonutil::get_int(r.data, "autoRound", 0));
     int64_t started = jsonutil::get_int(r.data, "startedAt", 0);
@@ -2491,6 +2517,7 @@ void UiApp::attach_live_turn(const std::string& sid) {
       a->text = text;   // current round only; narration is in `interim`
       a->thinking = thinking;
       if (!thinking.empty()) a->thinking_open = true;
+      a->thoughts = live_thoughts;
       a->interim = interim;
       a->interim_after = interim_after;
       // Rebuild the running turn's tool rows. They live only in the loop's
@@ -3842,8 +3869,20 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     int& total = is_active ? st_.history_total : vp->history_total;
     comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
-    msg.thinking += text;
-    msg.thinking_open = true;  // the process is the only thing moving
+    const size_t after = msg.tools.size();
+    if (!msg.thoughts.empty() && msg.thoughts.back().after == after &&
+        msg.thoughts.back().streaming) {
+      msg.thoughts.back().text += text;
+      msg.thoughts.back().rev = next_msg_rev_++;
+    } else {
+      comp::ChatMsg::ThinkBlock b;
+      b.text = text;
+      b.after = after;
+      b.open = true;
+      b.streaming = true;
+      b.rev = next_msg_rev_++;
+      msg.thoughts.push_back(b);
+    }
     msg.streaming = true;
     msg.rev = next_msg_rev_++;
     msg.now_ms = now_ms();
@@ -3866,6 +3905,13 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // every event that can open a turn (delta / tool.start / interim) agrees on
     // the message's defaults, including the work fold being open while it runs.
     comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
+    // The answer started: reasoning has ended, fold its segments.
+    for (auto& tb : msg.thoughts) {
+      if (!tb.streaming) continue;
+      tb.streaming = false;
+      tb.open = false;
+      tb.rev = next_msg_rev_++;
+    }
     msg.text += text;
     msg.streaming = true;
     msg.rev = next_msg_rev_++;
@@ -3926,6 +3972,12 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
     if (!m.empty() && m.back().role == "assistant") {
       m.back().streaming = false;
+      // A turn is over: every reasoning segment is over too, so fold it.
+      for (auto& th : m.back().thoughts) {
+        th.streaming = false;
+        th.open = false;
+        th.rev = next_msg_rev_++;
+      }
       // The work is done: fold the process. You watch it while it runs; after
       // that the answer is what you reread, and a long tool log above it buries
       // the reply. A reopened transcript starts folded too, so live and stored
@@ -4029,6 +4081,13 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         if (at != std::string::npos) ans.erase(at, text.size());
       }
       msg.interim.push_back(text);
+      // Narration means the reasoning segment is over.
+      for (auto& th : msg.thoughts) {
+        if (!th.streaming) continue;
+        th.streaming = false;
+        th.open = false;
+        th.rev = next_msg_rev_++;
+      }
       // The anchor: how many tools had already run when this note arrived.
       int64_t done = jsonutil::get_int(payload, "tools", -1);
       msg.interim_after.push_back(
@@ -4051,6 +4110,13 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     int& total = is_active ? st_.history_total : vp->history_total;
     if (!name.empty()) {
       comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
+      // A tool starts: the reasoning segment that led to it is over.
+      for (auto& th : msg.thoughts) {
+        if (!th.streaming) continue;
+        th.streaming = false;
+        th.open = false;
+        th.rev = next_msg_rev_++;
+      }
       comp::ToolBlock tb;
       tb.name = name;
       tb.summary = tr("运行中…");
@@ -4506,6 +4572,11 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       if (m.ended_at <= 0) m.ended_at = now_ms();
       if (m.started_at <= 0) m.started_at = m.ended_at;
       if (!st_.interrupt_reason.empty()) m.error = st_.interrupt_reason;
+      for (auto& th : m.thoughts) {
+        th.streaming = false;
+        th.open = false;
+        th.rev = next_msg_rev_++;
+      }
       m.rev = next_msg_rev_++;
     }
     st_.toast = st_.interrupt_reason.empty()
@@ -4538,12 +4609,18 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
         // instead of showing a blank answer. Text that DID arrive stays - it is
         // the part the user is keeping by stopping here.
         if (m.back().text.empty() && m.back().tools.empty() &&
-            m.back().interim.empty() && m.back().thinking.empty()) {
+            m.back().interim.empty() && m.back().thinking.empty() &&
+            m.back().thoughts.empty()) {
           m.pop_back();
         } else {
           m.back().streaming = false;
           m.back().now_ms = 0;
           m.back().ended_at = now_ms();
+          for (auto& th : m.back().thoughts) {
+            th.streaming = false;
+            th.open = false;
+            th.rev = next_msg_rev_++;
+          }
           if (m.back().started_at <= 0) m.back().started_at = m.back().ended_at;
           m.back().rev = next_msg_rev_++;
         }
@@ -4589,6 +4666,7 @@ std::string UiApp::debug_stats() const {
     msg_bytes += m.text.size();
     for (size_t k = 0; k < m.interim.size(); ++k) msg_bytes += m.interim[k].size();
     for (size_t k = 0; k < m.guidance.size(); ++k) msg_bytes += m.guidance[k].size();
+    for (size_t k = 0; k < m.thoughts.size(); ++k) msg_bytes += m.thoughts[k].text.size();
     tools += m.tools.size();
     for (size_t k = 0; k < m.tools.size(); ++k) {
       tool_bytes += m.tools[k].input.size() + m.tools[k].detail.size();
@@ -6503,6 +6581,30 @@ VNodePtr UiApp::build_session() {
       toast(tr("已复制"));
     },
                                [this, uid](const std::string& v) {
+      int i = find_message_by_uid(uid);
+      if (i < 0) return;
+      if (v == "legacy-think") {
+        update([&](AppState& s) {
+          if (i < static_cast<int>(s.messages.size())) {
+            s.messages[i].thinking_open = !s.messages[i].thinking_open;
+            s.messages[i].rev = next_msg_rev_++;
+          }
+        });
+        return;
+      }
+      if (v.compare(0, 6, "think:") == 0) {
+        int ti = std::atoi(v.substr(6).c_str());
+        update([&](AppState& s) {
+          if (i < static_cast<int>(s.messages.size()) && ti >= 0 &&
+              ti < static_cast<int>(s.messages[i].thoughts.size())) {
+            s.messages[i].thoughts[ti].open =
+                !s.messages[i].thoughts[ti].open;
+            s.messages[i].thoughts[ti].rev = next_msg_rev_++;
+            s.messages[i].rev = next_msg_rev_++;
+          }
+        });
+        return;
+      }
       // The value carries "<blockIndex>\t<action>": a message can have many
       // foldable blocks, and clicking one must not toggle the first.
       size_t tab = v.find('\t');
@@ -6510,8 +6612,6 @@ VNodePtr UiApp::build_session() {
       if (tab != std::string::npos) {
         block = std::atoi(v.substr(0, tab).c_str());
       }
-      int i = find_message_by_uid(uid);
-      if (i < 0) return;
       update([&](AppState& s) {
         if (i < static_cast<int>(s.messages.size()) && block >= 0 &&
             block < static_cast<int>(s.messages[i].tools.size())) {
@@ -12070,6 +12170,12 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   for (size_t i = 0; i < m.interim.size(); ++i) mix(m.interim[i].size());
   // Guidance blocks are part of the work log too.
   for (size_t i = 0; i < m.guidance.size(); ++i) mix(m.guidance[i].size());
+  for (size_t i = 0; i < m.thoughts.size(); ++i) {
+    mix(m.thoughts[i].text.size());
+    mix(m.thoughts[i].after + 1);
+    mix(static_cast<uint64_t>(m.thoughts[i].open));
+    mix(static_cast<uint64_t>(m.thoughts[i].streaming));
+  }
   // ...and so is WHERE each note sits relative to the calls (see interim_after).
   for (size_t i = 0; i < m.interim_after.size(); ++i) mix(m.interim_after[i] + 1);
   return h;

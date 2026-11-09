@@ -229,8 +229,9 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   // Through spawn_terminal, NOT the manager directly: that shortcut skipped
   // the project-root cwd default, so model commands ran in the app's own
   // directory (git log showed THIS repo instead of the user's project).
-  deps.terminal_spawn = [this](const Json& a, Json* out) -> FsResult {
-    return spawn_terminal(a, out);
+  deps.terminal_spawn = [this](const Json& a, Json* out,
+                               const std::function<bool()>& cancel) -> FsResult {
+    return spawn_terminal(a, out, cancel);
   };
   deps.terminal_poll = [tm](const Json& a, Json* out) -> FsResult {
     return tm->poll(a, out);
@@ -2376,7 +2377,8 @@ FsResult FsApi::terminal_show(const std::string& tid) {
 // DIRECTLY, bypassing the cwd default below - so `git log` ran in the APP's
 // directory (the release folder, inside this repo) and the model read FlashSight's
 // own history instead of the user's project. One spawn path is the fix.
-FsResult FsApi::spawn_terminal(Json args, Json* out) {
+FsResult FsApi::spawn_terminal(Json args, Json* out,
+                               const std::function<bool()>& cancel) {
   std::string sid = jsonutil::get<std::string>(args, "sid", "");
   // Default the working directory to the PROJECT ROOT (the session's cwd).
   // A missing cwd must never mean "wherever the app happens to run".
@@ -2401,7 +2403,7 @@ FsResult FsApi::spawn_terminal(Json args, Json* out) {
     }
   }
   Json o;
-  FsResult r = terminal_mgr_->spawn(args, &o);
+  FsResult r = terminal_mgr_->spawn(args, &o, cancel);
   if (out) *out = o;
   if (!r.ok()) return r;
   // The transcript belongs to EVERY terminal, including the ones the model

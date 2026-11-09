@@ -31,7 +31,8 @@ class TerminalManager {
   // interactive = 起一个交互式 shell（无命令、stdin 接管），用户终端用；
   // 非交互 = shell -c command，模型终端用。
   // -> {tid, status, output, exitCode}
-  FsResult spawn(const Json& args, Json* out);
+  FsResult spawn(const Json& args, Json* out,
+                 const std::function<bool()>& cancel = nullptr);
   // args: {tid} -> {status, output, exitCode}
   FsResult poll(const Json& args, Json* out);
   // args: {tid} -> {}

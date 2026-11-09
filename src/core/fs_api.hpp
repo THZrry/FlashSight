@@ -203,7 +203,8 @@ class FsApi {
   // 唯一的终端启动口：UI 的交互式终端和模型的 terminal_exec/spawn 都走这里。
   // 缺省 cwd = 会话的项目根（模型曾经因此在本应用的目录里跑 git，读到的是本仓
   // 的提交）。同时给每个终端分配输出日志（转写脚本、搜索都依赖它）。
-  FsResult spawn_terminal(Json args, Json* out);
+  FsResult spawn_terminal(Json args, Json* out,
+                          const std::function<bool()>& cancel = nullptr);
   // 非阻塞轮询所有终端，把新增输出/退出推成 terminal.output / terminal.exit
   // 事件（UI 不再手动轮询）。宿主定时调用（桌面线程 / 浏览器定时器）。
   void terminal_tick();

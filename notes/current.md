@@ -3366,3 +3366,12 @@ The process of project: P0 环境搭建 + P1 AppCore
     - 无 progress 的硬看门狗仍是 10 分钟（`model_progress_timeout_ms`），现在不会被正常长思考误触发。
   - **缓存命中分析**：该会话 usage 的异常不是 80% 的单次命中，而是**少数 `cache=0` 或 `cache=256` 的 30 万 token 请求**把累计命中率拉到约 80%。例如 `in=307640/cache=0`、接着 `in=307405/cache=256`、`309246/256`、`311104/256`、`313077/256`。`256` 意味着上游只命中了开头约 256 token（系统提示），不是普通的缓存 TTL 归零；这更像**中转站把请求路由到了没有该前缀缓存的上游通道**，或该通道只缓存了系统段。应用侧检查：同一 provider/model、system/tools 顺序稳定、runtime 块只在最新 user 消息末尾；`compaction.json` 在这段时间没有更新，因此不是压缩前缀重排。暂未在应用里找到会周期性改写前缀的路径。要彻底区分“应用前缀变了”和“中转站换通道”，下一步应在每次请求记录 prompt 前缀 hash；本次没有伪造这个结论。
   - **测试/构建**：471 用例 4361 断言全过；一条 xmake 命令在 `build_verify` 下实际链接出三个 exe；正式 `flashsight-web.exe`/`flashsight-whaleui.exe` 已更新，`flashsight-webview.exe` 仍被运行中的实例占用，最新在 `temp\flashsight-webview-new.exe`。
+
+
+<132>(ROOT CAUSE/FIX): WhaleJS 卡住是前台 terminal_exec 里 run.exe 永不退出且 timeout 失效；工作过程思考改为按到达位置插入、可折叠、结束自动折叠。
+  - **WhaleJS 16:25 卡住的现场**：gdb attach 到 16720，线程栈停在 `TerminalManager::spawn -> reproc_wait -> WaitForSingleObjectEx`。子进程树：bash -c `gcc ... | tail; echo "=== TRANSLATED ==="; ./temp/emcctest/run.exe | tail`，`run.exe`（PID 26752）从 16:25 一直活着，日志停在 `=== TRANSLATED ===`。模型调用不是阻塞点，是 terminal_exec 命令本身没有退出。
+  - **timeout 为什么没生效**：前台等待用 `timeoutMs`；模型可以传 0 表示不限，或传一个很大的值，于是 `reproc_wait` 直接无限等。现在前台命令 `timeoutMs<=0` 按 60000ms，且硬上限 10 分钟；后台 `terminal_spawn` 的 0 仍表示不限（后台有 tick 超时）。
+  - **中止也要能杀**：新增 `ToolContext::cancel`，`AgentLoop` 注入 abort 标志；前台等待改成 100ms 切片轮询，cancel 后立即 terminate/kill，返回 `cancelled`，不再等满 timeout。`AgentHost` 的 terminal_spawn 回调带上 cancel。新增 `terminal_foreground_cancel_kills`。
+  - **工作过程顺序（按 note <96> 的原始要求回正）**：不是“工具 → 解说 → 思考”三段，也不是把整轮 reasoning 合成一个块丢在最后。现在 `ChatMsg::ThinkBlock{text,after,open,streaming}` 按“到达时已执行工具数”插入同一条流：工具前到达的思考在工具前，工具后的思考在工具后。`thinking.delta` 追加到当前段；`stream.delta`/`tool.start`/`assistant.interim`/`turn.done` 会把当前段标成结束并自动折叠。思考块点击可展开/折叠；旧存储的单个 `thinking` 作为兼容块保留。
+  - **持久化/重开**：assistant turn 存 `thoughts`；`live_state`/`attach_live_turn` 也带 `thoughts`，切页/重开还原位置和折叠态；`message_sig`/debug 统计包含 thoughts。
+  - **测试/构建**：473 用例 4373 断言全过；新增思考流自动折叠/位置、前台 terminal cancel 用例。

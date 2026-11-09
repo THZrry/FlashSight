@@ -346,6 +346,7 @@ class AgentLoop {
   mutable std::mutex live_mu_;
   std::string live_text_;
   std::string live_thinking_;
+  Json live_thoughts_ = Json::array();
   // Narration from COMPLETED rounds, kept apart from the current round's text.
   // Without this, reopening a running tab concatenated every round's narration
   // into the answer ("切页面思考跑到任务输出").

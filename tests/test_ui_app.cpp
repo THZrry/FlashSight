@@ -4167,6 +4167,35 @@ FS_TEST(uiapp_unavailable_model_clears_composer) {  NullDom dom;
 }
 
 // Thinking is a foldable block, closed by default; opening it shows the body.
+FS_TEST(uiapp_thinking_stream_auto_folds_and_interleaves) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) { seed_session(s, "sess_a"); });
+  app.on_backend_event_for_test(
+      "thinking.delta", Json{{"sid", "sess_a"}, {"text", "THINK0"}});
+  ASSERT_TRUE(app.state().messages.size() == 1);
+  ASSERT_TRUE(app.state().messages[0].thoughts.size() == 1);
+  EXPECT_TRUE(app.state().messages[0].thoughts[0].open);
+  EXPECT_TRUE(app.state().messages[0].thoughts[0].streaming);
+  app.on_backend_event_for_test(
+      "stream.delta", Json{{"sid", "sess_a"}, {"text", "answer"}});
+  ASSERT_TRUE(app.state().messages[0].thoughts.size() == 1);
+  // The answer started: the reasoning segment auto-folds.
+  EXPECT_FALSE(app.state().messages[0].thoughts[0].open);
+  EXPECT_FALSE(app.state().messages[0].thoughts[0].streaming);
+  // A tool row, then a second reasoning segment: the segment gets `after=1` so
+  // the renderer can put it in arrival order rather than at the very end.
+  app.on_backend_event_for_test(
+      "tool.start", Json{{"sid", "sess_a"}, {"name", "read_file"},
+                         {"args", Json::object()}});
+  app.on_backend_event_for_test(
+      "thinking.delta", Json{{"sid", "sess_a"}, {"text", "THINK1"}});
+  ASSERT_TRUE(app.state().messages[0].thoughts.size() == 2);
+  EXPECT_EQ(app.state().messages[0].thoughts[1].after, size_t(1));
+}
+
 // Reasoning and tool calls live in ONE folded "工作过程" group: the answer is
 // what you read, the process is what you open.
 FS_TEST(uiapp_thinking_block_folds) {

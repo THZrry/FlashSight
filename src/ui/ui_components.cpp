@@ -772,6 +772,33 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         }
       }
       size_t interim_at = 0;
+      size_t thought_at = 0;
+      auto add_thought = [&](size_t idx) {
+        if (idx >= m.thoughts.size()) return;
+        const comp::ChatMsg::ThinkBlock& th = m.thoughts[idx];
+        if (th.text.empty()) return;
+        H block = el("div", th.open ? "think-block open" : "think-block");
+        H head = el("div", "think-head");
+        head.add(el("i", "fa fa-comment-dots"));  // falls back to the label if the subset lacks it
+        head.add(el("span").text(tr("思考")));
+        head.add(el("span", "grow"));
+        head.add(el("span", "think-caret").text(th.open ? "\u25be" : "\u25b8"));
+        if (on_tool_toggle) {
+          EventFn cb = on_tool_toggle;
+          std::string key = "think:" + itos(static_cast<int>(idx));
+          head.on(EventKind::kClick, [cb, key](const std::string&) { cb(key); });
+        }
+        block.add(head);
+        if (th.open) block.add(el("pre", "think-body").text(th.text));
+        inner.add(block);
+      };
+      auto flush_thoughts = [&](size_t after) {
+        while (thought_at < m.thoughts.size() &&
+               m.thoughts[thought_at].after <= after) {
+          add_thought(thought_at++);
+        }
+      };
+      flush_thoughts(0);
       for (size_t i = 0; i < m.tools.size(); ++i) {
         while (interim_at < m.interim.size()) {
           size_t after = interim_at < m.interim_after.size()
@@ -783,6 +810,9 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           }
           ++interim_at;
         }
+        // A reasoning segment that arrived after the previous tool belongs here,
+        // before the tool it led to.
+        flush_thoughts(i);
         EventFn toggle = nullptr;
         if (on_tool_toggle) {
           EventFn base = on_tool_toggle;
@@ -805,6 +835,7 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           inner.add(el("div", "work-note").text(m.interim[interim_at]));
         }
       }
+      flush_thoughts(m.tools.size());
       // A complete-step subagent's live work: process text, deliberately in the
       // non-emphasis work colour. It used to be appended to the ANSWER, which
       // made the subagent's thinking look like the main model's output.
@@ -812,11 +843,23 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         inner.add(el("div", "work-label").text(tr("子代理过程")));
         inner.add(el("div", "work-note work-subagent").text(m.work_live));
       }
-      // Appended, not grouped: it goes where the stream has reached, and a tool
-      // call that arrives later simply lands below it.
-      if (!m.thinking.empty()) {
-        inner.add(el("div", "work-label").text(tr("思考")));
-        inner.add(el("pre", "think-body").text(m.thinking));
+      // Legacy single thinking block (old stored turns / tests): collapsible too.
+      if (m.thoughts.empty() && !m.thinking.empty()) {
+        H block = el("div", "think-block open");
+        H head = el("div", "think-head");
+        head.add(el("i", "fa fa-comment-dots"));
+        head.add(el("span").text(tr("思考")));
+        head.add(el("span", "grow"));
+        head.add(el("span", "think-caret").text("\u25be"));
+        if (on_tool_toggle) {
+          EventFn cb = on_tool_toggle;
+          head.on(EventKind::kClick, [cb](const std::string&) { cb("legacy-think"); });
+        }
+        block.add(head);
+        // Old turns never had a fold state; keep the text visible (the parent
+        // work fold is the control). New turns use `thoughts`, which auto-fold.
+        block.add(el("pre", "think-body").text(m.thinking));
+        inner.add(block);
       }
       work.add(inner);
     }

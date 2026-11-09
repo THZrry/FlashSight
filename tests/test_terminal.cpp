@@ -10,6 +10,7 @@
 
 using namespace fs;
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -65,6 +66,35 @@ FS_TEST(terminal_foreground_timeout_kills) {
   const TermEntry* e = reg.find(tid);
   ASSERT_TRUE(e != nullptr);
   EXPECT_TRUE(e->status == TermStatus::kExited);
+}
+
+// A foreground terminal must honor the user's 中止 immediately, not keep the
+// turn waiting for its (up to 10 minute) timeout.
+FS_TEST(terminal_foreground_cancel_kills) {
+  WallClock clock;
+  TerminalRegistry reg(&clock);
+  TerminalManager mgr(&reg, &clock);
+#if defined(_WIN32)
+  std::string cmd = "ping 127.0.0.1";
+#else
+  std::string cmd = "sleep 20";
+#endif
+  Json args = Json::object();
+  args["command"] = cmd;
+  args["background"] = false;
+  args["timeoutMs"] = 20000;
+  std::atomic<bool> cancel{false};
+  std::thread t([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    cancel.store(true);
+  });
+  Json out;
+  FsResult r = mgr.spawn(args, &out,
+                         [&]() { return cancel.load(); });
+  t.join();
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(jsonutil::get<std::string>(out, "status", ""), std::string("exited"));
+  EXPECT_TRUE(jsonutil::get<bool>(out, "cancelled", false));
 }
 
 FS_TEST(terminal_poll_and_kill) {
