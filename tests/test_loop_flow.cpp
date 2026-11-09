@@ -1064,6 +1064,32 @@ FS_TEST(loop_compresses_after_a_final_call_at_water_level) {
   EXPECT_TRUE(saved.contains("summary"));
 }
 
+// A model call that produces no token for the progress budget must be aborted,
+// not left running for hours (the WhaleJS 01:54→09:00 hang).
+FS_TEST(loop_aborts_a_model_call_with_no_progress) {
+  AgentLoop::Options opts;
+  opts.sid = "s_stall";
+  opts.permission = "full";
+  opts.model_progress_timeout_ms = 30;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.call_model = [](const ModelCallRequest& req, ModelCallResult* out,
+                       const std::function<void(const std::string&)>&) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    if (req.cancel && req.cancel()) {
+      out->error = "model call made no progress";
+    } else {
+      out->text = "ok";
+    }
+    return FsResult::success();
+  };
+  FsResult r = loop.send("go");
+  // The turn must end as an interruption, not stay running.
+  EXPECT_TRUE(rec.saw("loop.interrupted"));
+  EXPECT_TRUE(r.ok());  // the loop reports the provider error through the event
+}
+
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------
 FS_TEST(loop_unattended_denies_instead_of_waiting) {
   AgentLoop::Options opts;

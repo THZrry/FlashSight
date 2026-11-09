@@ -103,6 +103,9 @@ class AgentLoop {
     // 防过拟合（默认关，设置 session.overfitEnabled）。只发提示事件，
     // 后端不截断（agent-loop.md §5）。
     bool overfit_enabled = false;
+    // No token progress for this long aborts the model call (a relay can hold an
+    // SSE socket open forever). 0 = the default 10 minutes; tests set it low.
+    int64_t model_progress_timeout_ms = 10LL * 60 * 1000;
   };
 
   explicit AgentLoop(Options opts);

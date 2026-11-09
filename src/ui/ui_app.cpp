@@ -4312,7 +4312,18 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       }
     }
     apply_session_event(sid, event, payload);
-    if (!coalesced) render();
+    // Background stream/tool events update only that session's stashed view.
+    // Repainting the ACTIVE page for each one made a second running session's
+    // 300+ tool events rebuild and re-diff the visible transcript, which is the
+    // "no response while another task runs" report. Lifecycle events (turn/loop/
+    // auto/terminal state, subagents, asks) still paint immediately so tabs and
+    // dots cannot lag; the hot data events rely on the tab-switch render.
+    const bool bulk_event =
+        event == "stream.delta" || event == "tool.start" ||
+        event == "tool.update" || event == "assistant.interim" ||
+        event == "loop.usage" || event == "todo.updated" ||
+        event == "terminal.output";
+    if (!coalesced && !bulk_event) render();
     return;
   }
   if (event == "stream.delta" || event == "turn.done" || event == "turn.started" ||
@@ -7055,7 +7066,11 @@ VNodePtr UiApp::build_session() {
                              : "输入消息…（Enter 发送，Shift+Enter 换行）";
   H ta = comp::textarea(st_.session_input, tr(hint_key),
                         [this](const std::string& v) {
+    const bool was_empty = st_.session_input.empty();
     st_.session_input = v;  // no re-render while typing (avoid caret jumps)
+    // The only state the toolbar depends on is "is there input?" - repaint on
+    // that boundary so 中止 ↔ 引导 swaps, without a render per keystroke.
+    if (was_empty != v.empty()) render();
     // Inline completion trigger. NO re-render here (that would move the caret),
     // so the menu is (re)built only when the TRIGGER STATE actually changes.
     update_complete_from_input(v);
@@ -7466,17 +7481,19 @@ VNodePtr UiApp::build_session() {
   // streamed and parks it, keeping the transcript. 挂起 next to it is the
   // graceful one - finish this round, then wait.
   if (st_.turn_running) {
-    // While a turn runs, the composer's normal send becomes "add guidance": the
-    // text joins the queue and ALL queued guidance goes out at the next model
-    // call. Different icon from the normal send so the two actions cannot be
-    // confused; 中止 stays next to it.
-    H guide = comp::icon_text_button("comment-dots", tr("引导"),
-                                     [this](const std::string&) { send_message(); },
-                                     "ghost");
-    guide.key("guide-btn").cls("text-wide");
-    guide.attr("title", tr("加入引导队列：下一次模型调用带上队列里的全部引导"));
-    right_tools.add(guide);
-    H stop = comp::icon_text_button("stop", tr("中止"), [this](const std::string&) {
+    // While a turn runs and the input is NOT empty, the primary action is
+    // "add guidance" (replacing 中止, per the user's instruction). Clear the
+    // input to get the 中止 button back. The icon differs from normal send.
+    const bool has_input = !st_.session_input.empty() || !st_.attachments.empty();
+    if (has_input) {
+      H guide = comp::icon_text_button("comments", tr("引导"),
+                                       [this](const std::string&) { send_message(); },
+                                       "ghost");
+      guide.key("guide-btn").cls("text-wide");
+      guide.attr("title", tr("加入引导队列：下一次模型调用带上队列里的全部引导"));
+      right_tools.add(guide);
+    } else {
+      H stop = comp::icon_text_button("stop", tr("中止"), [this](const std::string&) {
       std::string sid = active_sid();
       if (sid.empty()) return;
       // 中止 is a LOCAL, immediate operation: mark the turn finished and stop
@@ -7520,6 +7537,7 @@ VNodePtr UiApp::build_session() {
     stop.key("stop-btn").cls("text-wide");
     stop.attr("title", tr("中止本轮（立即停止输出，已产生的输出会保留，可继续）"));
     right_tools.add(stop);
+    }
   } else {
     // Sending needs a usable model: a session whose remembered model was disabled
     // (or whose provider was deleted) cannot send, and a click that only produces

@@ -370,7 +370,9 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
     if (abort_requested_.load()) return true;
     int64_t last = model_activity_ms_.load();
     if (last <= 0) last = started;
-    return WallClock().now_ms() - last > 10LL * 60 * 1000;
+    int64_t limit = opts_.model_progress_timeout_ms;
+    if (limit <= 0) limit = 10LL * 60 * 1000;
+    return WallClock().now_ms() - last > limit;
   };
 
   bool streamed = false;

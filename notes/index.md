@@ -1716,3 +1716,12 @@ The process of project: P0 环境搭建
   - **不向模型报上下文占用**：`build_runtime` 删除 context% / tokens 行。模型无法利用这个数字（压缩由宿主自动做），UI 仍显示给用户。
   - **仍未验证**：中止的 socket watcher 仍无真实网络单测；引导“立即”打断→单条续跑、压缩后的模型摘要、工作过程引导块都需要在新构建里手测。webview 正式产物仍被正在运行的 `flashsight-webview.exe` 占用，最新二进制在 `temp/flashsight-webview-new.exe`；关闭窗口后跑 `build_all.py` 覆盖。
   - **测试/构建**：470 用例 4359 断言全过；web / whaleui 最新代码编译通过；webview 在备用 builddir 编译通过。
+
+
+<130>(FIX): 引导按钮替换规则/图标；WhaleJS 无进展看门狗；后台事件不再重绘当前页；旧历史渲染路径复核。
+  - **引导按钮**：运行中且输入框/附件非空时，主按钮替换成“引导”，图标是 `comments`（与正常 `paper-plane` 不同）；输入框和附件都为空时才显示“中止”。输入框只在 empty↔non-empty 边界触发一次 render，不会每敲一个字重绘。
+  - **WhaleJS 01:54 卡住证据**：`runtime.json` 最后工具是 1676（01:48），之后 usage 再也没有记录；`running=true`，autoRound=0，模型调用没有产生任何 token。不是终端进程还在跑，而是**终端结束后的下一次模型调用挂住**（旧 23:19 二进制没有看门狗）。新增 `Options::model_progress_timeout_ms`（默认 10 分钟），`req.cancel` 超时返回 true；`HttplibNetClient` 的 CancelWatch 调 `Client::stop()` 断 socket，`ProviderRuntime` 对取消不重试。新增 `loop_aborts_a_model_call_with_no_progress`（用 30ms 预算验证）。旧进程不会获益，必须用新二进制；正式 webview 仍被运行中的旧实例占用，最新在 `temp\flashsight-webview-new.exe`。
+  - **后台会话事件不再重绘当前页**：以前背景会话的 `stream.delta/tool.start/tool.update/assistant.interim/loop.usage/todo.updated/terminal.output` 每个事件都 `render()` 当前页；两个会话并行时，另一个会话 300+ 工具事件会让可见页面反复 build/diff，表现成“无响应”。现在这些 hot 事件只更新该会话的 stashed view，不再重绘当前页；turn/loop/auto/subagent 等生命周期事件仍立即渲染，tab/dot 不延迟。
+  - **旧历史 markdown**：复核了路径——`msg_nodes_` 以 (uid,rev,sig) 命中时直接复用同一 VNode，`tool_block_cached` 对每个工具行单独 memo，`markdown_blocks` 只在该消息 rev/sig 变化时重建；固化的旧消息不会在每次 render 重新解析 markdown。真正的重复开销来自上面的后台事件重绘和 streaming 消息的每秒计时。没有再加历史截断或渲染窗口。
+  - **仍未验证**：按钮切换、后台不重绘、看门狗都需要在新 webview 手测；`dom_slots` 在旧进程里每 30 秒 +1 的小泄漏仍未处理（不是本次卡死原因）。
+  - **测试/构建**：471 用例 4361 断言全过；web / whaleui 最新代码编译通过；webview 在备用 builddir 编译通过。
