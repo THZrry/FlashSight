@@ -1150,8 +1150,11 @@ FsResult FsApi::session_list(const std::string& pid) {
     // even though no turn is in flight. The status dot uses this to show a
     // distinct "background" colour instead of "idle".
     int64_t live_terms = 0;
-    if (terminals_) {
-      for (auto& te : terminals_->list_for_session(sid)) {
+    if (terminal_mgr_) {
+      // Copy under the manager mutex: the registry has no lock of its own and a
+      // second session can be spawning terminals right now.
+      std::vector<TermEntry> entries = terminal_mgr_->entries_for_session(sid);
+      for (auto& te : entries) {
         // A background model terminal is a REAL terminal even without a label:
         // `terminal_spawn` (and a foreground command that hit its budget and was
         // handed to the background) keeps running after the turn returns.
@@ -2211,9 +2214,9 @@ void FsApi::append_terminal_log(const std::string& tid, const std::string& text)
     // command's output is drained), so the registry is the other half of the
     // lookup. Keep the registry call OUTSIDE term_log_mu_: the manager calls the
     // sink while holding its own mutex, and nested locks are how deadlocks start.
-    const TermEntry* e = terminals_->find(tid);
-    if (e && !e->log_path.empty()) {
-      path = e->log_path;
+    TermEntry e;
+    if (terminal_mgr_->entry_snapshot(tid, &e) && !e.log_path.empty()) {
+      path = e.log_path;
       std::lock_guard<std::mutex> lk(term_log_mu_);
       term_log_paths_[tid] = path;
     }
@@ -2259,8 +2262,8 @@ FsResult FsApi::terminal_search(const std::string& tid, const std::string& query
     if (it != term_log_paths_.end()) path = it->second;
   }
   if (path.empty()) {
-    TermEntry* e = terminals_->find(tid);
-    if (e) path = e->log_path;
+    TermEntry e;
+    if (terminal_mgr_->entry_snapshot(tid, &e)) path = e.log_path;
   }
   if (path.empty()) {
     return FsResult::success(Json{{"matches", Json::array()}, {"scanned", 0}});
@@ -2324,7 +2327,11 @@ FsResult FsApi::terminal_list(const std::string& sid) {
         return jsonutil::get_int(a, "startedAt", 0) <
                jsonutil::get_int(b, "startedAt", 0);
       });
-      for (size_t k = 0; k < saved.size(); ++k) terminals_->add_saved(saved[k]);
+      {
+        // `add_saved` mutates the registry; serialise it with spawn/tick.
+        std::lock_guard<std::recursive_mutex> lk(terminal_mgr_->mutex());
+        for (size_t k = 0; k < saved.size(); ++k) terminals_->add_saved(saved[k]);
+      }
     }
   } catch (...) {
   }
@@ -2335,7 +2342,8 @@ FsResult FsApi::terminal_list(const std::string& sid) {
   // that were empty shells - and clicking one looked like a crash for no reason.
   // Records with a live process or a readable log are real; the rest are noise.
   std::vector<Json> real;
-  for (auto& e : terminals_->list_for_session(sid)) {
+  std::vector<TermEntry> entries = terminal_mgr_->entries_for_session(sid);
+  for (auto& e : entries) {
     std::error_code lec;
     // A foreground model command is a tool result (its short log is pruned on
     // exit, so it never reaches this list). A BACKGROUND model terminal is not:
@@ -2363,11 +2371,13 @@ FsResult FsApi::terminal_list(const std::string& sid) {
   return FsResult::success(arr);
 }
 FsResult FsApi::terminal_show(const std::string& tid) {
-  TermEntry* e = terminals_->find(tid);
-  if (!e) return FsResult::error(ErrCode::kNotFound, "terminal not found: " + tid);
+  TermEntry e;
+  if (!terminal_mgr_ || !terminal_mgr_->entry_snapshot(tid, &e)) {
+    return FsResult::error(ErrCode::kNotFound, "terminal not found: " + tid);
+  }
   // 日志缺失不报错（terminal.md §3：graceful 降级）
-  Json j = e->to_json();
-  j["logExists"] = !e->log_path.empty() && ghc::filesystem::exists(e->log_path);
+  Json j = e.to_json();
+  j["logExists"] = !e.log_path.empty() && ghc::filesystem::exists(e.log_path);
   return FsResult::success(j);
 }
 // 所有终端都从这里起：UI 的交互式终端和模型调用 terminal_exec/terminal_spawn。
@@ -2409,18 +2419,26 @@ FsResult FsApi::spawn_terminal(Json args, Json* out,
   // starts: give it a log file and write the metadata now (see persistence).
   std::string tid = jsonutil::get<std::string>(o, "tid", "");
   if (!tid.empty() && !sid.empty()) {
-    TermEntry* e = terminals_->find(tid);
-    if (e) {
-      try {
-        e->log_path = sessions_->make_store(sid).terminal_log_path(sid, tid).string();
-        e->log_attached = true;
-      } catch (...) {
+    TermEntry snapshot;
+    bool found = false;
+    {
+      // Read a COPY under the manager's lock (spawn/tick use the same one);
+      // persist outside it. The manager already assigned `log_path` through
+      // log_path_fn_ BEFORE starting the child, so re-assigning it here could
+      // resurrect a transcript that maybe_prune_log had just deleted.
+      std::lock_guard<std::recursive_mutex> lk(terminal_mgr_->mutex());
+      TermEntry* e = terminals_->find(tid);
+      if (e) {
+        snapshot = *e;
+        found = true;
       }
+    }
+    if (found) {
       {
         std::lock_guard<std::mutex> lk(term_log_mu_);
-        term_log_paths_[tid] = e->log_path;
+        term_log_paths_[tid] = snapshot.log_path;
       }
-      persist_terminal_entry(e->to_json());
+      persist_terminal_entry(snapshot.to_json());
     }
   }
   // 立即把首个提示符推进事件流，用户不用等下一次 tick
@@ -2476,8 +2494,9 @@ FsResult FsApi::terminal_grid(const std::string& tid) {
   // "打开过的终端" can still be read - and return an EMPTY grid rather than
   // "not found" when there is no record at all: a terminal tab that was just
   // restored is allowed to be empty, and the error only looked like a bug.
-  TermEntry* e = terminals_->find(tid);
-  std::string log_path = e ? e->log_path : std::string();
+  TermEntry e;
+  bool have_entry = terminal_mgr_->entry_snapshot(tid, &e);
+  std::string log_path = have_entry ? e.log_path : std::string();
   if (log_path.empty()) {
     std::lock_guard<std::mutex> lk(term_log_mu_);
     std::map<std::string, std::string>::const_iterator it = term_log_paths_.find(tid);
@@ -2509,7 +2528,7 @@ FsResult FsApi::terminal_grid(const std::string& tid) {
     empty["title"] = "";
     empty["tid"] = tid;
     empty["status"] = "exited";
-    empty["exitCode"] = e ? e->exit_code : 0;
+    empty["exitCode"] = have_entry ? e.exit_code : 0;
     empty["replay"] = "empty";
     return FsResult::success(empty);
   }
@@ -2561,12 +2580,13 @@ FsResult FsApi::terminal_grid(const std::string& tid) {
   g["title"] = "";
   g["tid"] = tid;
   g["status"] = "exited";
-  g["exitCode"] = e ? e->exit_code : 0;
+  g["exitCode"] = have_entry ? e.exit_code : 0;
   g["replay"] = "log";
   return FsResult::success(g);
 }
 
 FsResult FsApi::terminal_rename(const std::string& tid, const std::string& label) {
+  std::lock_guard<std::recursive_mutex> lk(terminal_mgr_->mutex());
   return terminals_->set_label(tid, label);
 }
 
@@ -2575,12 +2595,14 @@ FsResult FsApi::terminal_kill(const std::string& tid) {
   FsResult r = terminal_mgr_->kill(Json{{"tid", tid}}, &out);
   if (!r.ok()) {
     // 注册表里存在但管理器没有（如 P1 建的历史条目）仍标记退出
+    std::lock_guard<std::recursive_mutex> lk(terminal_mgr_->mutex());
     TermEntry* e = terminals_->find(tid);
     if (e) return terminals_->mark_exited(tid, -1, clock_->now_ms());
   }
   return r;
 }
 FsResult FsApi::terminal_set_encoding(const std::string& tid, const std::string& enc) {
+  std::lock_guard<std::recursive_mutex> lk(terminal_mgr_->mutex());
   return terminals_->set_encoding(tid, enc);
 }
 
@@ -2605,9 +2627,11 @@ void FsApi::terminal_tick() {
       emit_event("terminal.output", p);
     }
     if (jsonutil::get<bool>(c, "justExited", false)) {
-      // Freeze the entry on disk with its exit status.
-      TermEntry* e = terminals_->find(tid);
-      if (e) persist_terminal_entry(e->to_json());
+      // Freeze the entry on disk with its exit status. Snapshot under the
+      // manager lock; persist outside it.
+      TermEntry e;
+      bool have_entry = terminal_mgr_->entry_snapshot(tid, &e);
+      if (have_entry) persist_terminal_entry(e.to_json());
       int exit_code = static_cast<int>(jsonutil::get_int(c, "exitCode", 0));
       Json p = c;
       p["sid"] = sid;
@@ -2618,7 +2642,7 @@ void FsApi::terminal_tick() {
       // on_terminal_exit had no caller at all - a background command could
       // finish with nobody resuming the task. This is the only exit path that
       // knows both the entry flag and the agent host.
-      if (e && e->wake_on_exit && agent_host_ && !sid.empty()) {
+      if (have_entry && e.wake_on_exit && agent_host_ && !sid.empty()) {
         agent_host_->on_terminal_exit(sid, tid, exit_code);
       }
     }

@@ -1529,6 +1529,12 @@ FsResult AgentHost::steering_push(const std::string& sid, const std::string& kin
   std::lock_guard<std::recursive_mutex> host_lock(lock());
   SteeringKind k = (kind == "round-end") ? SteeringKind::kRoundEnd : SteeringKind::kImmediate;
   int id = steering_[sid].push(k, text);
+  if (id <= 0) {
+    return FsResult::error(
+        ErrCode::kInvalidArg,
+        "guidance queue is full (" + std::to_string(kMaxSteeringItems) +
+            " items); send or delete one first");
+  }
   emit("steering.queued", Json{{"sid", sid}, {"id", id}, {"kind", kind}});
   return FsResult::success(Json{{"id", id}});
 }

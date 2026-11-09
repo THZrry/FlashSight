@@ -1666,7 +1666,8 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       if (!th.is_object()) continue;
       comp::ChatMsg::ThinkBlock b;
       b.text = jsonutil::get<std::string>(th, "text", "");
-      if (b.text.empty()) continue;
+      // Whitespace-only segments are noise, not reasoning.
+      if (comp::text_is_blank(b.text)) continue;
       b.after = static_cast<size_t>(jsonutil::get_int(th, "after", 0));
       b.open = jsonutil::get<bool>(th, "open", false);  // stored = folded
       b.rev = next_msg_rev_++;
@@ -2482,7 +2483,7 @@ void UiApp::attach_live_turn(const std::string& sid) {
         if (!th.is_object()) continue;
         comp::ChatMsg::ThinkBlock b;
         b.text = jsonutil::get<std::string>(th, "text", "");
-        if (b.text.empty()) continue;
+        if (comp::text_is_blank(b.text)) continue;
         b.after = static_cast<size_t>(jsonutil::get_int(th, "after", 0));
         b.open = jsonutil::get<bool>(th, "open", true);
         b.streaming = jsonutil::get<bool>(th, "streaming", false);
@@ -3831,6 +3832,22 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     return;
   }
   if (event == "turn.started") {
+    // A send made while the UI believed a turn was running drew no bubble. If
+    // the backend actually STARTED a turn, this event is the first proof: put
+    // the question in now, BEFORE ensure_turn_message adds the answer slot.
+    auto insert_pending_user = [&](std::vector<comp::ChatMsg>& msgs, int& total) {
+      if (pending_guidance_text_.empty() || pending_guidance_sid_ != sid) return;
+      comp::ChatMsg u;
+      u.role = "user";
+      u.text = pending_guidance_text_;
+      u.time = "刚刚";
+      u.rev = next_msg_rev_++;
+      u.uid = total + static_cast<int64_t>(msgs.size());
+      msgs.push_back(u);
+      ++total;
+      pending_guidance_text_.clear();
+      pending_guidance_sid_.clear();
+    };
     // The turn is in flight now: the composer's primary button becomes 中止, and
     // any parked state is stale (a new turn is running). The interrupt bar must
     // disappear NOW - a new turn means the task is no longer parked.
@@ -3840,6 +3857,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         s.suspended = false;
         s.interrupted = false;
         s.interrupt_reason.clear();
+        insert_pending_user(s.messages, s.history_total);
         // The optimistic assistant bubble is created here, not in the send
         // click: a send that the backend turned into guidance starts no turn,
         // and an eager bubble would remain as a phantom empty answer.
@@ -3850,6 +3868,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       vp->suspended = false;
       vp->interrupted = false;
       vp->interrupt_reason.clear();
+      insert_pending_user(vp->messages, vp->history_total);
       ensure_turn_message(vp->messages, vp->history_total, &next_msg_rev_, now_ms());
     }
   } else if (event == "loop.resumed") {
@@ -3879,7 +3898,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         msg.thoughts.back().streaming) {
       msg.thoughts.back().text += text;
       msg.thoughts.back().rev = next_msg_rev_++;
-    } else {
+    } else if (!comp::text_is_blank(text)) {
+      // Do not OPEN a reasoning row on a bare "\n" delta. If real text follows
+      // it starts its own row; a whitespace-only segment is never visible.
       comp::ChatMsg::ThinkBlock b;
       b.text = text;
       b.after = after;
@@ -12015,29 +12036,37 @@ void UiApp::send_message() {
 
 void UiApp::dispatch_message(const std::string& sid, const std::string& text,
                              const std::string& shown, const Json& attachments) {
-  // SENDING WHILE A TURN RUNS IS GUIDANCE, NOT A NEW CONVERSATION. The decision
-  // belongs to the backend (`session.send` knows the loop's real state); this
-  // function always posts one user bubble and lets the reply say whether it was
-  // queued. The old UI-side `st_.turn_running` branch was a race: a missed
-  // turn.done made the UI open a second conversation while the backend appended
-  // the text to the old turn, so the old turn's terminal output landed in the
-  // "new" turn's work log and a page switch rendered the wrong one.
-  // echo the user's message immediately (optimistic; the assistant text streams in)
-  // A message sent now is newer than everything loaded from disk. Its uid is
-  // derived from the absolute history position so it stays distinct from the
-  // loaded turns (which use indices 0..history_total-1).
+  // SENDING WHILE A TURN RUNS IS GUIDANCE, NOT A NEW CONVERSATION. The backend
+  // still owns the decision (`session.send` knows the loop's real state), but the
+  // UI must not draw a bubble it is about to retract. When the live state says a
+  // turn is running we skip BOTH optimistic bubbles and clear the input; the
+  // reply confirms. If the UI was stale and the backend actually started a new
+  // turn, the bubbles are created on that reply. The reverse race (UI idle,
+  // backend queues) still removes the optimistic pair, which is rare and cannot
+  // be known in advance.
+  const bool likely_guidance = st_.turn_running || st_.auto_round > 0;
+  if (likely_guidance) {
+    pending_guidance_sid_ = sid;
+    pending_guidance_text_ = shown;
+  } else {
+    pending_guidance_sid_.clear();
+    pending_guidance_text_.clear();
+  }
   int64_t next_live_uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
   update([&](AppState& s) {
-    comp::ChatMsg m;
-    m.role = "user";
-    m.text = shown;
-    m.time = "刚刚";
-    m.rev = next_msg_rev_++;
-    m.uid = next_live_uid;
-    s.messages.push_back(m);
-    s.history_total += 1;  // one more turn now exists on disk
+    if (!likely_guidance) {
+      comp::ChatMsg m;
+      m.role = "user";
+      m.text = shown;
+      m.time = "刚刚";
+      m.rev = next_msg_rev_++;
+      m.uid = next_live_uid;
+      s.messages.push_back(m);
+      s.history_total += 1;  // one more turn now exists on disk
+    }
     s.session_input.clear();
     s.attachments.clear();
+    s.hist_follow = true;
   });
   // The DOM textarea still holds the typed text: no re-render happens while
   // typing, so both the old and new trees say value="". Write the cleared
@@ -12047,6 +12076,16 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   if (sid.empty() || !backend_) {
     // no session/backend: keep a local demo reply so the prototype stays usable
     update([&](AppState& s) {
+      if (likely_guidance) {
+        comp::ChatMsg m;
+        m.role = "user";
+        m.text = shown;
+        m.time = "刚刚";
+        m.rev = next_msg_rev_++;
+        m.uid = next_live_uid;
+        s.messages.push_back(m);
+        s.history_total += 1;
+      }
       comp::ChatMsg a;
       a.role = "assistant";
       a.text = "（未绑定会话后端）这是原型回复。\n\n- 事件已接通\n- 组件由 VNode diff 增量更新\n";
@@ -12064,56 +12103,77 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   // user picked, or the backend routes it to the first provider that has it.
   if (!st_.model_provider.empty()) args["providerId"] = st_.model_provider;
   if (!st_.thinking.empty()) args["thinking"] = st_.thinking;
-  // Sending from the composer means the user is at the END of the transcript;
-  // pin the view there so the question and the answer are visible without a
-  // manual scroll. The assistant bubble is the WAIT indicator (the first token
-  // can take seconds); if the backend turns this send into guidance, both
-  // optimistic bubbles are removed again below.
-  int64_t wait_uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
-  update([&](AppState& s) {
-    s.hist_follow = true;
-    if (!s.messages.empty() && s.messages.back().role == "assistant" &&
-        s.messages.back().streaming) {
-      return;
-    }
-    comp::ChatMsg a;
-    a.role = "assistant";
-    a.streaming = true;
-    a.work_open = true;
-    a.rev = next_msg_rev_++;
-    a.started_at = now_ms();
-    a.uid = wait_uid;
-    s.messages.push_back(a);
-  });
+  // The wait indicator is an assistant placeholder. Do not add it for guidance:
+  // that would be another bubble to retract.
+  int64_t wait_uid = -1;
+  if (!likely_guidance) {
+    wait_uid = st_.history_total + static_cast<int64_t>(st_.messages.size());
+    update([&](AppState& s) {
+      s.hist_follow = true;
+      if (!s.messages.empty() && s.messages.back().role == "assistant" &&
+          s.messages.back().streaming) {
+        return;
+      }
+      comp::ChatMsg a;
+      a.role = "assistant";
+      a.streaming = true;
+      a.work_open = true;
+      a.rev = next_msg_rev_++;
+      a.started_at = now_ms();
+      a.uid = wait_uid;
+      s.messages.push_back(a);
+    });
+  }
   follow_history_if_pinned();
   call_async("session.send", args,
-             [this, sid, next_live_uid, wait_uid](const BackendResult& r) {
+             [this, sid, next_live_uid, wait_uid, likely_guidance, shown,
+              attachments](const BackendResult& r) {
     if (!r.ok) {
+      if (likely_guidance) {
+        // Nothing was echoed, so a failed queue must not swallow the text.
+        pending_guidance_sid_.clear();
+        pending_guidance_text_.clear();
+        update([&](AppState& s) {
+          if (s.session_input.empty()) s.session_input = shown;
+          if (s.attachments.empty()) s.attachments = attachments;
+        });
+        sync_composer_textarea();
+      }
       toast(tr("发送失败：") + r.message);
       return;
     }
     if (jsonutil::get<bool>(r.data, "queued", false)) {
-      // The backend appended it to the turn that is ALREADY running. Take the
-      // optimistic bubbles back out; the item now lives in the guidance queue
-      // above the composer, where it can be edited or sent now.
-      update([&](AppState& s) {
-        for (size_t i = 0; i < s.messages.size();) {
-          const comp::ChatMsg& m = s.messages[i];
-          bool user_echo = m.uid == next_live_uid && m.role == "user";
-          bool wait_echo = m.uid == wait_uid && m.role == "assistant" &&
-                           m.text.empty() && m.tools.empty() &&
-                           m.interim.empty() && m.thinking.empty();
-          if (user_echo || wait_echo) {
-            s.messages.erase(s.messages.begin() + static_cast<long>(i));
-            if (user_echo && s.history_total > 0) s.history_total -= 1;
-          } else {
-            ++i;
+      if (!likely_guidance) {
+        // Rare stale-UI race: the backend turned a send we drew as a new turn
+        // into guidance. Take the optimistic bubbles back out; the item now
+        // lives in the guidance queue above the composer.
+        update([&](AppState& s) {
+          for (size_t i = 0; i < s.messages.size();) {
+            const comp::ChatMsg& m = s.messages[i];
+            bool user_echo = m.uid == next_live_uid && m.role == "user";
+            bool wait_echo = m.uid == wait_uid && m.role == "assistant" &&
+                             m.text.empty() && m.tools.empty() &&
+                             m.interim.empty() && m.thinking.empty();
+            if (user_echo || wait_echo) {
+              s.messages.erase(s.messages.begin() + static_cast<long>(i));
+              if (user_echo && s.history_total > 0) s.history_total -= 1;
+            } else {
+              ++i;
+            }
           }
-        }
-      });
+        });
+      }
+      pending_guidance_sid_.clear();
+      pending_guidance_text_.clear();
       refresh_steering(sid);
       toast(tr("已加入本轮引导，将在下一次调用带上"));
+      return;
     }
+    // It was NOT queued: the backend started a new turn despite the stale
+    // "running" flag. `turn.started` has already inserted the question and the
+    // assistant placeholder; nothing to draw here.
+    pending_guidance_sid_.clear();
+    pending_guidance_text_.clear();
   });
 }
 

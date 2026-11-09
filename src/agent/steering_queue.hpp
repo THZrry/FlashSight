@@ -16,6 +16,11 @@ enum class SteeringKind {
 
 const char* steering_kind_str(SteeringKind k);
 
+// Hard cap. The queue is rendered above the composer and drained into the next
+// model call; without a bound a model that keeps talking plus a user who keeps
+// typing grows it until the queue pushes the composer off the window.
+constexpr size_t kMaxSteeringItems = 20;
+
 // 队列条目（支持编辑/排序/删除；auto 模式每轮可加备注）
 struct SteeringItem {
   int id = 0;

@@ -8,6 +8,9 @@ const char* steering_kind_str(SteeringKind k) {
 }
 
 int SteeringQueue::push(SteeringKind kind, const std::string& text) {
+  // 0 = rejected. The UI shows the error; nothing is silently dropped to make
+  // room for newer guidance.
+  if (items_.size() >= kMaxSteeringItems) return 0;
   SteeringItem item;
   item.id = next_id_++;
   item.kind = kind;

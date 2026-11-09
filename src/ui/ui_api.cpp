@@ -533,9 +533,16 @@ FsResult UiApi::call(const std::string& method, const Json& args) {
   //     lock itself only to snapshot the provider list.
   // Holding the lock for these would stall every other call, which is the freeze
   // this design exists to prevent.
+  // Terminal routes have their OWN manager mutex and may wait for a stubborn
+  // child (kill: up to 2+2 s). Holding the global UI lock across that made every
+  // other session's panel/session call queue behind a terminal. `terminal.grid`
+  // is a read of the manager's screen model; `terminal.poll`/`kill` are short
+  // manager operations. None of them touch the maps this lock protects.
   if (!api_ || method == "session.send" || method == "session.continue" ||
       method == "session.resume" || method == "tool.invoke" ||
-      method == "provider.balances") {
+      method == "provider.balances" || method == "terminal.grid" ||
+      method == "terminal.poll" || method == "terminal.kill" ||
+      method == "terminal.tick") {
     return it->second(args);
   }
   std::lock_guard<std::recursive_mutex> lk(api_->mutex());

@@ -143,6 +143,14 @@ void inline_md(H& host, const std::string& text, EventFn on_link) {
 }  // namespace
 }  // namespace
 
+bool text_is_blank(const std::string& s) {
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i];
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') return false;
+  }
+  return true;
+}
+
 // ---------- buttons ----------
 
 H button(const std::string& label, EventFn on_click, const std::string& variant) {
@@ -699,8 +707,13 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   // had been dropped again.
   // `thoughts` MUST be here: a turn whose first round is pure reasoning has no
   // tools/interim/legacy text yet. Without it the whole work group (and the
-  // streaming thought inside it) simply did not render.
-  bool has_work = !m.thinking.empty() || !m.thoughts.empty() || !m.tools.empty() ||
+  // streaming thought inside it) simply did not render. Blank-only reasoning is
+  // not work: a "\n" delta must not create an empty fold.
+  bool has_thought = false;
+  for (size_t i = 0; i < m.thoughts.size(); ++i) {
+    if (!text_is_blank(m.thoughts[i].text)) { has_thought = true; break; }
+  }
+  bool has_work = !text_is_blank(m.thinking) || has_thought || !m.tools.empty() ||
                   !m.interim.empty() || !m.work_live.empty();
   if (has_work) {
     int nfail = 0;
@@ -779,7 +792,7 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       auto add_thought = [&](size_t idx) {
         if (idx >= m.thoughts.size()) return;
         const comp::ChatMsg::ThinkBlock& th = m.thoughts[idx];
-        if (th.text.empty()) return;
+        if (text_is_blank(th.text)) return;
         // Reuse the TOOL fold row (same header/caret/body) instead of inventing a
         // second fold style. The only difference is the label and the spinner
         // while the reasoning is still streaming.
@@ -791,6 +804,7 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         tb.running = th.streaming;
         tb.ok = !th.streaming;
         tb.plain = true;
+        tb.icon = "brain";
         tb.rev = th.rev;
         EventFn toggle = nullptr;
         if (on_tool_toggle) {
@@ -821,6 +835,12 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       };
       flush_thoughts(0);
       for (size_t i = 0; i < m.tools.size(); ++i) {
+        // A reasoning segment that arrived after the previous tool belongs here,
+        // before the tool it led to. It also comes BEFORE this round's narration:
+        // reasoning streams during the call, the note is emitted when the call
+        // returns. Both carry the same tool anchor, so the old interim-first
+        // order inverted what the user watched happen.
+        flush_thoughts(i);
         while (interim_at < m.interim.size()) {
           size_t after = interim_at < m.interim_after.size()
                              ? m.interim_after[interim_at]
@@ -831,9 +851,6 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           }
           ++interim_at;
         }
-        // A reasoning segment that arrived after the previous tool belongs here,
-        // before the tool it led to.
-        flush_thoughts(i);
         EventFn toggle = nullptr;
         if (on_tool_toggle) {
           EventFn base = on_tool_toggle;
@@ -850,13 +867,15 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
                           (work_open ? ":o" : ":c");
         inner.add(tool_block_cached(tb, toggle, on_open_subagent, gen));
       }
+      // Trailing reasoning (no later tool to hang it on) is still BEFORE the
+      // narration that closed the same round.
+      flush_thoughts(m.tools.size());
       // Anything left (a turn that narrated but called no tool).
       for (; interim_at < m.interim.size(); ++interim_at) {
         if (!m.interim[interim_at].empty()) {
           inner.add(el("div", "work-note").text(m.interim[interim_at]));
         }
       }
-      flush_thoughts(m.tools.size());
       // A complete-step subagent's live work: process text, deliberately in the
       // non-emphasis work colour. It used to be appended to the ANSWER, which
       // made the subagent's thinking look like the main model's output.
@@ -875,6 +894,7 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         tb.expanded = m.thinking_open;
         tb.ok = true;
         tb.plain = true;
+        tb.icon = "brain";
         tb.rev = m.rev;
         EventFn toggle = nullptr;
         if (on_tool_toggle) {
@@ -982,7 +1002,11 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
   if (on_toggle) {
     head.on(EventKind::kClick, [on_toggle](const std::string&) { on_toggle("toggle"); });
   }
-  if (b.running) {
+  if (!b.icon.empty()) {
+    // A semantic icon (thinking => brain). Reasoning has no pass/fail verdict;
+    // a green check made it look like a finished tool.
+    head.add(el("span", "tb-ico kind").add(el("i", "fa fa-" + b.icon)));
+  } else if (b.running) {
     // No verdict yet: a spinner says "working", a check/cross would lie.
     head.add(el("span", "tb-ico run").add(spinner()));
   } else {
@@ -1103,7 +1127,8 @@ H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
                     std::to_string(b.summary.size()) + ":" +
                     std::to_string(b.detail.size()) + ":" +
                     std::to_string(b.input.size()) + ":" +
-                    std::to_string(b.subagent_id.size()) + "#" +
+                    std::to_string(b.subagent_id.size()) + ":" +
+                    std::to_string(b.icon.size()) + "#" +
                     (b.expanded ? "1" : "0") + (b.running ? "r" : "") +
                     (b.ok ? "" : "x");
   std::map<std::string, H>::iterator it = cache.find(key);

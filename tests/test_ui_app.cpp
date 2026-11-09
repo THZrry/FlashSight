@@ -1749,6 +1749,105 @@ FS_TEST(uiapp_turns_reply_keeps_live_messages) {
   EXPECT_TRUE(have_new);   // and the un-persisted send survived
 }
 
+// A send that becomes guidance must NOT draw a user bubble + wait placeholder
+// and then retract them. The live state (turn running) says guidance before the
+// request leaves; the backend reply only confirms it.
+FS_TEST(uiapp_guidance_send_draws_no_bubble) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class QueueBackend : public IUiBackend {
+   public:
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "session.send") r.data = Json{{"queued", true}};
+      if (method == "steering.list") r.data = Json::array();
+      if (method == "model.allEnabled") {
+        r.data = Json{{"models", Json::array({Json{{"id", "m1"}}})}};
+      }
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "m1";
+    s.model_available = true;
+    s.turn_running = true;  // the live state the composer already shows
+    s.session_input = "guide this";
+  });
+  size_t before = app.state().messages.size();
+  app.send_message();
+  // No user echo, no assistant placeholder: the item is only in the queue.
+  EXPECT_EQ(app.state().messages.size(), before);
+  EXPECT_TRUE(app.state().session_input.empty());
+}
+
+// If the UI thought a turn was running but the backend starts a new one, the
+// skipped question must be inserted from turn.started (which arrives DURING the
+// call), in front of the answer. The send result arrives only when the turn is
+// over, so appending it there would put the question after the answer.
+FS_TEST(uiapp_guidance_race_draws_turn_from_reply) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class DeferredBackend : public IUiBackend {
+   public:
+    BackendDone send_done;
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "model.allEnabled") {
+        r.data = Json{{"models", Json::array({Json{{"id", "m1"}}})}};
+      }
+      return r;
+    }
+    void call_async(const std::string& method, const Json& args,
+                    BackendDone done) override {
+      if (method == "session.send") {
+        send_done = done;  // the turn is still running
+        return;
+      }
+      BackendResult r = call(method, args);
+      if (done) done(r);
+    }
+    void finish() {
+      if (!send_done) return;
+      BackendDone d = send_done;
+      send_done = nullptr;
+      BackendResult r;
+      r.ok = true;
+      d(r);
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.model = "m1";
+    s.model_available = true;
+    s.turn_running = true;  // stale: the backend is actually idle
+    s.session_input = "real question";
+  });
+  size_t before = app.state().messages.size();
+  app.send_message();
+  // Nothing was drawn optimistically.
+  EXPECT_EQ(app.state().messages.size(), before);
+  // The backend proves a new turn started: question THEN answer placeholder.
+  app.on_backend_event_for_test(
+      "turn.started", Json{{"sid", "sess_a"}, {"text", "real question"}});
+  ASSERT_TRUE(app.state().messages.size() == before + 2);
+  EXPECT_EQ(app.state().messages[before].role, std::string("user"));
+  EXPECT_EQ(app.state().messages[before].text, std::string("real question"));
+  EXPECT_EQ(app.state().messages[before + 1].role, std::string("assistant"));
+  EXPECT_TRUE(app.state().messages[before + 1].streaming);
+  // The turn's completion must not add a second pair.
+  backend.finish();
+  EXPECT_EQ(app.state().messages.size(), before + 2);
+}
+
 FS_TEST(uiapp_permission_prompt_opens_modal) {
   NullDom dom;
   AppState st = AppState::make();
@@ -4317,6 +4416,9 @@ FS_TEST(uiapp_thinking_row_uses_tool_fold) {
   EXPECT_TRUE(d.find("tool-block") != std::string::npos);
   EXPECT_TRUE(d.find("tb-head") != std::string::npos);
   EXPECT_TRUE(d.find("思考") != std::string::npos);
+  // Reasoning is not a tool verdict: a brain, never a green check.
+  EXPECT_TRUE(d.find("fa-brain") != std::string::npos);
+  EXPECT_TRUE(d.find("tb-ico ok") == std::string::npos);
   // Folded by default (the stored/live state is thinking_open=false).
   EXPECT_TRUE(d.find("LEGACY_THINK_MARKER") == std::string::npos);
   int hid = click_hid_in(app.tree_for_test(), "tb-head", "\u601d\u8003");
@@ -4973,6 +5075,69 @@ FS_TEST(uiapp_work_process_puts_thinking_last) {
   // where the stream has reached (a later call would land below it).
   EXPECT_TRUE(narr_at < tool_at);
   EXPECT_TRUE(think_at > tool_at);
+}
+
+// Reasoning streams DURING the model call; the narration note is emitted when
+// that call returns. They share the same tool anchor, so the thought must come
+// first. The old renderer flushed interim notes first and put the thought below
+// text the user watched arrive later.
+FS_TEST(uiapp_thought_precedes_narration_at_same_anchor) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.work_open = true;
+    comp::ToolBlock tb;
+    tb.name = "read_file";
+    tb.summary = "a.cpp";
+    m.tools.push_back(tb);
+    comp::ChatMsg::ThinkBlock th;
+    th.text = "THOUGHT_MARKER";
+    th.after = 1;  // after the only tool
+    th.open = true;
+    m.thoughts.push_back(th);
+    m.interim.push_back("NARRATION_MARKER");
+    m.interim_after.push_back(1);  // same anchor as the thought
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  size_t tool_at = d.find("read_file");
+  size_t think_at = d.find("THOUGHT_MARKER");
+  size_t narr_at = d.find("NARRATION_MARKER");
+  ASSERT_TRUE(tool_at != std::string::npos);
+  ASSERT_TRUE(think_at != std::string::npos);
+  ASSERT_TRUE(narr_at != std::string::npos);
+  EXPECT_TRUE(tool_at < think_at);
+  EXPECT_TRUE(think_at < narr_at);
+}
+
+// A provider that sends "\n" between tokens can open a reasoning row with no
+// visible content. It must not render as an empty 思考 block or create a work
+// fold by itself.
+FS_TEST(uiapp_blank_thought_is_not_rendered) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "answer";
+    comp::ChatMsg::ThinkBlock th;
+    th.text = " \n\t\r\n";
+    th.after = 0;
+    m.thoughts.push_back(th);
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("work-block") == std::string::npos);
+  EXPECT_TRUE(d.find("思考") == std::string::npos);
+  EXPECT_TRUE(d.find("answer") != std::string::npos);
 }
 
 // A subagent transcript shows the tools a message called even when it also has

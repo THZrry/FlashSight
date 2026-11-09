@@ -408,6 +408,19 @@ FS_TEST(steering_queue_ops) {
   EXPECT_TRUE(j.is_array());
 }
 
+// The queue is rendered above the composer; unbounded growth pushed the input
+// out of the window. Reject the (kMax+1)-th item instead of silently evicting
+// an older instruction.
+FS_TEST(steering_queue_is_bounded) {
+  SteeringQueue q;
+  for (size_t i = 0; i < kMaxSteeringItems; ++i) {
+    EXPECT_TRUE(q.push(SteeringKind::kRoundEnd, "item") > 0);
+  }
+  EXPECT_EQ(q.push(SteeringKind::kRoundEnd, "overflow"), 0);
+  EXPECT_EQ(static_cast<int>(q.items().size()),
+            static_cast<int>(kMaxSteeringItems));
+}
+
 // The new steering contract: the NEXT call carries the WHOLE queue; "send now"
 // takes exactly ONE item (the other queued items stay).
 FS_TEST(steering_queue_drain_all_and_take_one) {

@@ -117,6 +117,9 @@ struct ToolBlock {
   // The body is prose, not a tool payload: never JSON-highlight it just because
   // the first character happens to be `[` or `{` (thinking blocks).
   bool plain = false;
+  // FontAwesome icon instead of the ok/err verdict (a thinking row must not show
+  // a checkmark: reasoning is not a successful tool call).
+  std::string icon;
   // Still executing. The row shows a "running" state and is completed in place
   // when the matching tool.update arrives (a tool that takes seconds otherwise
   // looks like it never started).
@@ -148,6 +151,10 @@ H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
 // them back leaves rows with no attached DOM - clicks silently do nothing.
 // The same applies to the message-node cache, which the shell prunes per session.
 void tool_block_cache_clear();
+
+// Whitespace-only text carries no content. Providers emit reasoning deltas that
+// can be just "\n" or spaces; such a segment must not become a visible 思考 row.
+bool text_is_blank(const std::string& s);
 
 struct ChatMsg {
   // One reasoning segment. `after` is the number of tool calls already executed

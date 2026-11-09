@@ -1625,6 +1625,8 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .tb-ico.err { color: var(--err); }
 /* still executing: no verdict yet, so no check/cross */
 .tb-ico.run { display: inline-flex; align-items: center; }
+.tb-ico.kind { display: inline-flex; align-items: center; color: var(--text-faint); }
+.tb-ico.kind .fa { font-size: 11px; }
 .tool-block.running { border-style: dashed; }
 .tool-block.running .tb-sum { color: var(--text-faint); }
 .tb-name { font-family: var(--mono); }
@@ -2292,6 +2294,10 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   flex: none;
   margin: 0 32px 6px;
   max-width: calc(100% - 64px);
+  /* The queue is between the transcript and the composer. Without a cap a long
+     queue grows until it pushes the composer out of the window ("顶出去"). */
+  max-height: min(220px, 32vh);
+  overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel);

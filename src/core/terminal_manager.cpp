@@ -1,9 +1,20 @@
 // terminal_manager.cpp - reproc 子进程封装实现。
 #include "terminal_manager.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <system_error>
+#include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#endif
 
 #include <reproc/reproc.h>
 
@@ -38,10 +49,9 @@ struct TerminalManager::Proc {
   // the registry transition belong to that waiter; otherwise both would mark
   // the terminal exited and the event would race the tool result.
   bool fg_wait = false;
-  // A BACKGROUND model terminal used to ignore timeoutMs completely: only the
-  // foreground waiter called reproc_wait with a deadline, so `terminal_spawn`
-  // with timeoutMs=60000 stayed alive for half an hour. Keep the deadline here
-  // and enforce it in tick() (the only clock a background process has).
+  // A BACKGROUND model terminal has no waiter, so its explicit timeoutMs is
+  // enforced by tick() (the only clock a background process has). The foreground
+  // budget lives in spawn() and must never be enforced while holding mu_.
   int64_t timeout_ms = 0;
   int64_t started_ms = 0;
   int64_t kill_deadline_ms = 0;
@@ -52,6 +62,17 @@ struct TerminalManager::Proc {
   // the per-instance output sink (a static sink outlived its FsApi and called
   // into a destroyed object in the unit test).
   TerminalManager* owner = nullptr;
+  // Non-blocking exit detection. reproc_wait() cannot provide it: on Windows it
+  // blocks in WaitForSingleObject(INFINITE) after the exit pipe becomes
+  // readable, and BusyBox closes that inherited pipe while the shell is still
+  // running. Keep our own process handle/pid.
+  int64_t pid = 0;
+#if defined(_WIN32)
+  HANDLE native = nullptr;
+  ~Proc() {
+    if (native) CloseHandle(native);
+  }
+#endif
 };
 
 TerminalManager::TerminalManager(TerminalRegistry* reg, const Clock* clock)
@@ -68,11 +89,96 @@ TerminalManager::~TerminalManager() {
     }
     if (p.h) {
       if (!p.exited) {
-        // 退出时清理：先温和终止，再强杀（避免留孤儿）
-        reproc_stop(p.h, (reproc_stop_actions)REPROC_STOP_ACTIONS_NULL);
+        // 退出时清理：先温和终止，再强杀（避免留孤儿）. The NULL stop actions
+        // only closed pipes and left the child alive; a hung run.exe then
+        // outlived the app and kept the console/pipe handles open.
+        reproc_terminate(p.h);
+        reproc_kill(p.h);
       }
+      // destroy does not wait with NULL stop actions, so shutdown cannot hang
+      // on a child that ignores termination.
       p.h = reproc_destroy(p.h);
     }
+  }
+}
+
+bool TerminalManager::entry_snapshot(const std::string& tid, TermEntry* out) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  const TermEntry* e = reg_ ? reg_->find(tid) : nullptr;
+  if (!e) return false;
+  if (out) *out = *e;
+  return true;
+}
+
+std::vector<TermEntry> TerminalManager::entries_for_session(const std::string& sid) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  return reg_ ? reg_->list_for_session(sid) : std::vector<TermEntry>();
+}
+
+bool TerminalManager::add_saved_entry(const Json& j) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  return reg_ ? reg_->add_saved(j) : false;
+}
+
+// Caller holds mu_. Updates p.exited/exit_code exactly once.
+bool TerminalManager::try_wait(Proc& p, int* exit_code) {
+  if (p.exited) {
+    if (exit_code) *exit_code = p.exit_code;
+    return true;
+  }
+#if defined(_WIN32)
+  if (!p.native) {
+    // OpenProcess normally succeeds for our own child. If it did not, fall back
+    // to reproc's status check - it can block once the exit pipe is stale, but
+    // never knowing the exit is worse. This path is not taken in practice.
+    if (!p.h) return false;
+    int w = reproc_wait(p.h, 0);
+    if (w == REPROC_ETIMEDOUT) return false;
+    p.exited = true;
+    p.exit_code = w;
+    if (exit_code) *exit_code = w;
+    return true;
+  }
+  DWORD r = WaitForSingleObject(p.native, 0);
+  if (r != WAIT_OBJECT_0) return false;
+  DWORD code = 0;
+  if (!GetExitCodeProcess(p.native, &code)) return false;
+  // WaitForSingleObject already said the process is signaled; do NOT reject
+  // STILL_ACTIVE (259), which is also a legal exit code and would loop forever.
+  p.exited = true;
+  p.exit_code = static_cast<int>(code);
+  if (exit_code) *exit_code = p.exit_code;
+  return true;
+#else
+  if (p.pid <= 0) return false;
+  int status = 0;
+  pid_t r = waitpid(static_cast<pid_t>(p.pid), &status, WNOHANG);
+  if (r != static_cast<pid_t>(p.pid)) return false;
+  int code = -1;
+  if (WIFEXITED(status)) code = WEXITSTATUS(status);
+  else if (WIFSIGNALED(status)) code = -WTERMSIG(status);
+  p.exited = true;
+  p.exit_code = code;
+  if (exit_code) *exit_code = code;
+  return true;
+#endif
+}
+
+// Caller MUST NOT hold mu_. Polls in short slices so another session's
+// terminal work can proceed while we wait out terminate/kill.
+int TerminalManager::wait_for_exit(Proc& p, int timeout_ms) {
+  int waited = 0;
+  for (;;) {
+    {
+      std::lock_guard<std::recursive_mutex> lk(mu_);
+      int code = 0;
+      if (try_wait(p, &code)) return code;
+    }
+    if (waited >= timeout_ms) return REPROC_ETIMEDOUT;
+    int slice = timeout_ms - waited;
+    if (slice > 20) slice = 20;
+    std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+    waited += slice;
   }
 }
 
@@ -180,7 +286,7 @@ FsResult TerminalManager::spawn(const Json& args, Json* out,
   // terminal's spawn/poll/kill, and (through tick) the wake scheduler. A
   // `terminal_exec sleep 60` used to block all of them for a full minute - the
   // two-session freeze where the plan and scheduled wakes never updated.
-  std::unique_lock<std::mutex> lk(mu_);
+  std::unique_lock<std::recursive_mutex> lk(mu_);
   std::string command = jsonutil::get<std::string>(args, "command", "");
   bool interactive = jsonutil::get<bool>(args, "interactive", false);
   // 交互式终端没有命令：它就是"设置里的那个 shell"的一个会话
@@ -283,6 +389,20 @@ FsResult TerminalManager::spawn(const Json& args, Json* out,
   std::unique_ptr<Proc> p(new Proc());
   p->h = h;
   p->pty = pty.release();
+  if (h) {
+    p->pid = reproc_pid(h);
+#if defined(_WIN32)
+    // A second handle for WaitForSingleObject(0); reproc does not expose its
+    // own. Query-limited rights are enough for an exit code and are the least
+    // privileged on modern Windows.
+    p->native = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                            FALSE, static_cast<DWORD>(p->pid));
+    if (!p->native) {
+      p->native = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE,
+                              static_cast<DWORD>(p->pid));
+    }
+#endif
+  }
   p->tid = e.tid;
   p->sid = sid;
   p->owner = this;
@@ -291,105 +411,115 @@ FsResult TerminalManager::spawn(const Json& args, Json* out,
   p->rows = rows;
   p->screen.resize(cols, rows);
   std::string tid = e.tid;
-  // Foreground commands already get a deadline from reproc_wait below. A
-  // background command has no waiter, so only an EXPLICIT timeoutMs starts a
+  // A background command has no waiter, so only an EXPLICIT timeoutMs starts a
   // clock: an omitted value must mean "unlimited" (a long build must not die
-  // because the model did not repeat the 60 s default).
+  // because the model did not repeat the 60 s default). Foreground uses the
+  // tool budget enforced below.
   if (background && !interactive && args.contains("timeoutMs")) {
     p->timeout_ms = timeout_ms > 0 ? timeout_ms : 0;
     p->started_ms = e.started_at;
   }
   procs_[tid] = std::move(p);
 
-  // 前台：等结果（超时终止并返回 timedOut，绝不转后台）
+  // 前台：等结果（工具预算到期返回并转后台；用户中止则终止）
   // 交互式终端永远立即返回：它的生命周期由用户/UI 控制
   if (!background && !interactive) {
     Proc& pr = *procs_[tid];
     pr.fg_wait = true;
     reproc_t* handle = pr.h;
     int wait_ms = static_cast<int>(timeout_ms > 0 ? timeout_ms : 60000);
-    // Release the manager lock for the wait. tick() keeps draining output for
-    // the live panel (and skips exit detection while fg_wait is set); other
-    // sessions can spawn their own terminals in parallel.
+    // Release the manager lock for the wait; take it only for the short exit
+    // checks. tick() keeps draining output for the live panel (and skips exit
+    // detection while fg_wait is set). CRITICAL: do NOT call reproc_wait here.
+    // Its Windows path blocks in WaitForSingleObject(INFINITE) once the exit
+    // pipe is readable, and BusyBox closes that inherited pipe early - the 60 s
+    // budget never fired and the poller later froze every session on mu_.
     lk.unlock();
-    // Wait in small slices so a user 中止 (cancel) is honored even when the
-    // child never exits; a single reproc_wait(60s+) made the button look dead.
-    int w = REPROC_ETIMEDOUT;
+    int exit_code = -1;
+    bool exited = false;
     bool cancelled = false;
     int remaining = wait_ms;
-    while (remaining > 0) {
-      int slice = remaining > 100 ? 100 : remaining;
-      w = reproc_wait(handle, slice);
-      if (w != REPROC_ETIMEDOUT) break;
+    for (;;) {
+      {
+        std::lock_guard<std::recursive_mutex> poll_lk(mu_);
+        if (try_wait(pr, &exit_code)) {
+          exited = true;
+          break;
+        }
+      }
       if (cancel && cancel()) {
         cancelled = true;
-        w = REPROC_ETIMEDOUT;
         break;
       }
+      if (remaining <= 0) break;
+      int slice = remaining > 100 ? 100 : remaining;
+      std::this_thread::sleep_for(std::chrono::milliseconds(slice));
       remaining -= slice;
     }
-    if (remaining <= 0 && !cancelled) {
-      // The last slice may have raced an exit: do not report a timeout for a
-      // command that actually completed at the deadline.
-      int last = reproc_wait(handle, 0);
-      w = last;
-    }
     lk.lock();
+    // The deadline / cancel may have raced the exit.
+    if (!exited && try_wait(pr, &exit_code)) exited = true;
     pr.fg_wait = false;
     drain(pr);
-    if (w == REPROC_ETIMEDOUT) {
-      if (cancelled) {
-        // The USER stopped the turn: that means stop the command too.
-        reproc_terminate(handle);
-        int killed = reproc_wait(handle, 2000);
-        if (killed == REPROC_ETIMEDOUT) {
-          reproc_kill(handle);
-          killed = reproc_wait(handle, 2000);
-        }
-        drain(pr);
-        pr.exited = true;
-        pr.exit_code = -1;
-        reg_->mark_exited(tid, -1, clock_->now_ms());
-        Json o = Json::object();
-        o["tid"] = tid;
-        o["status"] = "exited";
-        o["exitCode"] = -1;
-        o["output"] = pr.out;
-        o["cancelled"] = true;
-        o["summary"] = "cancelled by user (killed)";
-        if (out) *out = o;
-        return FsResult::success(o);
-      }
-      // BUDGET REACHED, not failure. Return NOW so the model can decide what to
-      // do (poll it, kill it, or leave it as background work). Killing here
-      // destroyed the work and made "转为后台" impossible; staying here made a
-      // hung child block the whole turn past the advertised minute.
-      pr.timeout_ms = 0;   // the foreground budget is spent; no second deadline
-      pr.timed_out = true;
-      reg_->promote_to_background(tid, clock_->now_ms());
-      reg_->mark_timed_out(tid);
+    if (exited) {
+      reg_->mark_exited(tid, exit_code, clock_->now_ms());
+      maybe_prune_log(tid);
       Json o = Json::object();
       o["tid"] = tid;
-      o["status"] = "running";
+      o["status"] = "exited";
       o["output"] = pr.out;
-      o["timedOut"] = true;
+      o["exitCode"] = exit_code;
       o["budgetMs"] = wait_ms;
-      o["summary"] = "foreground budget of " + std::to_string(wait_ms) +
-                     " ms reached; command is still running in background as terminal " +
-                     tid;
       if (out) *out = o;
       return FsResult::success(o);
     }
-    pr.exited = true;
-    pr.exit_code = w;
-    reg_->mark_exited(tid, w, clock_->now_ms());
-    maybe_prune_log(tid);
+    if (cancelled) {
+      // The USER stopped the turn: that means stop the command too. Wait
+      // OUTSIDE mu_ so the poller and other sessions keep running.
+      reproc_terminate(handle);
+      lk.unlock();
+      int killed = wait_for_exit(pr, 2000);
+      if (killed == REPROC_ETIMEDOUT) {
+        {
+          std::lock_guard<std::recursive_mutex> relock(mu_);
+          if (!pr.exited) reproc_kill(handle);
+        }
+        wait_for_exit(pr, 2000);
+      }
+      lk.lock();
+      drain(pr);
+      if (!pr.exited) {
+        pr.exited = true;
+        pr.exit_code = -1;
+      }
+      reg_->mark_exited(tid, pr.exit_code, clock_->now_ms());
+      Json o = Json::object();
+      o["tid"] = tid;
+      o["status"] = "exited";
+      o["exitCode"] = pr.exit_code;
+      o["output"] = pr.out;
+      o["cancelled"] = true;
+      o["summary"] = "cancelled by user (killed)";
+      if (out) *out = o;
+      return FsResult::success(o);
+    }
+    // BUDGET REACHED, not failure. Return NOW so the model can decide what to
+    // do (poll it, kill it, or leave it as background work). Killing here
+    // destroyed the work and made "转为后台" impossible; staying here made a
+    // hung child block the whole turn past the advertised minute.
+    pr.timeout_ms = 0;   // the foreground budget is spent; no second deadline
+    pr.timed_out = true;
+    reg_->promote_to_background(tid, clock_->now_ms());
+    reg_->mark_timed_out(tid);
     Json o = Json::object();
     o["tid"] = tid;
-    o["status"] = "exited";
+    o["status"] = "running";
     o["output"] = pr.out;
-    o["exitCode"] = w;
+    o["timedOut"] = true;
     o["budgetMs"] = wait_ms;
+    o["summary"] = "foreground budget of " + std::to_string(wait_ms) +
+                   " ms reached; command is still running in background as terminal " +
+                   tid;
     if (out) *out = o;
     return FsResult::success(o);
   }
@@ -410,7 +540,7 @@ FsResult TerminalManager::spawn(const Json& args, Json* out,
 // 把用户输入写进终端。text 是 VT 编码后的原始字节（按键序列），不补换行——
 // Enter 由调用方编码成 \r。ConPTY 下这就是一个真终端的键盘输入。
 FsResult TerminalManager::write(const Json& args, Json* out) {
-  std::lock_guard<std::mutex> lk(mu_);
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   std::string tid = jsonutil::get<std::string>(args, "tid", "");
   std::string text = jsonutil::get<std::string>(args, "text", "");
   std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.find(tid);
@@ -451,7 +581,7 @@ FsResult TerminalManager::write(const Json& args, Json* out) {
 
 // 交互式终端的窗口大小（ConPTY 会把它告诉子进程；全屏程序据此排版）。
 FsResult TerminalManager::resize(const Json& args, Json* out) {
-  std::lock_guard<std::mutex> lk(mu_);
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   std::string tid = jsonutil::get<std::string>(args, "tid", "");
   std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.find(tid);
   if (it == procs_.end()) {
@@ -477,7 +607,7 @@ FsResult TerminalManager::resize(const Json& args, Json* out) {
 }
 
 FsResult TerminalManager::poll(const Json& args, Json* out) {
-  std::lock_guard<std::mutex> lk(mu_);
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   std::string tid = jsonutil::get<std::string>(args, "tid", "");
   std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.find(tid);
   if (it == procs_.end()) {
@@ -495,10 +625,8 @@ FsResult TerminalManager::poll(const Json& args, Json* out) {
         maybe_prune_log(tid);
       }
     } else if (p.h) {
-      int w = reproc_wait(p.h, 0);  // 非阻塞检查
-      if (w != REPROC_ETIMEDOUT) {
-        p.exited = true;
-        p.exit_code = w;
+      int w = -1;
+      if (try_wait(p, &w)) {
         reg_->mark_exited(tid, w, clock_->now_ms());
         maybe_prune_log(tid);
       }
@@ -514,7 +642,7 @@ FsResult TerminalManager::poll(const Json& args, Json* out) {
 }
 
 FsResult TerminalManager::kill(const Json& args, Json* out) {
-  std::lock_guard<std::mutex> lk(mu_);
+  std::unique_lock<std::recursive_mutex> lk(mu_);
   std::string tid = jsonutil::get<std::string>(args, "tid", "");
   std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.find(tid);
   if (it == procs_.end()) {
@@ -527,15 +655,26 @@ FsResult TerminalManager::kill(const Json& args, Json* out) {
     p.exited = true;
     p.exit_code = 0;
   } else if (p.h && !p.exited) {
-    reproc_terminate(p.h);       // 先温和
-    int w = reproc_wait(p.h, 2000);
+    // Terminate under the lock, wait OUTSIDE it. A child that ignores the
+    // polite signal must not freeze tick()/other sessions for two seconds.
+    reproc_terminate(p.h);
+    lk.unlock();
+    int w = wait_for_exit(p, 2000);
     if (w == REPROC_ETIMEDOUT) {
-      reproc_kill(p.h);          // 再强杀
-      w = reproc_wait(p.h, 2000);
+      {
+        std::lock_guard<std::recursive_mutex> relock(mu_);
+        if (!p.exited) reproc_kill(p.h);
+      }
+      w = wait_for_exit(p, 2000);
     }
+    lk.lock();
     drain(p);
-    p.exited = true;
-    p.exit_code = (w == REPROC_ETIMEDOUT) ? -1 : w;
+    if (p.exited) {
+      p.exit_code = w;
+    } else {
+      p.exited = true;
+      p.exit_code = -1;
+    }
   }
   reg_->mark_exited(tid, p.exit_code, clock_->now_ms());
   Json o = Json::object();
@@ -552,7 +691,7 @@ FsResult TerminalManager::kill(const Json& args, Json* out) {
 // 事件里带的是屏幕网格（按样式合并后的紧凑行），不是原始字节流：escape 序列
 // 已经在这一层被解析掉，UI 直接画格子，不重复实现一个终端。
 std::vector<Json> TerminalManager::tick() {
-  std::lock_guard<std::mutex> lk(mu_);
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   std::vector<Json> out;
   for (std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.begin();
        it != procs_.end(); ++it) {
@@ -596,10 +735,8 @@ std::vector<Json> TerminalManager::tick() {
           reg_->mark_exited(p.tid, code, clock_->now_ms());
         }
       } else if (p.h) {
-        int w = reproc_wait(p.h, 0);  // 非阻塞检查
-        if (w != REPROC_ETIMEDOUT) {
-          p.exited = true;
-          p.exit_code = w;
+        int w = -1;
+        if (try_wait(p, &w)) {
           reg_->mark_exited(p.tid, w, clock_->now_ms());
         }
       }
@@ -720,7 +857,7 @@ Json TerminalManager::screen_json(const Proc& p, int from) {
 }
 
 FsResult TerminalManager::grid(const Json& args, Json* out) {
-  std::lock_guard<std::mutex> lk(mu_);
+  std::lock_guard<std::recursive_mutex> lk(mu_);
   std::string tid = jsonutil::get<std::string>(args, "tid", "");
   std::map<std::string, std::unique_ptr<Proc> >::iterator it = procs_.find(tid);
   if (it == procs_.end()) {

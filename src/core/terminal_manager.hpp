@@ -57,6 +57,16 @@ class TerminalManager {
   // are not safe to touch from two threads at once.
   std::vector<Json> tick();
 
+  // Thread-safe registry access. TerminalRegistry itself has no lock; the
+  // manager's mutex serialises every mutation, so reads from FsApi (session
+  // list, terminal drawer, transcript lookup) must take the same lock and work
+  // on copies. Returning a raw TermEntry* here was a two-session data race.
+  bool entry_snapshot(const std::string& tid, TermEntry* out);
+  std::vector<TermEntry> entries_for_session(const std::string& sid);
+  bool add_saved_entry(const Json& j);
+  // For the few single registry updates FsApi performs itself.
+  std::recursive_mutex& mutex() { return mu_; }
+
   // Every drained chunk of output, the moment it is produced (tid + text). The
   // host writes the terminal's transcript from here - NOT from tick(), which may
   // never run again if the app closes right after a command exits. That gap is
@@ -83,9 +93,10 @@ class TerminalManager {
   TerminalRegistry* reg_;
   const Clock* clock_;
   std::map<std::string, std::unique_ptr<Proc> > procs_;
-  // serializes spawn/poll/kill/write/tick: the desktop poller thread and the
-  // browser UI timer can both drive tick() at the same time
-  std::mutex mu_;
+  // Serializes spawn/poll/kill/write/tick AND every TerminalRegistry access.
+  // Recursive so a manager method called while FsApi already holds it (a
+  // snapshot helper) cannot self-deadlock.
+  std::recursive_mutex mu_;
 
   // 组装 argv（shell + flag + command）；win cmd 用 /c，powershell 用 -Command
   static std::vector<std::string> build_argv(const ShellInfo& sh, const std::string& cmd);
@@ -98,6 +109,14 @@ class TerminalManager {
   static Json screen_json(const Proc& p, int from = 0);
   // 读走当前可用输出（非阻塞），追加到 proc.out
   static void drain(Proc& p);
+  // Non-blocking process exit check. MUST NOT use reproc_wait(handle, 0) here:
+  // its Windows path calls WaitForSingleObject(INFINITE) once the exit PIPE is
+  // readable, and a shell that closes the inherited pipe before exiting (BusyBox)
+  // makes that pipe readable while the shell is still alive. Caller holds mu_.
+  static bool try_wait(Proc& p, int* exit_code);
+  // Wait for an exit without holding mu_ across the sleep. Returns a reproc code
+  // (REPROC_ETIMEDOUT on deadline). Caller MUST NOT hold mu_.
+  int wait_for_exit(Proc& p, int timeout_ms);
   // A foreground MODEL command that finished quickly is noise, not a record: its
   // transcript is deleted on exit. Kept: user terminals, background terminals,
   // labelled ("marked") ones, and anything that ran longer than a minute.

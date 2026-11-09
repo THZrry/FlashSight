@@ -15,6 +15,15 @@
   + 已产生的输出；命令继续作为 model-bg 运行，模型自己决定 poll / kill / 继续等。
   记录（含 `timedOut`）必须在“所有终端”里可见，原 history 保留 `terminalRef` 引用。
 - `timeoutMs` 只能缩短前台等待，默认/上限都是 60000ms；长任务用 `terminal_spawn`。
+- **退出检测不能用 `reproc_wait(handle, 0)`**：reproc 的 Windows 实现只要 exit
+  pipe 可读就会进 `WaitForSingleObject(INFINITE)`；BusyBox 起子进程时会提前关闭
+  继承的 exit pipe 句柄，于是前台 60s 预算和 `tick()` 都会永久卡住。管理器自己
+  持有 `OpenProcess(SYNCHRONIZE)` 句柄（POSIX 用 `waitpid(WNOHANG)`）做真正
+  非阻塞的 `try_wait`；`spawn/poll/tick/kill` 都不再调用 reproc_wait。
+- **锁顺序**：`tick()` 持有终端 `mu_`；UI 的 `terminal.grid/poll/kill` 不再持有
+  全局后端锁去等 `mu_`（这些路由已从 UiApi 的全局锁排除）。`TerminalRegistry`
+  没有自己的锁，所有读都通过 `TerminalManager::entry_snapshot /
+  entries_for_session` 在 `mu_` 下拷出副本。
 
 ## 2. 注册表字段
 

@@ -82,6 +82,42 @@ FS_TEST(terminal_foreground_timeout_detaches) {
   ASSERT_TRUE(mgr.kill(Json{{"tid", tid}}, &p).ok());
 }
 
+// The real freeze (batch 134): the shell spawned a child (`run.exe`) and
+// BusyBox closed reproc's inherited EXIT pipe early. `reproc_wait(handle, 0)`
+// then blocked in WaitForSingleObject(INFINITE) — the 60 s budget never fired,
+// and tick() held the terminal mutex forever. A shell command that spawns a
+// child is the regression shape.
+FS_TEST(terminal_foreground_timeout_with_a_shell_child) {
+  WallClock clock;
+  TerminalRegistry reg(&clock);
+  TerminalManager mgr(&reg, &clock);
+  ShellInfo sh = ShellDetector::resolve("", ShellDetector::detect_all());
+  std::string cmd = "ping 127.0.0.1";
+  if (sh.name == "bash" || sh.name == "sh" || sh.name == "zsh" ||
+      sh.name == "dash") {
+    cmd = "sleep 5 & wait";
+  }
+  Json args = Json::object();
+  args["command"] = cmd;
+  args["background"] = false;
+  args["timeoutMs"] = 300;
+  Json out;
+  FsResult r = mgr.spawn(args, &out);
+  ASSERT_TRUE(r.ok());
+  EXPECT_TRUE(jsonutil::get<bool>(out, "timedOut", false));
+  std::string tid = jsonutil::get<std::string>(out, "tid", "");
+  ASSERT_TRUE(!tid.empty());
+  // tick() must also return promptly while that shell and its child are alive.
+  std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < 3; ++i) mgr.tick();
+  int64_t elapsed = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - t0).count());
+  EXPECT_TRUE(elapsed < 1000);
+  Json p;
+  ASSERT_TRUE(mgr.kill(Json{{"tid", tid}}, &p).ok());
+}
+
 // The foreground budget is the TOOL's: a model-supplied larger value cannot
 // turn terminal_exec into a ten-minute blocking call (and an omitted value does
 // not need to be supplied by the model at all). We cannot wait 60 s here, so

@@ -1373,6 +1373,12 @@ class UiApp {
   // next continuation. Only this item - the rest of the queue remains.
   std::string pending_now_sid_;
   std::string pending_now_text_;
+  // A send made while the live state said "turn running": no optimistic user
+  // bubble is drawn (it would be retracted if the backend queues it). If the
+  // backend instead STARTS a turn, turn.started carries the user text and this
+  // pending pair lets the handler insert the question once, before the answer.
+  std::string pending_guidance_sid_;
+  std::string pending_guidance_text_;
   // Build-driven loads (the explore page needs the skill/MCP lists) must not
   // re-request on every render while the first reply is still in flight - that
   // request storm starved the event loop and made clicks look dead.
