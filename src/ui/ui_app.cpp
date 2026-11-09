@@ -1063,6 +1063,7 @@ void UiApp::load_terminals(const std::string& sid) {
       it.label = jsonutil::get<std::string>(t, "label", "");
       it.status = jsonutil::get<std::string>(t, "status", "running");
       it.kind = jsonutil::get<std::string>(t, "kind", "user");
+      it.timed_out = jsonutil::get<bool>(t, "timedOut", false);
       // A closed terminal is still LISTED (it keeps running; closing only
       // removed its tab), so it is not filtered out here - the tab strip skips
       // it and the overview shows it as an inactive row.
@@ -2229,12 +2230,16 @@ ProjectCard::SessionRow UiApp::live_session_row(ProjectCard::SessionRow row) con
   for (size_t i = 0; i < st_.terminals.size(); ++i) {
     const TermItem& t = st_.terminals[i];
     if (t.status != "running") continue;
-    bool visible = t.kind == "user" ||
-                   ((t.kind == "model-fg" || t.kind == "model-bg") &&
-                    !t.label.empty());
+    // Background model terminals count even unlabelled: they are real processes
+    // the drawer can open. Foreground commands are tool results unless marked.
+    bool visible = t.kind == "user" || t.kind == "model-bg" ||
+                   !t.label.empty();
     if (visible) ++running_terms;
   }
-  row.terminal_count = running_terms;
+  // Live state can ADD to the backend snapshot, never erase it: before the
+  // drawer has been opened `st_.terminals` is empty, and overwriting the count
+  // with 0 hid a running background terminal from the session dot.
+  if (running_terms > row.terminal_count) row.terminal_count = running_terms;
   // An interrupted turn is a failure the list cannot know about yet.
   if (st_.interrupted && !st_.interrupt_reason.empty()) {
     row.last_error = st_.interrupt_reason;
@@ -4185,6 +4190,16 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       msg.rev = next_msg_rev_++;
       render();
     }
+    // A terminal tool can leave a REAL terminal behind (background spawn, or a
+    // foreground command that hit its budget and was handed to the background).
+    // The drawer must agree with the backend immediately, not after the user
+    // closes and reopens it: the tool row saying "completed" while no terminal
+    // exists is exactly the UI/backend split.
+    if (is_active && !sid.empty() &&
+        (name == "terminal_exec" || name == "terminal_spawn" ||
+         name == "terminal_kill")) {
+      load_terminals(sid);
+    }
   } else if (event == "subagent.done") {
     std::string id = jsonutil::get<std::string>(payload, "id", "");
     std::string summary = jsonutil::get<std::string>(payload, "summary", "");
@@ -4272,9 +4287,12 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // ghosts that vanished on the next list refresh ("十几个点进去变成几个").
     std::string kind = jsonutil::get<std::string>(payload, "kind", "");
     std::string label = jsonutil::get<std::string>(payload, "label", "");
-    bool user_visible = kind == "user" ||
-                        ((kind == "model-fg" || kind == "model-bg") &&
-                         !label.empty());
+    // Same predicate as `terminal.list`: a background model terminal is a real
+    // terminal; a foreground command is a tool result unless it was marked. The
+    // event carries `kind` because FsApi now forwards the manager's payload -
+    // dropping it made every model terminal look like a ghost here.
+    bool user_visible = kind == "user" || kind == "model-bg" ||
+                        !label.empty();
     std::vector<std::string>& hidden_list =
         is_active ? st_.term_hidden : vp->term_hidden;
     std::vector<TermItem>& terms = is_active ? st_.terminals : vp->terminals;
@@ -4320,6 +4338,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       it.status = "running";
       it.kind = kind;
       it.label = label;
+      it.timed_out = jsonutil::get<bool>(payload, "timedOut", false);
       terms.push_back(it);
       // A USER terminal is a tab by definition. A model command stays a record
       // in 所有终端 until the user opens it - it must not pop a tab on the right.
@@ -9035,7 +9054,11 @@ VNodePtr UiApp::build_terminal_drawer() {
       // three states, and the tab one matters: a closed terminal keeps running,
       // so "running" alone would not tell you why it has no tab
       std::string state = closed ? tr("标签已关闭")
-                                 : (t.status == "running" ? tr("运行中") : tr("已退出"));
+                                 : (t.status == "running"
+                                        ? (t.timed_out ? tr("超时·后台")
+                                                       : tr("运行中"))
+                                        : (t.timed_out ? tr("超时退出")
+                                                       : tr("已退出")));
       ih.add(el("span", "dim").text(state));
       item.add(ih);
       H pre = el("pre", "td-all-out");

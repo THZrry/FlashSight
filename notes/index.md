@@ -1745,3 +1745,16 @@ The process of project: P0 环境搭建
   - **工作过程顺序（按 note <96> 的原始要求回正）**：不是“工具 → 解说 → 思考”三段，也不是把整轮 reasoning 合成一个块丢在最后。现在 `ChatMsg::ThinkBlock{text,after,open,streaming}` 按“到达时已执行工具数”插入同一条流：工具前到达的思考在工具前，工具后的思考在工具后。`thinking.delta` 追加到当前段；`stream.delta`/`tool.start`/`assistant.interim`/`turn.done` 会把当前段标成结束并自动折叠。思考块点击可展开/折叠；旧存储的单个 `thinking` 作为兼容块保留。
   - **持久化/重开**：assistant turn 存 `thoughts`；`live_state`/`attach_live_turn` 也带 `thoughts`，切页/重开还原位置和折叠态；`message_sig`/debug 统计包含 thoughts。
   - **测试/构建**：473 用例 4373 断言全过；新增思考流自动折叠/位置、前台 terminal cancel 用例。
+
+
+<133>(ROOT CAUSE/FIX): 前台 terminal_exec 的预算由工具强制 60s，到时返回并转后台；终端 UI 与后端重新接上（事件丢字段/列表过滤/计数覆盖）；思考块完全复用工具折叠行。
+  - **60s 是工具的预算，不是模型参数**：旧代码允许模型传 0（→60s）或最高 10min；模型传个大值就会“一分钟早过了还不返回”。现在前台 `terminal_exec` 的 wait_ms = min(模型 timeoutMs>0, 60000)，省略/0 也是 60000；再大的值也只等 60s。后台 `terminal_spawn` 的 0 仍是不限（显式 timeoutMs 由 tick 在后台执行）。
+  - **到时返回，不是杀死**：60s 到达时 `reproc_wait` 返回 ETIMEDOUT，进程不再 terminate；`promote_to_background` 把它改成 model-bg（wakeOnExit=true），返回 `status:"running"`、`timedOut:true`、`budgetMs:60000` 和已产生的输出，模型自己决定 terminal_poll / terminal_kill / 继续等。用户中止仍立即 terminate→2s→kill，两个分支分开。工具结果 summary 明确写“超时（60000ms），命令已转后台（终端 #N）”，不再看起来像普通完成。
+  - **为什么 UI 看不到终端（两条断链）**：
+    1) `FsApi::terminal_tick` 重新构造了 `{sid,tid,text}` 事件，把 manager 已经带上的 `kind/label/timedOut` 全部丢掉，UI 只能把 model 终端当 ghost 隐藏；
+    2) `terminal_list` 只显示 user 或“带 label 的 model 终端”，无标签的 `terminal_spawn`/晋升后台终端永远不出现；`terminal.output` 的 UI 分支用同一错误谓词，`live_session_row` 又用未加载的空本地表覆盖后端 terminalCount。
+    现在事件 payload 原样透传；`terminal_list` 的谓词是 user / model-bg / 带 label，且必须（运行中或日志存在）；UI 输出分支同一谓词；会话圆点取 max(后端计数, 本地计数)；terminal 工具的 `tool.update` 后主动 `load_terminals`。无标签的 model-bg 在“所有终端”里可见，并新增“超时·后台 / 超时退出”状态。
+  - **日志事件还有一处断链**：`tick()` 用“本次 tick 开始时 p.out 的大小”判断新输出，而前台 spawn/poll 在 tick 之前已经把输出 drain 完，导致 foreground 的 terminal.output 从不发出。改为和 `p.reported` 比较（1MB 截断时同步 reported 的旧逻辑保留）。新增 FsApi 用例断言事件带 kind，以及超时记录出现在 terminal.list 且仍 running。
+  - **思考块复用工具折叠组件**：删除自定义 `think-block/think-head/think-body`，`thoughts[i]` 和旧的单个 `thinking` 都渲染成 `ToolBlock{name:"思考", detail:text, expanded:open, running:streaming, plain:true}`，走 `tool_block_cached`（流式时不缓存，否则每个 token 的完整 growing text 都会进 4000 条 row cache）；点 `tb-head` 发 `think:<idx>`/`legacy-think`，与工具行完全同一套折叠。`plain` 关掉 JSON 高亮，`tb-prose` 让正文换行而不是横向滚动。
+  - **为什么整组不显示**：`chat_message` 的 `has_work` 只看 thinking/tools/interim/work_live，漏了 `thoughts`；纯 reasoning 的第一轮会整块不渲染。已加入 `!m.thoughts.empty()`。旧存储的 thinking 现在默认折叠（`thinking_open` 默认 false），点开可见；测试同步改成点开后再断言文本。
+  - **测试/构建**：480 用例 4419 断言全过；新增 `terminal_foreground_timeout_detaches`、`terminal_foreground_budget_is_capped`、`terminal_registry_timed_out_roundtrip`、`uiapi_terminal_output_event_carries_kind`、`uiapi_terminal_timeout_is_listed_and_running`、`uiapp_thinking_row_uses_tool_fold`、`uiapp_terminal_output_background_model_terminal_is_visible`、`uiapp_backend_terminal_count_survives_empty_live_list`。`xmake b flashsight-web flashsight-webview flashsight-whaleui fs_tests` 一条命令重编三变体并通过。

@@ -55,8 +55,8 @@
 - [x] read_file（offset/limit + 二进制守卫）/ ls / find-grep。
 - [x] write_file / diffWrite（dtl；上下文对不上直接失败；diff 进 patches/）。
 - [x] remove_file（直接删除；确认走批准门；删前快照保证可回滚）。
-- [x] terminal_exec/spawn/kill/poll（reproc；前台超 5min 自动转后台并通知+事件；
-  后台退出→wake 或徽标；输出流式 `terminal.output/exit`）。
+- [x] terminal_exec/spawn/kill/poll（reproc；前台工具强制 60s 预算，到时返回 timedOut
+  并转后台、在“所有终端”可见；后台退出→wake 或徽标；输出流式 `terminal.output/exit`）。
 - [x] fetch_url（method/headers/timeout/sizeCap/证书开关；脱敏 trace）。
 - [ ] search_web（先调研开源实现，有则用，无则接可配 HTTP 搜索 API）。
 - [x] screenshot（屏/窗口/区域，权限门）/ readImage（最大边+质量压缩可设）。

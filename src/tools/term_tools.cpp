@@ -37,16 +37,20 @@ void register_term_tools(ToolRegistry* registry) {
       });
   }
 
-  // terminal_exec（前台执行；超时终止并返回 timedOut）
+  // terminal_exec（前台执行；工具强制 60s 预算，到时返回并转后台）
   {
     ToolDef def;
     def.name = "terminal_exec";
-    def.description = "前台执行命令（高风险；timeoutMs 到时直接终止并返回 timedOut；0=默认60s，上限10min）";
+    def.description =
+        "前台执行一条短命令（高风险）。工具强制 60s 预算：到时立即返回 timedOut，"
+        "命令继续在后台运行（tid 可 terminal_poll/terminal_kill）；已知耗时的任务请直接用 "
+        "terminal_spawn。timeoutMs 只能缩短等待，不能超过 60s。";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
     props["command"] = Json{{"type", "string"}, {"description", "要执行的命令"}};
-    props["timeoutMs"] = Json{{"type", "integer"}, {"description", "超时毫秒（0=默认60s，最大10min）"}};
+    props["timeoutMs"] = Json{{"type", "integer"},
+                              {"description", "可选，只能缩短前台等待（默认/最大 60000ms）"}};
     props["shell"] = Json{{"type", "string"}, {"description", "shell（空=自动）"}};
     params["properties"] = props;
     params["required"] = Json::array({"command"});
@@ -65,7 +69,15 @@ void register_term_tools(ToolRegistry* registry) {
         // The host's foreground spawn already waits for the process and returns
         // the final output/status. Polling here duplicated the same output under
         // `poll.output` (the user saw both) and could contradict the spawn result.
-        if (!out.contains("summary")) {
+        if (jsonutil::get<bool>(out, "timedOut", false)) {
+          // Make the outcome visible in the work log, not just in the JSON body:
+          // "completed" on the row while the command still runs is misleading.
+          std::string tid = jsonutil::get<std::string>(out, "tid", "");
+          out["summary"] = "超时（" +
+                           std::to_string(jsonutil::get_int(out, "budgetMs", 60000)) +
+                           "ms），命令已转后台" +
+                           (tid.empty() ? std::string() : "（终端 #" + tid + "）");
+        } else if (!out.contains("summary")) {
           std::string command = jsonutil::get<std::string>(args, "command", "");
           out["summary"] = utf8::truncate(command, 80, "…");
         }

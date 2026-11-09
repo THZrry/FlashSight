@@ -179,6 +179,9 @@ struct TermItem {
   // "user" | "model-fg" | "model-bg". Model foreground commands are results,
   // not windows: they belong in 所有终端, not as open tabs by default.
   std::string kind;
+  // The backstop budget fired (a foreground command was handed to the
+  // background). Shown in the overview so "still running" has a reason.
+  bool timed_out = false;
 };
 
 // A wake-up the backend will fire for this session (auto mode). Declared at

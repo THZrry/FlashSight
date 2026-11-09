@@ -697,8 +697,11 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   // tool calls still has a work log. Without it the fold was not rendered at all,
   // so "过程说明" had nowhere to appear - which is why the narration looked like it
   // had been dropped again.
-  bool has_work = !m.thinking.empty() || !m.tools.empty() || !m.interim.empty() ||
-                  !m.work_live.empty();
+  // `thoughts` MUST be here: a turn whose first round is pure reasoning has no
+  // tools/interim/legacy text yet. Without it the whole work group (and the
+  // streaming thought inside it) simply did not render.
+  bool has_work = !m.thinking.empty() || !m.thoughts.empty() || !m.tools.empty() ||
+                  !m.interim.empty() || !m.work_live.empty();
   if (has_work) {
     int nfail = 0;
     for (size_t i = 0; i < m.tools.size(); ++i) if (!m.tools[i].ok) ++nfail;
@@ -777,20 +780,38 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         if (idx >= m.thoughts.size()) return;
         const comp::ChatMsg::ThinkBlock& th = m.thoughts[idx];
         if (th.text.empty()) return;
-        H block = el("div", th.open ? "think-block open" : "think-block");
-        H head = el("div", "think-head");
-        head.add(el("i", "fa fa-comment-dots"));  // falls back to the label if the subset lacks it
-        head.add(el("span").text(tr("思考")));
-        head.add(el("span", "grow"));
-        head.add(el("span", "think-caret").text(th.open ? "\u25be" : "\u25b8"));
+        // Reuse the TOOL fold row (same header/caret/body) instead of inventing a
+        // second fold style. The only difference is the label and the spinner
+        // while the reasoning is still streaming.
+        comp::ToolBlock tb;
+        tb.key = "think:" + std::to_string(m.uid) + ":" + itos(static_cast<int>(idx));
+        tb.name = tr("思考");
+        tb.detail = th.text;
+        tb.expanded = th.open;
+        tb.running = th.streaming;
+        tb.ok = !th.streaming;
+        tb.plain = true;
+        tb.rev = th.rev;
+        EventFn toggle = nullptr;
         if (on_tool_toggle) {
           EventFn cb = on_tool_toggle;
           std::string key = "think:" + itos(static_cast<int>(idx));
-          head.on(EventKind::kClick, [cb, key](const std::string&) { cb(key); });
+          toggle = [cb, key](const std::string&) { cb(key); };
         }
-        block.add(head);
-        if (th.open) block.add(el("pre", "think-body").text(th.text));
-        inner.add(block);
+        std::string gen = std::to_string(m.uid) + ":think:" +
+                          std::to_string(m.work_seq) +
+                          (work_open ? ":o" : ":c");
+        // A streaming thought changes on every token. Memoising each revision
+        // would park the whole growing text in the row cache once per delta
+        // (thousands of copies). Only the FINISHED row is cached; streaming is
+        // rebuilt on the (25 ms throttled) paint like any live text.
+        if (th.streaming) {
+          H live = tool_block(tb, toggle, nullptr);
+          live.key("tb:" + gen + ":" + tb.key);
+          inner.add(live);
+        } else {
+          inner.add(tool_block_cached(tb, toggle, nullptr, gen));
+        }
       };
       auto flush_thoughts = [&](size_t after) {
         while (thought_at < m.thoughts.size() &&
@@ -843,23 +864,32 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
         inner.add(el("div", "work-label").text(tr("子代理过程")));
         inner.add(el("div", "work-note work-subagent").text(m.work_live));
       }
-      // Legacy single thinking block (old stored turns / tests): collapsible too.
+      // Legacy single thinking block (old stored turns): the stored turn has one
+      // coalesced blob, so it cannot be interleaved. It still uses the same fold
+      // row as a tool/thought instead of a second visual language.
       if (m.thoughts.empty() && !m.thinking.empty()) {
-        H block = el("div", "think-block open");
-        H head = el("div", "think-head");
-        head.add(el("i", "fa fa-comment-dots"));
-        head.add(el("span").text(tr("思考")));
-        head.add(el("span", "grow"));
-        head.add(el("span", "think-caret").text("\u25be"));
+        comp::ToolBlock tb;
+        tb.key = "legacy:" + std::to_string(m.uid);
+        tb.name = tr("思考");
+        tb.detail = m.thinking;
+        tb.expanded = m.thinking_open;
+        tb.ok = true;
+        tb.plain = true;
+        tb.rev = m.rev;
+        EventFn toggle = nullptr;
         if (on_tool_toggle) {
           EventFn cb = on_tool_toggle;
-          head.on(EventKind::kClick, [cb](const std::string&) { cb("legacy-think"); });
+          toggle = [cb](const std::string&) { cb("legacy-think"); };
         }
-        block.add(head);
-        // Old turns never had a fold state; keep the text visible (the parent
-        // work fold is the control). New turns use `thoughts`, which auto-fold.
-        block.add(el("pre", "think-body").text(m.thinking));
-        inner.add(block);
+        std::string gen = std::to_string(m.uid) + ":legacy:" +
+                          std::to_string(m.work_seq) +
+                          (work_open ? ":o" : ":c");
+        // One coalesced blob per stored turn; there is nothing to memoise. Not
+        // caching also avoids one full copy per revision if a live snapshot
+        // carries only `thinking` while the text is still growing.
+        H row = tool_block(tb, toggle, nullptr);
+        row.key("tb:" + gen + ":" + tb.key);
+        inner.add(row);
       }
       work.add(inner);
     }
@@ -1007,11 +1037,14 @@ H tool_block(const ToolBlock& b, EventFn on_toggle, EventFn on_open_subagent) {
     auto body = [&](const std::string& label, const std::string& text_str,
                     const std::string& key) {
       if (!label.empty()) d.add(el("div", "tb-label").text(label));
-      H pre = el("pre", "tb-body");
+      // Thinking is prose: same fold row, but wrapping text instead of the
+      // horizontal-scroll treatment a JSON/tool result needs.
+      H pre = el("pre", b.plain ? "tb-body tb-prose" : "tb-body");
       // Keyed so the shell can scroll it to the bottom after opening: the useful
       // end of a tool result is its last lines.
       pre.key(key);
-      if (spec && std::strcmp(spec->id, "plain") != 0 && !text_str.empty() &&
+      if (!b.plain && spec && std::strcmp(spec->id, "plain") != 0 &&
+          !text_str.empty() &&
           (text_str[0] == '{' || text_str[0] == '[')) {
         pre.html(highlight::to_html_cached(text_str, "json"));
       } else {

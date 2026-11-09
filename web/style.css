@@ -1663,6 +1663,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   scrollbar-color: transparent transparent;
 }
 .tb-label + .tb-body { border-top: none; }
+/* Prose body (a thinking block) reuses the tool fold but not its code layout:
+   a 200-character sentence must wrap, not hide behind a horizontal scrollbar. */
+.tb-body.tb-prose { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Thin bars on both axes, thumb appearing on hover: a transcript full of tool
    rows must not read as a stack of rails. */
 .tb-body::-webkit-scrollbar { width: 8px; height: 8px; }

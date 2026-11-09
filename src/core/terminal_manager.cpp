@@ -194,14 +194,14 @@ FsResult TerminalManager::spawn(const Json& args, Json* out,
   std::string encoding = jsonutil::get<std::string>(args, "encoding", "");
   std::string label = jsonutil::get<std::string>(args, "label", "");
   int64_t timeout_ms = jsonutil::get_int(args, "timeoutMs", 60000);
-  // A foreground tool call blocks the whole turn. `timeoutMs: 0` means
-  // "unlimited" for a BACKGROUND job, but must never mean an unbounded
-  // foreground wait: a hung test binary held WhaleJS for hours. Neither can a
-  // huge model-supplied value: cap foreground commands at 10 minutes.
+  // The TOOL owns the foreground budget. A model-supplied value may only make
+  // the call SHORTER; it can never turn terminal_exec into an unbounded (or
+  // ten-minute) blocking call. Long work belongs in terminal_spawn, and the
+  // model must not have to remember a timeout for short work.
   if (!background && !interactive) {
-    if (timeout_ms <= 0) timeout_ms = 60000;
-    const int64_t kFgMaxMs = 10LL * 60 * 1000;
-    if (timeout_ms > kFgMaxMs) timeout_ms = kFgMaxMs;
+    const int64_t kFgBudgetMs = 60LL * 1000;
+    if (timeout_ms <= 0 || timeout_ms > kFgBudgetMs) timeout_ms = kFgBudgetMs;
+    if (timeout_ms < 100) timeout_ms = 100;
   }
 
   // shell 解析：显式指定 > 探测最优（cmd 兜底）
@@ -328,35 +328,55 @@ FsResult TerminalManager::spawn(const Json& args, Json* out,
       }
       remaining -= slice;
     }
-    if (remaining <= 0) w = REPROC_ETIMEDOUT;
+    if (remaining <= 0 && !cancelled) {
+      // The last slice may have raced an exit: do not report a timeout for a
+      // command that actually completed at the deadline.
+      int last = reproc_wait(handle, 0);
+      w = last;
+    }
     lk.lock();
     pr.fg_wait = false;
     drain(pr);
     if (w == REPROC_ETIMEDOUT) {
-      // A foreground `terminal_exec` timeout is a TIMEOUT, not permission to
-      // leave the process running forever. It used to be promoted to background;
-      // a command with timeoutMs=60000 then stayed alive for half an hour and the
-      // session looked stuck. Kill it, drain what it produced, and mark it exited.
-      reproc_terminate(handle);
-      int killed = reproc_wait(handle, 2000);
-      if (killed == REPROC_ETIMEDOUT) {
-        reproc_kill(handle);
-        killed = reproc_wait(handle, 2000);
+      if (cancelled) {
+        // The USER stopped the turn: that means stop the command too.
+        reproc_terminate(handle);
+        int killed = reproc_wait(handle, 2000);
+        if (killed == REPROC_ETIMEDOUT) {
+          reproc_kill(handle);
+          killed = reproc_wait(handle, 2000);
+        }
+        drain(pr);
+        pr.exited = true;
+        pr.exit_code = -1;
+        reg_->mark_exited(tid, -1, clock_->now_ms());
+        Json o = Json::object();
+        o["tid"] = tid;
+        o["status"] = "exited";
+        o["exitCode"] = -1;
+        o["output"] = pr.out;
+        o["cancelled"] = true;
+        o["summary"] = "cancelled by user (killed)";
+        if (out) *out = o;
+        return FsResult::success(o);
       }
-      drain(pr);
-      pr.exited = true;
-      pr.exit_code = -1;
-      reg_->mark_exited(tid, -1, clock_->now_ms());
+      // BUDGET REACHED, not failure. Return NOW so the model can decide what to
+      // do (poll it, kill it, or leave it as background work). Killing here
+      // destroyed the work and made "转为后台" impossible; staying here made a
+      // hung child block the whole turn past the advertised minute.
+      pr.timeout_ms = 0;   // the foreground budget is spent; no second deadline
+      pr.timed_out = true;
+      reg_->promote_to_background(tid, clock_->now_ms());
+      reg_->mark_timed_out(tid);
       Json o = Json::object();
       o["tid"] = tid;
-      o["status"] = "exited";
-      o["exitCode"] = -1;
+      o["status"] = "running";
       o["output"] = pr.out;
-      o["timedOut"] = !cancelled;
-      if (cancelled) o["cancelled"] = true;
-      o["summary"] = cancelled
-                         ? "cancelled by user (killed)"
-                         : ("timed out after " + std::to_string(wait_ms) + " ms (killed)");
+      o["timedOut"] = true;
+      o["budgetMs"] = wait_ms;
+      o["summary"] = "foreground budget of " + std::to_string(wait_ms) +
+                     " ms reached; command is still running in background as terminal " +
+                     tid;
       if (out) *out = o;
       return FsResult::success(o);
     }
@@ -369,6 +389,7 @@ FsResult TerminalManager::spawn(const Json& args, Json* out,
     o["status"] = "exited";
     o["output"] = pr.out;
     o["exitCode"] = w;
+    o["budgetMs"] = wait_ms;
     if (out) *out = o;
     return FsResult::success(o);
   }
@@ -544,6 +565,7 @@ std::vector<Json> TerminalManager::tick() {
     if (!p.exited && !p.fg_wait && p.timeout_ms > 0 && p.started_ms > 0 &&
         now_ms - p.started_ms >= p.timeout_ms) {
       p.timed_out = true;
+      reg_->mark_timed_out(p.tid);
       if (!p.timeout_sent) {
         p.timeout_sent = true;
         p.kill_deadline_ms = now_ms + 1500;
@@ -556,9 +578,12 @@ std::vector<Json> TerminalManager::tick() {
         if (p.h) reproc_kill(p.h);
       }
     }
-    size_t before = p.out.size();
     drain(p);
-    bool new_out = p.out.size() > before;
+    // Compare against what has been REPORTED, not against the size at the top of
+    // this tick: a foreground spawn drains its whole output (and poll() drains
+    // too) before tick runs, so `before` was already the final size and the
+    // terminal.output event never carried it.
+    bool new_out = p.out.size() > p.reported;
     // The foreground waiter owns exit detection/finalization; a tick racing it
     // would mark the registry exited and emit terminal.exit before the tool
     // returns. Output still streams so the terminal panel stays live.

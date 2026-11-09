@@ -46,26 +46,68 @@ FS_TEST(terminal_spawn_captures_output) {
   EXPECT_TRUE(e->status == TermStatus::kExited);
 }
 
-// A foreground timeout must KILL the command, not promote it to a background
-// terminal that keeps running for half an hour.
-FS_TEST(terminal_foreground_timeout_kills) {
+// A foreground command that overruns the TOOL budget returns at the deadline
+// and is handed to the background. The model then decides: poll it, kill it, or
+// leave it. Killing at the deadline destroyed the work and there was no terminal
+// left to inspect ("terminal_exec 显示完成，却没有终端").
+FS_TEST(terminal_foreground_timeout_detaches) {
   WallClock clock;
   TerminalRegistry reg(&clock);
   TerminalManager mgr(&reg, &clock);
+  // `ping 127.0.0.1` is the portable long-ish command: BusyBox pings until
+  // killed, Windows ping sends four packets (~3 s). Both exceed 300 ms. Do NOT
+  // use `ping -n N`: BusyBox has no -n count and exits immediately with usage.
   std::string cmd = "ping 127.0.0.1";
   Json args = Json::object();
   args["command"] = cmd;
   args["background"] = false;
-  args["timeoutMs"] = 200;
+  args["timeoutMs"] = 300;
   Json out;
   FsResult r = mgr.spawn(args, &out);
   ASSERT_TRUE(r.ok());
-  EXPECT_EQ(jsonutil::get<std::string>(out, "status", ""), std::string("exited"));
+  EXPECT_EQ(jsonutil::get<std::string>(out, "status", ""), std::string("running"));
   EXPECT_TRUE(jsonutil::get<bool>(out, "timedOut", false));
   std::string tid = jsonutil::get<std::string>(out, "tid", "");
+  ASSERT_TRUE(!tid.empty());
   const TermEntry* e = reg.find(tid);
   ASSERT_TRUE(e != nullptr);
-  EXPECT_TRUE(e->status == TermStatus::kExited);
+  // Still alive, and now a real background terminal the drawer can list.
+  EXPECT_TRUE(e->status == TermStatus::kRunning);
+  EXPECT_TRUE(e->kind == TermKind::kModelBg);
+  EXPECT_TRUE(e->timed_out);
+  Json p;
+  ASSERT_TRUE(mgr.poll(Json{{"tid", tid}}, &p).ok());
+  EXPECT_EQ(jsonutil::get<std::string>(p, "status", ""), std::string("running"));
+  // Clean up the child.
+  ASSERT_TRUE(mgr.kill(Json{{"tid", tid}}, &p).ok());
+}
+
+// The foreground budget is the TOOL's: a model-supplied larger value cannot
+// turn terminal_exec into a ten-minute blocking call (and an omitted value does
+// not need to be supplied by the model at all). We cannot wait 60 s here, so
+// assert the clamp through the returned budget.
+FS_TEST(terminal_foreground_budget_is_capped) {
+  WallClock clock;
+  TerminalRegistry reg(&clock);
+  TerminalManager mgr(&reg, &clock);
+  Json args = Json::object();
+  args["command"] = "echo budget";
+  args["background"] = false;
+  args["timeoutMs"] = 600000;  // the old "10 min" allowance
+  Json out;
+  ASSERT_TRUE(mgr.spawn(args, &out).ok());
+  // The waiter's actual deadline is reported; 600000 must have become 60000.
+  EXPECT_EQ(jsonutil::get_int(out, "budgetMs", 0), int64_t(60000));
+  // A smaller value is honoured: the model may shorten the wait.
+  args["timeoutMs"] = 250;
+  Json out2;
+  ASSERT_TRUE(mgr.spawn(args, &out2).ok());
+  EXPECT_EQ(jsonutil::get_int(out2, "budgetMs", 0), int64_t(250));
+  // Omitted/0 uses the tool default, not an unbounded wait.
+  args["timeoutMs"] = 0;
+  Json out3;
+  ASSERT_TRUE(mgr.spawn(args, &out3).ok());
+  EXPECT_EQ(jsonutil::get_int(out3, "budgetMs", 0), int64_t(60000));
 }
 
 // A foreground terminal must honor the user's 中止 immediately, not keep the
@@ -101,12 +143,8 @@ FS_TEST(terminal_poll_and_kill) {
   WallClock clock;
   TerminalRegistry reg(&clock);
   TerminalManager mgr(&reg, &clock);
-  // 后台跑一个会持续一段时间的命令
-#if defined(_WIN32)
-  std::string cmd = "ping -n 6 127.0.0.1 > nul";
-#else
-  std::string cmd = "sleep 5";
-#endif
+  // 后台跑一个会持续一段时间的命令（BusyBox 的 ping 没有 -n 计数）
+  std::string cmd = "ping 127.0.0.1";
   Json args = Json::object();
   args["command"] = cmd;
   args["background"] = true;
@@ -141,11 +179,8 @@ FS_TEST(terminal_background_timeout_kills) {
   WallClock clock;
   TerminalRegistry reg(&clock);
   TerminalManager mgr(&reg, &clock);
-#if defined(_WIN32)
-  std::string cmd = "ping -n 20 127.0.0.1 > nul";
-#else
-  std::string cmd = "sleep 20";
-#endif
+  // Portable long command: BusyBox pings until killed, Windows ping ~3 s.
+  std::string cmd = "ping 127.0.0.1";
   Json args = Json::object();
   args["command"] = cmd;
   args["background"] = true;
@@ -166,6 +201,21 @@ FS_TEST(terminal_background_timeout_kills) {
   const TermEntry* e = reg.find(tid);
   ASSERT_TRUE(e != nullptr);
   EXPECT_TRUE(e->status != TermStatus::kRunning);
+}
+
+// A timeout is a persisted fact, not a transient log line: after a restart the
+// record must still say why it is in the list.
+FS_TEST(terminal_registry_timed_out_roundtrip) {
+  WallClock clock;
+  TerminalRegistry reg(&clock);
+  TermEntry e = reg.create("s1", TermKind::kModelBg, "bash", "", "", false, 1000);
+  reg.mark_timed_out(e.tid);
+  const TermEntry* live = reg.find(e.tid);
+  ASSERT_TRUE(live != nullptr);
+  Json j = live->to_json();
+  EXPECT_TRUE(jsonutil::get<bool>(j, "timedOut", false));
+  TermEntry back = TermEntry::from_json(j);
+  EXPECT_TRUE(back.timed_out);
 }
 
 // A foreground command must NOT hold the manager lock while it waits: tick()

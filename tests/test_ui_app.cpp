@@ -2689,6 +2689,56 @@ FS_TEST(uiapp_terminal_output_ghost_is_not_a_terminal) {
   EXPECT_EQ(app.state().terminals[0].tid, std::string("t10"));
 }
 
+// A BACKGROUND model terminal is not a ghost: it outlives the turn and the
+// drawer must be able to open it even without a user label. It stays out of the
+// tab strip (hidden), but it exists in 所有终端.
+FS_TEST(uiapp_terminal_output_background_model_terminal_is_visible) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_project(s);
+    seed_session(s, "sess_a");
+  });
+  app.on_backend_event_for_test(
+      "terminal.output", Json{{"sid", "sess_a"}, {"tid", "t11"},
+                              {"text", "background build"},
+                              {"kind", "model-bg"}});
+  ASSERT_TRUE(app.state().terminals.size() == 1);
+  EXPECT_EQ(app.state().terminals[0].tid, std::string("t11"));
+  EXPECT_EQ(app.state().terminals[0].kind, std::string("model-bg"));
+  // Not auto-opened as a tab; still available in the overview.
+  bool hidden = false;
+  for (size_t i = 0; i < app.state().term_hidden.size(); ++i) {
+    if (app.state().term_hidden[i] == "t11") hidden = true;
+  }
+  EXPECT_TRUE(hidden);
+}
+
+// The session dot's terminal count must never be ERASED by the live list: the
+// terminal list is lazily fetched (only when the drawer opens), so at this point
+// st_.terminals is empty while the backend snapshot already says "1 terminal
+// running". The old unconditional overwrite turned the purple background dot
+// back to idle.
+FS_TEST(uiapp_backend_terminal_count_survives_empty_live_list) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    s.settings_values["ui.tabs"] = Json("left");
+    seed_project(s);
+    seed_session(s, "sess_a");
+    ProjectCard::SessionRow& r = s.projects[0].sessions[0];
+    r.running = false;
+    r.loop_state = "idle";
+    r.terminal_count = 1;  // from session.list: a background terminal is live
+    s.terminals.clear();   // the drawer has never been opened
+  });
+  EXPECT_TRUE(dump_has(dom, "ps-dot background"));
+}
+
 // The blue "done" dot means "news since you last looked". The backend's loopState
 // stays "turnDone" forever, so it used to be permanent - it survived opening the
 // session AND switching tabs ("可查看了不会消失").
@@ -4179,12 +4229,19 @@ FS_TEST(uiapp_thinking_stream_auto_folds_and_interleaves) {
   ASSERT_TRUE(app.state().messages[0].thoughts.size() == 1);
   EXPECT_TRUE(app.state().messages[0].thoughts[0].open);
   EXPECT_TRUE(app.state().messages[0].thoughts[0].streaming);
+  // While streaming it is a normal tool fold row, open, body visible.
+  app.update([](AppState&) {});
+  std::string live = dom.dump();
+  EXPECT_TRUE(live.find("tool-block") != std::string::npos);
+  EXPECT_TRUE(live.find("THINK0") != std::string::npos);
   app.on_backend_event_for_test(
       "stream.delta", Json{{"sid", "sess_a"}, {"text", "answer"}});
   ASSERT_TRUE(app.state().messages[0].thoughts.size() == 1);
-  // The answer started: the reasoning segment auto-folds.
+  // The answer started: the reasoning segment auto-folds, in the same component.
   EXPECT_FALSE(app.state().messages[0].thoughts[0].open);
   EXPECT_FALSE(app.state().messages[0].thoughts[0].streaming);
+  app.update([](AppState&) {});
+  EXPECT_TRUE(dom.dump().find("THINK0") == std::string::npos);
   // A tool row, then a second reasoning segment: the segment gets `after=1` so
   // the renderer can put it in arrival order rather than at the very end.
   app.on_backend_event_for_test(
@@ -4209,6 +4266,9 @@ FS_TEST(uiapp_thinking_block_folds) {
     m.role = "assistant";
     m.text = "answer";
     m.thinking = "let me reason about it";
+    // A stored/live legacy blob has no split position; this test is about the
+    // OUTER work fold, so open the thinking row explicitly.
+    m.thinking_open = true;
     // A turn that is RUNNING shows its work: the process is the only thing
     // moving, and a folded block made a long tool chain look frozen.
     m.streaming = true;
@@ -4232,6 +4292,43 @@ FS_TEST(uiapp_thinking_block_folds) {
     s.messages[0].rev = 9001;
   });
   EXPECT_TRUE(dom.dump().find("let me reason about it") != std::string::npos);
+}
+
+// A thought is a TOOL-STYLE fold row, not a second visual language: same
+// tb-head/caret/body, and the row itself toggles. The custom think-block used to
+// look out of place and its click did nothing.
+FS_TEST(uiapp_thinking_row_uses_tool_fold) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.text = "answer";
+    // Old stored turns carry ONE coalesced thinking blob; new ones carry
+    // `thoughts`. Both must render through the tool fold.
+    m.thinking = "LEGACY_THINK_MARKER";
+    m.work_open = true;
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("tool-block") != std::string::npos);
+  EXPECT_TRUE(d.find("tb-head") != std::string::npos);
+  EXPECT_TRUE(d.find("思考") != std::string::npos);
+  // Folded by default (the stored/live state is thinking_open=false).
+  EXPECT_TRUE(d.find("LEGACY_THINK_MARKER") == std::string::npos);
+  int hid = click_hid_in(app.tree_for_test(), "tb-head", "\u601d\u8003");
+  ASSERT_TRUE(hid != 0);
+  bus().fire(hid, "");
+  EXPECT_TRUE(dom.dump().find("LEGACY_THINK_MARKER") != std::string::npos);
+  // ... and the same row closes again (the memoised row must not survive its
+  // own expanded body: the old fold opened once and then went dead).
+  hid = click_hid_in(app.tree_for_test(), "tb-head", "\u601d\u8003");
+  ASSERT_TRUE(hid != 0);
+  bus().fire(hid, "");
+  EXPECT_TRUE(dom.dump().find("LEGACY_THINK_MARKER") == std::string::npos);
 }
 
 // A tool call must appear when it STARTS and be completed in place when it
@@ -4380,6 +4477,7 @@ FS_TEST(uiapp_work_group_shows_time_and_folds) {
   app.update([](AppState& s) {
     s.messages[0].work_open = true;
     s.messages[0].work_touched = true;
+    s.messages[0].thinking_open = true;  // legacy blob opens through its own row
     s.messages[0].rev = 9002;
   });
   std::string o = dom.dump();
@@ -4855,6 +4953,7 @@ FS_TEST(uiapp_work_process_puts_thinking_last) {
     m.role = "assistant";
     m.text = "the answer";
     m.thinking = "REASONING_MARKER";
+    m.thinking_open = true;
     m.work_open = true;
     comp::ToolBlock tb;
     tb.name = "read_file";

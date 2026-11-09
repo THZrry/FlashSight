@@ -114,6 +114,9 @@ struct ToolBlock {
   std::string input;
   bool expanded = false;
   bool ok = true;
+  // The body is prose, not a tool payload: never JSON-highlight it just because
+  // the first character happens to be `[` or `{` (thinking blocks).
+  bool plain = false;
   // Still executing. The row shows a "running" state and is completed in place
   // when the matching tool.update arrives (a tool that takes seconds otherwise
   // looks like it never started).

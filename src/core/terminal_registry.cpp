@@ -22,6 +22,7 @@ Json TermEntry::to_json() const {
   j["endedAt"] = ended_at;
   j["wakeOnExit"] = wake_on_exit;
   j["logAttached"] = log_attached;
+  if (timed_out) j["timedOut"] = true;
   if (!log_path.empty()) j["logPath"] = log_path;
   return j;
 }
@@ -47,6 +48,7 @@ TermEntry TermEntry::from_json(const Json& j) {
   e.ended_at = jsonutil::get_int(j, "endedAt", 0);
   e.wake_on_exit = jsonutil::get<bool>(j, "wakeOnExit", false);
   e.log_attached = jsonutil::get<bool>(j, "logAttached", false);
+  e.timed_out = jsonutil::get<bool>(j, "timedOut", false);
   e.log_path = jsonutil::get<std::string>(j, "logPath", "");
   return e;
 }
@@ -119,6 +121,11 @@ FsResult TerminalRegistry::mark_exited(const std::string& tid, int exit_code,
   e->exit_code = exit_code;
   e->ended_at = now_ms ? now_ms : clock_->now_ms();
   return FsResult::success();
+}
+
+void TerminalRegistry::mark_timed_out(const std::string& tid) {
+  TermEntry* e = find(tid);
+  if (e) e->timed_out = true;
 }
 
 FsResult TerminalRegistry::promote_to_background(const std::string& tid, int64_t now_ms) {

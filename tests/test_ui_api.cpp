@@ -128,3 +128,85 @@ FS_TEST(native_backend_receives_events) {
   be.poll();
   EXPECT_TRUE(!got.empty());  // at least one event was delivered
 }
+
+namespace {
+
+struct TermSession {
+  fstest::TempDir tmp;
+  FsApi api;
+  std::string sid;
+  explicit TermSession(const char* tag) : tmp(tag), api(tmp.path()) {
+    std::string dir = tmp.path() + "/p";
+    ghc::filesystem::create_directories(dir);
+    FsResult pc = api.project_create(dir);
+    FsResult sn = api.session_new(jsonutil::get<std::string>(pc.data, "pid", ""), dir);
+    sid = jsonutil::get<std::string>(sn.data, "sid", "");
+  }
+};
+
+}  // namespace
+
+// The terminal event is the ONLY bridge between the process registry and the
+// drawer. FsApi rebuilt the payload with {sid,tid,text} and dropped kind/label/
+// timedOut, so the UI classified every model terminal as an unknown ghost while
+// the backend had a real record.
+FS_TEST(uiapi_terminal_output_event_carries_kind) {
+  TermSession ts("term_evt");
+  ASSERT_TRUE(!ts.sid.empty());
+  std::vector<std::string> kinds;
+  ts.api.set_event_sink([&kinds](const std::string& e, const Json& p) {
+    if (e == "terminal.output") {
+      kinds.push_back(jsonutil::get<std::string>(p, "kind", ""));
+    }
+  });
+  Json out;
+  Json args = Json{{"sid", ts.sid},
+                   {"command", "echo term-kind"},
+                   {"background", false},
+                   {"timeoutMs", 5000}};
+  ASSERT_TRUE(ts.api.spawn_terminal(args, &out).ok());
+  ts.api.terminal_tick();
+  bool saw_fg = false;
+  for (size_t i = 0; i < kinds.size(); ++i) {
+    if (kinds[i] == "model-fg") saw_fg = true;
+  }
+  EXPECT_TRUE(saw_fg);
+}
+
+// The foreground budget is enforced by the tool: at the deadline the call
+// returns `timedOut` with the command STILL RUNNING, and the record is a real
+// background terminal that terminal.list must return (so the drawer can open
+// it). This is the UI/backend connection the user could not find.
+FS_TEST(uiapi_terminal_timeout_is_listed_and_running) {
+  TermSession ts("term_timeout");
+  ASSERT_TRUE(!ts.sid.empty());
+  // Portable long-ish command (BusyBox ping has no -n count and would exit
+  // immediately with a usage error).
+  std::string cmd = "ping 127.0.0.1";
+  Json out;
+  Json args = Json{{"sid", ts.sid},
+                   {"command", cmd},
+                   {"background", false},
+                   {"timeoutMs", 300}};
+  FsResult r = ts.api.spawn_terminal(args, &out);
+  ASSERT_TRUE(r.ok());
+  EXPECT_TRUE(jsonutil::get<bool>(out, "timedOut", false));
+  EXPECT_EQ(jsonutil::get<std::string>(out, "status", ""), std::string("running"));
+  std::string tid = jsonutil::get<std::string>(out, "tid", "");
+  ASSERT_TRUE(!tid.empty());
+  FsResult list = ts.api.terminal_list(ts.sid);
+  ASSERT_TRUE(list.ok());
+  ASSERT_TRUE(list.data.is_array());
+  bool found = false;
+  for (size_t i = 0; i < list.data.size(); ++i) {
+    if (jsonutil::get<std::string>(list.data[i], "tid", "") != tid) continue;
+    found = true;
+    EXPECT_EQ(jsonutil::get<std::string>(list.data[i], "kind", ""),
+              std::string("model-bg"));
+    EXPECT_TRUE(jsonutil::get<bool>(list.data[i], "timedOut", false));
+    EXPECT_EQ(jsonutil::get<std::string>(list.data[i], "status", ""),
+              std::string("running"));
+  }
+  EXPECT_TRUE(found);
+  ASSERT_TRUE(ts.api.terminal_kill(tid).ok());
+}

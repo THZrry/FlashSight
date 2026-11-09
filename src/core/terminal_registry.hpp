@@ -28,6 +28,10 @@ struct TermEntry {
   bool log_attached = false;
   std::string log_path;
   bool wake_on_exit = false;
+  // The tool's own deadline fired. A foreground command that overruns its
+  // budget is handed to the background (not killed), so the record must say
+  // WHY it is still running; the list uses this to keep it visible.
+  bool timed_out = false;
 
   Json to_json() const;
   static TermEntry from_json(const Json& j);
@@ -45,6 +49,8 @@ class TerminalRegistry {
 
   // 状态更新
   FsResult mark_exited(const std::string& tid, int exit_code, int64_t now_ms);
+  // The tool deadline (not a process exit) elapsed: keep the record, mark it.
+  void mark_timed_out(const std::string& tid);
 
   // 查询
   TermEntry* find(const std::string& tid);

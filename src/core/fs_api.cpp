@@ -1152,11 +1152,11 @@ FsResult FsApi::session_list(const std::string& pid) {
     int64_t live_terms = 0;
     if (terminals_) {
       for (auto& te : terminals_->list_for_session(sid)) {
-        bool user_visible =
-            te.kind == TermKind::kUser ||
-            ((te.kind == TermKind::kModelBg ||
-              te.kind == TermKind::kModelFg) &&
-             !te.label.empty());
+        // A background model terminal is a REAL terminal even without a label:
+        // `terminal_spawn` (and a foreground command that hit its budget and was
+        // handed to the background) keeps running after the turn returns.
+        bool user_visible = te.kind == TermKind::kUser ||
+                            te.kind == TermKind::kModelBg || !te.label.empty();
         if (user_visible && te.status == TermStatus::kRunning) ++live_terms;
       }
     }
@@ -2337,15 +2337,14 @@ FsResult FsApi::terminal_list(const std::string& sid) {
   std::vector<Json> real;
   for (auto& e : terminals_->list_for_session(sid)) {
     std::error_code lec;
-    // Only USER terminals (and a deliberately labelled background job) are
-    // user-facing terminals. Model `terminal_exec` records - even long ones -
-    // live in the transcript as tool results; listing them here made a session
-    // show "十几 terminals" that were only command history, and the count did
-    // not match the tabs.
+    // A foreground model command is a tool result (its short log is pruned on
+    // exit, so it never reaches this list). A BACKGROUND model terminal is not:
+    // it outlives the turn, and the user must be able to open it even with no
+    // label. Hiding it here was why "terminal_exec 显示完成后却没有终端可看" -
+    // the backend kept the process and its transcript, the list refused to show
+    // them.
     bool user_visible = e.kind == TermKind::kUser ||
-                        ((e.kind == TermKind::kModelBg ||
-                          e.kind == TermKind::kModelFg) &&
-                         !e.label.empty());
+                        e.kind == TermKind::kModelBg || !e.label.empty();
     if (!user_visible) continue;
     bool live = e.status == TermStatus::kRunning;
     bool has_log = !e.log_path.empty() &&
@@ -2596,16 +2595,25 @@ void FsApi::terminal_tick() {
     if (c.contains("output") && c["output"].is_string()) {
       // The transcript was already written by the manager's output sink, the
       // moment the bytes were drained - not here (tick may never run again).
-      std::string text = c["output"].get<std::string>();
-      emit_event("terminal.output", Json{{"sid", sid}, {"tid", tid}, {"text", text}});
+      // Pass the WHOLE change through: it carries `kind`/`label`/`timedOut`,
+      // and rebuilding a three-field object here silently dropped them. The UI
+      // then saw every model terminal as an unknown "ghost" - backend and
+      // terminal drawer disagreed about what existed.
+      Json p = c;
+      p["sid"] = sid;
+      p["tid"] = tid;
+      emit_event("terminal.output", p);
     }
     if (jsonutil::get<bool>(c, "justExited", false)) {
       // Freeze the entry on disk with its exit status.
       TermEntry* e = terminals_->find(tid);
       if (e) persist_terminal_entry(e->to_json());
       int exit_code = static_cast<int>(jsonutil::get_int(c, "exitCode", 0));
-      emit_event("terminal.exit", Json{{"sid", sid}, {"tid", tid},
-                                       {"exitCode", exit_code}});
+      Json p = c;
+      p["sid"] = sid;
+      p["tid"] = tid;
+      p["exitCode"] = exit_code;
+      emit_event("terminal.exit", p);
       // wakeOnExit used to be stored and never read, and AgentHost's
       // on_terminal_exit had no caller at all - a background command could
       // finish with nobody resuming the task. This is the only exit path that
