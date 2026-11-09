@@ -93,7 +93,7 @@ def find_exe(build_dir, variant):
                            p.relative_to(build_dir).parts))
         raise SystemExit(
             "no %s under %s (found: %s)\n"
-            "Build that variant first:  xmake f --variant=%s && xmake b"
+            "Build that target first:  xmake b flashsight-%s"
             % (wanted[0], build_dir, ", ".join(found) or "nothing", variant))
     # Prefer the shallowest path, and a release build over a stale debug tree.
     hits.sort(key=lambda p: (len(p.parts), "debug" in p.parts))

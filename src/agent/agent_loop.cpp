@@ -374,6 +374,21 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
     if (limit <= 0) limit = 10LL * 60 * 1000;
     return WallClock().now_ms() - last > limit;
   };
+  // Reasoning tokens are progress too. They go to the thinking block, never to
+  // the answer; without this a long `thinking=max` call looked exactly like a
+  // dead request and the watchdog would count it as no progress.
+  bool reasoning_streamed = false;
+  req.on_reasoning = [this, &reasoning_streamed](const std::string& piece) {
+    if (piece.empty()) return;
+    reasoning_streamed = true;
+    model_activity_ms_.store(WallClock().now_ms());
+    {
+      std::lock_guard<std::mutex> lk(live_mu_);
+      live_thinking_ += piece;
+    }
+    emit("thinking.delta", Json{{"text", piece}, {"sid", opts_.sid}});
+    maybe_persist_live();
+  };
 
   bool streamed = false;
   auto on_delta = [this, &streamed](const std::string& piece) {
@@ -393,6 +408,13 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
   FsResult r = call_model ? call_model(req, out, on_delta)
                           : FsResult::error(ErrCode::kInternal, "model not wired");
   if (r.ok() && out->error.empty()) {
+    if (!reasoning_streamed && !out->thinking.empty()) {
+      {
+        std::lock_guard<std::mutex> lk(live_mu_);
+        live_thinking_ += out->thinking;
+      }
+      emit("thinking.delta", Json{{"text", out->thinking}, {"sid", opts_.sid}});
+    }
     if (!streamed && !out->text.empty()) {
       emit("stream.delta", Json{{"text", out->text}, {"sid", opts_.sid}});
     }
@@ -1189,6 +1211,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     std::lock_guard<std::mutex> lk(live_mu_);
     live_running_ = true;
     live_text_.clear();
+    live_thinking_.clear();
     live_interim_ = Json::array();
     live_interim_after_.clear();
     live_tools_ = Json::array();
@@ -1458,6 +1481,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   Json asst_turn = Json::object();
   asst_turn["role"] = "assistant";
   asst_turn["streamSummary"] = result.text;
+  if (!result.thinking.empty()) asst_turn["thinking"] = result.thinking;
   asst_turn["toolCalls"] = executed_calls_;
   // The between-tools narration: kept with the turn so the work log can render it
   // after a reload. Without it the model's own commentary on what it was doing
@@ -1509,6 +1533,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     std::lock_guard<std::mutex> lk(live_mu_);
     live_running_ = false;
     live_text_.clear();
+    live_thinking_.clear();
     live_interim_ = Json::array();
     live_interim_after_.clear();
     live_tools_ = Json::array();
@@ -1730,6 +1755,7 @@ Json AgentLoop::live_state() const {
   Json j = Json::object();
   j["running"] = live_running_;
   j["text"] = live_text_;
+  j["thinking"] = live_thinking_;
   j["startedAt"] = live_started_ms_;
   j["autoRound"] = current_auto_round_.load();
   j["tools"] = live_tools_;

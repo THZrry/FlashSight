@@ -2458,6 +2458,7 @@ void UiApp::attach_live_turn(const std::string& sid) {
     bool running = jsonutil::get<bool>(r.data, "running", false);
     bool crashed = jsonutil::get<bool>(r.data, "crashed", false);
     std::string text = jsonutil::get<std::string>(r.data, "text", "");
+    std::string thinking = jsonutil::get<std::string>(r.data, "thinking", "");
     std::string user_text = jsonutil::get<std::string>(r.data, "userText", "");
     int auto_round = static_cast<int>(jsonutil::get_int(r.data, "autoRound", 0));
     int64_t started = jsonutil::get_int(r.data, "startedAt", 0);
@@ -2488,6 +2489,8 @@ void UiApp::attach_live_turn(const std::string& sid) {
     if (st_.active_tab != sid) return;
     auto apply_live = [&](comp::ChatMsg* a) {
       a->text = text;   // current round only; narration is in `interim`
+      a->thinking = thinking;
+      if (!thinking.empty()) a->thinking_open = true;
       a->interim = interim;
       a->interim_after = interim_after;
       // Rebuild the running turn's tool rows. They live only in the loop's
@@ -3834,6 +3837,24 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       vp->turn_running = true;
     }
     render();
+  } else if (event == "thinking.delta") {
+    std::string text = jsonutil::get<std::string>(payload, "text", "");
+    std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
+    int& total = is_active ? st_.history_total : vp->history_total;
+    comp::ChatMsg& msg = ensure_turn_message(m, total, &next_msg_rev_, now_ms());
+    msg.thinking += text;
+    msg.thinking_open = true;  // the process is the only thing moving
+    msg.streaming = true;
+    msg.rev = next_msg_rev_++;
+    msg.now_ms = now_ms();
+    int64_t now = now_ms();
+    if (now - last_stream_paint_ms_ >= 25) {
+      last_stream_paint_ms_ = now;
+      stream_dirty_ = false;
+      render();
+    } else {
+      stream_dirty_ = true;
+    }
   } else if (event == "stream.delta") {
     std::string text = jsonutil::get<std::string>(payload, "text", "");
     std::vector<comp::ChatMsg>& m = is_active ? st_.messages : vp->messages;
@@ -4282,7 +4303,7 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   // Repainting per delta starves the browser's event loop (the next poll never
   // runs), which makes the stream LOOK frozen. pump() paints them on a ~50 ms
   // cadence instead; every other event repaints immediately.
-  const bool coalesced = (event == "stream.delta");
+  const bool coalesced = (event == "stream.delta" || event == "thinking.delta");
   // session-scoped events go to their own view (may be a background tab)
   if (!sid.empty() && sid != st_.active_tab) {
     // A background tab that is working gets the dot on its tab: without it the
@@ -4319,14 +4340,15 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // auto/terminal state, subagents, asks) still paint immediately so tabs and
     // dots cannot lag; the hot data events rely on the tab-switch render.
     const bool bulk_event =
-        event == "stream.delta" || event == "tool.start" ||
-        event == "tool.update" || event == "assistant.interim" ||
-        event == "loop.usage" || event == "todo.updated" ||
-        event == "terminal.output";
+        event == "stream.delta" || event == "thinking.delta" ||
+        event == "tool.start" || event == "tool.update" ||
+        event == "assistant.interim" || event == "loop.usage" ||
+        event == "todo.updated" || event == "terminal.output";
     if (!coalesced && !bulk_event) render();
     return;
   }
-  if (event == "stream.delta" || event == "turn.done" || event == "turn.started" ||
+  if (event == "stream.delta" || event == "thinking.delta" ||
+      event == "turn.done" || event == "turn.started" ||
       event == "tool.start" ||
       event == "tool.update" || event == "assistant.interim" ||
       event == "subagent.done" || event == "loop.usage" ||

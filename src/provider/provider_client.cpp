@@ -304,6 +304,15 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
           if (d.contains("usage")) apply_usage(d["usage"], out);
           Json delta = ch.contains("delta") && ch["delta"].is_object()
                            ? ch["delta"] : Json::object();
+          std::string reasoning =
+              jsonutil::get<std::string>(delta, "reasoning_content", "");
+          if (reasoning.empty()) {
+            reasoning = jsonutil::get<std::string>(delta, "reasoning", "");
+          }
+          if (!reasoning.empty()) {
+            out->thinking += reasoning;
+            if (req.reasoning_delta) req.reasoning_delta(reasoning);
+          }
           std::string piece = jsonutil::get<std::string>(delta, "content", "");
           if (!piece.empty()) {
             out->text += piece;
@@ -362,6 +371,10 @@ FsResult ProviderClient::chat_openai_chat(const ChatRequest& req, ChatResponse* 
     if (!choices.empty()) {
       Json msg = choices[0].contains("message") ? choices[0]["message"] : Json::object();
       out->text = jsonutil::get<std::string>(msg, "content", "");
+      out->thinking = jsonutil::get<std::string>(msg, "reasoning_content", "");
+      if (out->thinking.empty()) {
+        out->thinking = jsonutil::get<std::string>(msg, "reasoning", "");
+      }
       // tool_calls（P3 解析执行）
       if (msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
         out->tool_calls = msg["tool_calls"];

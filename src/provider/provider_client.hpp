@@ -33,6 +33,10 @@ struct ChatRequest {
   // the loop on its own can only park at a tool boundary, which never comes
   // during a plain streaming reply. Null = never cancel.
   std::function<bool()> cancel;
+  // Reasoning/thinking deltas (DeepSeek `reasoning_content`, OpenAI `reasoning`).
+  // Separate from text: it must not be appended to the answer, but it IS token
+  // progress and must reach the UI's thinking block / the no-progress watchdog.
+  std::function<void(const std::string&)> reasoning_delta;
 };
 
 // 一次调用的输出（含用量）
@@ -50,6 +54,8 @@ struct ChatResponse {
   int64_t latency_ms = 0;
   int http_status = 0;
   std::string error;                  // 空 = 成功
+  // Appended at the END so aggregate initializers keep their order.
+  std::string thinking;
 };
 
 // 流式 delta 回调（text delta；UI P4 接，本阶段先推测试订阅者）

@@ -81,47 +81,18 @@ if is_plat("windows") then
     table.insert(includedirs, "3rdparty/mswebview2/include")
 end
 
--- THE variant selector. One option with three values, instead of two booleans:
+-- The three variants are three targets, not one target selected by a cached
+-- option. Build them by name:
 --
---   xmake f --variant=web      (default) browser tab + embedded HTTP server
---   xmake f --variant=webview  native window via the OS web engine
---   xmake f --variant=whaleui  native window via WhaleUI's own renderer
+--   xmake b flashsight-web flashsight-webview flashsight-whaleui
 --
--- Two booleans (--webview / --whaleui) could both be left set in the cached
--- config, and `xmake f --whaleui=y` never cleared --webview. That is how
--- "select WhaleUI" produced a Web build: the flags disagreed and the derived
--- variant silently fell back to web. A single valued option cannot disagree
--- with itself.
-option("variant")
-    set_default("web")
-    set_values("web", "webview", "whaleui")
-    set_showmenu(true)
-    set_description("UI host for a PLAIN `xmake` build; build every enabled variant with scripts/build_all.py")
-option_end()
+-- `flashsight-whaleui` is defined only when --whaleui_libdir contains the built
+-- WhaleUI library; `flashsight-web` only when emcc is on PATH. No `--variant`
+-- value can silently select the wrong one.
 
--- Independent compile switches. `variant` still selects the one host a single
--- target graph can link (a web exe and a native WebView exe are different
--- binaries); these expose the same three switches in `xmake f` (so a release
--- config is self-describing), while scripts/build_all.py takes them on its own
--- command line and runs one configure+build per selected host.
-option("web")
-    set_default(true)
-    set_showmenu(true)
-    set_description("Include the Web variant when building all variants")
-option_end()
-option("webview")
-    set_default(true)
-    set_showmenu(true)
-    set_description("Include the WebView variant when building all variants")
-option_end()
-option("whaleui")
-    set_default(false)
-    set_showmenu(true)
-    set_description("Include the WhaleUI variant when building all variants")
-option_end()
-
--- path to a WhaleUI build (the directory holding libwhaleui-*.a); only used with
--- --variant=whaleui. Override with `xmake f --variant=whaleui --whaleui_libdir=...`
+-- path to a WhaleUI build (the directory holding libwhaleui-*.a). Only read by
+-- the flashsight-whaleui target. Override with
+-- `xmake f --whaleui_libdir=...`.
 option("whaleui_libdir")
     set_default("C:/aaa/WhaleUI/build/mingw/x86_64/release")
     set_showmenu(true)
@@ -137,9 +108,10 @@ option("whaleui_dir")
     set_description("WhaleUI checkout (supplies SDL3/SDL3_ttf libs and DLLs)")
 option_end()
 
-local variant = get_config("variant") or "web"
-local whaleui_on = variant == "whaleui"
-local webview_on = variant == "webview"
+-- The three UI variants are three REAL xmake targets (see below):
+--   flashsight-web / flashsight-webview / flashsight-whaleui
+-- `xmake b <target>...` selects them; there is no cached --variant value.
+local whaleui_available = os.isdir(get_config("whaleui_libdir") or "")
 
 -- The three UI variants. They differ ONLY in the DOM backend under IDom:
 --
@@ -187,27 +159,11 @@ else
     add_defines("_DEFAULT_SOURCE")
 end
 
--- Which desktop host is compiled in.
---
--- The variant used to be a PROJECT-WIDE add_defines(). A global define is part
--- of every translation unit's command line, so switching variants invalidated
--- every object and `xmake f --variant=whaleui && xmake b` recompiled the whole
--- world - the user's complaint was exactly this ("鍏跺疄鎶?main 鎻愬嚭鏉ュ彧闇€瑕侀噸缂?-- 璇戜竴涓枃浠舵墠瀵?).
---
--- Now the macro is defined only on the targets that contain branching files:
---
---   fs_ui       : shared UI code, NO variant macro
---   fs_ui_host  : just the two backend files of the selected variant
---   flashsight  : main.cpp (the only other file that branches)
---
--- Switching variants therefore recompiles three files and relinks.
-local host_files = {}
-if whaleui_on then
-    host_files = {"src/ui/ui_dom_whale.cpp", "src/ui/ui_main_whale.cpp"}
-    add_linkdirs(get_config("whaleui_libdir"))
-elseif webview_on then
-    host_files = {"src/ui/ui_dom_webview.cpp", "src/ui/ui_main_webview.cpp"}
-end
+-- Variant macros are scoped to the per-variant host libraries + their exe's
+-- main.cpp: fs_ui stays shared and is compiled once. The host libraries are
+-- three separate targets (`fs_ui_host_webview`, `fs_ui_host_whaleui`; the Web
+-- host is the wasm target), not one target whose sources depend on a cached
+-- option.
 
 -- Generated headers live in the BUILD tree (not in src/), at ONE stable path.
 --
@@ -351,20 +307,9 @@ local function has_emcc()
 end
 local emcc_ok = has_emcc()
 
--- The Web variant IS the wasm bundle: without emcc the build would succeed but
--- embed no fs_ui.js/fs_ui.wasm, and the browser would show a stale or blank
--- app (the asset packer only lists files that exist). Fail here instead.
-if variant == "web" and not emcc_ok then
-    raise("emcc not found on PATH - the Web variant needs Emscripten to build " ..
-          "the wasm UI.\n" ..
-          "  * install emsdk and run `emsdk activate latest`, or\n" ..
-          "  * build a desktop variant instead: xmake f --variant=webview")
-end
-
--- Only the Web variant has any use for the wasm bundle. Building it for the
--- desktop variants cost a full emcc run on every build for output nobody
--- embedded.
-if variant == "web" and emcc_ok then
+-- The Web variant needs emcc. If it is missing the Web target is simply not
+-- defined; the two native targets still build. Do not fail the whole graph.
+if emcc_ok then
 target("fs_ui_wasm")
     set_kind("binary")
     set_plat("wasm")
@@ -672,30 +617,25 @@ target("fs_ui")
     add_headerfiles(web_assets)
     -- ui_server.cpp stays in EVERY variant: all three embed the local HTTP
     -- server (it is the groundwork for remote access, see the note at the top).
-    if whaleui_on then
-        whaleui_link()
-    end
     add_cxxflags("-Wall")
-    if emcc_ok and not whaleui_on and not webview_on then
-        -- fs_ui_wasm produces web/fs_ui.js + fs_ui.wasm, which the packer embeds.
-        -- Only the Web variant ships the wasm bundle; the desktop variants host
-        -- the UI natively and have no use for it.
+    if emcc_ok then
+        -- fs_ui_wasm produces web/fs_ui.js + fs_ui.wasm, which the shared asset
+        -- pack embeds. Native targets carry the bytes unused; that is the price
+        -- of ONE fs_ui object set shared by all three targets.
         add_deps("fs_ui_wasm", {link = false})
     end
     -- Pack the assets BEFORE fs_ui's own sources are checked for staleness:
     -- a header regenerated inside a dependency's after_build is already "not
     -- newer" by then, so a style.css edit never reached this target.
     --
-    -- Every variant embeds the stylesheet + icons (the Web variant serves them
-    -- over HTTP, the webview variant inlines them into the document, the
-    -- WhaleUI variant reads them through its VFS). Only the Web variant also
-    -- embeds the compiled wasm bundle.
+    -- Every variant embeds the stylesheet + icons. The wasm bundle is included
+    -- whenever emcc is available so fs_ui is ONE object set for all targets.
     --
     -- NOTE: the body is INLINED here on purpose. xmake only exposes io/os/path
     -- inside a target hook's own body; a script-level function cannot see them
     -- ("attempt to index a nil value (local 'io_lib')" / "call a nil value").
     if true then
-        local with_wasm = (variant == "web") and emcc_ok
+        local with_wasm = emcc_ok
         before_build(function (target)
             local root = os.projectdir()
             os.mkdir(gen_dir)
@@ -825,81 +765,112 @@ target("fs_ui")
 -- recompiles two backend files plus main.cpp.
 -- ==========================================================================
 
--- Per-variant backend files, compiled with that variant's macro.
-if #host_files > 0 then
-target("fs_ui_host")
+-- Per-variant backend libraries. Each exists as its own target, so one
+-- `xmake build flashsight-web flashsight-webview flashsight-whaleui` builds all
+-- three without reconfiguring or juggling a cached --variant value.
+target("fs_ui_host_webview")
     set_kind("static")
     set_languages("c++14")
     add_includedirs(includedirs)
-    -- ui_main_webview.cpp includes the generated asset header.
     add_includedirs(gen_dir)
-    add_files(host_files)
-    add_defines(whaleui_on and "FS_UI_WHALEUI" or "FS_UI_WEBVIEW")
-    add_deps("fs_ui", "fs_core")
-    add_deps("mbedtls_src")
+    add_files("src/ui/ui_dom_webview.cpp", "src/ui/ui_main_webview.cpp")
+    add_defines("FS_UI_WEBVIEW")
+    add_deps("fs_ui", "fs_core", "mbedtls_src", "webview_host")
     add_cxxflags("-Wall")
-    if whaleui_on then
-        whaleui_link()
-    elseif webview_on then
-        add_deps("webview_host")
-        if is_plat("windows") then
-            add_syslinks("advapi32", "version")
-        end
-    end
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
-                     "ole32", "uuid", "crypt32", "bcrypt", "psapi")
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi",
+                     "advapi32", "version")
     else
         add_syslinks("pthread", "dl")
     end
     mbedtls_link()
+target_end()
+
+if whaleui_available then
+target("fs_ui_host_whaleui")
+    set_kind("static")
+    set_languages("c++14")
+    add_includedirs(includedirs)
+    add_includedirs(gen_dir)
+    add_files("src/ui/ui_dom_whale.cpp", "src/ui/ui_main_whale.cpp")
+    add_defines("FS_UI_WHALEUI")
+    add_deps("fs_ui", "fs_core", "mbedtls_src")
+    add_cxxflags("-Wall")
+    if is_plat("windows") then
+        add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi",
+                     "gdi32", "winmm", "imm32", "oleaut32", "version",
+                     "advapi32", "setupapi")
+    else
+        add_syslinks("pthread", "dl")
+    end
+    whaleui_link()
+    mbedtls_link()
+target_end()
 end
 
-target("flashsight")
+-- Web: native launcher + embedded HTTP server; the UI itself is the wasm bundle.
+if emcc_ok then
+target("flashsight-web")
     set_kind("binary")
     set_languages("c++14")
     add_includedirs(includedirs)
     add_includedirs(gen_dir)
     add_files("src/main.cpp")
-    -- The output carries the variant, so building two variants in the same
-    -- output directory never silently replaces one with the other (that is how
-    -- "I selected WhaleUI and got a Web package" happened).
-    set_basename("flashsight-" .. variant)
-    -- fs_ui BEFORE fs_core: ui_app.cpp calls into fs_core (fs::highlight,
-    -- settings_store, fs_vt), so the linker must see fs_ui's undefined
-    -- references while fs_core is still ahead of it on the command line.
-    -- With the old order (-lfs_core -lfs_ui) it failed with
-    -- "undefined reference to fs::highlight::lang_for_path" - the browser
-    -- build never noticed because nothing there pulls ui_app.cpp.obj in.
-    add_deps("fs_ui", "fs_core")
-    add_deps("mbedtls_src")
-    -- main.cpp is the only other file that branches on the variant.
-    if whaleui_on then
-        add_deps("fs_ui_host")
-        add_defines("FS_UI_WHALEUI")
-        -- The desktop UI reads web/style.css through the VFS at run time, so the
-        -- assets must exist next to the exe; they are tracked as inputs so a CSS
-        -- edit re-links.
-        add_headerfiles(web_assets)
-    elseif webview_on then
-        add_deps("fs_ui_host")
-        add_defines("FS_UI_WEBVIEW")
-        if is_plat("windows") then
-            add_syslinks("advapi32", "version")
-        end
-    end
+    add_deps("fs_ui", "fs_core", "mbedtls_src")
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi")
     else
-        -- see fs_core: -pthread for std::thread, dl for the webview backend
         add_syslinks("pthread", "dl")
     end
     mbedtls_link()
-    if whaleui_on then
-        whaleui_copy_dlls()
+target_end()
+end
+
+target("flashsight-webview")
+    set_kind("binary")
+    set_languages("c++14")
+    add_includedirs(includedirs)
+    add_includedirs(gen_dir)
+    add_files("src/main.cpp")
+    add_defines("FS_UI_WEBVIEW")
+    add_deps("fs_ui_host_webview", "fs_ui", "fs_core", "mbedtls_src")
+    add_cxxflags("-Wall")
+    if is_plat("windows") then
+        add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi",
+                     "advapi32", "version")
+    else
+        add_syslinks("pthread", "dl")
     end
+    mbedtls_link()
+target_end()
+
+if whaleui_available then
+target("flashsight-whaleui")
+    set_kind("binary")
+    set_languages("c++14")
+    add_includedirs(includedirs)
+    add_includedirs(gen_dir)
+    add_files("src/main.cpp")
+    add_defines("FS_UI_WHALEUI")
+    add_deps("fs_ui_host_whaleui", "fs_ui", "fs_core", "mbedtls_src")
+    add_headerfiles(web_assets)
+    add_cxxflags("-Wall")
+    if is_plat("windows") then
+        add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi")
+    else
+        add_syslinks("pthread", "dl")
+    end
+    whaleui_link()
+    whaleui_copy_dlls()
+    mbedtls_link()
+target_end()
+end
 
 -- ==========================================================================
 -- webview host library (only with --variant=webview).
@@ -916,7 +887,7 @@ target("flashsight")
 --
 -- See doc-internal/thirdparty.md.
 -- ==========================================================================
-if webview_on and not is_plat("wasm") then
+if not is_plat("wasm") then
     target("webview_host")
         set_kind("static")
         set_languages("c++14")

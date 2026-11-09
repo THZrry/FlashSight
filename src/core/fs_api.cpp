@@ -178,6 +178,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     creq.stream = static_cast<bool>(on_delta);
     creq.session_id = req.session_id;  // kPlan: x-opencode-session 亲和 id
     creq.cancel = req.cancel;          // 停止生成 -> abort the SSE transfer
+    creq.reasoning_delta = req.on_reasoning;
     ProviderRuntime runtime(conn, net, us, clk);
     // PER-MODEL retry settings (Settings > model > advanced). 0 = the global
     // default. Without this the fields were written and never read: a flaky
@@ -195,6 +196,7 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
       return r;
     }
     out->text = cresp.text;
+    out->thinking = cresp.thinking;
     out->tool_calls = cresp.tool_calls;
     out->in_tokens = cresp.in_tokens;
     out->out_tokens = cresp.out_tokens;

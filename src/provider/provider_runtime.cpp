@@ -85,9 +85,16 @@ FsResult ProviderRuntime::call(const ChatRequest& req, ChatResponse* out,
         cb(piece);
       };
     }
-    FsResult r = client.chat(req, &attempt_out, attempt_delta);
-    record_usage(req, attempt_out, r.ok() && attempt_out.error.empty());
-    // A cancelled transfer (user 中止, or the no-progress watchdog) must not be
+    ChatRequest attempt_req = req;
+    if (req.reasoning_delta) {
+      const auto& cb = req.reasoning_delta;
+      attempt_req.reasoning_delta = [&emitted, cb](const std::string& piece) {
+        emitted = true;
+        cb(piece);
+      };
+    }
+    FsResult r = client.chat(attempt_req, &attempt_out, attempt_delta);
+    record_usage(req, attempt_out, r.ok() && attempt_out.error.empty());    // A cancelled transfer (user 中止, or the no-progress watchdog) must not be
     // retried: the caller asked to stop, and retrying a hung relay just restarts
     // the same ten-minute wait.
     if (req.cancel && req.cancel()) {

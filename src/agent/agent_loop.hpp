@@ -62,6 +62,9 @@ struct ModelCallRequest {
   // ChatRequest::cancel). The loop sets it to its own suspend flag, so 停止生成
   // cuts a streaming answer instead of waiting for it to finish.
   std::function<bool()> cancel;
+  // Reasoning/thinking deltas (not the answer): progress for the watchdog and
+  // text for the UI's thinking block.
+  std::function<void(const std::string&)> on_reasoning;
 };
 struct ModelCallResult {
   std::string text;
@@ -71,6 +74,8 @@ struct ModelCallResult {
   int64_t out_tokens = 0;
   int64_t cache_tokens = 0;
   bool cache_known = false;  // false = the endpoint reported no cache figure
+  // Appended at the END so existing aggregate initializers keep their order.
+  std::string thinking;
 };
 
 class AgentLoop {
@@ -340,6 +345,7 @@ class AgentLoop {
   // written. Guarded by live_mu_ (the UI thread reads it).
   mutable std::mutex live_mu_;
   std::string live_text_;
+  std::string live_thinking_;
   // Narration from COMPLETED rounds, kept apart from the current round's text.
   // Without this, reopening a running tab concatenated every round's narration
   // into the answer ("切页面思考跑到任务输出").

@@ -3355,3 +3355,14 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **旧历史 markdown**：复核了路径——`msg_nodes_` 以 (uid,rev,sig) 命中时直接复用同一 VNode，`tool_block_cached` 对每个工具行单独 memo，`markdown_blocks` 只在该消息 rev/sig 变化时重建；固化的旧消息不会在每次 render 重新解析 markdown。真正的重复开销来自上面的后台事件重绘和 streaming 消息的每秒计时。没有再加历史截断或渲染窗口。
   - **仍未验证**：按钮切换、后台不重绘、看门狗都需要在新 webview 手测；`dom_slots` 在旧进程里每 30 秒 +1 的小泄漏仍未处理（不是本次卡死原因）。
   - **测试/构建**：471 用例 4361 断言全过；web / whaleui 最新代码编译通过；webview 在备用 builddir 编译通过。
+
+
+<131>(FIX/ANALYSIS): 三个变体改为真正的 xmake target；推理流不再被忽略（长请求假死的直接原因）；缓存异常分析。
+  - **xmake 三 target**：删除 `scripts/build_all.py` 和 `--variant/--web/--webview/--whaleui` 配置。现在图里就是 `flashsight-web`、`flashsight-webview`、`flashsight-whaleui` 三个可执行 target，外加 `fs_ui_host_webview`/`fs_ui_host_whaleui` 两个宿主静态库；共享 `fs_ui` 只编一次。一条命令 `xmake b flashsight-web flashsight-webview flashsight-whaleui` 在备用目录实测三个 exe 全部链接成功（webview 正式产物被运行中的旧实例占用，不能覆盖）。CI 和 `doc-internal/build.md` 改成按 target 名构建，`package.py` 的提示同步。
+  - **长请求“卡住”的直接原因**：ProviderClient 只解析 `delta.content`，完全忽略 DeepSeek 的 `reasoning_content` / OpenAI 的 `reasoning`。`thinking=max` 时模型先流几十万 reasoning token，应用一个 delta 都收不到：UI 看起来完全静止，`model_activity_ms_` 也不更新，原来的看门狗会把它当无进展（甚至误杀）。usage 里那次 `latency=390177ms, out=4096, cache=0` 的调用就是这种长思考；它不是死连接。现在：
+    - `ChatRequest::reasoning_delta`；OpenAI SSE 解析 `reasoning_content`/`reasoning`，累积到 `ChatResponse::thinking`；
+    - `ModelCallRequest::on_reasoning` → `AgentLoop` 更新活动时间、写 `live_thinking_`、发 `thinking.delta`；UI 把内容放进 `ChatMsg::thinking` 并展开，不混进答案；
+    - reasoning 也标记为 `emitted`，中途断流不会重试并重复可见内容；流结束时把 thinking 持久化到 assistant turn；
+    - 无 progress 的硬看门狗仍是 10 分钟（`model_progress_timeout_ms`），现在不会被正常长思考误触发。
+  - **缓存命中分析**：该会话 usage 的异常不是 80% 的单次命中，而是**少数 `cache=0` 或 `cache=256` 的 30 万 token 请求**把累计命中率拉到约 80%。例如 `in=307640/cache=0`、接着 `in=307405/cache=256`、`309246/256`、`311104/256`、`313077/256`。`256` 意味着上游只命中了开头约 256 token（系统提示），不是普通的缓存 TTL 归零；这更像**中转站把请求路由到了没有该前缀缓存的上游通道**，或该通道只缓存了系统段。应用侧检查：同一 provider/model、system/tools 顺序稳定、runtime 块只在最新 user 消息末尾；`compaction.json` 在这段时间没有更新，因此不是压缩前缀重排。暂未在应用里找到会周期性改写前缀的路径。要彻底区分“应用前缀变了”和“中转站换通道”，下一步应在每次请求记录 prompt 前缀 hash；本次没有伪造这个结论。
+  - **测试/构建**：471 用例 4361 断言全过；一条 xmake 命令在 `build_verify` 下实际链接出三个 exe；正式 `flashsight-web.exe`/`flashsight-whaleui.exe` 已更新，`flashsight-webview.exe` 仍被运行中的实例占用，最新在 `temp\flashsight-webview-new.exe`。

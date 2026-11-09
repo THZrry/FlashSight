@@ -15,38 +15,37 @@
 （emcc，产物被 `fs_ui` 的 `before_build` 打包进 `ui_assets_gen.hpp`）；
 Webview 变体另有 `webview_host`。
 
-## 2.1 三个 UI 变体（独立开关 + build_all.py）
+## 2.1 三个 UI 变体 = 三个 xmake target
 
 ```sh
-xmake f --variant=web      -y --toolchain=mingw && xmake b   # 默认，单变体
-xmake f --variant=webview  -y --toolchain=mingw && xmake b
-xmake f --variant=whaleui  -y --toolchain=mingw && xmake b
-# 一次编译多个（脚本按变体逐个 configure/build；项目级 xmake.lua 不能注册 task）。
-# xmake f 里也暴露了同名开关 --web/--webview/--whaleui 供配置查看/记录，
-# 但真正一次跑多个变体仍由脚本完成：
-python scripts/build_all.py --web --webview -- --toolchain=mingw --mingw="C:/Program Files/mingw64"
+xmake f -y --toolchain=mingw --mingw="C:/Program Files/mingw64"
+xmake b flashsight-web          # browser + embedded HTTP server
+xmake b flashsight-webview      # native window via the OS web engine
+xmake b flashsight-whaleui      # native window via WhaleUI
+# 一条命令编全部三个（target 名一起传）：
+xmake b flashsight-web flashsight-webview flashsight-whaleui
 ```
 
-`--variant` 仍然只负责**单变体**的 target 图：web 可执行文件和 WebView 窗口是不同
-二进制，一个 xmake target 不能同时链接两个 host。`build_all.py` 用同一个输出目录
-逐个构建，产物名带变体，互不覆盖；不带参数时默认 web+webview。
+三个可执行文件是三个独立的 target，输出名互不覆盖。`flashsight-web` 只在
+emcc 可用时定义；`flashsight-whaleui` 只在 `--whaleui_libdir` 里找得到
+`libwhaleui-full.a` 时定义。没有 `--variant` 这种缓存单值，也没有外部
+Python 脚本：一条 `xmake b <target>...` 就是全部。
 
 产物都在同一个输出目录，**文件名带变体**：
 `flashsight-web[.exe]` / `flashsight-webview[.exe]` / `flashsight-whaleui[.exe]`。
 
-单变体构建仍然用 `--variant`；多选编译由 `scripts/build_all.py` 的命令行开关选择
-变体并逐个 configure/build。`xmake f --web/--webview/--whaleui` 只是把同一组
-变体意图记录在配置里，单个 target 图不会因此变成三个可执行文件。
-
-为什么切变体只重编几个文件：变体宏（`FS_UI_WHALEUI` / `FS_UI_WEBVIEW`）
-**不再项目级 `add_defines`**，而是只加在真正分叉的目标上：
+变体宏（`FS_UI_WHALEUI` / `FS_UI_WEBVIEW`）只加在对应 host library 和
+各自 exe 的 `main.cpp` 上；共享 `fs_ui` 只编译一次：
 
 | 目标 | 内容 | 变体宏 |
 |---|---|---|
 | `fs_ui` | 共享 UI（app/components/vdom/server…） | 无 |
-| `fs_ui_host` | 选中变体的两个后端文件 | 有 |
-| `flashsight` | `main.cpp` | 有 |
-| `fs_ui_wasm` | 仅 `--variant=web` | — |
+| `fs_ui_host_webview` | ui_dom_webview.cpp + ui_main_webview.cpp | `FS_UI_WEBVIEW` |
+| `fs_ui_host_whaleui` | ui_dom_whale.cpp + ui_main_whale.cpp | `FS_UI_WHALEUI` |
+| `flashsight-web` | `main.cpp` + fs_ui + wasm bundle | 无 |
+| `flashsight-webview` | `main.cpp` + webview host | `FS_UI_WEBVIEW` |
+| `flashsight-whaleui` | `main.cpp` + WhaleUI host | `FS_UI_WHALEUI` |
+| `fs_ui_wasm` | wasm UI bundle（emcc 可用时） | — |
 
 项目级宏会进入每个编译单元的命令行，改一次就等于全量重编；现在 `web ↔
 webview` 只重编 `ui_server.cpp`（资源头变了）+ 两个后端 + `main.cpp`，
@@ -61,14 +60,14 @@ webview` 只重编 `ui_server.cpp`（资源头变了）+ 两个后端 + `main.cp
 
 `.github/workflows/build.yml` 按 tag（`v*`）与 `release: published` 触发，
 矩阵覆盖 Windows x86_64/arm64、macOS arm64、Linux x86_64/aarch64；每个 job
-用 `--variant=web` 和 `--variant=webview` 各编一次（同一个输出目录，切变体只
-重编三个文件，所以放在一个 job 里而不是两个），`scripts/package.py` 按变体名
-找可执行文件——**找不到就报错并提示该编哪个变体，绝不退化成"随便找个
+一次 configure，按 target 名构建选中的变体（`xmake b flashsight-web
+flashsight-webview`），共享 `fs_ui` 只编译一次，`scripts/package.py` 按变体名
+找可执行文件——**找不到就报错并提示该编哪个 target，绝不退化成"随便找个
 flashsight*"**，那个 fallback 正是错的二进制进发布包的原因。
 
-构建后还有一道断言：二进制里必须真的有内嵌资源（`#fs-root`、样式、Web 版的
-`fs_ui.wasm`），且 webview 版**不能**带 wasm（带了说明用错了变体的 pack）。
-这类问题发布之后完全看不出来，只能在 CI 里拦。断言脚本按
+构建后还有一道断言：二进制里必须真的有内嵌资源（`#fs-root`、样式，Web 版的
+`fs_ui.wasm`）。三个 target 共用同一个 `fs_ui` 和同一份资源 pack，因此桌面
+二进制也会带 wasm 字节；它是无害的多余数据，不是"用错了变体"。断言脚本按
 `build/<plat>/<arch>/release` 查找，可执行文件名按平台带不带 `.exe`，所以
 macOS / Linux 的 job 也适用。
 

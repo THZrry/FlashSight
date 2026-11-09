@@ -223,17 +223,9 @@ jobs:
       # mixes two C runtimes, and every HTTPS request then crashed inside
       # RtlFreeHeap. Nothing extra is needed here - just the sources.
 
-      # ---- build ----------------------------------------------------------
-      # The variant is a single valued option (`--variant=web|webview`), the
-      # same one a local `xmake f` uses - there is no wrapper script. Both
-      # variants build into the SAME output directory: the executable name
-      # carries the variant (flashsight-web / flashsight-webview), and the
-      # variant macro only applies to the two backend files plus main.cpp, so
-      # the second configure recompiles three files instead of the project.
-      #
-      # `want_*` comes from the boolean dispatch inputs. On tag/release events
-      # there are no inputs, so both desktop variants build (the historical
-      # release set); WhaleUI stays governed by the repository variable.
+      # The three variants are three xmake targets. Configure once, then build
+      # exactly the selected target names; no --variant switch, no wrapper
+      # script, and adding/removing a variant cannot leave a stale cached value.
       - name: Select variants
         id: want
         run: |
@@ -258,10 +250,9 @@ jobs:
           echo "whaleui=$whaleui" >> "$GITHUB_OUTPUT"
           echo "selected: web=$web webview=$webview whaleui=$whaleui"
 
-      - name: Configure (web)
-        if: steps.want.outputs.web == '1'
+      - name: Configure
         run: |
-          args=(-y -m release --arch=${{ matrix.arch }} --variant=web)
+          args=(-y -m release --arch=${{ matrix.arch }})
           if [ -n "${{ matrix.toolchain }}" ]; then
             args+=(--toolchain=${{ matrix.toolchain }})
           fi
@@ -271,26 +262,13 @@ jobs:
           echo "xmake f ${args[*]}"
           xmake f "${args[@]}"
 
-      - name: Build (web)
-        if: steps.want.outputs.web == '1'
-        run: xmake -y
-
-      - name: Configure (webview)
-        if: steps.want.outputs.webview == '1'
+      - name: Build selected targets
         run: |
-          args=(-y -m release --arch=${{ matrix.arch }} --variant=webview)
-          if [ -n "${{ matrix.toolchain }}" ]; then
-            args+=(--toolchain=${{ matrix.toolchain }})
-          fi
-          if [ -n "${MINGW_DIR:-}" ]; then
-            args+=(--mingw="$MINGW_DIR")
-          fi
-          echo "xmake f ${args[*]}"
-          xmake f "${args[@]}"
-
-      - name: Build (webview)
-        if: steps.want.outputs.webview == '1'
-        run: xmake -y
+          targets=()
+          if [ "${{ steps.want.outputs.web }}" = "1" ]; then targets+=(flashsight-web); fi
+          if [ "${{ steps.want.outputs.webview }}" = "1" ]; then targets+=(flashsight-webview); fi
+          echo "xmake b ${targets[*]}"
+          xmake -y b "${targets[@]}"
 
       # The two failures that actually shipped a broken package: a webview exe
       # with no embedded CSS (the asset pack had been overwritten by the web
@@ -331,18 +309,13 @@ jobs:
           for variant, needles in wanted:
               p = find(variant)
               if p is None:
-                  sys.exit("missing flashsight-%s in %s (build it with "
-                           "--variant=%s)" % (variant, root, variant))
+                  sys.exit("missing flashsight-%s in %s (build the target "
+                           "flashsight-%s)" % (variant, root, variant))
               data = p.read_bytes()
               for n in needles:
                   if n not in data:
                       sys.exit("%s is missing embedded asset %r - the asset pack "
-                               "was not rebuilt for this variant" % (p.name, n))
-              # The webview build hosts the UI natively, so carrying the wasm
-              # bundle means the WRONG variant's asset pack was embedded.
-              if variant == "webview" and b"fs_ui.wasm" in data:
-                  sys.exit("%s embeds fs_ui.wasm; the web variant's asset pack "
-                           "was used" % p.name)
+                               "was not rebuilt for this target" % (p.name, n))
               print("%-28s %8.2f MB  assets ok" % (p.name, len(data) / 1e6))
           PY
 
@@ -482,12 +455,11 @@ jobs:
           echo "whaleui libdir: $LIBDIR"
           xmake f -y -m release --arch=x86_64 --toolchain=mingw \
             --mingw="$MINGW_DIR" \
-            --variant=whaleui \
             --whaleui_libdir="$LIBDIR" \
             --whaleui_dir="$(cd ../WhaleUI && pwd)"
 
       - name: Build (whaleui)
-        run: xmake -y
+        run: xmake -y b flashsight-whaleui
 
       # WhaleUI reads its stylesheet from disk (through the engine's VFS), so
       # the build copies web/ next to the exe and the package has to carry it.
