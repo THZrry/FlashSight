@@ -187,8 +187,11 @@ struct ChatMsg {
   std::vector<std::string> interim;
   // Guidance the user injected while this turn was running. It is the USER's
   // voice, not model narration: rendered in its own block in the work log, never
-  // appended to the answer or mixed with `interim`.
+  // appended to the answer or mixed with `interim`. `guidance_after` is parallel:
+  // the number of tool calls already executed when it was injected, so the block
+  // lands AFTER those tools instead of at the top of the turn.
   std::vector<std::string> guidance;
+  std::vector<size_t> guidance_after;
   // How many tool calls had already run when each note arrived (parallel to
   // `interim`). The work stream places note k immediately before tool
   // interim_after[k]; a round with several tool calls made the old "note index

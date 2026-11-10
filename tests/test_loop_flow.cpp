@@ -8,6 +8,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -1088,6 +1089,40 @@ FS_TEST(loop_aborts_a_model_call_with_no_progress) {
   // The turn must end as an interruption, not stay running.
   EXPECT_TRUE(rec.saw("loop.interrupted"));
   EXPECT_TRUE(r.ok());  // the loop reports the provider error through the event
+}
+
+// Process shutdown reaches loops that are NOT in AgentHost::loops_ (subagents)
+// through Options::external_cancel. Without it, closing the window waited for
+// the running subagent forever.
+FS_TEST(loop_external_cancel_aborts_a_blocked_call) {
+  std::atomic<bool> stopping(false);
+  AgentLoop::Options opts;
+  opts.sid = "s_shutdown";
+  opts.permission = "full";
+  opts.model_progress_timeout_ms = 100000;  // only the external flag may fire
+  opts.external_cancel = [&stopping]() { return stopping.load(); };
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.call_model = [](const ModelCallRequest& req, ModelCallResult* out,
+                       const std::function<void(const std::string&)>&) {
+    for (int i = 0; i < 400; ++i) {
+      if (req.cancel && req.cancel()) {
+        out->error = "shutdown";
+        return FsResult::success();
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    out->text = "should not finish";
+    return FsResult::success();
+  };
+  FsResult r;
+  std::thread t([&]() { r = loop.send("go"); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  stopping.store(true);
+  t.join();
+  EXPECT_TRUE(r.ok());
+  EXPECT_TRUE(rec.saw("loop.interrupted"));
 }
 
 // ---------- 无人值守（子代理）：需要批准的动作直接拒绝，不挂死 ----------

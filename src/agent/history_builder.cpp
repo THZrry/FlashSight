@@ -812,7 +812,9 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
       Json sv = short_view_messages(turns, start, total, prior);
       for (auto& m : sv) out.messages.push_back(m);
       out.summary = short_view_summary(turns, start, total, prior);
-      out.est_tokens = estimate_tokens(out.messages);
+      out.est_tokens = estimate_tokens(sv);
+      // system/tools overhead + the fallback content, i.e. the next prompt.
+      out.projected_tokens = overhead + out.est_tokens;
     } else {
       if (fold_text.rfind("[Earlier conversation was compacted]", 0) != 0) {
         fold_text = "[Earlier conversation was compacted]\n" + fold_text;
@@ -822,6 +824,10 @@ HistoryResult HistoryBuilder::build_neutral(const Json& full) const {
           Json{{"role", "user"}, {"content", fold_text}});
       out.summary = fold_text;
       out.est_tokens = estimate_tokens(fold_text);
+      // Include the system prompt / tool prefix that will accompany the summary.
+      // Counting the fold text alone made the UI report ~0-1% right after a
+      // compaction; the user's expectation is the real next-request size (~10%).
+      out.projected_tokens = overhead + out.est_tokens;
     }
     return out;
   }

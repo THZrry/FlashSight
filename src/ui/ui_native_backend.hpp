@@ -92,6 +92,11 @@ class NativeBackend : public IUiBackend {
   void worker_main();
 
   std::unique_ptr<UiApi> api_;
+  // Kept so shutdown can remove the event listener and abort running agents
+  // BEFORE joining workers. Destroying the backend while the terminal poller/a
+  // turn still holds a callback into it was a use-after-free at app exit.
+  FsApi* fs_api_ = nullptr;
+  int listener_id_ = 0;
   std::vector<BackendEvent> subs_;
 
   // UI-facing queue (workers and the event sink -> UI thread).

@@ -10,6 +10,7 @@
 
 #include "fs_highlight.hpp"
 #include "fs_i18n.hpp"
+#include "fs_utf8.hpp"
 #include "icon_tables_gen.hpp"
 
 namespace fs {
@@ -777,18 +778,32 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       // for that comparison (the old rule) broke the moment one round issued
       // several tool calls: the next round's thought landed above tools that had
       // already run ("新的思考跑到了上一个工具下面").
-      // Guidance is the USER's voice. It lives in the work log but in its own
-      // block, never mixed with the model's narration or appended to the answer.
-      if (!m.guidance.empty()) {
-        inner.add(el("div", "work-label").text(tr("本轮引导")));
-        for (size_t gi = 0; gi < m.guidance.size(); ++gi) {
-          if (!m.guidance[gi].empty()) {
-            inner.add(el("div", "work-guidance").text(m.guidance[gi]));
-          }
-        }
-      }
       size_t interim_at = 0;
       size_t thought_at = 0;
+      size_t guidance_at = 0;
+      // Guidance is the USER's voice. It belongs where it was injected - after
+      // the tool calls that had already run - not at the top of the turn. The
+      // body is truncated for the transcript (the full text stays in the stored
+      // turn and is available on hover); a long guidance message must not turn
+      // the work log into a wall of user text.
+      auto add_guidance = [&](size_t idx) {
+        if (idx >= m.guidance.size() || m.guidance[idx].empty()) return;
+        const std::string& full = m.guidance[idx];
+        inner.add(el("div", "work-label").text(tr("引导")));
+        H g = el("div", "work-guidance");
+        g.attr("title", full);
+        g.text(utf8::truncate(full, 240, "…"));
+        inner.add(g);
+      };
+      auto flush_guidance = [&](size_t after) {
+        while (guidance_at < m.guidance.size()) {
+          size_t anchor = guidance_at < m.guidance_after.size()
+                              ? m.guidance_after[guidance_at]
+                              : 0;
+          if (anchor > after) break;
+          add_guidance(guidance_at++);
+        }
+      };
       auto add_thought = [&](size_t idx) {
         if (idx >= m.thoughts.size()) return;
         const comp::ChatMsg::ThinkBlock& th = m.thoughts[idx];
@@ -833,8 +848,13 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           add_thought(thought_at++);
         }
       };
+      flush_guidance(0);
       flush_thoughts(0);
       for (size_t i = 0; i < m.tools.size(); ++i) {
+        // Guidance was applied after the tools that had already run; it comes
+        // before the next round's reasoning. Then the reasoning, then this
+        // round's narration (both share the tool anchor; see below).
+        flush_guidance(i);
         // A reasoning segment that arrived after the previous tool belongs here,
         // before the tool it led to. It also comes BEFORE this round's narration:
         // reasoning streams during the call, the note is emitted when the call
@@ -867,8 +887,9 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
                           (work_open ? ":o" : ":c");
         inner.add(tool_block_cached(tb, toggle, on_open_subagent, gen));
       }
-      // Trailing reasoning (no later tool to hang it on) is still BEFORE the
-      // narration that closed the same round.
+      // Trailing guidance/reasoning (no later tool to hang them on) still comes
+      // BEFORE the narration that closed the same round.
+      flush_guidance(m.tools.size());
       flush_thoughts(m.tools.size());
       // Anything left (a turn that narrated but called no tool).
       for (; interim_at < m.interim.size(); ++interim_at) {

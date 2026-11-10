@@ -114,6 +114,15 @@ idle ──send/append──▶ planning ⇄ toolCalling ──permission/ask─
 - **挂起中发送消息 = 带引导继续**：`send()` 检测到 `parked_ && saved_valid_` 时走
   `continue_task(text)`，而不是开新轮——新轮会从磁盘历史重建，把停车时手里的工具
   结果整批丢掉。
+- **中途引导的位置**：`apply_steering()` 在下一个模型调用前注入，同时把
+  `executed_calls_.size()` 记进 `applied_steering_after_`（落盘为 `guidanceAfter`）。
+  UI 按这个 tool anchor 把引导放在已经跑过的工具**之后**，而不是整轮最前面。
+  队列有硬上限 `kMaxSteeringItems=20`，满了返回错误，不静默顶掉旧项。
+- **窗口关闭 = 中止所有 agent**：`FsApi::abort_all_agents()` → `AgentHost::abort_all()`
+  置 `shutting_down_` 并 interrupt 所有主 loop；子代理 loop 不在 `loops_` 里，靠
+  `Options::external_cancel` 读到同一标志，模型调用/工具/摘要请求都会取消。
+  `NativeBackend` 析构先退订事件、再 abort、再 join worker；否则关窗后进程会一直等
+  正在跑的 turn（控制台不退出）。
 - **停车不会发 `turn.done`**（那一轮没有正常结束）。UI 必须把
   `loop.state = suspended` 当作"本轮结束"来处理：最后一个 assistant 消息
   `streaming = false`、补 `ended_at`，一个字都没产出的空消息直接丢掉。少了这一步，

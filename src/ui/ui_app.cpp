@@ -1658,6 +1658,15 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
     for (size_t k = 0; k < t["guidance"].size(); ++k) {
       if (t["guidance"][k].is_string()) {
         m.guidance.push_back(t["guidance"][k].get<std::string>());
+        size_t after = 0;
+        if (t.contains("guidanceAfter") && t["guidanceAfter"].is_array() &&
+            k < t["guidanceAfter"].size()) {
+          int64_t v = t["guidanceAfter"][k].is_number()
+                          ? t["guidanceAfter"][k].get<int64_t>()
+                          : 0;
+          after = v > 0 ? static_cast<size_t>(v) : 0;
+        }
+        m.guidance_after.push_back(after);
       }
     }
   }
@@ -3831,7 +3840,52 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     }
     return;
   }
-  if (event == "turn.started") {
+  if (event == "context.compressed") {
+    std::string mode = jsonutil::get<std::string>(payload, "mode", "full");
+    int dropped = static_cast<int>(jsonutil::get_int(payload, "droppedTurns", 0));
+    int64_t est = jsonutil::get_int(payload, "estTokens", -1);
+    if (is_active) {
+      if (mode == "short-view") {
+        st_.toast = "上下文窗口不足：已把全部历史进一步压缩成摘要（完整记录仍在会话里，未截断消息）";
+        st_.toast_deadline_ms = now_ms() + kToastMs * 2;
+      } else {
+        st_.toast = "上下文已压缩：全部历史 → 摘要（完整记录仍在会话里）" +
+                    (dropped > 0 ? "（本次折叠 " + itos(dropped) + " 条）" : "");
+        st_.toast_deadline_ms = now_ms() + kToastMs;
+      }
+      st_.context_compacted = true;
+      // The level must reflect the NEXT request (the summary), not the request
+      // that triggered compaction. Otherwise the UI keeps showing 80%/54% next
+      // to a session whose prompt is now the ~10% summary.
+      if (est > 0 && st_.context_window > 0) {
+        st_.context_tokens = est;
+        st_.context_pct = static_cast<int>(est * 100 / st_.context_window);
+      }
+    } else if (vp) {
+      vp->context_compacted = true;
+      if (est > 0 && vp->context_window > 0) {
+        vp->context_tokens = est;
+        vp->context_pct = static_cast<int>(est * 100 / vp->context_window);
+      }
+    }
+  } else if (event == "steering.applied") {
+    std::string text = jsonutil::get<std::string>(payload, "text", "");
+    std::vector<comp::ChatMsg>& msgs = is_active ? st_.messages : vp->messages;
+    if (!text.empty() && !msgs.empty() && msgs.back().role == "assistant") {
+      comp::ChatMsg& m = msgs.back();
+      m.guidance.push_back(text);
+      int64_t anchor = jsonutil::get_int(payload, "tools", -1);
+      m.guidance_after.push_back(
+          anchor >= 0 ? static_cast<size_t>(anchor) : m.tools.size());
+      m.work_open = true;
+      m.rev = next_msg_rev_++;
+    }
+    if (is_active) {
+      st_.toast = "已把本轮引导带入下一次模型调用";
+      st_.toast_deadline_ms = now_ms() + kToastMs;
+    }
+    if (!sid.empty()) refresh_steering(sid);
+  } else if (event == "turn.started") {
     // A send made while the UI believed a turn was running drew no bubble. If
     // the backend actually STARTED a turn, this event is the first proof: put
     // the question in now, BEFORE ensure_turn_message adds the answer slot.
@@ -4459,7 +4513,8 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       event == "tool.update" || event == "assistant.interim" ||
       event == "subagent.done" || event == "loop.usage" ||
       event == "auto.next" || event == "auto.halted" ||
-      event == "todo.updated" ||
+      event == "todo.updated" || event == "context.compressed" ||
+      event == "steering.applied" ||
       event == "terminal.exit" || event == "terminal.output") {
     // Session-scoped: apply_session_event writes to AppState or the stashed view,
     // so the same event works for the active tab and a background one.
@@ -4516,35 +4571,9 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
     // and a fired timer left a stale "5 分钟后" countdown on screen.
     refresh_pending_wakes();
     if (event == "wake.fired" && !sid.empty()) refresh_loop_state(sid);
-  } else if (event == "context.compressed") {
-    std::string mode = jsonutil::get<std::string>(payload, "mode", "full");
-    int dropped = static_cast<int>(jsonutil::get_int(payload, "droppedTurns", 0));
-    if (mode == "short-view") {
-      // Automatic fallback only when even the normal summary cannot fit. The
-      // transcript is NOT truncated: every turn is represented in the summary.
-      st_.toast = "上下文窗口不足：已把全部历史进一步压缩成摘要（完整记录仍在会话里，未截断消息）";
-      st_.toast_deadline_ms = now_ms() + kToastMs * 2;
-    } else {
-      st_.toast = "上下文已压缩：全部历史 → 摘要（完整记录仍在会话里）" +
-                  (dropped > 0 ? "（本次折叠 " + itos(dropped) + " 条）" : "");
-      st_.toast_deadline_ms = now_ms() + kToastMs;
-    }
-    st_.context_compacted = true;
   } else if (event == "subagent.steered") {
     st_.toast = "子代理已收到引导";
     st_.toast_deadline_ms = now_ms() + kToastMs;
-  } else if (event == "steering.applied") {
-    std::string text = jsonutil::get<std::string>(payload, "text", "");
-    if (!text.empty() && !st_.messages.empty() &&
-        st_.messages.back().role == "assistant") {
-      comp::ChatMsg& m = st_.messages.back();
-      m.guidance.push_back(text);
-      m.work_open = true;
-      m.rev = next_msg_rev_++;
-    }
-    st_.toast = "已把本轮引导带入下一次模型调用";
-    st_.toast_deadline_ms = now_ms() + kToastMs;
-    if (!sid.empty()) refresh_steering(sid);
   } else if (event == "steering.queued") {
     if (!sid.empty()) refresh_steering(sid);
   } else if (event == "plan.update") {
@@ -7478,12 +7507,9 @@ VNodePtr UiApp::build_session() {
       else if (st_.context_pct >= 60) txt.cls("warm");
       mb.add(txt);
     }
-    if (st_.context_compacted) {
-      H tag = el("span", "model-ctx-pct dim");
-      tag.text(tr("摘要"));
-      tag.attr("title", tr("模型请求使用全部历史的摘要；完整消息仍保存在会话里，没有被截断"));
-      mb.add(tag);
-    }
+    // No "摘要" badge in the model row. The user reads it as a second status
+    // label ("why is the session still at 54% when it says summary?"); the water
+    // level and the toast already say what happened.
     right_tools.add(mb);
   }
   // 思考档位: ONE control. It used to be an icon button that did nothing plus a

@@ -5115,6 +5115,61 @@ FS_TEST(uiapp_thought_precedes_narration_at_same_anchor) {
   EXPECT_TRUE(think_at < narr_at);
 }
 
+// Guidance is a user turn injected mid-flight; it belongs AFTER the tools that
+// had already run, not at the top of the turn.
+FS_TEST(uiapp_guidance_uses_its_tool_anchor) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.work_open = true;
+    comp::ToolBlock tb;
+    tb.name = "read_file";
+    tb.summary = "a.cpp";
+    m.tools.push_back(tb);
+    m.guidance.push_back("GUIDE_MARKER");
+    m.guidance_after.push_back(1);  // after the only tool
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  size_t tool_at = d.find("read_file");
+  size_t guide_at = d.find("GUIDE_MARKER");
+  ASSERT_TRUE(tool_at != std::string::npos);
+  ASSERT_TRUE(guide_at != std::string::npos);
+  EXPECT_TRUE(tool_at < guide_at);
+}
+
+// A background session's compaction must not touch the active session's water
+// level or "compacted" state.
+FS_TEST(uiapp_compaction_is_session_scoped) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.context_window = 100000;
+    s.context_pct = 80;
+    s.context_tokens = 80000;
+  });
+  app.on_backend_event_for_test(
+      "context.compressed",
+      Json{{"sid", "sess_b"}, {"mode", "full"}, {"estTokens", 10000}});
+  EXPECT_EQ(app.state().context_pct, 80);
+  EXPECT_FALSE(app.state().context_compacted);
+  // The active session's own compaction DOES move the level to the projected
+  // next request, not the 80% request that triggered it.
+  app.on_backend_event_for_test(
+      "context.compressed",
+      Json{{"sid", "sess_a"}, {"mode", "full"}, {"estTokens", 10000}});
+  EXPECT_EQ(app.state().context_pct, 10);
+  EXPECT_TRUE(app.state().context_compacted);
+}
+
 // A provider that sends "\n" between tokens can open a reasoning row with no
 // visible content. It must not render as an empty 思考 block or create a work
 // fold by itself.

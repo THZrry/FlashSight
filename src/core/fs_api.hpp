@@ -209,6 +209,11 @@ class FsApi {
   // 事件（UI 不再手动轮询）。宿主定时调用（桌面线程 / 浏览器定时器）。
   void terminal_tick();
 
+  // UI 进程退出：中止所有主 turn / 唤醒续跑 / 子代理，并停掉终端 poller。
+  // Called BEFORE the NativeBackend worker pool is joined; otherwise closing the
+  // window waits for whatever turn was running (and the console never exits).
+  void abort_all_agents();
+
   // ----- git.*（侧栏 Git 面板；git CLI，只读为主 + 四个显式写操作）-----
   // 所有方法都接 pid：路径由后端解析，UI 永远不自己拼仓库路径。
   FsResult git_status(const std::string& pid);
@@ -372,11 +377,17 @@ class FsApi {
   // 事件订阅（P4 UI 接入；addon2 工作流推进也经此驱动）
   // 支持多个监听者（本地 UI + HTTP API 服务各一个）；返回 id 供退订
   int add_event_listener(std::function<void(const std::string&, const Json&)> fn) {
+    std::lock_guard<std::recursive_mutex> lk(event_mu_);
     int id = next_listener_id_++;
     event_listeners_[id] = std::move(fn);
     return id;
   }
-  void remove_event_listener(int id) { event_listeners_.erase(id); }
+  void remove_event_listener(int id) {
+    // Waits for an in-flight emit: a UI backend being destroyed must not be
+    // called by a terminal poller/worker after its members are gone.
+    std::lock_guard<std::recursive_mutex> lk(event_mu_);
+    event_listeners_.erase(id);
+  }
   // 兼容旧用法：追加一个监听者
   void set_event_sink(std::function<void(const std::string&, const Json&)> sink) {
     if (sink) add_event_listener(std::move(sink));
@@ -449,7 +460,11 @@ class FsApi {
   std::mutex term_log_mu_;
   std::map<std::string, std::string> term_log_paths_;  // tid -> 当前日志
   std::map<int, std::function<void(const std::string&, const Json&)> > event_listeners_;
+  std::recursive_mutex event_mu_;
   int next_listener_id_ = 1;
+  // Set by abort_all_agents: post-turn title upkeep must not start a fresh
+  // model call while the UI is closing (it would keep the worker join waiting).
+  std::atomic<bool> shutting_down_{false};
   // Guards the mutable state above for callers that are not the turn thread.
   // Recursive: a public method may call another (session_send ->
   // sessions_->load_full), and control calls re-enter while a turn is parked.

@@ -111,6 +111,10 @@ class AgentLoop {
     // No token progress for this long aborts the model call (a relay can hold an
     // SSE socket open forever). 0 = the default 10 minutes; tests set it low.
     int64_t model_progress_timeout_ms = 10LL * 60 * 1000;
+    // Process shutdown. Aborts model calls and tools even when this loop never
+    // received interrupt(); subagent loops are not in AgentHost::loops_, so they
+    // had no way to be stopped and kept the app process alive on window close.
+    std::function<bool()> external_cancel;
   };
 
   explicit AgentLoop(Options opts);
@@ -306,6 +310,9 @@ class AgentLoop {
   // message before the next model call and persisted with the assistant turn, so
   // it is not lost when the transcript is replayed.
   std::vector<std::string> applied_steering_;
+  // Parallel to applied_steering_: how many tool calls had already run when the
+  // guidance was injected. The UI places it in the work stream, not at the top.
+  std::vector<size_t> applied_steering_after_;
   bool apply_steering(Json* messages);
 
   // Approval gate state. A model reply can carry several tool calls; when one

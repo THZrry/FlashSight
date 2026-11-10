@@ -23,6 +23,10 @@ struct HistoryResult {
   int64_t compressed_to = 0;
   int64_t dropped_turns = 0;       // 被折叠的 turn 数
   int64_t est_tokens = 0;          // 估算的对话 token（不含 system）
+  // Estimated size of the NEXT request after compaction: system + tool prefix +
+  // the summary/short view. The UI uses this for the water level; `est_tokens`
+  // stays content-only so compression can be compared with the full replay.
+  int64_t projected_tokens = 0;
   // How history was compacted this turn:
   //   "full"       - threshold/forced: EVERY stored turn folded into a summary
   //   "short-view" - the current window cannot hold the prompt (e.g. the user

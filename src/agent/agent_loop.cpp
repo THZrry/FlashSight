@@ -184,8 +184,12 @@ bool AgentLoop::apply_steering(Json* messages) {
   messages->push_back(Json{{"role", "user"},
                            {"content", AgentContext::wrap_user_turn(
                                            runtime_block(), combined)}});
+  size_t after =
+      executed_calls_.is_array() ? static_cast<size_t>(executed_calls_.size()) : 0;
   applied_steering_.push_back(combined);
-  emit("steering.applied", Json{{"sid", opts_.sid}, {"text", combined}});
+  applied_steering_after_.push_back(after);
+  emit("steering.applied", Json{{"sid", opts_.sid}, {"text", combined},
+                                {"tools", static_cast<int64_t>(after)}});
   return true;
 }
 
@@ -230,6 +234,12 @@ std::string AgentLoop::summarize_session(const std::string& material) {
   req.messages = Json::array({Json{{"role", "system"}, {"content", sys}},
                               Json{{"role", "user"}, {"content", material}}});
   req.auto_mode = false;
+  // Shutdown/abort must also cancel the summary request itself; otherwise the
+  // worker join waits for a network timeout after the window is already gone.
+  req.cancel = [this]() {
+    return abort_requested_.load() ||
+           (opts_.external_cancel && opts_.external_cancel());
+  };
   ModelCallResult out;
   FsResult r = call_model(req, &out, nullptr);
   if (!r.ok() || !out.error.empty() || out.text.empty()) return std::string();
@@ -281,6 +291,10 @@ bool AgentLoop::compress_durable_history(Json* rebuilt) {
           {"keptTurns", 0},
           {"reason", dec.reason},
           {"waterPct", dec.pct},
+          // The post-compaction projected size, so the UI can drop the water
+          // level immediately instead of keeping the request that triggered it.
+          {"estTokens", hist.projected_tokens > 0 ? hist.projected_tokens
+                                                  : hist.est_tokens},
           {"promptTokens", last_in_tokens_},
           {"contextLimit", context_limit.load()}});
   return true;
@@ -368,6 +382,7 @@ FsResult AgentLoop::call_model_once(const Json& messages, const Json& tools,
   model_activity_ms_.store(started);
   req.cancel = [this, started]() {
     if (abort_requested_.load()) return true;
+    if (opts_.external_cancel && opts_.external_cancel()) return true;
     int64_t last = model_activity_ms_.load();
     if (last <= 0) last = started;
     int64_t limit = opts_.model_progress_timeout_ms;
@@ -879,7 +894,10 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
   ctx.permission = opts_.permission;
   ctx.approved = true;  // 到达这里说明已放行（或不需要批准）
   ctx.thinking_lang = opts_.thinking_lang;
-  ctx.cancel = [this]() { return abort_requested_.load(); };
+  ctx.cancel = [this]() {
+    return abort_requested_.load() ||
+           (opts_.external_cancel && opts_.external_cancel());
+  };
   ctx.emit = [this](const std::string& e, const Json& p) { emit(e, p); };
 
   emit("tool.start", Json{{"sid", opts_.sid}, {"name", name}, {"args", args},
@@ -956,6 +974,7 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
   state_ = LoopState::kPlanning;
   HistoryBuilder::Options hopts = opts_.history;
   applied_steering_.clear();
+  applied_steering_after_.clear();
   if (current_auto_round_.load() == 0) empty_auto_streak_ = 0;
   // Reuse the durable summary from a previous run/turn. Without this a reopened
   // session starts from the full transcript, which no longer fits the window
@@ -1062,6 +1081,8 @@ FsResult AgentLoop::run_turn(const std::string& user_text) {
               {"reason", hist.mode == "short-view" ? "window-too-small"
                                                    : dec.reason},
               {"waterPct", dec.pct},
+              {"estTokens", hist.projected_tokens > 0 ? hist.projected_tokens
+                                                      : hist.est_tokens},
               {"promptTokens", dec.prompt_tokens},
               {"contextLimit", dec.context_limit}});
     } else if (dec.compress || hopts.force_compress) {
@@ -1537,6 +1558,11 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     Json g = Json::array();
     for (size_t i = 0; i < applied_steering_.size(); ++i) g.push_back(applied_steering_[i]);
     asst_turn["guidance"] = g;
+    Json ga = Json::array();
+    for (size_t i = 0; i < applied_steering_after_.size(); ++i) {
+      ga.push_back(static_cast<int64_t>(applied_steering_after_[i]));
+    }
+    asst_turn["guidanceAfter"] = ga;
   }
   asst_turn["startedAt"] = turn_started_ms_ > 0 ? turn_started_ms_ : ended_ms;
   asst_turn["ts"] = ended_ms;

@@ -142,6 +142,10 @@ class AgentHost {
   // 挂起: finish the current round, then park. 中止: cut the reply in flight.
   FsResult suspend(const std::string& sid);
   FsResult interrupt(const std::string& sid);
+  // Stop EVERY agent (main turns, wake continuations, subagents) for process
+  // shutdown. Without this, closing the window left the backend joining worker
+  // threads for the duration of a running turn.
+  void abort_all();
   FsResult resume(const std::string& sid);
   FsResult cancel_wake(const std::string& sid);
 
@@ -280,6 +284,10 @@ class AgentHost {
   // emit() 会被子代理工作线程调用，而 pending_keypoints_ 也由主线程读写，
   // 所以单独一把锁（不要复用 subagent_mu_，避免锁序纠缠）。
   std::mutex keypoint_mu_;
+  // Set by abort_all() when the UI window closes. The loops' cancel predicates
+  // and every subagent's external_cancel read it; a subagent is not in loops_,
+  // so interrupt() alone could never stop one.
+  std::atomic<bool> shutting_down_{false};
   // 子代理执行线程（spawn 非阻塞：模型拿到 id 后可以继续做别的）。
   // 每项带子代理 id：线程跑完但没 join 时仍占着栈，reap_subagent_threads()
   // 依据记录状态把它们 join 掉并移出（否则每条子代理都泄漏一份线程栈）。

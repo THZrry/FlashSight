@@ -646,6 +646,9 @@ FsResult FsApi::server_login(const std::string& password) {
 
 // 事件扇出：给所有监听者（本地 UI + HTTP API 服务）；无监听者则丢弃（后端不依赖 UI）
 void FsApi::emit_event(const std::string& event, const Json& payload) {
+  // Locked: remove_event_listener (UI shutdown) must wait for an in-flight
+  // listener instead of destroying a backend the listener is about to call.
+  std::lock_guard<std::recursive_mutex> lk(event_mu_);
   for (std::map<int, std::function<void(const std::string&, const Json&)> >::iterator it =
            event_listeners_.begin();
        it != event_listeners_.end(); ++it) {
@@ -654,6 +657,15 @@ void FsApi::emit_event(const std::string& event, const Json& payload) {
 }
 
 FsApi::~FsApi() {
+  stop_terminal_poller();
+}
+
+void FsApi::abort_all_agents() {
+  shutting_down_.store(true);
+  if (agent_host_) agent_host_->abort_all();
+  // The terminal poller emits into the UI's event sink; during shutdown the
+  // backend is about to disappear, so stop it here rather than waiting for the
+  // FsApi destructor (which runs after main has already torn the UI down).
   stop_terminal_poller();
 }
 
@@ -1201,6 +1213,9 @@ FsResult FsApi::session_rename(const std::string& sid, const std::string& title)
 // gist, and sending a whole session would cost more than the title is worth).
 // The summary-model preference wins; otherwise the session's own model is used.
 FsResult FsApi::session_ai_title(const std::string& sid) {
+  if (shutting_down_.load()) {
+    return FsResult::error(ErrCode::kCancelled, "shutting down");
+  }
   Json full;
   FsResult r = sessions_->load_full(sid, &full);
   if (!r.ok()) return r;
@@ -1319,7 +1334,7 @@ FsResult FsApi::session_ai_title(const std::string& sid) {
 // proper summary. That keeps the common case free (no extra request) and spends
 // a call only when there is something worth summarising.
 void FsApi::maybe_upgrade_title(const std::string& sid) {
-  if (!sessions_ || sid.empty()) return;
+  if (!sessions_ || sid.empty() || shutting_down_.load()) return;
   Json full;
   if (!sessions_->load_full(sid, &full).ok()) return;
   Json meta = full.value("meta", Json::object());

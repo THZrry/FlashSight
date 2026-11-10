@@ -323,6 +323,9 @@ target("fs_ui_wasm")
     set_languages("c++17")
     add_includedirs(wasm_includedirs)
     add_files(ui_shared)
+    -- ui_components uses utf8::truncate for bounded guidance text; the native
+    -- build gets it through fs_core, the wasm target does not link fs_core.
+    add_files("src/common/fs_utf8.cpp")
     add_files("src/ui/ui_dom_wasm.cpp", "src/ui/ui_main_wasm.cpp",
               "src/ui/ui_http_backend.cpp")
     -- asset inputs (see web_assets): keeps the packed header in sync

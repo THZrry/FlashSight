@@ -42,12 +42,14 @@ bool droppable_event(const std::string& name) {
 }
 }  // namespace
 
-NativeBackend::NativeBackend(FsApi* api) : api_(new UiApi(api)) {
+NativeBackend::NativeBackend(FsApi* api)
+    : api_(new UiApi(api)), fs_api_(api) {
   if (api) {
     // FsApi fans events out through this sink. Called from ANY thread (the turn
     // thread, a subagent, the terminal poller), so it only appends to the queue;
-    // delivery happens in poll() on the UI thread.
-    api->set_event_sink([this](const std::string& e, const Json& p) {
+    // delivery happens in poll() on the UI thread. Keep the id so shutdown can
+    // REMOVE it before `this` dies.
+    listener_id_ = api->add_event_listener([this](const std::string& e, const Json& p) {
       Item item;
       item.is_event = true;
       item.name = e;
@@ -58,6 +60,16 @@ NativeBackend::NativeBackend(FsApi* api) : api_(new UiApi(api)) {
 }
 
 NativeBackend::~NativeBackend() {
+  // Order matters at app exit:
+  //   1. Unsubscribe (waits for an in-flight emit, then no new callbacks can
+  //      reach a half-destroyed NativeBackend).
+  //   2. Abort every turn/subagent and stop the terminal poller, or the joins
+  //      below wait for the running task (the console never exited).
+  //   3. Only then stop and join the worker pool.
+  if (fs_api_) {
+    if (listener_id_ > 0) fs_api_->remove_event_listener(listener_id_);
+    fs_api_->abort_all_agents();
+  }
   {
     std::lock_guard<std::mutex> lk(job_mu_);
     quit_ = true;

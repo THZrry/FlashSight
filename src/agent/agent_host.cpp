@@ -300,6 +300,7 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
     if (cp.is_number()) opts.history.compress_at_pct = static_cast<int>(cp.get<int64_t>());
   }
   opts.event = [this](const std::string& e, const Json& p) { emit(e, p); };
+  opts.external_cancel = [this]() { return shutting_down_.load(); };
   auto loop = std::unique_ptr<AgentLoop>(new AgentLoop(std::move(opts)));
   loop->call_model = [this](const ModelCallRequest& req, ModelCallResult* out,
                             const std::function<void(const std::string&)>& on_delta)
@@ -1042,6 +1043,16 @@ FsResult AgentHost::interrupt(const std::string& sid) {
   return FsResult::success();
 }
 
+void AgentHost::abort_all() {
+  shutting_down_.store(true);
+  std::lock_guard<std::recursive_mutex> host_lock(lock());
+  for (auto& kv : loops_) {
+    if (kv.second) kv.second->interrupt();
+  }
+  // Subagent threads are not in loops_; their loops read shutting_down_ through
+  // Options::external_cancel. Wake continuations use a main loop and are covered.
+}
+
 FsResult AgentHost::resume(const std::string& sid) {
   // Snapshot the loop under the lock, then RUN outside it: continuing a parked
   // turn is a whole model round trip, and holding the host lock across it is the
@@ -1268,6 +1279,7 @@ FsResult AgentHost::run_subagent(const Json& req, const ContextInput& seed, Json
   // The main chat uses this to show the work in progress (it is the user's
   // window into what the agent is doing) WITHOUT the transcript entering the
   // main conversation's history - that separation is the point of delegating.
+  opts.external_cancel = [this]() { return shutting_down_.load(); };
   opts.event = [this, id, seed, kind]() {
     std::string parent = seed.sid;
     return [this, id, parent, kind](const std::string& e, const Json& p) {
@@ -1297,6 +1309,20 @@ FsResult AgentHost::run_subagent(const Json& req, const ContextInput& seed, Json
     tctx.permission = in.permission;
     tctx.approved = true;
     tctx.thinking_lang = in.thinking_lang;
+    // Carry the loop's cancel predicate (abort + process shutdown) into the
+    // subagent's tools; without it a terminal_exec inside a subagent ignored
+    // 中止/shutdown and kept the worker alive.
+    tctx.cancel = in.cancel;
+    if (deps_.terminal_spawn) {
+      std::function<bool()> cancel = tctx.cancel;
+      std::string sub_sid = id;
+      tctx.terminal_spawn = [this, sub_sid, cancel](const Json& a,
+                                                    Json* out) -> FsResult {
+        Json args = a;
+        if (!args.contains("sid")) args["sid"] = sub_sid;
+        return deps_.terminal_spawn(args, out, cancel);
+      };
+    }
     // A subagent's own todo tree is keyed by its id (make_ctx uses the id as
     // sid, so todo_op already lands on a separate owner).
     return tools_.invoke(tctx, name, args);
