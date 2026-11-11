@@ -149,6 +149,12 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
   var listener = function (evt) {
+    // IME composition: intermediate `input` events carry pinyin, not committed
+    // text. Feeding them to the app let a render or async completion reply break
+    // the composition and leave "zi'fu'c" in the box. The final input event
+    // (isComposing=false) still arrives, so the committed text is not lost.
+    if (name === 'input' && evt.isComposing) return;
+    if ((name === 'keydown' || name === 'keyenter') && evt.isComposing) return;
     // FRAMEWORK RULE: an activation event belongs to the INNERMOST element that
     // handles it. A button inside a clickable row (a card, a fold header) runs
     // its own handler and stops the event there; the row never sees the press.
@@ -937,6 +943,21 @@ EM_JS(void, fs_dom_copy_text, (const char* text), {
 // context menu over text fields (the native one is suppressed), so cut / copy /
 // paste / select-all have to be reachable from a menu item.
 // Insert clipboard text (obtained by the host) at the context target's caret.
+// Put the caret at `pos` after the app replaced a control's value (inline path
+// completion). Without this the browser leaves it at the end, so completing a
+// path while editing earlier text threw the caret to the end of the draft.
+EM_JS(void, fs_dom_set_caret, (int node_id, int pos), {
+  var el = globalThis.__fsNodes[node_id];
+  if (!el) return;
+  try {
+    el.focus();
+    var n = (el.value == null) ? 0 : el.value.length;
+    if (pos < 0) pos = 0;
+    if (pos > n) pos = n;
+    if (typeof el.setSelectionRange === 'function') el.setSelectionRange(pos, pos);
+  } catch (e) {}
+});
+
 EM_JS(void, fs_dom_insert_text, (const char* text), {
   function editTarget() {
     var t = globalThis.__fsCtxTarget;
@@ -1559,6 +1580,9 @@ class WasmDom : public IDom {
   }
   void insert_text_at_caret(const std::string& text) override {
     fs_dom_insert_text(text.c_str());
+  }
+  void set_text_caret(Node node, int pos) override {
+    if (node.valid()) fs_dom_set_caret(static_cast<int>(node.id), pos);
   }
 
   void play_animation(Node node, const std::string& cls) override {

@@ -202,6 +202,61 @@ FS_TEST(adapter_openai_tool_result_shape) {
   EXPECT_EQ(a.messages[3]["tool_call_id"].get<std::string>(), std::string("c1"));
 }
 
+// A read_image/screenshot tool result carries an image part. OpenAI Chat cannot
+// put an image on a `tool` message, so the adapter must emit a USER content
+// block after the tool result; otherwise the model receives only base64 text and
+// never sees the picture.
+FS_TEST(adapter_openai_tool_image_becomes_user_part) {
+  Json parts = Json::array({
+      Json{{"type", "text"}, {"text", "{\"path\":\"a.png\"}"}},
+      Json{{"type", "image"}, {"dataUri", "data:image/png;base64,AAAA"}},
+  });
+  Json msgs = Json::array({
+      Json{{"role", "user"}, {"content", "see it"}},
+      Json{{"role", "assistant"},
+           {"content", ""},
+           {"toolCalls", Json::array({Json{{"id", "c1"},
+                                           {"name", "read_image"},
+                                           {"args", Json{{"path", "a.png"}}}}})}},
+      Json{{"role", "tool"}, {"toolCallId", "c1"}, {"name", "read_image"},
+           {"content", "{\"path\":\"a.png\"}"}, {"parts", parts}},
+  });
+  prompt::Adapted a = prompt::adapt(ApiKind::kOpenAIChat, msgs, Json::array());
+  ASSERT_TRUE(a.messages.is_array());
+  bool saw_tool = false, saw_image_user = false;
+  for (auto& m : a.messages) {
+    if (m.value("role", "") == std::string("tool")) {
+      saw_tool = true;
+      EXPECT_TRUE(m["content"].is_string());  // never a data URI array here
+    }
+    if (m.value("role", "") == std::string("user") && m["content"].is_array()) {
+      for (auto& b : m["content"]) {
+        if (b.value("type", "") == std::string("image_url")) {
+          saw_image_user = true;
+          EXPECT_EQ(b["image_url"]["url"].get<std::string>(),
+                    std::string("data:image/png;base64,AAAA"));
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(saw_tool);
+  EXPECT_TRUE(saw_image_user);
+
+  // Anthropic supports image blocks inside tool_result; keep them there.
+  prompt::Adapted an = prompt::adapt(ApiKind::kAnthropic, msgs, Json::array());
+  bool an_image = false;
+  for (auto& m : an.messages) {
+    for (auto& b : m["content"]) {
+      if (b.value("type", "") != std::string("tool_result")) continue;
+      if (!b["content"].is_array()) continue;
+      for (auto& ib : b["content"]) {
+        if (ib.value("type", "") == std::string("image")) an_image = true;
+      }
+    }
+  }
+  EXPECT_TRUE(an_image);
+}
+
 // ---------- Anthropic：tool_use / tool_result blocks + 顶层 system ----------
 FS_TEST(adapter_anthropic_blocks) {
   Json msgs = Json::array({

@@ -524,24 +524,35 @@ FS_TEST(addon2_todo_tool_layer) {
   };
   FsResult add = host.tools().invoke(ctx, "todo_add", Json{{"task", "write tests"}});
   ASSERT_TRUE(add.ok());
-  EXPECT_EQ((int)add.data["items"].size(), 1);
+  // Compact result: ids/pending counts only, not the whole list.
+  ASSERT_TRUE(add.data.contains("ids"));
+  EXPECT_EQ((int)add.data["ids"].size(), 1);
+  EXPECT_EQ((int)add.data["pending"].get<int>(), 1);
+  EXPECT_FALSE(add.data.contains("items"));
   // Completing the last item does NOT delete the list: the backend keeps the
   // task list for the whole task, and the next round starts from it.
-  int id = static_cast<int>(add.data["id"].get<int>());
+  int id = static_cast<int>(add.data["ids"][0].get<int>());
   FsResult chk = host.tools().invoke(ctx, "todo_check", Json{{"id", id}});
   ASSERT_TRUE(chk.ok());
-  EXPECT_EQ((int)chk.data["items"].size(), 1);
-  EXPECT_TRUE(chk.data["items"][0]["done"].get<bool>());
+  EXPECT_TRUE(chk.data["done"].get<bool>());
+  EXPECT_EQ((int)chk.data["pending"].get<int>(), 0);
   FsResult lst = host.tools().invoke(ctx, "todo_list", Json::object());
   ASSERT_TRUE(lst.ok());
   EXPECT_EQ((int)lst.data["items"].size(), 1);
+  // One call can add a batch; it returns all ids but not the list text.
+  FsResult batch = host.tools().invoke(
+      ctx, "todo_add", Json{{"tasks", Json::array({"a", "b", "c"})}});
+  ASSERT_TRUE(batch.ok());
+  EXPECT_EQ((int)batch.data["ids"].size(), 3);
+  EXPECT_EQ((int)batch.data["pending"].get<int>(), 3);
+  EXPECT_EQ((int)batch.data["total"].get<int>(), 4);
   // The model can drop an obsolete item itself, not only clear everything.
   FsResult add2 = host.tools().invoke(ctx, "todo_add", Json{{"task", "obsolete"}});
   ASSERT_TRUE(add2.ok());
-  int id2 = static_cast<int>(add2.data["id"].get<int>());
+  int id2 = static_cast<int>(add2.data["ids"][0].get<int>());
   FsResult ers = host.tools().invoke(ctx, "todo_erase", Json{{"id", id2}});
   ASSERT_TRUE(ers.ok());
-  EXPECT_EQ((int)host.tools().invoke(ctx, "todo_list", Json::object()).data["items"].size(), 1);
+  EXPECT_EQ((int)host.tools().invoke(ctx, "todo_list", Json::object()).data["items"].size(), 4);
   FsResult clr = host.tools().invoke(ctx, "todo_clear", Json::object());
   ASSERT_TRUE(clr.ok());
   EXPECT_EQ((int)host.tools().invoke(ctx, "todo_list", Json::object()).data["items"].size(), 0);

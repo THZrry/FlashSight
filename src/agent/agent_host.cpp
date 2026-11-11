@@ -757,16 +757,36 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
   std::string op = jsonutil::get<std::string>(args, "op", "");
   int64_t now = deps_.clock ? deps_.clock->now_ms() : 0;
   if (op == "add") {
-    std::string task = jsonutil::get<std::string>(args, "task", "");
-    if (task.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty task");
-    int id = todos_.add(owner, task);
+    std::vector<std::string> tasks;
+    std::string single = jsonutil::get<std::string>(args, "task", "");
+    if (!single.empty()) tasks.push_back(single);
+    if (args.contains("tasks") && args["tasks"].is_array()) {
+      for (auto& t : args["tasks"]) {
+        if (t.is_string() && !t.get<std::string>().empty()) {
+          tasks.push_back(t.get<std::string>());
+        }
+      }
+    }
+    if (tasks.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty task");
+    Json ids = Json::array();
+    for (size_t i = 0; i < tasks.size(); ++i) {
+      ids.push_back(todos_.add(owner, tasks[i]));
+    }
     // A checklist does NOT touch the plan: they are different layers now. The
     // plan is the document that says what the whole job is; the list is this
     // round's tasks derived from it. (Batch 49 cleared the plan here, which was
     // the "same thing, newer wins" confusion - the user rejected it.)
     save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
-    return FsResult::success(Json{{"id", id}, {"items", todos_.to_json(owner)}});
+    // Compact result: the full list was already returned by every add and ate
+    // the context. The model can call todo_list when it actually needs the text.
+    Json res = Json{{"ids", ids},
+                    {"added", static_cast<int64_t>(ids.size())},
+                    {"pending", todos_.pending_count(owner)},
+                    {"total", static_cast<int64_t>(todos_.to_json(owner).size())}};
+    // Backward-compatible single-id field for direct callers and older tests.
+    if (ids.size() > 0) res["id"] = ids[0];
+    return FsResult::success(res);
   }
   if (op == "list") {
     return FsResult::success(
@@ -783,8 +803,10 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     // and the user can see what was done). It is only removed by `erase`/`clear`.
     save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
-    return FsResult::success(Json{{"items", todos_.to_json(owner)},
-                                  {"pending", todos_.pending_count(owner)}});
+    return FsResult::success(Json{{"id", id},
+                                  {"done", done},
+                                  {"pending", todos_.pending_count(owner)},
+                                  {"total", static_cast<int64_t>(todos_.to_json(owner).size())}});
   }
   if (op == "erase") {
     int id = static_cast<int>(jsonutil::get_int(args, "id", 0));
@@ -795,13 +817,15 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     // the removed row until something else refreshed it.
     save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
-    return FsResult::success(Json{{"items", todos_.to_json(owner)}});
+    return FsResult::success(Json{{"removed", id},
+                                  {"pending", todos_.pending_count(owner)},
+                                  {"total", static_cast<int64_t>(todos_.to_json(owner).size())}});
   }
   if (op == "clear") {
     todos_.clear(owner);
     save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", Json::array()}});
-    return FsResult::success(Json{{"items", Json::array()}});
+    return FsResult::success(Json{{"pending", 0}, {"total", 0}});
   }
   return FsResult::error(ErrCode::kInvalidArg, "unknown todo op: " + op);
 }

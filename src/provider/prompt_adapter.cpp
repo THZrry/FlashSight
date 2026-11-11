@@ -123,18 +123,27 @@ void push_merge(Json* out, Json msg) {
   out->push_back(msg);
 }
 
+Json image_parts(const Json& m) {
+  Json arr = Json::array();
+  if (!has_parts(m)) return arr;
+  for (auto& p : m["parts"]) {
+    if (p.is_object() && get_str(p, "type") == "image" &&
+        !get_str(p, "dataUri").empty()) {
+      arr.push_back(p);
+    }
+  }
+  return arr;
+}
+
 Json openai_tool_message(const Json& m) {
   Json o = Json::object();
   o["role"] = "tool";
   o["tool_call_id"] = get_str(m, "toolCallId");
-  // A tool result that carries an image (a screenshot) must send the image as
-  // content parts; a JSON string containing a data URI would be text to the
-  // model, i.e. it could not see it.
-  if (has_parts(m)) {
-    o["content"] = openai_parts(m);
-  } else {
-    o["content"] = get_str(m, "content");
-  }
+  // Chat Completions does not accept image parts on a `tool` message. The image
+  // is emitted as a following USER message (see adapt) - that is the field every
+  // vision provider understands. Content here is always the text metadata, so a
+  // data URI never leaks into the prompt as base64 text.
+  o["content"] = get_str(m, "content");
   return o;
 }
 
@@ -396,8 +405,49 @@ Adapted adapt(ApiKind kind, const Json& neutral_messages, const Json& neutral_to
 
   if (kind == ApiKind::kOpenAIResponse) {
     Json list = Json::array();
+    Json deferred_images = Json::array();
+    auto flush_images = [&]() {
+      if (deferred_images.empty()) return;
+      Json content = Json::array();
+      content.push_back(Json{{"type", "input_text"},
+                             {"text", "Image attached from the tool result above."}});
+      for (auto& p : deferred_images) {
+        content.push_back(Json{{"type", "input_image"},
+                               {"image_url", get_str(p, "dataUri")}});
+      }
+      list.push_back(Json{{"role", "user"}, {"content", content}});
+      deferred_images = Json::array();
+    };
     for (auto& m : msgs) {
       if (!m.is_object()) continue;
+      if (get_str(m, "role") == "tool") {
+        Json item = response_api_item(m);
+        if (item.is_object() && item.contains("__array")) {
+          for (auto& x : item["__array"]) list.push_back(x);
+        } else {
+          list.push_back(item);
+        }
+        Json imgs = image_parts(m);
+        for (auto& im : imgs) deferred_images.push_back(im);
+        continue;
+      }
+      flush_images();
+      if (get_str(m, "role") == "user" && has_parts(m)) {
+        Json content = Json::array();
+        for (auto& p : m["parts"]) {
+          if (!p.is_object()) continue;
+          std::string type = get_str(p, "type");
+          if (type == "text") {
+            content.push_back(Json{{"type", "input_text"},
+                                   {"text", get_str(p, "text")}});
+          } else if (type == "image" && !get_str(p, "dataUri").empty()) {
+            content.push_back(Json{{"type", "input_image"},
+                                   {"image_url", get_str(p, "dataUri")}});
+          }
+        }
+        list.push_back(Json{{"role", "user"}, {"content", content}});
+        continue;
+      }
       Json item = response_api_item(m);
       if (item.is_object() && item.contains("__array")) {
         for (auto& x : item["__array"]) list.push_back(x);
@@ -405,6 +455,7 @@ Adapted adapt(ApiKind kind, const Json& neutral_messages, const Json& neutral_to
         list.push_back(item);
       }
     }
+    flush_images();
     out.messages = list;
     out.system = Json();
     return out;
@@ -412,12 +463,35 @@ Adapted adapt(ApiKind kind, const Json& neutral_messages, const Json& neutral_to
 
   // OpenAI Chat / Custom / legacy Plan: system stays inline.
   Json list = Json::array();
+  // A tool message cannot carry an image in Chat Completions. Collect the images
+  // from a consecutive tool-result group and emit ONE user message after it:
+  // that is the shape vision providers actually inspect. Doing it here (not in
+  // AgentLoop) keeps the neutral history provider-independent.
+  Json deferred_images = Json::array();
+  auto flush_images = [&]() {
+    if (deferred_images.empty()) return;
+    Json blocks = Json::array();
+    blocks.push_back(
+        Json{{"type", "text"}, {"text", "Image attached from the tool result above."}});
+    for (auto& p : deferred_images) {
+      Json img = Json::object();
+      img["url"] = get_str(p, "dataUri");
+      blocks.push_back(Json{{"type", "image_url"}, {"image_url", img}});
+    }
+    list.push_back(Json{{"role", "user"}, {"content", blocks}});
+    deferred_images = Json::array();
+  };
   for (auto& m : msgs) {
     if (!m.is_object()) continue;
     std::string role = get_str(m, "role");
     if (role == "tool") {
       list.push_back(openai_tool_message(m));
-    } else if (role == "assistant") {
+      Json imgs = image_parts(m);
+      for (auto& im : imgs) deferred_images.push_back(im);
+      continue;
+    }
+    flush_images();
+    if (role == "assistant") {
       list.push_back(openai_assistant_message(m));
     } else if (role == "system") {
       list.push_back(Json{{"role", "system"}, {"content", get_str(m, "content")}});
@@ -428,6 +502,7 @@ Adapted adapt(ApiKind kind, const Json& neutral_messages, const Json& neutral_to
       list.push_back(Json{{"role", "user"}, {"content", get_str(m, "content")}});
     }
   }
+  flush_images();
   out.messages = list;
   out.system = Json();
   return out;

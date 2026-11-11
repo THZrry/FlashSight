@@ -354,6 +354,17 @@ html, body {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.nav-proj-toggle {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-faint);
+  padding: 0 3px;
+  cursor: pointer;
+}
+.nav-proj-toggle:hover { color: var(--text); }
 .nav-proj-add { display: none; }
 .nav-proj-head:hover .nav-proj-add { display: inline-flex; }
 .nav-session {
@@ -895,6 +906,7 @@ html, body {
   .proj-right:not(.open) { min-height: 0; }
   .proj-right.open { min-height: 0; }
   .proj-right .proj-sessions { max-height: none; overflow: visible; }
+  .proj-right .prh-toggle { display: inline; }
   .proj-right-head { cursor: pointer; }
   .proj-right-head:hover { background: var(--hover); color: var(--text); }
 }
@@ -903,10 +915,13 @@ html, body {
   /* SIDE-BY-SIDE layout: the renderer caps a >10-row list until the header is
      clicked; expanded keeps its own scroll so one project cannot push the rest
      of the page away. */
-  .proj-right .proj-sessions { max-height: 360px; overflow-y: auto; }
-  .proj-right-head { cursor: pointer; }
-  .proj-right-head:hover { background: var(--hover); color: var(--text); }
-  .proj-right .prh-toggle { display: inline; }
+  /* 10 session rows (32px) + the "+ 新建会话" row; beyond that it SCROLLS. */
+  .proj-right .proj-sessions { max-height: 352px; overflow-y: auto; }
+  .proj-right-head { cursor: default; }
+  .proj-right-head:hover { background: transparent; color: var(--text-dim); }
+  /* Two-column = scroll, never a truncated list. The narrow layout keeps the
+     expand/collapse control. */
+  .proj-right .prh-toggle { display: none; }
   .proj-right { min-height: 0; }
 }
 

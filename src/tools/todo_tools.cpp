@@ -30,13 +30,17 @@ void register_todo_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "todo_add";
     def.description =
-        "新增进程任务. Add a task to the current process list. "
-        "列出本轮任务，完成一项用 todo_check 打勾.";
+        "新增进程任务（一次可加多条）. Add one or more tasks to the current "
+        "process list; pass `tasks` for a batch. Returns only ids/pending counts, "
+        "not the whole list (use todo_list when you need the text).";
     Json params = base_params();
     Json props = Json::object();
-    props["task"] = Json{{"type", "string"}, {"description", "任务描述"}};
+    props["task"] = Json{{"type", "string"}, {"description", "单个任务描述"}};
+    props["tasks"] = Json{
+        {"type", "array"},
+        {"items", Json{{"type", "string"}}},
+        {"description", "一次添加多条任务（与 task 二选一或同时给）"}};
     params["properties"] = props;
-    params["required"] = Json::array({"task"});
     def.parameters = params;
     registry->register_tool("todo_add", def,
       [](const ToolContext& ctx, const Json& args) -> FsResult {

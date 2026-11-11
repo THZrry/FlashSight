@@ -440,6 +440,8 @@ const Entry kEnTable[] = {
      "Summary"},
     {"摘要模型",
      "Summary model"},
+    {"收起", "Collapse"},
+    {"展开", "Expand"},
     {"手动导入",
      "Import manually"},
     {"搜索 MCP",

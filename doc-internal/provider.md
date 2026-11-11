@@ -99,3 +99,14 @@
 - 子代理：预置 research、explore 等常用代理，各设开关/模型。
 - 插件：v1 灰色禁用，不实现。钩子：语义 TBD。
 - 长期记忆：用户偏好管理（设置-模型-长期记忆）。
+
+## 6. 图片输入（read_image / screenshot）
+
+工具结果里的 `dataUri` 不能以 base64 文本形式留在工具消息里——那对模型只是字符。
+`AgentLoop` 把图片抽成 neutral `parts`，由 `prompt::adapt` 按供应商落线：
+
+- OpenAI Chat：`tool` 消息不能带图片 content；工具组结束后追加一条 **user** 消息，
+  content 为 `[{type:"text"},{type:"image_url",image_url:{url:"data:..."}}]`。
+- Anthropic：保留在 `tool_result` 的 `{type:"image",source:{type:"base64",...}}`。
+- OpenAI Responses：user 消息的 `input_image`。
+- 历史回放（`project_tool_result`）丢掉 `dataUri`，只留 path/尺寸；否则每轮都重发大段 base64。

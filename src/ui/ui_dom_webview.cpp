@@ -286,6 +286,11 @@ const char* kGlueJs = R"JS(
     var name = NAMES[kind] || 'click';
     var evName = (name === 'keyenter') ? 'keydown' : name;
     var listener = function (evt) {
+      // IME composition: intermediate input events carry pinyin; the final one
+      // (isComposing=false) carries the committed text. Letting a render or an
+      // async completion reply run mid-composition broke Chinese input.
+      if (name === 'input' && evt.isComposing) return;
+      if ((name === 'keydown' || name === 'keyenter') && evt.isComposing) return;
       // FRAMEWORK RULE: an activation event belongs to the INNERMOST element
       // that handles it. A button inside a clickable row (a card, a fold header)
       // runs its own handler and stops the event there; the row never sees the
@@ -821,6 +826,22 @@ const char* kGlueJs = R"JS(
           try { document.execCommand(a, false, null); } catch (e) {}
         })();
         return;
+      case 'setCaret':
+        // The app replaced a control's value (inline path completion); put the
+        // caret after the inserted text instead of leaving it at the end.
+        (function () {
+          var el = N(i);
+          if (!el) return;
+          if (el.focus) { try { el.focus(); } catch (e) {} }
+          try {
+            var pos = parseInt(j, 10);
+            if (!(pos >= 0)) pos = 0;
+            var n = (el.value == null) ? 0 : el.value.length;
+            if (pos > n) pos = n;
+            if (typeof el.setSelectionRange === 'function') el.setSelectionRange(pos, pos);
+          } catch (err) {}
+        })();
+        return;
       case 'insertText':
         // Insert text obtained from the NATIVE clipboard. No clipboard API and
         // no permission: the WebView2 host read the text itself.
@@ -1192,6 +1213,10 @@ class WebViewDom : public IDom {
 
   void insert_text_at_caret(const std::string& text) override {
     call("insertText", 0, 0, text, "");
+  }
+  void set_text_caret(Node node, int pos) override {
+    if (!node.valid()) return;
+    call("setCaret", idx(node), pos, "", "");
   }
   void bind_file_picker(Node node, const std::string& pid,
                         std::function<void(const std::string&)> cb) override {

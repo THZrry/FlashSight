@@ -45,11 +45,9 @@ struct ProjectCard {
   // directly, narrow collapses it behind the header), so it is always loaded.
   bool sessions_loaded = false;
   bool expanded = true;            // narrow layout: list revealed? (wide ignores it)
-  // A project with >10 sessions keeps the list capped until this is switched
-  // on. It is SEPARATE from `expanded`: the narrow layout's reveal and the
-  // "show all N sessions" control are different questions, and tying them
-  // together let one long project push every other project off the page.
-  bool sessions_open = false;
+  // Left nav rail: each project group can be collapsed independently. This is
+  // per-project UI state, not the home card's narrow-layout reveal.
+  bool nav_open = true;
   // A session row carries more than a title: the card shows WHEN it last
   // changed and WHETHER it is running, and both have to be deletable.
   struct SessionRow {
@@ -427,6 +425,11 @@ struct AppState {
   std::string complete_dir;
   std::string complete_prefix;
   std::vector<std::pair<std::string, bool> > complete_items;  // (name, isDir)
+  // The path TOKEN around the caret that produced this menu. Accepting replaces
+  // exactly this range (including the suffix after the caret) and restores the
+  // caret; using the last slash of the whole draft put the caret at the end.
+  size_t complete_token_start = 0;
+  size_t complete_token_end = 0;
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
@@ -928,6 +931,8 @@ struct SessionView {
   std::string complete_dir;
   std::string complete_prefix;
   std::vector<std::pair<std::string, bool> > complete_items;
+  size_t complete_token_start = 0;
+  size_t complete_token_end = 0;
 
   std::vector<AppState::WorkflowDefRow> workflow_defs;
   bool workflow_defs_loaded = false;
@@ -1049,7 +1054,7 @@ class UiApp {
 
   // ---- composer inline completion ("/" commands, "/" and "./" paths) ----
   // Recompute the hint from the CURRENT input text (called on every edit).
-  void update_complete_from_input(const std::string& text);
+  void update_complete_from_input(const std::string& text, size_t caret);
   // Insert the highlighted candidate (Tab / click / Enter).
   void accept_complete();
   // Rows the menu currently shows (commands, or path candidates).
@@ -1312,7 +1317,7 @@ class UiApp {
   // test hook: what the composer's input handler does on every edit.
   void on_input_for_test(const std::string& text) {
     st_.session_input = text;
-    update_complete_from_input(text);
+    update_complete_from_input(text, text.size());
   }
   // diagnostics
   int event_count() const { return event_count_; }

@@ -1426,6 +1426,8 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   st_.complete_prefix.clear();
   st_.complete_dir.clear();
   st_.complete_items.clear();
+  st_.complete_token_start = 0;
+  st_.complete_token_end = 0;
   st_.complete_index = 0;
   // A context menu belongs to what was right-clicked; navigating away leaves
   // nothing for it to act on.
@@ -2365,7 +2367,8 @@ void UiApp::load_session_usage(const std::string& sid) {
     if (!r.ok) return;
     int64_t in = jsonutil::get_int(r.data, "totalIn", 0);
     int64_t out = jsonutil::get_int(r.data, "totalOut", 0);
-    int64_t cache = jsonutil::get_int(r.data, "totalCache", 0);
+    // One request's cache figures, not the session sum (see usage_query).
+    int64_t cache = jsonutil::get_int(r.data, "cacheHitCached", 0);
     double cost = jsonutil::get_number(r.data, "totalCost", 0.0);
     std::string kind = jsonutil::get<std::string>(r.data, "costKind", "unknown");
     int64_t calls = jsonutil::get_int(r.data, "calls", 0);
@@ -2904,11 +2907,14 @@ int UiApp::complete_row_count() const {
   return 0;
 }
 
-void UiApp::update_complete_from_input(const std::string& text) {
-  // A "/" as the FIRST character: the command list. Keep the current one open
-  // while the user narrows it ("/br" still lists commands).
-  auto is_cmd = [](const std::string& t) { return t.size() > 0 && t[0] == '/'; };
-  bool command_mode = is_cmd(text) && text.find(' ') == std::string::npos &&
+void UiApp::update_complete_from_input(const std::string& text, size_t caret) {
+  if (caret > text.size()) caret = text.size();
+  // A "/" as the FIRST character with the caret at the END: the command list.
+  // Keep the current one open while the user narrows it ("/br" still lists
+  // commands). Editing the middle of the line must not be reinterpreted as a
+  // command and must not replace the whole draft on Tab.
+  bool command_mode = !text.empty() && text[0] == '/' && caret == text.size() &&
+                      text.find(' ') == std::string::npos &&
                       text.find('\n') == std::string::npos;
   if (command_mode) {
     std::string q = text.substr(1);
@@ -2933,7 +2939,7 @@ void UiApp::update_complete_from_input(const std::string& text) {
             }
           }
           update([&](AppState& s) { s.command_menu = rows; });
-          update_complete_from_input(st_.session_input);
+          update_complete_from_input(st_.session_input, st_.session_input.size());
         });
       }
       update([&](AppState& s) {
@@ -2945,48 +2951,57 @@ void UiApp::update_complete_from_input(const std::string& text) {
     return;
   }
 
-  // Path mode: find the LAST "/" (or "./") and take the fragment after it.
-  size_t slash = text.find_last_of('/');
-  if (slash == std::string::npos || slash == 0) {
-    // No separator (or the leading one, which is command mode): nothing to hint.
+  // Path mode: the TOKEN around the caret, not the last slash of the whole
+  // draft. Editing earlier text used to take the separator from the suffix (or
+  // replace from the end), which moved the caret to the end of the draft.
+  auto is_delim = [](char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+  };
+  size_t token_start = caret;
+  while (token_start > 0 && !is_delim(text[token_start - 1])) --token_start;
+  size_t token_end = caret;
+  while (token_end < text.size() && !is_delim(text[token_end])) ++token_end;
+  std::string token = text.substr(token_start, token_end - token_start);
+  std::string typed = text.substr(token_start, caret - token_start);
+  auto close = [&]() {
     if (st_.complete_kind != AppState::CompleteKind::kNone) {
       update([&](AppState& s) { s.complete_kind = AppState::CompleteKind::kNone; });
     }
+  };
+  // Not a path: no separator, a URL, or a CLI flag. A prose token that happens
+  // to contain '/' still has a chance, but the backend's "no entries" answer is
+  // the final filter; these cases are never paths.
+  if (token.find('/') == std::string::npos &&
+      token.find('\\') == std::string::npos) {
+    close();
     return;
   }
-  // Only hint when the fragment looks like a path being typed: no spaces after
-  // the slash (it is a word, not prose).
-  std::string frag = text.substr(slash + 1);
-  if (frag.find(' ') != std::string::npos || frag.find('\n') != std::string::npos) {
-    if (st_.complete_kind != AppState::CompleteKind::kNone) {
-      update([&](AppState& s) { s.complete_kind = AppState::CompleteKind::kNone; });
-    }
+  if (token.compare(0, 7, "http://") == 0 || token.compare(0, 8, "https://") == 0 ||
+      token.compare(0, 5, "file:") == 0 || (!token.empty() && token[0] == '-')) {
+    close();
     return;
   }
-  // The path starts at the separator's word start: "./a/b" -> "./a/b"; "see a/b"
-  // -> "a/b" (the hint is about the path only).
-  size_t word = slash;
-  while (word > 0 && text[word - 1] != ' ' && text[word - 1] != '\n') --word;
-  std::string typed = text.substr(word, text.size() - word);
+  // A leading '/' is command mode only with the caret at the end; an absolute
+  // POSIX path (or a mid-line slash) is a path. A Windows drive is C:/ or C:\.
+  bool posix_abs = token[0] == '/' && token.size() > 1;
+  if (token_start == 0 && token[0] == '/' && !posix_abs) {
+    close();
+    return;
+  }
   bool was = st_.complete_kind == AppState::CompleteKind::kPath;
-  if (was && st_.complete_prefix == typed) return;  // nothing changed
+  if (was && st_.complete_prefix == typed &&
+      st_.complete_token_start == token_start &&
+      st_.complete_token_end == token_end) {
+    return;  // the same token, unchanged
+  }
   std::string sid = active_sid();
+  const std::string expected = text;
   call_async("complete.path", Json{{"sid", sid}, {"typed", typed}},
-             [this, typed](const BackendResult& r) {
-    // A reply is only valid while the SAME fragment is still being typed. Without
-    // this an answer arriving after the user finished the path (and went on to
-    // edit other text) re-opened the popup over what they were doing.
-    {
-      const std::string& cur = st_.session_input;
-      size_t s2 = cur.find_last_of('/');
-      bool still = s2 != std::string::npos && s2 != 0;
-      if (still) {
-        size_t w2 = s2;
-        while (w2 > 0 && cur[w2 - 1] != ' ' && cur[w2 - 1] != '\n') --w2;
-        still = cur.substr(w2) == typed;
-      }
-      if (!still) return;
-    }
+             [this, typed, expected, token_start, token_end](const BackendResult& r) {
+    // Only accept the answer if the DRAFT is still exactly what was queried.
+    // Comparing the last slash was wrong for mid-path edits and for a reply that
+    // arrived after an unrelated edit elsewhere in the line.
+    if (st_.session_input != expected) return;
     if (!r.ok) return;
     std::vector<std::pair<std::string, bool> > items;
     const Json& arr = r.data.contains("entries") ? r.data["entries"] : Json::array();
@@ -3012,6 +3027,8 @@ void UiApp::update_complete_from_input(const std::string& text) {
       s.complete_dir = jsonutil::get<std::string>(r.data, "dir", "");
       s.complete_items = items;
       s.complete_index = 0;
+      s.complete_token_start = token_start;
+      s.complete_token_end = token_end;
     });
   });
 }
@@ -3030,22 +3047,30 @@ void UiApp::accept_complete() {
     is_dir = st_.complete_items[static_cast<size_t>(idx)].second;
   }
   std::string text = st_.session_input;
+  size_t caret = text.size();
   if (st_.complete_kind == AppState::CompleteKind::kCommand) {
     text = insert;  // the command replaces the whole line
+    caret = text.size();
   } else {
-    // Replace the fragment after the last separator, keeping what came before.
-    size_t slash = text.find_last_of('/');
-    if (slash == std::string::npos) return;
-    size_t word = slash;
-    while (word > 0 && text[word - 1] != ' ' && text[word - 1] != '\n') --word;
-    text = text.substr(0, word) + text.substr(word, slash + 1 - word) + insert;
-    if (is_dir) text += "/";
+    // Replace the WHOLE path token around the caret, including any suffix after
+    // it (completing `src/ma|in.cpp` must not leave `in.cpp` dangling). The
+    // backend returned the directory part EXACTLY as typed, so `./`, a project
+    // folder prefix and Windows drive paths keep their spelling.
+    size_t start = st_.complete_token_start;
+    size_t end = st_.complete_token_end;
+    if (start > text.size() || end < start || end > text.size()) return;
+    std::string replacement = st_.complete_dir + insert;
+    if (is_dir) replacement += "/";
+    text = text.substr(0, start) + replacement + text.substr(end);
+    caret = start + replacement.size();
   }
   AppState::CompleteKind kind = st_.complete_kind;
   update([&](AppState& s) {
     s.session_input = text;
     s.complete_kind = AppState::CompleteKind::kNone;
     s.complete_index = 0;
+    s.complete_token_start = 0;
+    s.complete_token_end = 0;
   });
   // The accepted text has to be written THROUGH to the DOM. The framework
   // deliberately never overwrites a focused textarea's value (that would move
@@ -3054,13 +3079,18 @@ void UiApp::accept_complete() {
   // closed, which is exactly "Tab 没反应". Same fix as send_message's clear.
   {
     VNodePtr ta = find_by_key(tree_, "session-input");
-    if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", text);
+    if (ta && ta->dom.valid()) {
+      dom_.set_attr(ta->dom, "value", text);
+      // Without this the browser leaves the caret at the END of the new value;
+      // completing a path earlier in the line threw it to the end of the draft.
+      dom_.set_text_caret(ta->dom, static_cast<int>(caret));
+    }
   }
   // Focus + values live in the DOM mirror: the select is patched by the
   // framework, and the textarea's value follows `session_input`.
   if (kind == AppState::CompleteKind::kPath && is_dir) {
     // A directory was accepted: immediately list its contents.
-    update_complete_from_input(text);
+    update_complete_from_input(text, caret);
   }
 }
 
@@ -5546,6 +5576,18 @@ VNodePtr UiApp::build_nav_rail() {
         p.name.empty() ? "?" : p.name.substr(0, p.name.size() > 1 ? 2 : 1)));
     ph.add(el("span", "nav-proj-name").text(p.name));
     std::string pid = p.pid;
+    // Per-project collapse: the rail lists every project permanently, so a
+    // 40-session project must be reducible to one header line without hiding
+    // every other project. This is a TEXT control (收起/展开), separate from the
+    // home card's narrow-layout reveal.
+    H tg = el("span", "nav-proj-toggle");
+    tg.text(p.nav_open ? tr("收起") + " \u25be" : tr("展开") + " \u25b8");
+    tg.on(EventKind::kClick, [this, i](const std::string&) {
+      update([&](AppState& s) {
+        if (i < s.projects.size()) s.projects[i].nav_open = !s.projects[i].nav_open;
+      });
+    });
+    ph.add(tg);
     H plus = comp::icon_button("square-plus", tr("在这个项目里新建会话"),
                                [this, pid](const std::string&) {
       new_session_in_project(pid);
@@ -5553,6 +5595,11 @@ VNodePtr UiApp::build_nav_rail() {
     plus.cls("nav-proj-add");
     ph.add(plus);
     grp.add(ph);
+    if (!p.nav_open) {
+      nav_hits += rows.size();  // hidden by a collapse, not by the search
+      body.add(grp);
+      continue;
+    }
     for (size_t k = 0; k < rows.size(); ++k) {
       const ProjectCard::SessionRow& s = rows[k];
       ++nav_hits;
@@ -6037,30 +6084,15 @@ VNodePtr UiApp::build_home_projects() {
     rhead.add(el("span", "prh-title").text(tr("会话")));
     rhead.add(el("span", "prh-count").text(itos(p.session_count)));
     rhead.add(el("span", "grow"));
-    // A project with dozens of sessions must not push every other project off
-    // the page. Above 10 rows the list is capped and its own toggle expands it;
-    // the toggle is independent of the narrow layout's header reveal.
-    const bool long_list = p.sessions.size() > 10;
-    if (long_list) {
-      H tg = el("span", "prh-toggle").text(p.sessions_open ? tr("收起 \u25be")
-                                                          : tr("展开 \u25b8"));
-      tg.on(EventKind::kClick, [this, i](const std::string&) {
-        update([&](AppState& s) {
-          if (i < s.projects.size()) s.projects[i].sessions_open = !s.projects[i].sessions_open;
-        });
-      });
-      rhead.add(tg);
-    } else {
-      // Short list: the header is the narrow layout's reveal control. It has
-      // no own click handler, so the press reaches the header's toggle.
-      rhead.add(el("span", "prh-toggle").text(p.expanded ? tr("收起 \u25be")
-                                                         : tr("展开 \u25b8")));
-    }
+    // Wide/two-column: the list has a fixed height (~10 rows) and SCROLLS; it
+    // must not be truncated to 10 rows with an expand toggle. Narrow/stacked:
+    // the same header reveals or hides the block. CSS owns the difference; the
+    // renderer always builds every row so the scroll container has them.
+    rhead.add(el("span", "prh-toggle").text(
+        p.expanded ? tr("收起") + " \u25be" : tr("展开") + " \u25b8"));
     right.add(rhead);
     H list = el("div", "proj-sessions");
-    const size_t visible_rows =
-        (long_list && !p.sessions_open) ? 10 : p.sessions.size();
-    for (size_t k = 0; k < visible_rows; ++k) {
+    for (size_t k = 0; k < p.sessions.size(); ++k) {
       const ProjectCard::SessionRow& s = p.sessions[k];
       std::string sid = s.sid;
       if (s.renaming) {
@@ -7257,14 +7289,27 @@ VNodePtr UiApp::build_session() {
                              : "输入消息…（Enter 发送，Shift+Enter 换行）";
   H ta = comp::textarea(st_.session_input, tr(hint_key),
                         [this](const std::string& v) {
-    const bool was_empty = st_.session_input.empty();
+    const std::string old = st_.session_input;
+    const bool was_empty = old.empty();
     st_.session_input = v;  // no re-render while typing (avoid caret jumps)
+    // The DOM does not hand us the caret with the input event. Derive it from
+    // the edit itself: common prefix + common suffix gives the end of the
+    // inserted/replaced text. This is what lets completion run at the caret
+    // instead of at the end of the whole draft.
+    size_t p = 0;
+    while (p < old.size() && p < v.size() && old[p] == v[p]) ++p;
+    size_t s = 0;
+    while (s < old.size() - p && s < v.size() - p &&
+           old[old.size() - 1 - s] == v[v.size() - 1 - s]) {
+      ++s;
+    }
+    const size_t caret = v.size() - s;
     // The only state the toolbar depends on is "is there input?" - repaint on
     // that boundary so 中止 ↔ 引导 swaps, without a render per keystroke.
     if (was_empty != v.empty()) render();
     // Inline completion trigger. NO re-render here (that would move the caret),
     // so the menu is (re)built only when the TRIGGER STATE actually changes.
-    update_complete_from_input(v);
+    update_complete_from_input(v, caret);
   },
                         [this](const std::string&) { send_message(); });
   ta.key("session-input");  // send_message() clears it directly after sending

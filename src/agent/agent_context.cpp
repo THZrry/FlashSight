@@ -148,7 +148,11 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "已完成/无关条目留在新清单里；只有明确是同一任务的延续时才复用旧清单。");
     out.push_back(
         "- 只有纯问答（不读文件、不改文件、不跑命令）可以没有清单；只要动手，"
-        "就先 todo_add 一条再开始。清单本身也是 token。");
+        "就先 todo_add 一条再开始。清单本身也是 token。todo_add 支持一次传 tasks 数组。");
+    out.push_back(
+        "- 每轮先看运行时的 `状态: todo x/y, plan: ...`：有未完成项就继续做下一项，"
+        "**不要提前总结收尾**；全部完成就 todo_clear 清空已完成项；plan 仍为 active "
+        "时也不能以总结结束。");
     out.push_back(
         "- 三层任务，不要混：① 任务列表（todo_add/todo_check）是**本轮**的活；"
         "② 规划（plan_update）是一篇你负责的文档 `.flashsight/sessions/<sid>/plans/`："
@@ -195,8 +199,13 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "only reuse it when this really is a continuation of the same task.");
     out.push_back(
         "- Only pure Q&A (no file reads, writes or commands) may have no list. As "
-        "soon as you act, add one todo_add item before starting; the list itself "
-        "also costs tokens.");
+        "soon as you act, add one todo_add item before starting; todo_add accepts a "
+        "`tasks` array for a batch; the list itself also costs tokens.");
+    out.push_back(
+        "- Every round starts from the runtime line `status: todo x/y, plan: ...`: "
+        "if items are open, do the next one and do NOT summarize the turn yet; when "
+        "all are done, todo_clear the finished list; an active plan also prevents a "
+        "summary ending.");
     out.push_back(
         "- Three layers, never mixed: (1) the TASK LIST (todo_add/todo_check) is "
         "the work of THIS round; (2) the PLAN (plan_update) is a DOCUMENT you own "
@@ -600,10 +609,47 @@ std::string AgentContext::build_runtime(const ContextInput& in, const RuntimeSta
     }
   }
 
+  // ONE compact status line above the details. The model repeatedly forgot
+  // whether the checklist was finished and summarized while work remained
+  // (auto mode kept going, the answer looked done). Make the completion state
+  // an explicit, machine-like fact in the VOLATILE runtime block, not prose it
+  // has to infer from a list.
+  int todo_total = 0, todo_done = 0;
+  if (st.todos.is_array()) {
+    for (auto& t : st.todos) {
+      if (!t.is_object()) continue;
+      ++todo_total;
+      if (jsonutil::get<bool>(t, "done", false)) ++todo_done;
+    }
+  }
+  bool has_plan = st.plan.is_object() &&
+                  jsonutil::get<bool>(st.plan, "exists", false);
+  std::string plan_status =
+      has_plan ? jsonutil::get<std::string>(st.plan, "status", "active")
+               : std::string("none");
+  if (todo_total > 0 || has_plan) {
+    std::string line = zh(in) ? "状态: todo " : "status: todo ";
+    line += std::to_string(todo_done) + "/" + std::to_string(todo_total);
+    line += zh(in) ? "，plan: " : ", plan: ";
+    line += plan_status;
+    lines.push_back(line);
+    if (todo_total > 0 && todo_done == todo_total) {
+      lines.push_back(zh(in)
+                          ? "清单已全部完成：todo_clear 清空已完成项；若 plan 仍为 active，继续按文档收尾。"
+                          : "All checklist items are done: todo_clear them; if the "
+                            "plan is still active, finish it before summarizing.");
+    } else if (todo_total > todo_done) {
+      lines.push_back(zh(in)
+                          ? "清单仍有未完成项：先做下一项，不要在本轮以总结收尾。"
+                          : "Checklist has open items: do the next one; do not end "
+                            "this turn with a summary yet.");
+    }
+  }
+
   // The plan is a DOCUMENT. The model does not need it re-printed every round
   // (it can be long) - what it needs is the fact that it exists, where it is,
   // and whether it is done, because that status is what auto mode follows.
-  if (st.plan.is_object() && jsonutil::get<bool>(st.plan, "exists", false)) {
+  if (has_plan) {
     std::string status = jsonutil::get<std::string>(st.plan, "status", "active");
     std::string path = jsonutil::get<std::string>(st.plan, "path", "");
     std::string content = jsonutil::get<std::string>(st.plan, "content", "");

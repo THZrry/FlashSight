@@ -848,9 +848,45 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           add_thought(thought_at++);
         }
       };
-      flush_guidance(0);
-      flush_thoughts(0);
-      for (size_t i = 0; i < m.tools.size(); ++i) {
+      // A single auto turn can accumulate THOUSANDS of tool rows (the user's
+      // WhaleJS session reached 2387). Rendering all of them on every streaming
+      // delta made one render take 2.5 s and pushed the WebView renderer to 19 GB
+      // before it crashed. The process is a log, not the full record: keep the
+      // most recent slice while running, and a larger slice when the user opens a
+      // finished turn. The complete tool list stays in the stored turn.
+      const size_t kMaxVisibleTools = m.streaming ? 120 : 300;
+      size_t first_tool = 0;
+      if (m.tools.size() > kMaxVisibleTools) {
+        first_tool = m.tools.size() - kMaxVisibleTools;
+      }
+      if (first_tool > 0) {
+        // Skip notes/reasoning/guidance that belong to the hidden prefix; they
+        // would otherwise all pile up above the first visible tool.
+        while (interim_at < m.interim.size()) {
+          size_t a = interim_at < m.interim_after.size()
+                         ? m.interim_after[interim_at]
+                         : interim_at;
+          if (a >= first_tool) break;
+          ++interim_at;
+        }
+        while (thought_at < m.thoughts.size() &&
+               m.thoughts[thought_at].after < first_tool) {
+          ++thought_at;
+        }
+        while (guidance_at < m.guidance.size()) {
+          size_t a = guidance_at < m.guidance_after.size()
+                         ? m.guidance_after[guidance_at]
+                         : 0;
+          if (a >= first_tool) break;
+          ++guidance_at;
+        }
+        inner.add(el("div", "work-note dim").text(
+            tr("更早的 ") + itos(static_cast<int>(first_tool)) +
+            tr(" 步已省略；完整记录保存在会话中")));
+      }
+      flush_guidance(first_tool);
+      flush_thoughts(first_tool);
+      for (size_t i = first_tool; i < m.tools.size(); ++i) {
         // Guidance was applied after the tools that had already run; it comes
         // before the next round's reasoning. Then the reasoning, then this
         // round's narration (both share the tool anchor; see below).

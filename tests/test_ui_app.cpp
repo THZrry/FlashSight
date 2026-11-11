@@ -436,7 +436,7 @@ FS_TEST(uiapp_project_card_actions) {
   EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
 }
 
-FS_TEST(uiapp_long_session_list_is_capped) {
+FS_TEST(uiapp_long_session_list_renders_all_rows) {
   NullDom dom;
   AppState st = AppState::make();
   seed_project(st);
@@ -450,13 +450,11 @@ FS_TEST(uiapp_long_session_list_is_capped) {
   st.projects[0].session_count = 11;
   UiApp app(dom, st, nullptr);
   app.mount();
-  // >10 rows are capped by default; the explicit toggle is present and the
-  // 11th row is not rendered yet.
-  EXPECT_TRUE(dump_has(dom, "展开"));
-  EXPECT_FALSE(dump_has(dom, "SESSION_10"));
-  app.update([](AppState& s) { s.projects[0].sessions_open = true; });
-  EXPECT_TRUE(dump_has(dom, "收起"));
+  // Two-column mode SCROLLS at ~10 rows; it must not truncate the list to 10
+  // rows (the old expand toggle was the "截断" the user reported). Every row is
+  // in the DOM so the CSS scroll container can show it.
   EXPECT_TRUE(dump_has(dom, "SESSION_10"));
+  EXPECT_TRUE(dump_has(dom, "收起"));
 }
 
 FS_TEST(uiapp_splitter_bound) {
@@ -5168,6 +5166,42 @@ FS_TEST(uiapp_compaction_is_session_scoped) {
       Json{{"sid", "sess_a"}, {"mode", "full"}, {"estTokens", 10000}});
   EXPECT_EQ(app.state().context_pct, 10);
   EXPECT_TRUE(app.state().context_compacted);
+}
+
+// A 47-round auto turn reached 2387 tool rows; rendering all of them on every
+// streaming delta took 2.5 s per frame and pushed the WebView renderer to 19 GB.
+// The live work log keeps only the newest slice; the full record stays stored.
+FS_TEST(uiapp_huge_work_log_is_sliced) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    comp::ChatMsg m;
+    m.role = "assistant";
+    m.streaming = true;
+    m.work_open = true;
+    for (int i = 0; i < 400; ++i) {
+      comp::ToolBlock tb;
+      tb.name = "TOOL_" + std::to_string(i);
+      tb.summary = "x";
+      m.tools.push_back(tb);
+    }
+    s.messages.push_back(m);
+  });
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("更早的") != std::string::npos);
+  EXPECT_TRUE(d.find("TOOL_399") != std::string::npos);
+  EXPECT_TRUE(d.find("TOOL_0") == std::string::npos);
+  // Finished turn opened by the user: a larger slice, still bounded.
+  app.update([](AppState& s) {
+    s.messages[0].streaming = false;
+    s.messages[0].work_touched = true;
+  });
+  d = dom.dump();
+  EXPECT_TRUE(d.find("TOOL_399") != std::string::npos);
+  EXPECT_TRUE(d.find("TOOL_0") == std::string::npos);
 }
 
 // A provider that sends "\n" between tokens can open a reasoning row with no

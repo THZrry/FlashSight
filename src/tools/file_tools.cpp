@@ -71,6 +71,68 @@ bool only_keys(const Json& obj, std::initializer_list<const char*> allowed,
   return true;
 }
 
+// edit_file has existed in more than one shape, and a long session's stored tool
+// calls teach the model the old spelling (end/newText/start, flat startLine/text/
+// endLine). Accept those KNOWN aliases and normalise to
+// {path,hash,edits:[{start,end,newText}]}; unknown fields are still rejected.
+bool pick_edit_int(const Json& e, std::initializer_list<const char*> keys, int* out) {
+  for (const char* k : keys) {
+    if (!e.contains(k)) continue;
+    if (!e[k].is_number()) continue;
+    *out = static_cast<int>(e[k].get<int64_t>());
+    return true;
+  }
+  return false;
+}
+bool pick_edit_text(const Json& e, std::initializer_list<const char*> keys,
+                    std::string* out) {
+  for (const char* k : keys) {
+    if (!e.contains(k)) continue;
+    if (!e[k].is_string()) continue;
+    *out = e[k].get<std::string>();
+    return true;
+  }
+  return false;
+}
+Json normalize_edit_file_args(const Json& args) {
+  Json out = args;
+  auto norm_one = [](const Json& e) -> Json {
+    if (!e.is_object()) return e;
+    int start = 0, end = 0;
+    std::string text;
+    bool have_start = pick_edit_int(e, {"start", "startLine", "startline", "start_line"}, &start);
+    bool have_end = pick_edit_int(e, {"end", "endLine", "endline", "end_line"}, &end);
+    bool have_text = pick_edit_text(e, {"newText", "text", "new_text", "content"}, &text);
+    Json n = Json::object();
+    if (have_start) n["start"] = start;
+    if (have_end) n["end"] = end;
+    if (have_text) n["newText"] = text;
+    // Preserve nothing else: an unknown source key must still be rejected.
+    return n;
+  };
+  if (out.contains("edits") && out["edits"].is_array()) {
+    Json norm = Json::array();
+    for (auto& e : out["edits"]) norm.push_back(norm_one(e));
+    out["edits"] = norm;
+    return out;
+  }
+  // Flat single edit: {path, hash, start, end, newText} (or aliases).
+  int start = 0, end = 0;
+  std::string text;
+  if (pick_edit_int(out, {"start", "startLine", "startline", "start_line"}, &start) &&
+      pick_edit_int(out, {"end", "endLine", "endline", "end_line"}, &end) &&
+      pick_edit_text(out, {"newText", "text", "new_text", "content"}, &text)) {
+    Json e = Json{{"start", start}, {"end", end}, {"newText", text}};
+    // Remove every alias from the top level so only_keys does not reject them.
+    const char* drop[] = {"start", "startLine", "startline", "start_line",
+                          "end", "endLine", "endline", "end_line",
+                          "newText", "text", "new_text", "content"};
+    for (const char* k : drop) out.erase(k);
+    out["edits"] = Json::array({e});
+  }
+  return out;
+}
+
 // Cheap balance warnings for inserted text. A range replacement can be a partial
 // snippet, so these are warnings, never a refusal. They catch the exact failure
 // the user hit twice: an inserted block was missing a closing brace / comment
@@ -702,7 +764,9 @@ void register_file_tools(ToolRegistry* registry) {
         "edits:[{start,end,newText}] (start/end both required, 1-based inclusive). "
         "The range is replaced unconditionally as long as `hash` matches - there "
         "is NO expected-text comparison. Multiple edits use the original line "
-        "numbers and are applied bottom-up. AFTER ANY EDIT the line numbers below "
+        "numbers and are applied bottom-up. A single edit may also be sent flat "
+        "as {path, hash, start, end, newText}; startLine/endLine/text are accepted "
+        "aliases (key order never matters). AFTER ANY EDIT the line numbers below "
         "the change shift: re-read the file before another edit. Unknown fields "
         "are rejected (do not send count/ranges/expect).";
     Json params = Json::object();
@@ -728,7 +792,11 @@ void register_file_tools(ToolRegistry* registry) {
     params["required"] = Json::array({"path", "hash", "edits"});
     def.parameters = params;
     registry->register_tool("edit_file", def,
-      [](const ToolContext& ctx, const Json& args) -> FsResult {
+      [](const ToolContext& ctx, const Json& raw_args) -> FsResult {
+        // Accept the historical spellings of the SAME fields, then validate the
+        // canonical object. Most of the model's stored calls use
+        // {end,newText,start}; key ORDER is irrelevant, names are not.
+        Json args = normalize_edit_file_args(raw_args);
         std::string bad;
         if (!only_keys(args, {"path", "hash", "edits", "lineEnding"}, &bad)) {
           return FsResult::error(
@@ -931,8 +999,8 @@ void register_file_tools(ToolRegistry* registry) {
               if (actual_after != wanted) {
                 warnings.push_back(
                     "edit " + std::to_string(i + 1) +
-                    ": text read back from disk differs from newText; use the "
-                    "returned after text");
+                    ": text read back from disk differs from newText; re-read "
+                    "the file before the next edit");
               }
               ed.after = actual_after;
               delta += static_cast<int>(ed.replacement.size()) -
@@ -945,10 +1013,11 @@ void register_file_tools(ToolRegistry* registry) {
           Json c = Json::object();
           c["start"] = ed.start;
           c["end"] = ed.end;
-          // The before/after text is what lets the model undo its own edit, and
-          // what the UI shows as the change.
+          // Only the BEFORE text is returned. The after text is exactly the
+          // caller's newText (or its read-back), so echoing it wasted context;
+          // the user's complaint was that "after" is meaningless because it was
+          // already sent.
           c["before"] = utf8::truncate(ed.before, 2000);
-          c["after"] = utf8::truncate(ed.after, 2000);
           changes.push_back(c);
         }
         Json data = Json::object();

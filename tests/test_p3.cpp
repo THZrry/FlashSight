@@ -915,6 +915,8 @@ FS_TEST(file_tools_flow) {
   ASSERT_TRUE(er.ok());
   EXPECT_EQ((int)er.data["changes"].size(), 1);
   EXPECT_EQ(er.data["changes"][0]["before"].get<std::string>(), std::string("line2"));
+  // The after text is the caller's own newText; echoing it back wasted context.
+  EXPECT_FALSE(er.data["changes"][0].contains("after"));
   // A successful edit returns the new hash, so the next edit does not have to
   // re-read the file.
   ASSERT_TRUE(er.data.contains("hash"));

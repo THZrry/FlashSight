@@ -865,6 +865,27 @@ FsResult FsApi::complete_path(const std::string& sid, const std::string& typed) 
   size_t sep = typed.find_last_of("/\\");
   std::string dir_part = sep == std::string::npos ? std::string() : typed.substr(0, sep + 1);
   std::string frag = sep == std::string::npos ? typed : typed.substr(sep + 1);
+  // The user may type the PROJECT FOLDER NAME as the first segment
+  // ("WhaleJS/src/"). The UI only knows the text, so the backend strips that
+  // prefix for resolution while returning `dir_part` exactly as typed (the
+  // completion replacement keeps the user's spelling).
+  std::string resolve_dir = dir_part;
+  if (!cwd.empty()) {
+    std::string base = ghc::filesystem::path(cwd).filename().string();
+    if (!base.empty() && resolve_dir.size() > base.size() + 1) {
+      bool prefix = true;
+      for (size_t i = 0; i < base.size(); ++i) {
+        char a = resolve_dir[i], b = base[i];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+        if (a != b) { prefix = false; break; }
+      }
+      if (prefix && (resolve_dir[base.size()] == '/' ||
+                     resolve_dir[base.size()] == '\\')) {
+        resolve_dir = resolve_dir.substr(base.size() + 1);
+      }
+    }
+  }
   auto empty_answer = [&](bool blocked) {
     Json j = Json{{"dir", dir_part}, {"prefix", frag}, {"entries", Json::array()}};
     if (blocked) j["blocked"] = true;
@@ -872,25 +893,34 @@ FsResult FsApi::complete_path(const std::string& sid, const std::string& typed) 
   };
   if (dir_part.empty()) {
     if (cwd.empty()) return empty_answer(false);
-  } else if (dir_part.compare(0, 2, "./") == 0 || dir_part.compare(0, 2, ".\\") == 0) {
+  } else if (dir_part.compare(0, 3, "../") == 0 ||
+             dir_part.compare(0, 3, "..\\") == 0) {
+    // Parent traversal leaves the project; ./ does NOT (it means project root).
     if (!outside_ok) return empty_answer(true);
-  } else if (dir_part[0] == '/' || dir_part[0] == '\\') {
+  } else if (dir_part[0] == '/' || dir_part[0] == '\\' ||
+             (dir_part.size() >= 2 && dir_part[1] == ':')) {
     if (!outside_ok) return empty_answer(true);
   } else if (cwd.empty()) {
     return empty_answer(false);
   }
   // Resolve the DIRECTORY the typed text points at.
   ghc::filesystem::path dir;
-  if (dir_part.empty()) {
+  bool drive_abs = resolve_dir.size() >= 2 &&
+                   ((resolve_dir[0] >= 'A' && resolve_dir[0] <= 'Z') ||
+                    (resolve_dir[0] >= 'a' && resolve_dir[0] <= 'z')) &&
+                   resolve_dir[1] == ':' &&
+                   (resolve_dir.size() == 2 || resolve_dir[2] == '/' ||
+                    resolve_dir[2] == '\\');
+  if (resolve_dir.empty()) {
     dir = pathutil::normalize(ghc::filesystem::path(cwd));
-  } else if (dir_part.compare(0, 2, "./") == 0 ||
-             dir_part.compare(0, 2, ".\\") == 0) {
+  } else if (resolve_dir.compare(0, 2, "./") == 0 ||
+             resolve_dir.compare(0, 2, ".\\") == 0) {
     // "./x" means "next to the project root" in the user's head.
-    dir = pathutil::normalize(ghc::filesystem::path(cwd) / dir_part.substr(2));
-  } else if (dir_part[0] == '/' || dir_part[0] == '\\') {
-    dir = pathutil::normalize(dir_part);
+    dir = pathutil::normalize(ghc::filesystem::path(cwd) / resolve_dir.substr(2));
+  } else if (resolve_dir[0] == '/' || resolve_dir[0] == '\\' || drive_abs) {
+    dir = pathutil::normalize(resolve_dir);
   } else {
-    dir = pathutil::normalize(ghc::filesystem::path(cwd) / dir_part);
+    dir = pathutil::normalize(ghc::filesystem::path(cwd) / resolve_dir);
   }
   std::error_code ec;
   Json arr = Json::array();
@@ -2923,11 +2953,33 @@ FsResult FsApi::usage_query(const Json& filter) {
     }
     out["contextWindow"] = window;
   }
-  // Cache efficiency. `cacheHit` is -1 when no row ever reported a cache field:
-  // showing "0%" would claim the provider bills every prompt token, which is a
-  // different (and wrong) statement.
-  out["cacheHit"] = sum.cache_reported ? sum.cache_hit_ratio : -1.0;
-  out["cacheReported"] = sum.cache_reported;
+  // Cache efficiency from ONE request, not a session aggregate. Summing across
+  // calls mixes a 99%-cached follow-up with a cold 0% compaction request and
+  // shows a number that describes neither; the user asked for one data point.
+  // Prefer the last real call; if it did not report a cache field, use the most
+  // recent row that did.
+  double cache_hit = -1.0;
+  bool cache_reported = false;
+  int64_t cache_hit_in = 0, cache_hit_cached = 0;
+  auto take_cache = [&](const UsageRow& row) {
+    if (!row.cache_known || row.in <= 0) return false;
+    cache_hit = static_cast<double>(row.cache) / static_cast<double>(row.in);
+    cache_hit_in = row.in;
+    cache_hit_cached = row.cache;
+    cache_reported = true;
+    return true;
+  };
+  if (sum.has_last && take_cache(sum.last)) {
+    // done
+  } else {
+    for (size_t i = sum.recent.size(); i > 0; --i) {
+      if (take_cache(sum.recent[i - 1])) break;
+    }
+  }
+  out["cacheHit"] = cache_reported ? cache_hit : -1.0;
+  out["cacheReported"] = cache_reported;
+  out["cacheHitIn"] = cache_hit_in;
+  out["cacheHitCached"] = cache_hit_cached;
   // Cost per provider kind: one session can span a money provider and a quota
   // one, so the UI needs to know which numbers it may add up.
   Json ck = Json::object();

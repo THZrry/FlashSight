@@ -311,6 +311,10 @@ class IDom {
   // clipboard, so a WebView2 app can paste even though script-initiated
   // clipboard reads are refused ("右键粘贴没用").
   virtual void insert_text_at_caret(const std::string& text) { (void)text; }
+  // Move the text caret of a control after the app replaced its value
+  // programmatically (inline completion). Without this the browser puts the
+  // caret at the END of the new value, and editing a path in the middle jumps.
+  virtual void set_text_caret(Node node, int pos) { (void)node; (void)pos; }
 
   // --- file picker (upload) ---
   // Clicking `node` opens the OS file chooser. The picked files are sent to the
