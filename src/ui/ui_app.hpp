@@ -48,9 +48,10 @@ struct ProjectCard {
   // Home card: more than 10 sessions are CUT at 10, with an "展开剩余 N 个"
   // row at the END of the list (not a header toggle, not a scroll box).
   bool sessions_open = false;
-  // Left nav rail: each project group can be collapsed independently. This is
-  // per-project UI state, not the home card's narrow-layout reveal.
-  bool nav_open = true;
+  // Left nav rail: shows at most 10 sessions per project; `nav_open` reveals
+  // the hidden rest ("展开剩余 N 个" at the END of the list). The home card is
+  // the opposite: it renders everything and scrolls.
+  bool nav_open = false;
   // A session row carries more than a title: the card shows WHEN it last
   // changed and WHETHER it is running, and both have to be deletable.
   struct SessionRow {
@@ -1108,6 +1109,10 @@ class UiApp {
   // event that already changed the state (a `loop.interrupted` that cleared
   // 中止). Only the reply to the LATEST request is applied.
   int loop_state_seq_ = 0;
+  // Bumped whenever a turn STARTS. A loopState reply requested before that
+  // carries "idle" for a turn that has since begun; applying it cleared the
+  // fresh 中止 button. Only a reply from the same turn epoch may clear running.
+  int turn_epoch_ = 0;
   // Pull the session's pending wake-ups (scheduled tasks / event wakes) into
   // state so the composer can show a countdown and offer to cancel them.
   void refresh_pending_wakes();

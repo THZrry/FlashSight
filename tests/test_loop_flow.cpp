@@ -1244,3 +1244,31 @@ FS_TEST(loop_system_prompt_reflects_context) {
   }
   EXPECT_EQ(systems, 1);
 }
+
+// ---------- 抛异常也必须落到终态，不能永远“运行中” ----------
+// run_turn sets kPlanning before it persists the user turn. Anything that threw
+// there used to escape without touching the loop state, so is_running() stayed
+// true forever and a session whose turn failed still showed "running" after a
+// tab switch. The wrapper must always end in kTurnDone and announce it.
+FS_TEST(loop_exception_in_turn_start_is_terminal) {
+  AgentLoop::Options opts;
+  opts.sid = "s_throw";
+  opts.permission = "full";
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  ScriptedModel model;
+  loop.call_model = model.fn();
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json::object());
+  };
+  loop.persist_turn = [](const Json&) { throw std::runtime_error("disk full"); };
+
+  FsResult r = loop.send("go");
+  EXPECT_FALSE(r.ok());
+  // Terminal state: a later session.list / loopState says "not running".
+  EXPECT_TRUE(loop.state() == LoopState::kTurnDone);
+  EXPECT_TRUE(rec.saw("loop.interrupted"));
+  // The failure is visible in the transcript, not only in a toast.
+  EXPECT_FALSE(rec.saw("turn.started"));
+}

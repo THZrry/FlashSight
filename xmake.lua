@@ -232,6 +232,7 @@ ui_shared = {
     "src/ui/ui_vdom.cpp",
     "src/ui/ui_components.cpp",
     "src/ui/ui_app.cpp",
+    "src/ui/ui_path_range.cpp",
     "src/ui/ui_backend.cpp",
     "src/common/fs_json.cpp",
     "src/common/fs_log.cpp",

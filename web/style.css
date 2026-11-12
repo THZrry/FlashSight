@@ -828,13 +828,6 @@ html, body {
 }
 .proj-session:hover { background: var(--panel-2); }
 .proj-session.add { color: var(--accent); }
-/* The "展开剩余 N 个" / "收起" row at the END of a >10-session list. */
-.proj-session.more {
-  color: var(--text-faint);
-  justify-content: center;
-  cursor: pointer;
-}
-.proj-session.more:hover { color: var(--text); background: var(--panel-2); }
 .proj-session.dim-none { color: var(--text-faint); cursor: default; }
 .proj-session.dim-none:hover { background: transparent; }
 .ps-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -902,8 +895,8 @@ html, body {
 .proj-right .proj-sessions { display: flex; flex: none; }
 
 @container (max-width: 699px) {
-  /* STACKED layout: the header collapses/expands the whole block; a long list
-     is additionally capped to 10 rows by the renderer until expanded. */
+  /* STACKED layout: the header collapses/expands the whole block. The list is
+     complete when open (the card is not capped; only the left rail is). */
   .proj-right:not(.open) .proj-sessions { display: none; }
   .proj-right:not(.open) { min-height: 0; }
   .proj-right.open { min-height: 0; }
@@ -914,11 +907,11 @@ html, body {
 }
 
 @container (min-width: 700px) {
-  /* SIDE-BY-SIDE layout: the renderer caps a >10-row list until the header is
-     clicked; expanded keeps its own scroll so one project cannot push the rest
-     of the page away. */
-  /* Two-column: the renderer cuts at 10 and puts 展开剩余 N 个 at the END of
-     the list; no inner scrollbar. The narrow layout uses the header reveal. */
+  /* SIDE-BY-SIDE layout: the project card is the place that shows EVERY
+     session, and the list itself scrolls at ~10 rows. Capping it at 10 and
+     putting an expand row here was the wrong control (that belongs to the left
+     navigation rail). */
+  .proj-right .proj-sessions { max-height: 352px; overflow-y: auto; }
   .proj-right-head { cursor: default; }
   .proj-right-head:hover { background: transparent; color: var(--text-dim); }
   .proj-right .prh-toggle { display: none; }

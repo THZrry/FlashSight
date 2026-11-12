@@ -9,6 +9,7 @@
 //     free-form side-panel tabs, terminal selector
 //   * settings: roomy two-column page
 #include "ui_app.hpp"
+#include "ui_path_range.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1329,8 +1330,11 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.thinking = v.thinking;
   st_.attachments = v.attachments;
   st_.suspended = v.suspended;
-  st_.turn_running = v.turn_running;
-  st_.stop_pending = v.stop_pending;
+  // An interrupted/failed turn is OVER. Restoring the stashed "running" flag
+  // for it put 中止 (and the running dot) back on a task that had already
+  // stopped; the switch must not resurrect it.
+  st_.turn_running = v.turn_running && !v.interrupted;
+  st_.stop_pending = v.stop_pending && !v.interrupted;
   st_.suspend_pending = false;  // a request in flight does not survive a switch
   st_.interrupted = v.interrupted;
   st_.interrupt_reason = v.interrupt_reason;
@@ -1766,7 +1770,7 @@ void UiApp::load_session(const std::string& sid) {
       st_.model = v.model;
       st_.model_provider = v.model_provider;
   st_.thinking = v.thinking;
-  st_.auto_round = v.auto_round;
+  st_.auto_round = v.interrupted ? 0 : v.auto_round;
   st_.permission = v.permission;
       st_.perm_index = v.perm_index;
       st_.auto_mode = v.auto_mode;
@@ -2951,40 +2955,29 @@ void UiApp::update_complete_from_input(const std::string& text, size_t caret) {
     return;
   }
 
-  // Path mode: the TOKEN around the caret, not the last slash of the whole
-  // draft. Editing earlier text used to take the separator from the suffix (or
-  // replace from the end), which moved the caret to the end of the draft.
-  auto is_delim = [](char c) {
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-  };
-  size_t token_start = caret;
-  while (token_start > 0 && !is_delim(text[token_start - 1])) --token_start;
-  size_t token_end = caret;
-  while (token_end < text.size() && !is_delim(text[token_end])) ++token_end;
-  std::string token = text.substr(token_start, token_end - token_start);
-  std::string typed = text.substr(token_start, caret - token_start);
+  // Path mode is POSITIONAL: parse every path-looking interval of the whole
+  // draft greedily, then hit-test the caret against those intervals. The old
+  // whitespace token around the caret broke on the two normal ways to type a
+  // path in prose - glued to it ("看下./src/ui") or followed by Chinese
+  // punctuation ("src/ui，然后") - and it also asked about the prose prefix.
   auto close = [&]() {
     if (st_.complete_kind != AppState::CompleteKind::kNone) {
       update([&](AppState& s) { s.complete_kind = AppState::CompleteKind::kNone; });
     }
   };
-  // Not a path: no separator, a URL, or a CLI flag. A prose token that happens
-  // to contain '/' still has a chance, but the backend's "no entries" answer is
-  // the final filter; these cases are never paths.
-  if (token.find('/') == std::string::npos &&
-      token.find('\\') == std::string::npos) {
+  std::vector<PathRange> ranges = parse_path_ranges(text);
+  int ri = path_range_at(ranges, caret);
+  if (ri < 0) {
     close();
     return;
   }
-  if (token.compare(0, 7, "http://") == 0 || token.compare(0, 8, "https://") == 0 ||
-      token.compare(0, 5, "file:") == 0 || (!token.empty() && token[0] == '-')) {
-    close();
-    return;
-  }
-  // A leading '/' is command mode only with the caret at the end; an absolute
-  // POSIX path (or a mid-line slash) is a path. A Windows drive is C:/ or C:\.
-  bool posix_abs = token[0] == '/' && token.size() > 1;
-  if (token_start == 0 && token[0] == '/' && !posix_abs) {
+  const size_t token_start = ranges[static_cast<size_t>(ri)].start;
+  const size_t token_end = ranges[static_cast<size_t>(ri)].end;
+  const std::string typed = text.substr(token_start, caret - token_start);
+  if (typed.empty()) {
+    // The caret sits BEFORE the path (hit test includes the start). Completing
+    // there would ask about an empty prefix and replace text the user did not
+    // touch, so this is not a completion position.
     close();
     return;
   }
@@ -2992,7 +2985,7 @@ void UiApp::update_complete_from_input(const std::string& text, size_t caret) {
   if (was && st_.complete_prefix == typed &&
       st_.complete_token_start == token_start &&
       st_.complete_token_end == token_end) {
-    return;  // the same token, unchanged
+    return;  // the same range/prefix, unchanged
   }
   std::string sid = active_sid();
   const std::string expected = text;
@@ -3809,6 +3802,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   // session's auto-round/checklist updates were silently dropped and the tab
   // showed stale state when switched to.
   if (event == "auto.next") {
+    ++turn_epoch_;
     int round = static_cast<int>(jsonutil::get_int(payload, "round", 1));
     std::string reason = jsonutil::get<std::string>(payload, "reason", "");
     if (is_active) {
@@ -3916,6 +3910,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     }
     if (!sid.empty()) refresh_steering(sid);
   } else if (event == "turn.started") {
+    ++turn_epoch_;
     // A send made while the UI believed a turn was running drew no bubble. If
     // the backend actually STARTED a turn, this event is the first proof: put
     // the question in now, BEFORE ensure_turn_message adds the answer slot.
@@ -3956,6 +3951,7 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       ensure_turn_message(vp->messages, vp->history_total, &next_msg_rev_, now_ms());
     }
   } else if (event == "loop.resumed") {
+    ++turn_epoch_;
     // 继续 starts a turn WITHOUT turn.started, so the interrupt bar used to stay
     // on screen for the whole continuation and every further click started
     // another continue. Clear it (and show the turn as running) the moment the
@@ -5585,22 +5581,14 @@ VNodePtr UiApp::build_nav_rail() {
     grp.add(ph);
     // Per-project collapse: the control is the LAST row of the project list
     // (the user asked for 展开/收起 at the list end, not in the header).
-    H tg = el("div", "nav-session nav-more");
-    tg.text(p.nav_open ? tr("收起") + " \u25be"
-                       : tr("展开") + " \u25b8 (" +
-                             itos(static_cast<int>(rows.size())) + ")");
-    tg.on(EventKind::kClick, [this, i](const std::string&) {
-      update([&](AppState& s) {
-        if (i < s.projects.size()) s.projects[i].nav_open = !s.projects[i].nav_open;
-      });
-    });
-    if (!p.nav_open) {
-      nav_hits += rows.size();  // hidden by a collapse, not by the search
-      grp.add(tg);
-      body.add(grp);
-      continue;
-    }
-    for (size_t k = 0; k < rows.size(); ++k) {
+    // The rail is NAVIGATION, not the project card: it keeps at most 10 rows per
+    // project visible and puts "展开剩余 N 个" at the END of the list. A project
+    // card scrolls instead (the home page is the place that shows everything).
+    const size_t kNavLimit = 10;
+    const size_t visible = p.nav_open ? rows.size()
+                                      : (rows.size() < kNavLimit ? rows.size()
+                                                                 : kNavLimit);
+    for (size_t k = 0; k < visible; ++k) {
       const ProjectCard::SessionRow& s = rows[k];
       ++nav_hits;
       std::string sid = s.sid;
@@ -5630,7 +5618,23 @@ VNodePtr UiApp::build_nav_rail() {
       row.add(el("span", "nav-session-title").text(s.title));
       grp.add(row);
     }
-    grp.add(tg);
+    nav_hits += rows.size() - visible;  // hidden by the cap, not by a filter
+    if (rows.size() > kNavLimit) {
+      H tg = el("div", "nav-session nav-more");
+      tg.text(p.nav_open
+                  ? tr("收起") + " \u25be"
+                  : tr("展开剩余 ") +
+                        itos(static_cast<int>(rows.size() - kNavLimit)) +
+                        tr(" 个") + " \u25b8");
+      tg.on(EventKind::kClick, [this, i](const std::string&) {
+        update([&](AppState& s) {
+          if (i < s.projects.size()) {
+            s.projects[i].nav_open = !s.projects[i].nav_open;
+          }
+        });
+      });
+      grp.add(tg);
+    }
     body.add(grp);
   }
   if (nav_hits == 0 && !st_.projects.empty()) {
@@ -6085,18 +6089,14 @@ VNodePtr UiApp::build_home_projects() {
     rhead.add(el("span", "prh-title").text(tr("会话")));
     rhead.add(el("span", "prh-count").text(itos(p.session_count)));
     rhead.add(el("span", "grow"));
-    // The expand control is NOT in the header. More than 10 sessions are cut at
-    // 10, and the last row says "展开剩余 N 个" / "收起"; the user asked for the
-    // control at the END of the list, not a scroll box or a header toggle.
+    // The wide layout SCROLLS the whole list (the user's rule: 主页那个是直接
+    // 滚动). All rows are rendered here - capping them at 10 is the left rail's
+    // rule, not the project card's. The narrow layout still uses the header
+    // collapse, where the list is stacked and a long one would push the card
+    // off screen.
     right.add(rhead);
     H list = el("div", "proj-sessions");
-    const size_t kHomeSessionLimit = 10;
-    const size_t visible_rows =
-        p.sessions_open ? p.sessions.size()
-                        : (p.sessions.size() < kHomeSessionLimit
-                               ? p.sessions.size()
-                               : kHomeSessionLimit);
-    for (size_t k = 0; k < visible_rows; ++k) {
+    for (size_t k = 0; k < p.sessions.size(); ++k) {
       const ProjectCard::SessionRow& s = p.sessions[k];
       std::string sid = s.sid;
       if (s.renaming) {
@@ -6170,23 +6170,6 @@ VNodePtr UiApp::build_home_projects() {
       acts.add(del);
       row.add(acts);
       list.add(row);
-    }
-    if (p.sessions.size() > kHomeSessionLimit) {
-      H more = el("div", "proj-session more");
-      more.on(EventKind::kClick, [this, i](const std::string&) {
-        update([&](AppState& s) {
-          if (i < s.projects.size()) {
-            s.projects[i].sessions_open = !s.projects[i].sessions_open;
-          }
-        });
-      });
-      more.add(el("span", "ps-title").text(
-          p.sessions_open
-              ? tr("收起")
-              : tr("展开剩余 ") +
-                    itos(static_cast<int>(p.sessions.size() - kHomeSessionLimit)) +
-                    tr(" 个")));
-      list.add(more);
     }
     if (p.sessions.empty()) {
       H empty = el("div", "proj-session dim-none");
@@ -9830,8 +9813,9 @@ void UiApp::refresh_loop_state(const std::string& sid) {
   // ends while that request is in flight leaves a reply saying "running" -
   // applying it AFTER `loop.interrupted` put 中止 back on a stopped turn.
   int seq = ++loop_state_seq_;
+  int epoch = turn_epoch_;
   call_async("session.loopState", Json{{"sid", sid}},
-             [this, sid, seq](const BackendResult& r) {
+             [this, sid, seq, epoch](const BackendResult& r) {
     if (!r.ok) return;
     if (seq != loop_state_seq_) return;  // a newer request supersedes this reply
     std::string state = jsonutil::get<std::string>(r.data, "state", "idle");
@@ -9843,6 +9827,9 @@ void UiApp::refresh_loop_state(const std::string& sid) {
     // showed 中止 for a task that had already stopped, next to a 恢复 that did
     // nothing - "挂起功能疑似没做全".
     bool running = state != "idle" && state != "turnDone" && !suspended;
+    // A turn started after this request was sent: the "idle" in the reply is
+    // older than that event and must not clear the composer's 中止.
+    if (!running && epoch != turn_epoch_) return;
     if (st_.active_tab != sid) {
       SessionView& v = views_.get_or_create(sid);
       v.suspended = suspended;
@@ -12241,6 +12228,35 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
           if (s.attachments.empty()) s.attachments = attachments;
         });
         sync_composer_textarea();
+      } else {
+        // A send that the backend REJECTED started no turn, so no turn.done or
+        // loop.interrupted will follow. The optimistic empty answer and the
+        // running flag were ours, and leaving them made the composer (and the
+        // session row) look like the failed turn was still running - the
+        // "错误了的会话切换后还显示运行中" report. Close them here and let the
+        // backend's live state confirm.
+        update([&](AppState& s) {
+          s.turn_running = false;
+          s.auto_round = 0;
+          s.stop_pending = false;
+          for (size_t i = 0; i < s.messages.size(); ++i) {
+            comp::ChatMsg& m = s.messages[i];
+            if (m.uid != wait_uid || m.role != "assistant") continue;
+            if (!m.text.empty() || !m.tools.empty() || !m.interim.empty() ||
+                !m.thinking.empty() || !m.thoughts.empty()) {
+              break;  // content arrived meanwhile: leave the turn to its events
+            }
+            m.streaming = false;
+            m.now_ms = 0;
+            m.error = r.message.empty() ? tr("发送失败") : r.message;
+            m.ended_at = now_ms();
+            if (m.started_at <= 0) m.started_at = m.ended_at;
+            m.rev = next_msg_rev_++;
+            break;
+          }
+        });
+        refresh_loop_state(sid);
+        mark_sessions_dirty();
       }
       toast(tr("发送失败：") + r.message);
       return;

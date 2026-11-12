@@ -63,6 +63,20 @@ class EventBus {
     EventFn fn = it->second;
     fn(value);
   }
+  // Keep an EXISTING DOM listener id, but hand it the fresh closure of a newly
+  // built node. Surviving nodes never unbind/rebind: the id in the DOM stays
+  // valid forever, so a click or input event that arrives while a render batch
+  // is still queued cannot hit an id that retain() already dropped. That race is
+  // what made a button (or the composer) dead for the first moments after
+  // startup: the bridged adapters execute DOM scripts asynchronously, so the
+  // browser could still hold the previous generation's listener while the C++
+  // side had already discarded its handler.
+  void rebind(int keep_id, int new_id) {
+    std::map<int, EventFn>::iterator it = handlers_.find(new_id);
+    if (it == handlers_.end()) return;
+    handlers_[keep_id] = std::move(it->second);
+    handlers_.erase(it);
+  }
   // keep only the given ids; drop all others
   void retain(const std::vector<int>& keep);
   size_t size() const { return handlers_.size(); }

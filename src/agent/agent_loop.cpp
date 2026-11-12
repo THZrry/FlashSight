@@ -971,6 +971,22 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
 // turn execution
 // ---------------------------------------------------------------------------
 FsResult AgentLoop::run_turn(const std::string& user_text) {
+  // A turn MUST end in a terminal state. run_turn sets kPlanning before it
+  // touches the disk/history, and run_loop_impl only catches exceptions around
+  // the loop itself - so anything that threw earlier (a filesystem error while
+  // persisting the user turn, a JSON dump on invalid bytes) escaped while the
+  // loop still said "planning". is_running() then reported the session as
+  // running forever, which is the "错误了的会话切换后还显示运行中" report.
+  try {
+    return run_turn_impl(user_text);
+  } catch (const std::exception& e) {
+    return fail_turn(std::string("internal error: ") + e.what());
+  } catch (...) {
+    return fail_turn("internal error");
+  }
+}
+
+FsResult AgentLoop::run_turn_impl(const std::string& user_text) {
   state_ = LoopState::kPlanning;
   HistoryBuilder::Options hopts = opts_.history;
   applied_steering_.clear();

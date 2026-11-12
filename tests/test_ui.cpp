@@ -465,3 +465,56 @@ FS_TEST(comp_modal) {
   VNodePtr box = m.get()->children[0];
   EXPECT_EQ(box->children.size(), size_t(3));
 }
+
+// ---------- patch: listener identity is stable across renders ----------
+
+FS_TEST(vdom_surviving_node_keeps_its_listener_id) {
+  // The bridged desktop adapters run DOM scripts asynchronously, so the browser
+  // can still hold the previous render's listener while C++ has already built a
+  // new tree. Rebinding every render made that listener's id dead (retain had
+  // dropped it) - a click/keystroke during startup then did nothing. A node that
+  // survives a patch must keep its id, and the id must dispatch the NEW closure.
+  NullDom dom;
+  Node root = dom.root();
+  int calls = 0;
+  VNodePtr first = el("button", "icon-btn")
+                       .key("btn")
+                       .on(EventKind::kClick, [&calls](const std::string&) { ++calls; })
+                       .get();
+  patch(dom, VNodePtr(), first, root);
+  const int old_hid = first->events[0].hid;
+
+  VNodePtr second = el("button", "icon-btn")
+                        .key("btn")
+                        .on(EventKind::kClick, [&calls](const std::string&) { calls += 10; })
+                        .get();
+  patch(dom, first, second, root);
+  EXPECT_EQ(second->events[0].hid, old_hid);
+  // The listener was not torn down and re-added...
+  int rebinds = 0;
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    const NullDom::Call& c = dom.calls()[i];
+    if (c.method == "on" || c.method == "off") ++rebinds;
+  }
+  EXPECT_EQ(rebinds, 1);  // only the initial bind
+  // ...and the id the DOM still holds resolves to the fresh closure.
+  bus().fire(old_hid, "");
+  EXPECT_EQ(calls, 10);
+  // The bus is process-wide; do not leave a closure that captures a stack local.
+  bus().retain(std::vector<int>());
+}
+
+FS_TEST(vdom_removed_kind_is_unbound) {
+  NullDom dom;
+  Node root = dom.root();
+  VNodePtr first = el("div").key("n").on(EventKind::kClick, [](const std::string&) {}).get();
+  patch(dom, VNodePtr(), first, root);
+  dom.clear_calls();
+  VNodePtr second = el("div").key("n").get();
+  patch(dom, first, second, root);
+  int offs = 0;
+  for (size_t i = 0; i < dom.calls().size(); ++i) {
+    if (dom.calls()[i].method == "off") ++offs;
+  }
+  EXPECT_EQ(offs, 1);
+}

@@ -388,6 +388,7 @@ class AgentLoop {
   int ask_seq_ = 0;
 
   FsResult run_turn(const std::string& user_text);
+  FsResult run_turn_impl(const std::string& user_text);
   // Write ONLY the user turn. Called when the turn fails before any answer
   // exists: the user's message must still be in the session file, otherwise
   // reopening the session shows the answer without the question.

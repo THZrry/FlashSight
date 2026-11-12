@@ -335,33 +335,42 @@ void patch_attrs(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
 }
 
 void patch_events(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu) {
-  // A fresh render mints a new handler id for every event, so any node whose
-  // handler changed must drop the old listener first (otherwise the old and new
-  // handlers both fire on the next click).
+  // A SURVIVING NODE KEEPS ITS LISTENER ID. A fresh render mints a new id for
+  // every closure, and the old code unbound/rebound it on the DOM. On the
+  // bridged desktop adapters ExecuteScript is ASYNCHRONOUS: the browser kept
+  // dispatching to the previous listener while retain() had already dropped its
+  // handler, so the first click/keystroke after startup (a burst of renders)
+  // landed on a dead id - the "button/Enter does nothing until you click twice"
+  // report. Instead, hand the old id the NEW closure in the bus and leave the
+  // DOM binding alone. The listener then always resolves, whatever batch the
+  // browser has applied so far.
+  std::vector<bool> old_used(oldv->events.size(), false);
   for (size_t i = 0; i < neu->events.size(); ++i) {
     const VEvent& e = neu->events[i];
-    bool changed = true;
+    size_t matched = oldv->events.size();
     for (size_t j = 0; j < oldv->events.size(); ++j) {
-      if (oldv->events[j].kind == e.kind && oldv->events[j].hid == e.hid) {
-        changed = false;
+      if (!old_used[j] && oldv->events[j].kind == e.kind) {
+        matched = j;
         break;
       }
     }
-    if (changed) {
-      dom.off(neu->dom, e.kind);
-      dom.on(neu->dom, e.kind, e.hid);
+    if (matched < oldv->events.size()) {
+      old_used[matched] = true;
+      int old_hid = oldv->events[matched].hid;
+      if (old_hid != e.hid) {
+        bus().rebind(old_hid, e.hid);
+        // The new tree references the canonical (old) id from now on: retain()
+        // must keep it, and the next render compares against it.
+        neu->events[i].hid = old_hid;
+      }
+      continue;
     }
+    dom.on(neu->dom, e.kind, e.hid);
   }
   // unbind kinds the new node no longer listens for
   for (size_t j = 0; j < oldv->events.size(); ++j) {
-    bool still = false;
-    for (size_t i = 0; i < neu->events.size(); ++i) {
-      if (neu->events[i].kind == oldv->events[j].kind) {
-        still = true;
-        break;
-      }
-    }
-    if (!still) dom.off(neu->dom, oldv->events[j].kind);
+    if (old_used[j]) continue;
+    dom.off(neu->dom, oldv->events[j].kind);
   }
 }
 

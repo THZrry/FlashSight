@@ -39,6 +39,20 @@ bool overview_has(NullDom& dom, const std::string& needle) {
   return dump_overview(dom).find(needle) != std::string::npos;
 }
 
+// Only the left navigation rail (the home page underneath renders the same
+// session titles, so a whole-dump search cannot tell the two apart).
+std::string dump_nav(NullDom& dom) {
+  const std::string& d = dom.dump();
+  size_t a = d.find("nav-rail");
+  if (a == std::string::npos) return std::string();
+  size_t b = d.find("nav-main", a);
+  return d.substr(a, b == std::string::npos ? std::string::npos : b - a);
+}
+
+bool nav_has(NullDom& dom, const std::string& needle) {
+  return dump_nav(dom).find(needle) != std::string::npos;
+}
+
 // seed one project with one session, mirroring a backend project.list reply
 void seed_project(AppState& s) {
   ProjectCard p;
@@ -433,26 +447,48 @@ FS_TEST(uiapp_project_card_actions) {
   EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
 }
 
-FS_TEST(uiapp_long_session_list_expands_at_end) {
-  NullDom dom;
-  AppState st = AppState::make();
-  seed_project(st);
-  st.projects[0].sessions.clear();
-  for (int i = 0; i < 11; ++i) {
-    ProjectCard::SessionRow row;
-    row.sid = "s" + std::to_string(i);
-    row.title = "SESSION_" + std::to_string(i);
-    st.projects[0].sessions.push_back(row);
+FS_TEST(uiapp_long_session_list_scrolls_on_home_and_caps_in_nav) {
+  // home: EVERY session is rendered; the container scrolls (CSS), there is no
+  // end-of-list expand row.
+  {
+    NullDom dom;
+    AppState st = AppState::make();
+    seed_project(st);
+    st.projects[0].sessions.clear();
+    for (int i = 0; i < 11; ++i) {
+      ProjectCard::SessionRow row;
+      row.sid = "s" + std::to_string(i);
+      row.title = "SESSION_" + std::to_string(i);
+      st.projects[0].sessions.push_back(row);
+    }
+    st.projects[0].session_count = 11;
+    UiApp app(dom, st, nullptr);
+    app.mount();
+    EXPECT_TRUE(dump_has(dom, "SESSION_10"));
+    EXPECT_FALSE(dump_has(dom, "展开剩余"));
   }
-  st.projects[0].session_count = 11;
-  UiApp app(dom, st, nullptr);
-  app.mount();
-  // More than 10 sessions: the list is CUT at 10 and the last row expands it.
-  EXPECT_FALSE(dump_has(dom, "SESSION_10"));
-  EXPECT_TRUE(dump_has(dom, "展开剩余"));
-  app.update([](AppState& s) { s.projects[0].sessions_open = true; });
-  EXPECT_TRUE(dump_has(dom, "SESSION_10"));
-  EXPECT_TRUE(dump_has(dom, "收起"));
+  // left rail: 10 visible, the rest behind 展开剩余 N 个 at the END.
+  {
+    NullDom dom;
+    AppState st = AppState::make();
+    st.settings_values["ui.tabs"] = "left";
+    seed_project(st);
+    st.projects[0].sessions.clear();
+    for (int i = 0; i < 11; ++i) {
+      ProjectCard::SessionRow row;
+      row.sid = "s" + std::to_string(i);
+      row.title = "SESSION_" + std::to_string(i);
+      st.projects[0].sessions.push_back(row);
+    }
+    st.projects[0].session_count = 11;
+    UiApp app(dom, st, nullptr);
+    app.mount();
+    EXPECT_FALSE(nav_has(dom, "SESSION_10"));
+    EXPECT_TRUE(nav_has(dom, "展开剩余"));
+    app.update([](AppState& s) { s.projects[0].nav_open = true; });
+    EXPECT_TRUE(nav_has(dom, "SESSION_10"));
+    EXPECT_TRUE(nav_has(dom, "收起"));
+  }
 }
 
 FS_TEST(uiapp_splitter_bound) {
