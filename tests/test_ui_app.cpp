@@ -427,16 +427,13 @@ FS_TEST(uiapp_project_card_actions) {
   EXPECT_TRUE(dump_has(dom, "移出列表"));
   // the sessions area is present even when collapsed (dominant card area)
   EXPECT_TRUE(dump_has(dom, "会话"));
-  // STACKED layout starts EXPANDED (batch 54): the list is visible and the header
-  // offers 收起, which collapses the whole block.
-  EXPECT_TRUE(dump_has(dom, "收起"));
-  app.update([](AppState& s) { s.projects[0].expanded = false; });
-  EXPECT_TRUE(dump_has(dom, "展开"));
-  app.update([](AppState& s) { s.projects[0].expanded = true; });
+  // The narrow-layout reveal is CSS (header click); the list rows are rendered
+  // regardless. The >10 expand control is a separate end-of-list row, tested by
+  // uiapp_long_session_list_expands_at_end.
   EXPECT_TRUE(dump_has(dom, "UI 框架重构"));
 }
 
-FS_TEST(uiapp_long_session_list_renders_all_rows) {
+FS_TEST(uiapp_long_session_list_expands_at_end) {
   NullDom dom;
   AppState st = AppState::make();
   seed_project(st);
@@ -450,9 +447,10 @@ FS_TEST(uiapp_long_session_list_renders_all_rows) {
   st.projects[0].session_count = 11;
   UiApp app(dom, st, nullptr);
   app.mount();
-  // Two-column mode SCROLLS at ~10 rows; it must not truncate the list to 10
-  // rows (the old expand toggle was the "截断" the user reported). Every row is
-  // in the DOM so the CSS scroll container can show it.
+  // More than 10 sessions: the list is CUT at 10 and the last row expands it.
+  EXPECT_FALSE(dump_has(dom, "SESSION_10"));
+  EXPECT_TRUE(dump_has(dom, "展开剩余"));
+  app.update([](AppState& s) { s.projects[0].sessions_open = true; });
   EXPECT_TRUE(dump_has(dom, "SESSION_10"));
   EXPECT_TRUE(dump_has(dom, "收起"));
 }

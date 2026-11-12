@@ -148,13 +148,36 @@ EM_JS(void, fs_dom_bind, (int node_id, int kind, int hid), {
                'blur', 'auxclick'];
   var name = names[kind] || 'click';
   var evName = (name === 'keyenter') ? 'keydown' : name;
+  // IME: compositionstart/end are the reliable signal. The final `input` event
+  // is not guaranteed to carry isComposing=false across engines/IMEs, so
+  // compositionend pushes the committed value itself.
+  if (name === 'input') {
+    if (store['composition']) {
+      el.removeEventListener('compositionstart', store['composition'][0], false);
+      el.removeEventListener('compositionend', store['composition'][1], false);
+    }
+    var compStart = function () { el.__fsComposing = 1; };
+    var compEnd = function () {
+      el.__fsComposing = 0;
+      var v = el.value == null ? "" : String(el.value);
+      if (typeof Module !== 'undefined' && Module._fs_ui_fire) {
+        var len = Module.lengthBytesUTF8(v) + 1;
+        var ptr = Module._malloc(len);
+        Module.stringToUTF8(v, ptr, len);
+        Module._fs_ui_fire(hid, ptr);
+        Module._free(ptr);
+      }
+    };
+    el.addEventListener('compositionstart', compStart, false);
+    el.addEventListener('compositionend', compEnd, false);
+    store['composition'] = [compStart, compEnd];
+  }
   var listener = function (evt) {
-    // IME composition: intermediate `input` events carry pinyin, not committed
-    // text. Feeding them to the app let a render or async completion reply break
-    // the composition and leave "zi'fu'c" in the box. The final input event
-    // (isComposing=false) still arrives, so the committed text is not lost.
-    if (name === 'input' && evt.isComposing) return;
-    if ((name === 'keydown' || name === 'keyenter') && evt.isComposing) return;
+    if (name === 'input' && (evt.isComposing || el.__fsComposing)) return;
+    if ((name === 'keydown' || name === 'keyenter') &&
+        (evt.isComposing || el.__fsComposing)) {
+      return;
+    }
     // FRAMEWORK RULE: an activation event belongs to the INNERMOST element that
     // handles it. A button inside a clickable row (a card, a fold header) runs
     // its own handler and stops the event there; the row never sees the press.

@@ -285,12 +285,32 @@ const char* kGlueJs = R"JS(
     if (store[kind]) el.removeEventListener(store[kind][0], store[kind][1], false);
     var name = NAMES[kind] || 'click';
     var evName = (name === 'keyenter') ? 'keydown' : name;
+    // IME: track composition explicitly. `isComposing` on the final input is not
+    // reliable across WebView2/IME versions (some report true on commit); using
+    // compositionend to push the committed value makes sure Enter and Chinese
+    // text reach the app even then.
+    if (name === 'input') {
+      if (store['composition']) {
+        el.removeEventListener('compositionstart', store['composition'][0], false);
+        el.removeEventListener('compositionend', store['composition'][1], false);
+      }
+      var compStart = function () { el.__fsComposing = 1; };
+      var compEnd = function () {
+        el.__fsComposing = 0;
+        var v = el.value == null ? '' : String(el.value);
+        push('value', id, v);
+        post('fs_ui_fire', [hid, v]);
+      };
+      el.addEventListener('compositionstart', compStart, false);
+      el.addEventListener('compositionend', compEnd, false);
+      store['composition'] = [compStart, compEnd];
+    }
     var listener = function (evt) {
-      // IME composition: intermediate input events carry pinyin; the final one
-      // (isComposing=false) carries the committed text. Letting a render or an
-      // async completion reply run mid-composition broke Chinese input.
-      if (name === 'input' && evt.isComposing) return;
-      if ((name === 'keydown' || name === 'keyenter') && evt.isComposing) return;
+      if (name === 'input' && (evt.isComposing || el.__fsComposing)) return;
+      if ((name === 'keydown' || name === 'keyenter') &&
+          (evt.isComposing || el.__fsComposing)) {
+        return;
+      }
       // FRAMEWORK RULE: an activation event belongs to the INNERMOST element
       // that handles it. A button inside a clickable row (a card, a fold header)
       // runs its own handler and stops the event there; the row never sees the

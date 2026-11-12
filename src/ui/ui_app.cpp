@@ -5576,18 +5576,6 @@ VNodePtr UiApp::build_nav_rail() {
         p.name.empty() ? "?" : p.name.substr(0, p.name.size() > 1 ? 2 : 1)));
     ph.add(el("span", "nav-proj-name").text(p.name));
     std::string pid = p.pid;
-    // Per-project collapse: the rail lists every project permanently, so a
-    // 40-session project must be reducible to one header line without hiding
-    // every other project. This is a TEXT control (收起/展开), separate from the
-    // home card's narrow-layout reveal.
-    H tg = el("span", "nav-proj-toggle");
-    tg.text(p.nav_open ? tr("收起") + " \u25be" : tr("展开") + " \u25b8");
-    tg.on(EventKind::kClick, [this, i](const std::string&) {
-      update([&](AppState& s) {
-        if (i < s.projects.size()) s.projects[i].nav_open = !s.projects[i].nav_open;
-      });
-    });
-    ph.add(tg);
     H plus = comp::icon_button("square-plus", tr("在这个项目里新建会话"),
                                [this, pid](const std::string&) {
       new_session_in_project(pid);
@@ -5595,8 +5583,20 @@ VNodePtr UiApp::build_nav_rail() {
     plus.cls("nav-proj-add");
     ph.add(plus);
     grp.add(ph);
+    // Per-project collapse: the control is the LAST row of the project list
+    // (the user asked for 展开/收起 at the list end, not in the header).
+    H tg = el("div", "nav-session nav-more");
+    tg.text(p.nav_open ? tr("收起") + " \u25be"
+                       : tr("展开") + " \u25b8 (" +
+                             itos(static_cast<int>(rows.size())) + ")");
+    tg.on(EventKind::kClick, [this, i](const std::string&) {
+      update([&](AppState& s) {
+        if (i < s.projects.size()) s.projects[i].nav_open = !s.projects[i].nav_open;
+      });
+    });
     if (!p.nav_open) {
       nav_hits += rows.size();  // hidden by a collapse, not by the search
+      grp.add(tg);
       body.add(grp);
       continue;
     }
@@ -5630,6 +5630,7 @@ VNodePtr UiApp::build_nav_rail() {
       row.add(el("span", "nav-session-title").text(s.title));
       grp.add(row);
     }
+    grp.add(tg);
     body.add(grp);
   }
   if (nav_hits == 0 && !st_.projects.empty()) {
@@ -6084,15 +6085,18 @@ VNodePtr UiApp::build_home_projects() {
     rhead.add(el("span", "prh-title").text(tr("会话")));
     rhead.add(el("span", "prh-count").text(itos(p.session_count)));
     rhead.add(el("span", "grow"));
-    // Wide/two-column: the list has a fixed height (~10 rows) and SCROLLS; it
-    // must not be truncated to 10 rows with an expand toggle. Narrow/stacked:
-    // the same header reveals or hides the block. CSS owns the difference; the
-    // renderer always builds every row so the scroll container has them.
-    rhead.add(el("span", "prh-toggle").text(
-        p.expanded ? tr("收起") + " \u25be" : tr("展开") + " \u25b8"));
+    // The expand control is NOT in the header. More than 10 sessions are cut at
+    // 10, and the last row says "展开剩余 N 个" / "收起"; the user asked for the
+    // control at the END of the list, not a scroll box or a header toggle.
     right.add(rhead);
     H list = el("div", "proj-sessions");
-    for (size_t k = 0; k < p.sessions.size(); ++k) {
+    const size_t kHomeSessionLimit = 10;
+    const size_t visible_rows =
+        p.sessions_open ? p.sessions.size()
+                        : (p.sessions.size() < kHomeSessionLimit
+                               ? p.sessions.size()
+                               : kHomeSessionLimit);
+    for (size_t k = 0; k < visible_rows; ++k) {
       const ProjectCard::SessionRow& s = p.sessions[k];
       std::string sid = s.sid;
       if (s.renaming) {
@@ -6166,6 +6170,23 @@ VNodePtr UiApp::build_home_projects() {
       acts.add(del);
       row.add(acts);
       list.add(row);
+    }
+    if (p.sessions.size() > kHomeSessionLimit) {
+      H more = el("div", "proj-session more");
+      more.on(EventKind::kClick, [this, i](const std::string&) {
+        update([&](AppState& s) {
+          if (i < s.projects.size()) {
+            s.projects[i].sessions_open = !s.projects[i].sessions_open;
+          }
+        });
+      });
+      more.add(el("span", "ps-title").text(
+          p.sessions_open
+              ? tr("收起")
+              : tr("展开剩余 ") +
+                    itos(static_cast<int>(p.sessions.size() - kHomeSessionLimit)) +
+                    tr(" 个")));
+      list.add(more);
     }
     if (p.sessions.empty()) {
       H empty = el("div", "proj-session dim-none");
@@ -12044,6 +12065,17 @@ VNodePtr UiApp::build_overlays() {
 // Actions
 // ===========================================================================
 void UiApp::send_message() {
+  // The visible textarea is the source of truth if the input event was lost
+  // (a render storm or a WebView bridge interruption). Sending used to return
+  // silently when `session_input` was empty even though the box had text - the
+  // "Enter and click send do nothing" report.
+  if (st_.session_input.empty()) {
+    VNodePtr ta = find_by_key(tree_, "session-input");
+    if (ta && ta->dom.valid()) {
+      std::string typed = dom_.get_value(ta->dom);
+      if (!typed.empty()) st_.session_input = typed;
+    }
+  }
   // A message may be attachments only (dropping a file and hitting send).
   if (st_.session_input.empty() && st_.attachments.empty()) return;
   // Same guard as the disabled button: sending without a usable model can only

@@ -287,7 +287,9 @@ FS_TEST(terminal_foreground_wait_does_not_block_the_manager) {
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - t0).count());
   EXPECT_TRUE(bg_r.ok());
-  EXPECT_TRUE(ms < 1500);
+  // The point is "not blocked for the foreground command's whole lifetime"
+  // (originally 60 s). A loaded CI box can still take a second here.
+  EXPECT_TRUE(ms < 3000);
   t.join();
   EXPECT_TRUE(fg_r.ok());
   EXPECT_EQ(jsonutil::get<std::string>(fg_out, "status", ""), std::string("exited"));

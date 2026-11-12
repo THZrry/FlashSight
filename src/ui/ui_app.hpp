@@ -45,6 +45,9 @@ struct ProjectCard {
   // directly, narrow collapses it behind the header), so it is always loaded.
   bool sessions_loaded = false;
   bool expanded = true;            // narrow layout: list revealed? (wide ignores it)
+  // Home card: more than 10 sessions are CUT at 10, with an "展开剩余 N 个"
+  // row at the END of the list (not a header toggle, not a scroll box).
+  bool sessions_open = false;
   // Left nav rail: each project group can be collapsed independently. This is
   // per-project UI state, not the home card's narrow-layout reveal.
   bool nav_open = true;
