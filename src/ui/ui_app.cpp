@@ -9845,7 +9845,8 @@ std::string join_lines(const Json& vals, const std::string& key) {
 
 }  // namespace
 
-void UiApp::set_setting(const std::string& key, const Json& value) {
+void UiApp::set_setting(const std::string& key, const Json& value,
+                        std::function<void()> after) {
   update([&](AppState& s) {
     if (!s.settings_values.is_object()) s.settings_values = Json::object();
     Json entry = Json::object();
@@ -9861,7 +9862,12 @@ void UiApp::set_setting(const std::string& key, const Json& value) {
   // so a settings write reflects immediately without a full dump round-trip
   apply_settings(st_.settings_values);
   render();
-  call_async("settings.set", Json{{"key", key}, {"value", value}});
+  call_async("settings.set", Json{{"key", key}, {"value", value}},
+             [after](const BackendResult& r) {
+    // Run only after the write was accepted: a status read issued before it
+    // sees the old listener, which is what made a changed setting look ignored.
+    if (r.ok && after) after();
+  });
 }
 
 void UiApp::apply_settings(const Json& values) {
@@ -9972,10 +9978,11 @@ void UiApp::apply_appearance() {
 
 void UiApp::load_settings_section(const std::string& section) {
   if (!backend_) return;
-  // pull all settings once (settings.dump gives global + project). This may be
-  // called from a click handler or from build_settings (via render), so it
-  // must not itself render: mutate flags directly, the async completion
-  // re-renders when data lands.
+  // pull all settings once (settings.dump gives global + project). Called when
+  // the settings page OPENS or its nav item is clicked - never from a build.
+  // A loader that re-renders on completion, called from the render it causes,
+  // is an infinite render loop (the Web-service page used to do exactly that).
+  // So: mutate flags directly; the async completion re-renders when data lands.
   if (!st_.settings_dump_loaded && !st_.settings_dump_inflight) {
     st_.settings_dump_inflight = true;
     call_async("settings.dump", Json::object(), [this](const BackendResult& r) {
@@ -10358,38 +10365,81 @@ void UiApp::refresh_model_availability() {
   }, true);  // passive availability check; failures are handled by keeping send usable
 }
 
-void UiApp::refresh_server_status() {
+void UiApp::refresh_server_status(bool wait_for_change) {
+  if (wait_for_change) {
+    // A write may land while the passive entry read is still in flight; mark the
+    // wait BEFORE bailing out so that read's reply keeps polling.
+    server_status_wait_ = true;
+    server_status_polls_ = 0;
+  }
+  // One read at a time: the reply renders the page, and a page build must never
+  // start another read (that pair is what froze the app on the Web-service tab).
+  if (server_status_inflight_) return;
+  server_status_inflight_ = true;
   call_async("server.status", Json::object(), [this](const BackendResult& r) {
+    server_status_inflight_ = false;
     if (!r.ok) return;
     // The rebind happens on a helper thread (see UiServer::restart), so a status
     // read right after the settings write can still see the OLD listener. Poll
     // again shortly instead of reporting a stale port as "current".
-    bool pending = jsonutil::get<bool>(r.data, "rebinding", false);
+    const bool pending = jsonutil::get<bool>(r.data, "rebinding", false);
     const bool srv_running = jsonutil::get<bool>(r.data, "running", false);
     const int srv_port = static_cast<int>(jsonutil::get_int(r.data, "port", 0));
-    update([&](AppState& s) {
-      s.server_running = srv_running;
-      s.server_local_allowed = jsonutil::get<bool>(r.data, "localAllowed", true);
-      s.server_host = jsonutil::get<std::string>(r.data, "host", "");
-      s.server_port = srv_port;
-      s.server_requires_password = jsonutil::get<bool>(r.data, "password", false);
-      s.server_error = jsonutil::get<std::string>(r.data, "error", "");
-      // A LAN URL is only meaningful when listening on all interfaces. Build it
-      // from the machine's real address (server.lanIp, best-effort) so the user
-      // can copy it straight into a phone.
-      std::string lan_ip = jsonutil::get<std::string>(r.data, "lanIp", "");
-      s.server_lan_url = (s.server_host == "0.0.0.0" && !lan_ip.empty())
-                             ? ("http://" + lan_ip + ":" + itos(s.server_port) + "/")
-                             : "";
-    });
+    const bool srv_local = jsonutil::get<bool>(r.data, "localAllowed", true);
+    const std::string srv_host = jsonutil::get<std::string>(r.data, "host", "");
+    const bool srv_pw = jsonutil::get<bool>(r.data, "password", false);
+    const std::string srv_error = jsonutil::get<std::string>(r.data, "error", "");
+    // A LAN URL is only meaningful when listening on all interfaces. Build it
+    // from the machine's real address (server.lanIp, best-effort) so the user
+    // can copy it straight into a phone.
+    const std::string lan_ip = jsonutil::get<std::string>(r.data, "lanIp", "");
+    const std::string lan_url = (srv_host == "0.0.0.0" && !lan_ip.empty())
+                                    ? ("http://" + lan_ip + ":" + itos(srv_port) + "/")
+                                    : "";
+    // Render only on an actual change. Polling around a rebind returns the same
+    // values several times; repainting for those served no one and kept the
+    // event loop busy while a rebind was in flight.
+    if (st_.server_running != srv_running || st_.server_local_allowed != srv_local ||
+        st_.server_host != srv_host || st_.server_port != srv_port ||
+        st_.server_requires_password != srv_pw || st_.server_error != srv_error ||
+        st_.server_lan_url != lan_url) {
+      st_.server_running = srv_running;
+      st_.server_local_allowed = srv_local;
+      st_.server_host = srv_host;
+      st_.server_port = srv_port;
+      st_.server_requires_password = srv_pw;
+      st_.server_error = srv_error;
+      st_.server_lan_url = lan_url;
+      render();
+    }
+    // Did the listener reach the state the SAVED settings describe? A rebind is
+    // observable through `rebinding`, but a STOP is not (UiServer::stop has no
+    // flag), and the read may land before the write is applied at all. Comparing
+    // with the desired host/running state covers all three.
+    if (!pending && server_status_wait_) {
+      const std::string want_host =
+          sv_str(st_.settings_values, "server.host", "127.0.0.1");
+      const int want_port = sv_int(st_.settings_values, "server.port", 0);
+      const bool want_loopback = want_host == "127.0.0.1" ||
+                                 want_host == "localhost" || want_host == "::1";
+      const bool want_running = srv_local || !want_loopback;
+      const bool settled =
+          !srv_error.empty() ||   // a failed rebind is final; show its error
+          (want_running
+               ? (srv_running && srv_host == want_host &&
+                  (want_port <= 0 || srv_port == want_port))
+               : !srv_running);
+      if (settled) server_status_wait_ = false;
+    }
     // The rebind happens on a helper thread (see UiServer::restart), so a status
     // read right after the settings write can still see the OLD listener. Re-read
     // until "rebinding" clears; a single fixed delay silently reported the old
     // address as current whenever the swap took longer than the delay.
-    if (pending && ++server_status_polls_ < 20) {
+    if ((pending || server_status_wait_) && ++server_status_polls_ < 20) {
       dom_.schedule(250, [this]() { refresh_server_status(); });
     } else {
       server_status_polls_ = 0;
+      server_status_wait_ = false;
       // Fallback for a lost server.moved frame: if the page is still on the old
       // port while the server is already listening on a new one, follow it. The
       // native adapters have no location host, so this only runs in the browser.
@@ -10529,7 +10579,6 @@ VNodePtr UiApp::build_settings() {
   // patched in place and never animate). This is the per-page animation the
   // settings pages were missing.
   body.anim(anim::kEnter).anim_key("sec:" + sec);
-  if (backend_) load_settings_section(sec);
 
   if (sec == "providers") {
     fsdbg("build providers creating=%d picked=%d selected=%s templates=%zu",
@@ -11747,32 +11796,29 @@ VNodePtr UiApp::build_settings() {
   } else if (sec == "webserver") {
     body.add(comp::section_title(tr("Web 服务")));
     body.add(el("div", "field-hint").text(tr(
-        "Web 版需要这个服务来提供界面；Webview / WhaleUI 版有原生窗口，"
-        "默认不开本机服务，但选“局域网 / 远程”(0.0.0.0) 仍会启动，供其他设备访问。"
-        "改动立即生效：端口/地址变化会重新监听，当前网页会跳到新地址。"
+        "Web 版用这个服务提供本机界面；Webview / WhaleUI 版有原生窗口。"
+        "“开启局域网服务”打开后三个版本都会监听 0.0.0.0，其他设备可访问。"
+        "只有设置值真的改变时才会重新监听；当前网页在端口变化后会跳到新地址。"
         "本机访问始终免密，密码只约束远程来源。")));
     // 监听地址：两个明确的选项，而不是让人填 IP。绝大多数人只需要"仅本机"和
     // "局域网/远程"两种；填错 IP 的结果是服务器起不来，而错误信息在远程端看不见。
+    // ONE switch: "是否开启局域网服务". It is not a choice between "local vs
+    // LAN" - the Web build always has a local server, and a native window has no
+    // local server at all. The switch only decides whether 0.0.0.0 (LAN/remote)
+    // is opened, and that is meaningful in every variant.
     {
-      std::vector<comp::ChoiceOption> hosts;
-      comp::ChoiceOption o;
-      o.value = "127.0.0.1";
-      o.icon = "desktop";
-      o.title = tr("仅本机");
-      o.desc = tr("只有这台机器能访问；Web 版才启动本机服务");
-      hosts.push_back(o);
-      o.value = "0.0.0.0";
-      o.icon = "globe";
-      o.title = tr("局域网 / 远程");
-      o.desc = tr("监听所有网卡，其他设备可以连进来");
-      hosts.push_back(o);
-      std::string cur = sv_str(st_.settings_values, "server.host", "127.0.0.1");
-      if (cur.empty()) cur = "127.0.0.1";
-      body.add(comp::field(tr("监听地址"), comp::choice_list(
-          hosts, cur, [this](const std::string& v) {
-        set_setting("server.host", v);
-        refresh_server_status();
-      })));
+      std::string host = sv_str(st_.settings_values, "server.host", "127.0.0.1");
+      bool lan = host == "0.0.0.0";
+      body.add(comp::field(
+          tr("开启局域网服务"),
+          comp::toggle(lan, "", [this, lan](const std::string&) {
+        bool next = !lan;
+        if (next == lan) return;
+        set_setting("server.host", next ? "0.0.0.0" : "127.0.0.1",
+                    [this]() { refresh_server_status(true); });
+      }),
+          tr("关闭时只有 Web 版提供一个本机界面；开启后三个版本都监听 0.0.0.0，"
+             "其他设备可通过下方地址访问。")));
     }
     // Port and password are typed, so they commit on ENTER (or when focus
     // leaves the field) - never on every keystroke. Committing per character
@@ -11822,10 +11868,9 @@ VNodePtr UiApp::build_settings() {
         p = static_cast<int>(n);
       }
       st_.server_port_draft.clear();   // the saved value is the source of truth now
-      set_setting("server.port", p);
+      set_setting("server.port", p, [this]() { refresh_server_status(true); });
       toast(p > 0 ? (tr("端口已改为 ") + itos(p))
                   : tr("已设为自动（下次启动生效）"));
-      refresh_server_status();
     };
     body.add(comp::field(tr("端口"), comp::text_input(
         port_text, "0",
@@ -11842,9 +11887,8 @@ VNodePtr UiApp::build_settings() {
     auto commit_pw = [this](const std::string& v) {
       if (v == sv_str(st_.settings_values, "server.password", "")) return;
       st_.server_password_draft.clear();
-      set_setting("server.password", v);
+      set_setting("server.password", v, [this]() { refresh_server_status(true); });
       toast(v.empty() ? tr("已关闭访问密码") : tr("访问密码已更新"));
-      refresh_server_status();
     };
     body.add(comp::field(tr("访问密码"), comp::text_input(
         pw_text,
@@ -11874,7 +11918,7 @@ VNodePtr UiApp::build_settings() {
       body.add(el("div", "settings-note dim").text(
           st_.server_local_allowed
               ? tr("当前没有运行 Web 服务。")
-              : tr("本机服务只在 Web 版启动；本版选“局域网 / 远程”(0.0.0.0) 可开。")));
+              : tr("局域网服务已关闭；打开“开启局域网服务”后本版也会监听 0.0.0.0。")));
     }
     // A failed rebind must not look like "the setting did nothing": the address
     // may be taken or the port reserved, and the only place that says so is here.
@@ -12849,6 +12893,10 @@ void UiApp::open_modal_page(const std::string& page) {
   // A modal is not a tab navigation: it always enters the same way, regardless
   // of what the tab stack says about the page underneath.
   page_dir_.clear();
+  // Load the visible section's data HERE, as an effect of opening the page.
+  // build_settings must stay a pure function of state: when it kicked off a
+  // load whose reply re-renders, the Web-service page looped forever.
+  if (page == "settings" && backend_) load_settings_section(st_.settings_nav);
   render();
 }
 

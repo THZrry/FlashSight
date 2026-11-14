@@ -238,6 +238,10 @@ FS_TEST(uiapi_server_host_rules_by_variant) {
   api.settings_set(kKeyServerHost, Json("0.0.0.0"), "");
   EXPECT_EQ(restarts, 1);
   EXPECT_EQ(last_host, std::string("0.0.0.0"));
+  // Writing the SAME value again must not rebind (opening the settings page or
+  // re-rendering used to do that).
+  api.settings_set(kKeyServerHost, Json("0.0.0.0"), "");
+  EXPECT_EQ(restarts, 1);
   EXPECT_TRUE(jsonutil::get<bool>(api.server_status().data, "localAllowed", true) == false);
   api.settings_set(kKeyServerHost, Json("127.0.0.1"), "");
   EXPECT_EQ(stops, 1);

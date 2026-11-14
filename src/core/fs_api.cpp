@@ -3145,6 +3145,13 @@ FsResult FsApi::settings_get(const std::string& key, const std::string& pid) {
   return FsResult::success(out);
 }
 FsResult FsApi::settings_set(const std::string& key, const Json& value, const std::string& pid) {
+  // A server setting only rebinds when its VALUE actually changes. Writing the
+  // same host/port/password again (opening the page, re-rendering, clicking the
+  // already-selected option) must not tear down the listener.
+  const bool server_key = key == kKeyServerHost || key == kKeyServerPort ||
+                          key == kKeyServerPassword;
+  Json old_value;
+  if (server_key) old_value = store_for(pid).get(key).value;
   FsResult r = pid.empty() ? settings_->set_global(key, value)
                            : (path_for(pid).empty()
                                   ? FsResult::error(ErrCode::kNotFound, "project not found: " + pid)
@@ -3154,8 +3161,8 @@ FsResult FsApi::settings_set(const std::string& key, const Json& value, const st
   if (key == kKeyNetworkProxyHost || key == kKeyNetworkProxyPort) {
     apply_proxy_settings();
   }
-  // Web 服务设置（监听地址/端口/密码）：立即重启内嵌服务器
-  if (key == kKeyServerHost || key == kKeyServerPort || key == kKeyServerPassword) {
+  // Web 服务设置（监听地址/端口/密码）：值变了才重启内嵌服务器。
+  if (server_key && old_value != value) {
     apply_server_settings();
   }
   // 文件黑白名单变化立即生效

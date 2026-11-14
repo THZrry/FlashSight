@@ -4876,6 +4876,39 @@ FS_TEST(uiapp_webserver_shows_real_lan_url) {
   EXPECT_TRUE(d.find("<本机 IP>") == std::string::npos);
 }
 
+// A settings BUILD must never request data. The Web-service status reply
+// re-renders the page, so a render-time request is a render loop: opening that
+// page with a live server froze the whole app. Loading belongs to opening the
+// page or clicking its nav item, not to every repaint.
+FS_TEST(uiapp_webserver_does_not_reload_on_every_render) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class CountingBackend : public IUiBackend {
+   public:
+    int status = 0;
+    BackendResult call(const std::string& m, const Json&) override {
+      if (m == "server.status") {
+        ++status;
+        BackendResult r;
+        r.data = Json{{"running", true}, {"host", "0.0.0.0"}, {"port", 8812},
+                      {"localAllowed", true}, {"lanIp", "10.6.217.30"}};
+        return r;
+      }
+      return BackendResult{};
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  };
+  CountingBackend backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.update([](AppState& s) { s.settings_nav = "webserver"; });
+  app.open_modal_page("settings");   // one load for the visible section
+  EXPECT_EQ(backend.status, 1);
+  for (int i = 0; i < 6; ++i) app.render();   // repaints load nothing
+  EXPECT_EQ(backend.status, 1);
+  EXPECT_TRUE(dom.dump().find("正在监听 0.0.0.0:8812") != std::string::npos);
+}
+
 // A modal loses focus -> it dismisses. The permission gate is special: dismissing
 // it must DENY (the loop is parked on an answer), not leave the turn hanging.
 FS_TEST(uiapp_modal_dismisses_on_outside_click) {

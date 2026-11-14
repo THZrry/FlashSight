@@ -1115,6 +1115,12 @@ class WebViewDom : public IDom {
       Node node,
       std::function<void(const std::string&, const std::string&)> cb) override {
     drop_cb_ = cb;
+    // Bind ONCE per root node: this is a document/window listener, and rebinding
+    // it every render cost one synchronous ExecuteScript per frame. The callback
+    // itself is refreshed above, so the existing listener stays correct.
+    if (drop_bound_ && drop_node_.id == node.id) return;
+    drop_node_ = node;
+    drop_bound_ = true;
     call("dropZone", idx(node), 0, "", "");
   }
 
@@ -1122,6 +1128,8 @@ class WebViewDom : public IDom {
 
   void bind_global_key(std::function<void(const std::string&)> cb) override {
     global_key_cb_ = cb;
+    if (global_key_bound_) return;
+    global_key_bound_ = true;
     call("globalKey", 0, 0, "", "");
   }
   void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override {
@@ -1543,7 +1551,10 @@ class WebViewDom : public IDom {
   std::map<int, std::function<void(const std::string&)> > tab_drag_cbs_;
   std::map<int, std::function<void()> > sched_cbs_;
   std::function<void(const std::string&, const std::string&)> drop_cb_;
+  Node drop_node_{0};
+  bool drop_bound_ = false;
   std::function<void(const std::string&)> global_key_cb_;
+  bool global_key_bound_ = false;
   std::function<void(const KeyPress&)> key_input_cb_;
   std::function<void(int, int)> cell_cb_;
   std::function<void(bool)> scroll_pin_cb_;

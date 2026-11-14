@@ -96,13 +96,19 @@ void attach_server(const std::shared_ptr<fs::ui::UiServer>& server, fs::FsApi& a
         return server->restart(p, host, pw).ok();
       },
       [server]() {
+        // lan_ip() probes the outbound route with a UDP socket. Only ask when
+        // the listener is actually on all interfaces - a local/stopped server
+        // does not need it, and a stalled network stack must not make the
+        // settings page slow.
+        std::string lan =
+            server->host() == "0.0.0.0" ? server->lan_ip() : std::string();
         return fs::Json{{"running", server->running()},
                         {"host", server->host()},
                         {"port", server->port()},
                         {"password", server->requires_password()},
                         {"rebinding", server->rebinding()},
                         {"error", server->last_error()},
-                        {"lanIp", server->lan_ip()},
+                        {"lanIp", lan},
                         {"url", server->url()}};
       },
       [server]() {

@@ -696,7 +696,6 @@ struct AppState {
   Json settings_values = Json::object();   // key -> {value, source}
   bool settings_dump_loaded = false;
   bool settings_dump_inflight = false;
-  std::string settings_loaded_for;  // nav section whose loads were triggered
   struct PresetRow {
     std::string name;
     std::string description;
@@ -1172,7 +1171,7 @@ class UiApp {
   int64_t workflows_refresh_ms_ = 0;
   int64_t last_ops_refresh_ms_ = 0;
   // 读取 Web 服务当前监听状态（设置-Web 服务页）
-  void refresh_server_status();
+  void refresh_server_status(bool wait_for_change = false);
   // Ask which models are usable and clear the composer's model box if the one
   // this session remembered has been disabled or its provider deleted.
   void refresh_model_availability();
@@ -1182,7 +1181,11 @@ class UiApp {
   void load_mcp_tools();
   void load_settings_section(const std::string& section);
   // Save a settings key (global) and reflect it locally.
-  void set_setting(const std::string& key, const Json& value);
+  // `after` runs only when the backend accepted the write, and exists because a
+  // server-setting write starts a rebind; reading status before the write lands
+  // returns the OLD listener (and then looked like "the setting did nothing").
+  void set_setting(const std::string& key, const Json& value,
+                   std::function<void()> after = nullptr);
   // Parse a settings value map ({key:{value,...}}) into local caches.
   void apply_settings(const Json& values);
   // Push the appearance settings to the DOM adapter (palette/mode/fonts). Called
@@ -1403,6 +1406,13 @@ class UiApp {
   // How many times refresh_server_status has re-read while a rebind was in
   // flight; capped so a stuck rebind cannot poll forever.
   int server_status_polls_ = 0;
+  // One status read at a time. The reply re-renders the page, so overlapping
+  // reads would multiply renders instead of replacing them.
+  bool server_status_inflight_ = false;
+  // Set when the last read followed a settings WRITE: keep reading until the
+  // listener matches the saved host/port (a stop has no `rebinding` flag to
+  // watch, so without this the page kept displaying the retired address).
+  bool server_status_wait_ = false;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
   bool render_pending_ = false;
   // ask the next render to focus the terminal surface (only on spawn / tab
