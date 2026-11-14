@@ -382,6 +382,10 @@ class AgentLoop {
   // 当前轮是不是自动续跑轮（>0 = 第 N 轮自动续跑）。UI 据此画分隔线与后台小圆点，
   // 也据此决定是否把这一轮渲染成"用户消息"。
   std::atomic<int> current_auto_round_{0};
+  // Why the current auto round was started. Persisted with its synthetic user
+  // turn so the transcript can say the reason after a reload (it used to be a
+  // toast that vanished).
+  std::string current_auto_reason_;
   // ask 工具挂起时的现场。一个回复里可能有多条 ask（"1/2" 那种），所以是一组。
   Json pending_asks_ = Json::array();  // [{askId, callId, question, options, ...}]
   Json ask_answers_ = Json::object();  // askId -> selection（回答齐了才续跑）

@@ -525,9 +525,8 @@ void register_file_tools(ToolRegistry* registry) {
   {
     ToolDef def;
     def.name = "list_dir";
-    def.description = "列出目录内容. List directory. "
-                      "detail=false(默认): 仅文件名 one name per line; "
-                      "detail=true: name,type,date,size CSV 每行一个条目.";
+    def.description = "列出目录内容. List directory as JSON {entries:[{name,isDir,size,mtime}], path}. "
+                      "detail=true 也带上 type/date/size（默认 entries 已含这些字段）。";
     Json params = Json::object();
     params["type"] = "object";
     Json props = Json::object();
@@ -546,8 +545,6 @@ void register_file_tools(ToolRegistry* registry) {
           return FsResult::error(ErrCode::kNotFound, "dir not found: " + rel);
         }
         Json arr = Json::array();
-        std::string names;
-        std::string csv;
         for (auto& e : ghc::filesystem::directory_iterator(p, ec)) {
           Json j = Json::object();
           std::string name = e.path().filename().string();
@@ -565,27 +562,14 @@ void register_file_tools(ToolRegistry* registry) {
           } catch (...) {}
           j["mtime"] = mtime;
           arr.push_back(j);
-          if (detail) {
-            std::string q = name;
-            if (q.find(',') != std::string::npos || q.find('"') != std::string::npos) {
-              std::string esc;
-              for (char c : q) {
-                if (c == '"') esc += "\"\"";
-                else esc += c;
-              }
-              q = "\"" + esc + "\"";
-            }
-            csv += q + "," + (isdir ? "dir" : "file") + "," +
-                   std::to_string(mtime) + "," + std::to_string(size) + "\n";
-          } else {
-            names += name + "\n";
-          }
         }
         Json data = Json::object();
+        // ONE representation: the structured `entries` array. `names` and
+        // `entriesCsv` duplicated the same listing as one big string in every
+        // result (and the model paid for both).
         data["entries"] = arr;
+        data["path"] = rel;
         data["detail"] = detail;
-        if (detail) data["entriesCsv"] = csv;
-        else data["names"] = names;
         return FsResult::success(data);
       });
   }

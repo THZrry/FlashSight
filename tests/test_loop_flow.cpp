@@ -369,6 +369,36 @@ FS_TEST(loop_auto_mode_continues_on_open_plan) {
   EXPECT_TRUE(content.find("continue") != std::string::npos);
 }
 
+// ---------- 自动模式：plan/todo 都 done 时，本轮跑过工具也不续 ----------
+// The fallback "auto + tool ran = continue" must not override explicit tracking:
+// a final verification command in a finished task used to start another round.
+FS_TEST(loop_auto_stops_when_tracking_done_despite_tools) {
+  AgentLoop::Options opts;
+  opts.sid = "s_auto_done_tools";
+  opts.permission = "full";
+  opts.context.auto_mode = true;
+  opts.max_auto_continues = 5;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.runtime_state = []() {
+    RuntimeState st;
+    st.now_ms = 1700000000000LL;
+    st.plan = Json{{"exists", true}, {"status", "done"}, {"content", "# plan"}};
+    st.todos = Json::array({Json{{"id", 1}, {"task", "a"}, {"done", true}}});
+    return st;
+  };
+  ScriptedModel model;
+  model.replies.push_back(tool_reply({call("c1", "read_file", Json{{"path", "a.txt"}})}));
+  loop.call_model = model.fn();
+  loop.invoke_tool = [](const ToolContext&, const std::string&, const Json&) {
+    return FsResult::success(Json{{"ok", true}});
+  };
+  ASSERT_TRUE(loop.send("verify").ok());
+  EXPECT_FALSE(rec.saw("auto.next"));
+  EXPECT_EQ(rec.count("turn.done"), 1);
+}
+
 // ---------- 自动模式：规划全闭合 -> 不续跑 ----------
 FS_TEST(loop_auto_mode_stops_when_plan_done) {
   AgentLoop::Options opts;

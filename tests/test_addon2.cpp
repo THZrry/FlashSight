@@ -50,7 +50,7 @@ std::string read_file_bin(const ghc::filesystem::path& p) {
 
 }  // namespace
 
-// ---------- list_dir：基础（仅文件名）/ 详细（CSV）----------
+// ---------- list_dir：只有一份 JSON entries ----------
 FS_TEST(addon2_ls_basic_and_detail) {
   fstest::TempDir td("a2ls");
   ghc::filesystem::path proj = ghc::filesystem::path(td.path()) / "proj";
@@ -64,25 +64,30 @@ FS_TEST(addon2_ls_basic_and_detail) {
   ToolContext ctx;
   ctx.cwd = proj.string();
 
-  // 基础模式（默认）：只给文件名
   FsResult base = reg.invoke(ctx, "list_dir", Json::object());
   ASSERT_TRUE(base.ok());
-  EXPECT_FALSE(base.data["detail"].get<bool>());
-  std::string names = base.data["names"].get<std::string>();
-  EXPECT_TRUE(names.find("alpha.txt") != std::string::npos);
-  EXPECT_TRUE(names.find("sub") != std::string::npos);
-  // 基础模式无 CSV
+  ASSERT_TRUE(base.data.contains("entries") && base.data["entries"].is_array());
+  // The same listing must not be repeated as a string in every result.
+  EXPECT_FALSE(base.data.contains("names"));
   EXPECT_FALSE(base.data.contains("entriesCsv"));
+  bool alpha = false, sub = false;
+  for (auto& e : base.data["entries"]) {
+    if (e.value("name", "") == "alpha.txt") alpha = true;
+    if (e.value("name", "") == "sub" && e.value("isDir", false)) sub = true;
+    EXPECT_TRUE(e.contains("size"));
+    EXPECT_TRUE(e.contains("mtime"));
+  }
+  EXPECT_TRUE(alpha);
+  EXPECT_TRUE(sub);
+  EXPECT_EQ(base.data["path"].get<std::string>(), std::string("."));
 
-  // 详细模式：CSV 每行 name,type,date,size
   Json dargs = Json::object();
   dargs["detail"] = true;
   FsResult det = reg.invoke(ctx, "list_dir", dargs);
   ASSERT_TRUE(det.ok());
   EXPECT_TRUE(det.data["detail"].get<bool>());
-  std::string csv = det.data["entriesCsv"].get<std::string>();
-  EXPECT_TRUE(csv.find("alpha.txt,file,") != std::string::npos);
-  EXPECT_TRUE(csv.find("sub,dir,") != std::string::npos);
+  EXPECT_FALSE(det.data.contains("entriesCsv"));
+  EXPECT_TRUE(det.data["entries"].is_array());
 }
 
 // ---------- check_dir：子代理筛目录（复用 ls，带 requirement）----------

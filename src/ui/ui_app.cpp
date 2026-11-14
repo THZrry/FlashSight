@@ -10,6 +10,7 @@
 //   * settings: roomy two-column page
 #include "ui_app.hpp"
 #include "ui_path_range.hpp"
+#include "ui_tool_display.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1410,6 +1411,20 @@ void UiApp::switch_tab(const std::string& id, int dir) {
     if (h && h->dom.valid()) st_.hist_scroll = dom_.scroll_top(h->dom);
   }
   if (!leaving.empty()) save_session_view(leaving);
+  // Entering AND leaving are explicit status reads. The pushed session.status
+  // covers transitions while you watch; this closes the gap for a state that
+  // changed while the tab was in the background (or before this process knew
+  // about the session). `session.loopState` updates the stashed view; the row
+  // refresh updates the sidebar immediately instead of waiting for a coalesced
+  // pump pass.
+  if (backend_) {
+    // Entering: rows (all projects) are re-read NOW.
+    // Leaving: the old session's loopState is explicitly queried as well, so a
+    // turn that broke while it was in the background cannot come back as
+    // "running" when it is opened again.
+    if (!leaving.empty()) refresh_loop_state(leaving);
+    refresh_session_rows();
+  }
   // Any open transient popup belongs to the tab being left. Leaving it up is how
   // the model picker "stayed glued" across a tab switch.
   st_.model_picker_open = false;
@@ -1569,6 +1584,8 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   if (auto_round > 0 && m.role == "user") {
     m.role = "system";
     m.text = tr("自动继续 · 第 ") + itos(auto_round) + tr(" 轮");
+    std::string reason = jsonutil::get<std::string>(t, "autoReason", "");
+    if (!reason.empty()) m.text += "：" + reason;
     m.started_at = jsonutil::get_int(t, "ts", 0);
     m.rev = next_msg_rev_++;
     return m;
@@ -1581,6 +1598,18 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   m.text = jsonutil::get<std::string>(t, "text", "");
   if (m.text.empty()) m.text = jsonutil::get<std::string>(t, "promptRaw", "");
   if (m.text.empty()) m.text = jsonutil::get<std::string>(t, "streamSummary", "");
+  // Internal compaction material is model CONTEXT, not a conversational turn.
+  // If an older build ever wrote one of these synthetic user messages to disk,
+  // reopening the session showed the summary as a question bubble (the recurring
+  // "压缩的输出又露出来了"). Never render it.
+  if (m.role == "user" &&
+      (m.text.rfind("[Earlier conversation was compacted]", 0) == 0 ||
+       m.text.rfind("[Key points]", 0) == 0 ||
+       m.text.rfind("[Short view:", 0) == 0)) {
+    m.role.clear();
+    m.text.clear();
+    return m;
+  }
   // Reasoning is part of the stored turn when the provider returned it.
   m.thinking = jsonutil::get<std::string>(t, "thinking",
                  jsonutil::get<std::string>(t, "reasoning", ""));
@@ -1601,7 +1630,12 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       // Prefer the stored, already-summarised detail: `args` alone says what was
       // asked for, not what came back. Older turns only have args, so fall back.
       std::string detail = jsonutil::get<std::string>(tc[k], "detail", "");
-      tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
+      tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
+      Json targs = tc[k].contains("args") ? tc[k]["args"] : Json::object();
+      tb.summary = tool_display_summary(tb.name, targs, detail, tb.ok);
+      if (tb.summary.empty()) {
+        tb.summary = jsonutil::get<std::string>(tc[k], "summary", "");
+      }
       tb.detail = detail;
       // The call's INPUT is its own section (the block used to show only the
       // result). An empty object carries no information - skip it.
@@ -1849,31 +1883,61 @@ void UiApp::load_session(const std::string& sid) {
         }
         if (!seen) keep.push_back(lm);
       }
-      st_.messages = msgs;
-      for (size_t i = 0; i < keep.size(); ++i) st_.messages.push_back(keep[i]);
-      st_.history_total = total;
-      st_.history_start = start;
-      st_.history_has_more = has_more;
-      st_.history_loading_older = false;
-      // the page's animation replay token: the page animates again now that
-      // there is actually something to look at (a slow load used to play the
-      // animation over an empty page, so it was over before content arrived)
-      st_.session_loaded = true;
+      std::vector<comp::ChatMsg> next = msgs;
+      for (size_t i = 0; i < keep.size(); ++i) next.push_back(keep[i]);
+      // A revisit often fetches a transcript identical to the stashed one. The
+      // old code replaced it and rendered again unconditionally, which on the
+      // native renderers means a second layout of the same content right after
+      // the page entrance - the intermittent "进入会抽搐" report. Compare first.
+      bool same = next.size() == st_.messages.size();
+      for (size_t i = 0; same && i < next.size(); ++i) {
+        const comp::ChatMsg& a = next[i];
+        const comp::ChatMsg& b = st_.messages[i];
+        if (a.uid != b.uid || a.turn_id != b.turn_id || a.role != b.role ||
+            a.text != b.text || a.thinking != b.thinking ||
+            a.streaming != b.streaming || a.work_open != b.work_open ||
+            a.tools.size() != b.tools.size() ||
+            a.interim.size() != b.interim.size() ||
+            a.notices.size() != b.notices.size()) {
+          same = false;
+          break;
+        }
+        for (size_t k = 0; same && k < a.tools.size(); ++k) {
+          if (a.tools[k].name != b.tools[k].name ||
+              a.tools[k].summary != b.tools[k].summary ||
+              a.tools[k].detail.size() != b.tools[k].detail.size()) {
+            same = false;
+          }
+        }
+      }
+      const bool first_load = !st_.session_loaded;
+      if (!same) {
+        st_.messages = next;
+        st_.history_total = total;
+        st_.history_start = start;
+        st_.history_has_more = has_more;
+        st_.history_loading_older = false;
+      }
+      // The page's animation replay token is for the FIRST content arrival only.
+      // Setting it on every revisit replayed the entrance animation over a fully
+      // rendered transcript, which reads as a twitch on the native renderers.
+      if (first_load) st_.session_loaded = true;
       // A turn may still be streaming in the backend: the disk transcript ends
       // at the last FINISHED turn, so a tab closed mid-turn and reopened here
       // would show nothing of the answer that is being written right now.
       attach_live_turn(sid);
-      // The history just arrived, so whatever we scrolled to before was either
-      // an empty page or the previous content's height. Opening a session must
-      // land on the latest message, and a return visit must land on the saved
-      // offset. The restore is applied by THIS render, not a later tick: the
-      // content is already in the tree when it patches, so waiting would show
-      // the top of the transcript first and jump afterwards.
-      //
-      // ONE render, not two: the messages and the restore land in the same paint
-      // instead of painting the transcript at the top and then repositioning it.
-      request_history_scroll_restore();
-      render();
+      if (!same || first_load) {
+        // The history just arrived, so whatever we scrolled to before was either
+        // an empty page or the previous content's height. Opening a session must
+        // land on the latest message, and a return visit must land on the saved
+        // offset. The restore is applied by THIS render, not a later tick.
+        //
+        // ONE render, not two: the messages and the restore land in the same
+        // paint instead of painting the transcript at the top and then
+        // repositioning it.
+        request_history_scroll_restore();
+        render();
+      }
     }
     // Terminals are NOT fetched here: the list can be long, and the session page
     // does not show it until the terminal drawer is opened. `load_terminals` runs
@@ -2106,8 +2170,12 @@ void UiApp::load_sessions(size_t project_index) {
   // by activity (a running session changes lastActive), so by the time this
   // reply lands the index may point at ANOTHER project - its session rows would
   // be overwritten (a row showing the wrong dots, or losing "running").
-  call_async("session.list", Json{{"pid", pid}}, [this, pid](const BackendResult& r) {
+  const int seq = ++sessions_seq_[pid];
+  const int status_epoch = status_epoch_;
+  call_async("session.list", Json{{"pid", pid}}, [this, pid, seq, status_epoch](const BackendResult& r) {
     if (!r.ok || !r.data.is_array()) return;
+    std::map<std::string, int>::iterator sit = sessions_seq_.find(pid);
+    if (sit == sessions_seq_.end() || sit->second != seq) return;
     std::vector<ProjectCard::SessionRow> rows;
     for (size_t i = 0; i < r.data.size(); ++i) {
       const Json& s = r.data[i];
@@ -2148,6 +2216,21 @@ void UiApp::load_sessions(size_t project_index) {
         if (st.projects[i].pid == pid) { at = i; break; }
       }
       if (at < st.projects.size()) {
+        // A pushed status is newer than this snapshot; keep its running/error
+        // fields instead of reverting them to the older list values.
+        if (status_epoch != status_epoch_) {
+          for (size_t k = 0; k < rows.size(); ++k) {
+            for (size_t o = 0; o < st.projects[at].sessions.size(); ++o) {
+              const ProjectCard::SessionRow& old = st.projects[at].sessions[o];
+              if (old.sid != rows[k].sid) continue;
+              rows[k].running = old.running;
+              rows[k].loop_state = old.loop_state;
+              rows[k].last_error = old.last_error;
+              rows[k].auto_round = old.auto_round;
+              break;
+            }
+          }
+        }
         // Keep an in-progress rename alive: a refresh (which happens after a
         // rename of ANOTHER row, or on any project reload) must not yank the
         // input out from under the user.
@@ -2550,9 +2633,10 @@ void UiApp::attach_live_turn(const std::string& sid) {
         if (!t.is_object()) continue;
         comp::ToolBlock tb;
         tb.name = jsonutil::get<std::string>(t, "name", "");
-        tb.summary = jsonutil::get<std::string>(t, "summary", "");
         tb.detail = jsonutil::get<std::string>(t, "detail", "");
         tb.ok = jsonutil::get<bool>(t, "ok", true);
+        Json targs = t.contains("args") ? t["args"] : Json::object();
+        tb.summary = tool_display_summary(tb.name, targs, tb.detail, tb.ok);
         tb.running = false;
         tb.subagent_id = jsonutil::get<std::string>(t, "subagentId", "");
         if (t.contains("args") && t["args"].is_object() && !t["args"].empty()) {
@@ -2574,8 +2658,12 @@ void UiApp::attach_live_turn(const std::string& sid) {
       // The question itself may be missing: a crashed turn's user message was
       // written at turn start, but a crash BEFORE that (or a cleared snapshot)
       // leaves nothing. Do not duplicate it when it is already there.
+      const bool internal_compaction =
+          user_text.rfind("[Earlier conversation was compacted]", 0) == 0 ||
+          user_text.rfind("[Key points]", 0) == 0 ||
+          user_text.rfind("[Short view:", 0) == 0;
       bool have_user = false;
-      if (!user_text.empty()) {
+      if (!user_text.empty() && !internal_compaction) {
         for (size_t i = 0; i < s.messages.size(); ++i) {
           if (s.messages[i].role == "user" && s.messages[i].text == user_text) {
             have_user = true;
@@ -2862,6 +2950,10 @@ void UiApp::load_subagents(const std::string& sid) {
       row.id = jsonutil::get<std::string>(a, "id", "");
       row.kind = jsonutil::get<std::string>(a, "kind", "");
       row.status = jsonutil::get<std::string>(a, "status", "");
+      if (jsonutil::get<bool>(a, "failed", false)) row.status = "failed";
+      // A running complete-step is inline in the conversation; the panel only
+      // gets it after it reports. Keep that rule across list refreshes.
+      row.pending = row.kind == "complete-step" && row.status == "running";
       row.task = jsonutil::get<std::string>(a, "task", "");
       row.model = jsonutil::get<std::string>(a, "model", "");
       row.summary = jsonutil::get<std::string>(a, "summary", "");
@@ -3810,10 +3902,11 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         s.auto_round = round;
         s.turn_running = true;
         s.suspended = false;
-        s.toast = "自动继续（第 " + itos(round) + " 轮）" +
-                  (reason.empty() ? "" : "：" + reason);
-        s.toast_deadline_ms = now_ms() + kToastMs;
-        ensure_turn_message(s.messages, s.history_total, &next_msg_rev_, now_ms());
+        comp::ChatMsg& msg =
+            ensure_turn_message(s.messages, s.history_total, &next_msg_rev_, now_ms());
+        msg.notices.push_back("自动继续（第 " + itos(round) + " 轮）" +
+                              (reason.empty() ? "" : "：" + reason));
+        msg.rev = next_msg_rev_++;
       });
       if (!sid.empty()) {
         for (size_t i = 0; i < st_.projects.size(); ++i) load_sessions(i);
@@ -3822,25 +3915,46 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       vp->auto_round = round;
       vp->turn_running = true;
       vp->suspended = false;
-      ensure_turn_message(vp->messages, vp->history_total, &next_msg_rev_, now_ms());
+      comp::ChatMsg& msg =
+          ensure_turn_message(vp->messages, vp->history_total, &next_msg_rev_, now_ms());
+      msg.notices.push_back("自动继续（第 " + itos(round) + " 轮）" +
+                            (reason.empty() ? "" : "：" + reason));
+      msg.rev = next_msg_rev_++;
     }
     return;
   }
   if (event == "auto.halted") {
     std::string reason = jsonutil::get<std::string>(payload, "reason", "");
+    std::string note = reason.empty() ? tr("自动继续已停止")
+                                      : (tr("自动继续已停止：") + reason);
     if (is_active) {
       update([&](AppState& s) {
         s.auto_round = 0;
         s.turn_running = false;
         s.stop_pending = false;
-        s.toast = reason.empty() ? tr("自动继续已停止")
-                                 : (tr("自动继续已停止：") + reason);
-        s.toast_deadline_ms = now_ms() + kToastMs;
       });
+      // Attach to the turn that just ended; do NOT create a new empty streaming
+      // bubble just to hold a note.
+      add_work_notice(note);
     } else {
       vp->auto_round = 0;
       vp->turn_running = false;
       vp->stop_pending = false;
+      bool placed = false;
+      for (size_t i = vp->messages.size(); i-- > 0;) {
+        if (vp->messages[i].role != "assistant") continue;
+        vp->messages[i].notices.push_back(note);
+        vp->messages[i].rev = next_msg_rev_++;
+        placed = true;
+        break;
+      }
+      if (!placed) {
+        comp::ChatMsg sys;
+        sys.role = "system";
+        sys.text = note;
+        sys.rev = next_msg_rev_++;
+        vp->messages.push_back(sys);
+      }
     }
     return;
   }
@@ -4246,8 +4360,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   } else if (event == "tool.update") {
     std::string name = jsonutil::get<std::string>(payload, "name", "");
     bool ok = jsonutil::get<bool>(payload, "ok", true);
-    std::string summary = jsonutil::get<std::string>(payload, "summary", "");
     std::string detail = jsonutil::get<std::string>(payload, "detail", "");
+    Json args = payload.contains("args") ? payload["args"] : Json::object();
+    std::string summary = tool_display_summary(name, args, detail, ok);
     // A subagent tool's result carries the id it created, so the work-log row can
     // offer "打开记录". Without it the row only proved a subagent had run.
     std::string subagent_id;
@@ -4304,14 +4419,34 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   } else if (event == "subagent.done") {
     std::string id = jsonutil::get<std::string>(payload, "id", "");
     std::string summary = jsonutil::get<std::string>(payload, "summary", "");
+    std::string kind = jsonutil::get<std::string>(payload, "kind", "");
+    std::string task = jsonutil::get<std::string>(payload, "task", "");
+    bool failed = jsonutil::get<bool>(payload, "failed", false) ||
+                  jsonutil::get<std::string>(payload, "status", "") == "failed";
     int64_t ended = jsonutil::get_int(payload, "endedAt", 0);
     std::vector<AppState::SubagentRow>& subs = is_active ? st_.subagents : vp->subagents;
+    bool found = false;
     for (size_t i = 0; i < subs.size(); ++i) {
       if (subs[i].id != id) continue;
-      subs[i].status = "done";
+      found = true;
+      subs[i].status = failed ? "failed" : "done";
+      // A complete-step is moved from the inline view into the subagent panel
+      // HERE, when its work is finished - not before.
+      subs[i].pending = false;
       if (!summary.empty()) subs[i].summary = summary;
       if (ended > 0) subs[i].ended_at = ended;
       if (subs[i].ended_at <= 0) subs[i].ended_at = now_ms();
+    }
+    if (!found && kind == "complete-step" && !id.empty()) {
+      AppState::SubagentRow row;
+      row.id = id;
+      row.kind = kind;
+      row.task = task;
+      row.status = failed ? "failed" : "done";
+      row.summary = summary;
+      row.started_at = now_ms();
+      row.ended_at = ended > 0 ? ended : now_ms();
+      subs.push_back(row);
     }
     // The live process text was the inline view of the work. Once it reports,
     // fold that view back: the record stays in the subagent panel and the main
@@ -4328,7 +4463,8 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     std::map<std::string, AppState::SubagentDetail>::iterator d =
         st_.subagent_details.find(id);
     if (d != st_.subagent_details.end()) {
-      d->second.row.status = "done";
+      d->second.row.status = failed ? "failed" : "done";
+      d->second.row.pending = false;
       if (!summary.empty()) d->second.row.summary = summary;
       if (ended > 0) d->second.row.ended_at = ended;
       if (d->second.loaded) load_subagent_detail(id);
@@ -4354,6 +4490,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         row.task = jsonutil::get<std::string>(payload, "task", "");
         row.model = jsonutil::get<std::string>(payload, "model", "");
         row.status = "running";
+        // complete-step is the CURRENT task, not side work: it runs inline in
+        // the conversation and is packaged into this panel only when done.
+        row.pending = jsonutil::get<std::string>(payload, "kind", "") == "complete-step";
         row.started_at = now_ms();
         subs.push_back(row);
       }
@@ -4465,6 +4604,47 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   SlowEventLog slow_event_log(event);
   ++event_count_;
   std::string sid = jsonutil::get<std::string>(payload, "sid", "");
+  if (event == "session.status") {
+    // Authoritative, pushed by the backend on every loop transition. Updating
+    // the row here (instead of waiting for a coalesced session.list) is what
+    // makes a failure appear immediately and stops a just-left tab from keeping
+    // a stale running dot.
+    bool running = jsonutil::get<bool>(payload, "running", false);
+    std::string state = jsonutil::get<std::string>(payload, "state", "");
+    int auto_round = static_cast<int>(jsonutil::get_int(payload, "autoRound", 0));
+    std::string error = jsonutil::get<std::string>(payload, "error", "");
+    ++status_epoch_;
+    update([&](AppState& s) {
+      for (size_t i = 0; i < s.projects.size(); ++i) {
+        for (size_t k = 0; k < s.projects[i].sessions.size(); ++k) {
+          ProjectCard::SessionRow& row = s.projects[i].sessions[k];
+          if (row.sid != sid) continue;
+          row.running = running;
+          row.loop_state = state;
+          row.auto_round = auto_round;
+          if (!error.empty()) row.last_error = error;
+          else if (running) row.last_error.clear();
+        }
+      }
+      if (!sid.empty() && s.active_tab == sid) {
+        s.turn_running = running;
+        s.auto_round = auto_round;
+        s.stop_pending = running ? s.stop_pending : false;
+      }
+    });
+    if (!sid.empty() && st_.active_tab != sid) {
+      // A background session's stashed view must not keep "running" from the
+      // moment it was left. This is the exact stale value that came back when
+      // switching to a session whose turn had already failed.
+      SessionView& v = views_.get_or_create(sid);
+      v.turn_running = running;
+      v.auto_round = auto_round;
+      if (!running) v.stop_pending = false;
+    }
+    render();
+    return;
+  }
+
   // Anything that changes a session's STATUS also changes a project's dot (and
   // the sidebar rows). The dot used to be fed only by `session.list`, which was
   // fetched on load and never again - so a project looked idle while its agent
@@ -4537,7 +4717,8 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       event == "turn.done" || event == "turn.started" ||
       event == "tool.start" ||
       event == "tool.update" || event == "assistant.interim" ||
-      event == "subagent.done" || event == "loop.usage" ||
+      event == "subagent.started" || event == "subagent.done" ||
+      event == "loop.usage" ||
       event == "auto.next" || event == "auto.halted" ||
       event == "todo.updated" || event == "context.compressed" ||
       event == "steering.applied" ||
@@ -4674,10 +4855,9 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
       }
       m.rev = next_msg_rev_++;
     }
-    st_.toast = st_.interrupt_reason.empty()
-                    ? "已中断（可继续）"
-                    : ("已中断：" + st_.interrupt_reason);
-    st_.toast_deadline_ms = now_ms() + kToastMs;
+    if (!st_.interrupt_reason.empty()) {
+      add_work_notice(tr("中断：") + st_.interrupt_reason);
+    }
     // Ask the backend too: the click/state we set above is our best guess, and
     // the fresh reply also invalidates any older in-flight one.
     if (!st_.active_tab.empty()) refresh_loop_state(st_.active_tab);
@@ -4750,6 +4930,26 @@ void UiApp::toast(const std::string& text) {
   st_.toast = text;
   st_.toast_deadline_ms = now_ms() + kToastMs;
   render();
+}
+
+void UiApp::add_work_notice(const std::string& text) {
+  if (text.empty() || st_.active_tab.empty() || st_.active_tab == "home") return;
+  update([&](AppState& s) {
+    // The notice belongs to the turn whose work log is on screen. A notice with
+    // no turn yet becomes a small system line rather than disappearing.
+    for (size_t i = s.messages.size(); i-- > 0;) {
+      if (s.messages[i].role != "assistant") continue;
+      s.messages[i].notices.push_back(text);
+      s.messages[i].rev = next_msg_rev_++;
+      return;
+    }
+    comp::ChatMsg sys;
+    sys.role = "system";
+    sys.text = text;
+    sys.rev = next_msg_rev_++;
+    sys.uid = s.history_total + static_cast<int64_t>(s.messages.size());
+    s.messages.push_back(sys);
+  });
 }
 
 std::string UiApp::debug_stats() const {
@@ -7063,9 +7263,9 @@ VNodePtr UiApp::build_session() {
       std::string title = step_agent->kind + " · " + id;
       H bar = el("div", "interrupt-bar subagent-bar");
       bar.add(el("i", "fa fa-diagram-project"));
-      bar.add(el("span", "ib-text").text(tr("当前步骤在子代理中执行")));
+      bar.add(el("span", "ib-text").text(tr("当前步骤在主界面内联执行")));
       bar.add(el("span", "ib-reason dim").text(
-          tr("这里的输入发给主会话；要引导它请打开记录")));
+          tr("完成后进入子代理记录；这里的输入发给主会话")));
       bar.add(el("span", "grow"));
       bar.add(comp::button(tr("打开记录"), [this, id, title](const std::string&) {
         open_subagent_tab(id, title);
@@ -7084,10 +7284,52 @@ VNodePtr UiApp::build_session() {
   } else if (st_.interrupted) {
     H bar = el("div", "interrupt-bar");
     bar.add(el("i", "fa fa-circle-exclamation"));
-    bar.add(el("span", "ib-text").text(tr("任务已中断")));
+    bar.add(el("span", "ib-text").text(tr("会话已中断")));
     if (!st_.interrupt_reason.empty()) {
-      bar.add(el("span", "ib-reason dim").text(st_.interrupt_reason));
+      H reason = el("span", "ib-reason dim");
+      reason.attr("title", st_.interrupt_reason);
+      reason.text(st_.interrupt_reason);
+      bar.add(reason);
     }
+    bar.add(el("span", "grow"));
+    H acts = el("span", "ib-acts");
+    std::string sid = active_sid();
+    std::string reason_text = st_.interrupt_reason;
+    acts.add(comp::icon_text_button("play", tr("继续"), [this, sid, reason_text](const std::string&) {
+      if (sid.empty()) return;
+      update([&](AppState& s) {
+        s.interrupted = false;
+        s.interrupt_reason.clear();
+        s.turn_running = true;
+        s.stop_pending = false;
+      });
+      call_async("session.continue",
+                 Json{{"sid", sid}, {"guidance", ""}, {"suppressQueue", false}},
+                 [this, reason_text](const BackendResult& r) {
+        if (!r.ok) {
+          // The optimistic clear was wrong: put the bar back so the user can
+          // retry (or copy the error) instead of staring at a spinner.
+          update([&](AppState& s) {
+            s.turn_running = false;
+            s.interrupted = true;
+            if (s.interrupt_reason.empty()) s.interrupt_reason = reason_text;
+          });
+          toast(tr("继续失败：") + r.message);
+        }
+      });
+    }, "ghost"));
+    acts.add(comp::icon_text_button("xmark", tr("忽略"), [this](const std::string&) {
+      update([&](AppState& s) {
+        s.interrupted = false;
+        s.interrupt_reason.clear();
+      });
+    }, "ghost"));
+    acts.add(comp::icon_text_button("copy", tr("复制"), [this, reason_text](const std::string&) {
+      if (reason_text.empty()) return;
+      dom_.copy_text(reason_text);
+      toast(tr("已复制中断信息"));
+    }, "ghost"));
+    bar.add(acts);
     comp_box.add(bar);
   }
   // ---- attachments: ABOVE the input, never inside it ----
@@ -7886,7 +8128,11 @@ VNodePtr UiApp::build_side_panel() {
     t.title = st_.side_tabs[i].title;
     t.closable = true;
     if (st_.side_tabs[i].kind == "subagents") {
-      t.badge = static_cast<int>(st_.subagents.size());
+      int n = 0;
+      for (size_t k = 0; k < st_.subagents.size(); ++k) {
+        if (!st_.subagents[k].pending) ++n;
+      }
+      t.badge = n > 0 ? n : -1;
     }
     tabs.push_back(t);
   }
@@ -8262,16 +8508,28 @@ VNodePtr UiApp::build_side_panel() {
       }
     }
   } else if (kind == "subagents") {
-    if (st_.subagents.empty()) {
+    int visible = 0;
+    for (size_t i = 0; i < st_.subagents.size(); ++i) {
+      if (!st_.subagents[i].pending) ++visible;
+    }
+    if (visible == 0) {
       body.add(comp::empty_state(tr("没有子代理在运行。"), "", nullptr));
     }
     for (size_t i = 0; i < st_.subagents.size(); ++i) {
       const AppState::SubagentRow& a = st_.subagents[i];
+      // A running complete-step is inline in the conversation; the panel gets
+      // its card only after it finishes.
+      if (a.pending) continue;
       const bool a_running = a.status == "running";
-      H card = el("div", a_running ? "subagent-card running" : "subagent-card");
+      const bool a_failed = a.status == "failed";
+      H card = el("div", a_running ? "subagent-card running"
+                                   : (a_failed ? "subagent-card failed"
+                                               : "subagent-card"));
       H head = el("div", "sa-head");
-      head.add(el("span", a_running ? "sa-status running" : "sa-status done")
-                   .text(a_running ? "●" : "✓"));
+      head.add(el("span", a_running ? "sa-status running"
+                                    : (a_failed ? "sa-status failed" : "sa-status done"))
+                   .text(a_running ? "●" : (a_failed ? "✕" : "✓")));
+      if (a_failed) head.add(el("span", "sa-running-badge failed").text(tr("失败")));
       // A running agent must be unmistakable in a list that also holds finished
       // ones: the single "●" was easy to miss and the card said nothing else.
       if (a_running) head.add(el("span", "sa-running-badge").text(tr("运行中")));
@@ -9812,12 +10070,15 @@ void UiApp::refresh_loop_state(const std::string& sid) {
   // Ordered replies only: opening a session fires a refresh, and a turn that
   // ends while that request is in flight leaves a reply saying "running" -
   // applying it AFTER `loop.interrupted` put 中止 back on a stopped turn.
-  int seq = ++loop_state_seq_;
+  int seq = ++loop_state_seq_[sid];
   int epoch = turn_epoch_;
   call_async("session.loopState", Json{{"sid", sid}},
              [this, sid, seq, epoch](const BackendResult& r) {
     if (!r.ok) return;
-    if (seq != loop_state_seq_) return;  // a newer request supersedes this reply
+    std::map<std::string, int>::iterator sit = loop_state_seq_.find(sid);
+    if (sit == loop_state_seq_.end() || seq != sit->second) {
+      return;  // a newer request for THIS session supersedes this reply
+    }
     std::string state = jsonutil::get<std::string>(r.data, "state", "idle");
     bool compacted = jsonutil::get<bool>(r.data, "compacted", false);
     bool suspended = state == "suspended";
@@ -12378,6 +12639,7 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
     mix(static_cast<uint64_t>(m.thoughts[i].open));
     mix(static_cast<uint64_t>(m.thoughts[i].streaming));
   }
+  for (size_t i = 0; i < m.notices.size(); ++i) mix(m.notices[i].size());
   // ...and so is WHERE each note sits relative to the calls (see interim_after).
   for (size_t i = 0; i < m.interim_after.size(); ++i) mix(m.interim_after[i] + 1);
   return h;
@@ -13145,6 +13407,8 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
     // the first one.
     std::string prov = provider_id;
     std::string prov_label;
+    std::string old_model = st_.model;
+    std::string old_provider = st_.model_provider;
     if (!prov.empty()) {
       for (size_t i = 0; i < st_.providers.size(); ++i) {
         if (st_.providers[i].id == prov) {
@@ -13179,7 +13443,10 @@ void UiApp::pick_model(const std::string& provider_id, const std::string& model_
         load_balances(false);
       });
     }
-    toast(tr("已切换到 ") + model_id);
+    if (!old_model.empty() &&
+        (old_model != model_id || old_provider != prov)) {
+      add_work_notice(tr("模型已切换：") + old_model + " → " + model_id);
+    }
     return;
   }
   // a settings field: write the key (the field reads it back from settings)

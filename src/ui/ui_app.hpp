@@ -494,6 +494,10 @@ struct AppState {
     // from the tagged stream.delta events, so the panel can show live work
     // instead of just "running".
     std::string live_text;
+    // A complete-step runs INLINE in the main conversation while it works; it
+    // is only "packaged" into the subagent panel when it finishes. The row still
+    // exists (the composer bar and routing need its id) but the panel hides it.
+    bool pending = false;
   };
   std::vector<SubagentRow> subagents;
   // Loaded transcripts for subagent TABS, keyed by subagent id. Kept separate
@@ -1107,8 +1111,18 @@ class UiApp {
   void refresh_steering(const std::string& sid);
   // Replies to session.loopState arrive asynchronously and can be OLDER than an
   // event that already changed the state (a `loop.interrupted` that cleared
-  // 中止). Only the reply to the LATEST request is applied.
-  int loop_state_seq_ = 0;
+  // 中止). Only the reply to the LATEST request FOR THAT SESSION is applied; a
+  // request for the session being left must not cancel the one being opened.
+  std::map<std::string, int> loop_state_seq_;
+  // session.list replies are per project and can arrive out of order when the
+  // user switches quickly (each switch asks again). Only the newest request for
+  // that project may write its rows, or an older snapshot puts a stale "running"
+  // back after a newer one cleared it.
+  std::map<std::string, int> sessions_seq_;
+  // Bumped by every pushed session.status. A session.list reply requested
+  // BEFORE a push is a snapshot of an older moment; if this changed, the reply
+  // must not put its "running" back over the pushed value.
+  int status_epoch_ = 0;
   // Bumped whenever a turn STARTS. A loopState reply requested before that
   // carries "idle" for a turn that has since begun; applying it cleared the
   // fresh 中止 button. Only a reply from the same turn epoch may clear running.
@@ -1171,6 +1185,10 @@ class UiApp {
 
   // actions (public: also callable from tests and future menu bindings)
   void toast(const std::string& text);
+  // Put a human-facing event into the current turn's WORK LOG (auto-continue
+  // reason, interrupt cause, model switch). These are notes about the work, not
+  // answers and not three-second toasts that vanish before they can be read.
+  void add_work_notice(const std::string& text);
   // The core of a send once the text is decided: optimistic echo, then
   // session.send. Split out because 编辑并重发 has to trim the old turn FIRST and
   // only then send, so its callback needs to run exactly this.

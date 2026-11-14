@@ -145,6 +145,7 @@ FsResult AgentLoop::send(const std::string& text) {
   }
   auto_continues_ = 0;
   current_auto_round_.store(0);  // a user message is never an auto round
+  current_auto_reason_.clear();
   return run_turn(combined);
 }
 
@@ -916,30 +917,26 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
     result["errCode"] = err_code_name(r.code);
     if (r.denied()) result["denial"] = r.denial.reason;
   }
+  // `summary` is a HUMAN display label, not data. Serializing it into the model
+  // content charged the model for text meant for the transcript. Every tool's
+  // label is now derived by the UI (ui_tool_display.cpp) from name/args/detail.
+  // A SUBAGENT's summary is the deliverable of a complete-step, so that one is
+  // kept: it is the answer the main agent asked for.
+  const bool summary_is_payload =
+      name.rfind("subagent_", 0) == 0;
+  if (!summary_is_payload) result.erase("summary");
   pending_tool_results_.push_back(
       Json{{"name", name}, {"args", args}, {"id", current_call_id_},
            {"result", result}});
 
-  std::string summary;
-  if (!r.ok()) {
-    summary = result.contains("error") && result["error"].is_string()
-                  ? result["error"].get<std::string>()
-                  : err_code_name(r.code);
-  } else if (result.contains("summary") && result["summary"].is_string()) {
-    summary = result["summary"].get<std::string>();
-  } else if (result.contains("path") && result["path"].is_string()) {
-    summary = result["path"].get<std::string>();
-  } else if (result.contains("content") && result["content"].is_string()) {
-    summary = "ok";
-  } else {
-    summary = "ok";
-  }
   Json call = Json::object();
   call["name"] = name;
   call["args"] = args;
   call["id"] = current_call_id_;
-  call["ok"] = r.ok();
-  call["summary"] = summary;
+  // A completed subagent whose own loop failed reports `failed:true` while the
+  // tool call itself succeeded; the row must be red, not a green "done".
+  const bool tool_ok = r.ok() && !jsonutil::get<bool>(result, "failed", false);
+  call["ok"] = tool_ok;
   std::string body = dump_safe(result, 2);
   // Truncation must land on a character boundary: half a CJK character is
   // invalid UTF-8 and json::dump() throws when this is replayed next turn.
@@ -961,8 +958,8 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
     while (live_tools_.size() > 200) live_tools_.erase(live_tools_.begin());
   }
 
-  emit("tool.update", Json{{"sid", opts_.sid}, {"name", name}, {"ok", r.ok()},
-                           {"summary", summary}, {"detail", body},
+  emit("tool.update", Json{{"sid", opts_.sid}, {"name", name}, {"ok", tool_ok},
+                           {"args", args}, {"detail", body},
                            {"callId", current_call_id_}});
   return FsResult::success();
 }
@@ -1539,6 +1536,9 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   if (this_auto_round > 0) {
     user_turn["autoRound"] = this_auto_round;
     user_turn["system"] = true;  // not typed by the user: render as a marker
+    if (!current_auto_reason_.empty()) {
+      user_turn["autoReason"] = current_auto_reason_;
+    }
   }
   Json asst_turn = Json::object();
   asst_turn["role"] = "assistant";
@@ -1631,8 +1631,21 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     // mode a turn that actually executed tools is unfinished work: continue even
     // without a plan/todo. A text-only Q&A still stops (and the empty-round
     // guard handles a model that only narrates), so this cannot spin forever.
+    //
+    // BUT a project that HAS tracking and whose tracking is all done is finished:
+    // "plan done + todo done" must stop even though a tool ran in the last round.
+    // Otherwise the fallback turned every final verification command into another
+    // request ("plan/todo 都 done 了还因为调用了工具继续").
+    bool has_tracking = false;
+    if (runtime_state) {
+      RuntimeState st = runtime_state();
+      if (st.todos.is_array() && !st.todos.empty()) has_tracking = true;
+      if (st.plan.is_object() && jsonutil::get<bool>(st.plan, "exists", false)) {
+        has_tracking = true;
+      }
+    }
     if (!auto_continue && opts_.context.auto_mode && !opts_.unattended &&
-        runtime_state && turn_had_tools) {
+        runtime_state && turn_had_tools && !has_tracking) {
       auto_continue = true;
       auto_why = zh ? "本轮执行了工具，任务可能尚未完成（未建 todo/plan 也继续）"
                     : "tool work ran without a plan/todo; continuing";
@@ -1754,6 +1767,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
       // so a reload does not present "Continue." as something the user typed.
       last_user_text_ = nudge;
       current_auto_round_.store(auto_continues_);
+      current_auto_reason_ = auto_why;
       turn_started_ms_ = WallClock().now_ms();
       // Hand the next round to the run_loop() trampoline instead of recursing.
       auto_pending_ = true;
@@ -1772,6 +1786,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   // next manual send.
   if (!auto_continue) compress_durable_history(nullptr);
   current_auto_round_.store(0);
+  current_auto_reason_.clear();
   auto_continues_ = 0;
   return FsResult::success();
 }
@@ -1825,6 +1840,7 @@ void AgentLoop::persist_user_turn_only(int64_t now_ms) {
   if (ar > 0) {
     user_turn["autoRound"] = ar;
     user_turn["system"] = true;
+    if (!current_auto_reason_.empty()) user_turn["autoReason"] = current_auto_reason_;
   }
   persist_turn(user_turn);
 }

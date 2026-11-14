@@ -140,7 +140,8 @@ FS_TEST(loop_tool_call_events_and_persist) {
     if (jsonutil::get<std::string>(t, "role", "") == "assistant") persisted = t;
   };
   loop.invoke_tool = [](const ToolContext&, const std::string& name, const Json&) {
-    return FsResult::success(Json{{"summary", "42 lines"}, {"content", "x"}});
+    return FsResult::success(Json{{"startLine", 1}, {"endLine", 42},
+                                  {"totalLines", 42}, {"content", "x"}});
   };
   int calls = 0;
   loop.call_model = [&calls](const ModelCallRequest&, ModelCallResult* out,
@@ -170,18 +171,19 @@ FS_TEST(loop_tool_call_events_and_persist) {
   EXPECT_EQ(jsonutil::get<std::string>(start_payload, "name", ""),
             std::string("read_file"));
   EXPECT_TRUE(start_payload.contains("args"));
-  // ...update carries the verdict and a one-line summary.
+  // ...update carries the verdict and the data; the one-line label is a UI
+  // concern and is NOT sent to the model.
   EXPECT_TRUE(jsonutil::get<bool>(update_payload, "ok", false));
-  EXPECT_EQ(jsonutil::get<std::string>(update_payload, "summary", ""),
-            std::string("42 lines"));
+  EXPECT_FALSE(update_payload.contains("summary"));
+  EXPECT_TRUE(update_payload.contains("args"));
   EXPECT_TRUE(update_payload.contains("detail"));
 
   // The stored assistant turn keeps what ran, so a reload shows the same rows.
   EXPECT_TRUE(persisted.contains("toolCalls"));
   EXPECT_EQ(persisted["toolCalls"].size(), static_cast<size_t>(1));
-  EXPECT_EQ(jsonutil::get<std::string>(persisted["toolCalls"][0], "summary", ""),
-            std::string("42 lines"));
+  EXPECT_FALSE(persisted["toolCalls"][0].contains("summary"));
   EXPECT_TRUE(jsonutil::get<bool>(persisted["toolCalls"][0], "ok", false));
+  EXPECT_TRUE(persisted["toolCalls"][0].contains("detail"));
 }
 
 // ---------- Loop：挂起后不再发新调用 ----------

@@ -31,6 +31,7 @@ Json SubagentRecord::to_json() const {
   j["cwd"] = cwd;
   j["depth"] = depth;
   j["status"] = subagent_status_str(status);
+  if (failed) j["failed"] = true;
   j["startedAt"] = started_at;
   j["endedAt"] = ended_at;
   j["summary"] = summary;
@@ -88,12 +89,13 @@ FsResult SubagentManager::spawn(const std::string& parent_sid, const std::string
 
 FsResult SubagentManager::complete_with_summary(const std::string& id,
                                                const std::string& summary,
-                                               const Json& full) {
+                                               const Json& full, bool failed) {
   auto it = records_.find(id);
   if (it == records_.end()) {
     return FsResult::error(ErrCode::kNotFound, "subagent not found: " + id);
   }
   it->second.status = SubagentStatus::kDone;
+  it->second.failed = failed;
   it->second.ended_at = clock_->now_ms();
   it->second.summary = summary;
   it->second.full = full;

@@ -192,6 +192,10 @@ struct ChatMsg {
   // lands AFTER those tools instead of at the top of the turn.
   std::vector<std::string> guidance;
   std::vector<size_t> guidance_after;
+  // Human-facing events about this turn (auto-continue reason, why it broke, a
+  // model switch). Rendered as plain notes in the work log, after the tools.
+  // They are NOT the answer and NOT model narration.
+  std::vector<std::string> notices;
   // How many tool calls had already run when each note arrived (parallel to
   // `interim`). The work stream places note k immediately before tool
   // interim_after[k]; a round with several tool calls made the old "note index

@@ -651,7 +651,8 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
     if (out) *out = res;
     return FsResult::success(res);
   };
-  ctx.subagent_op = [this, sid](const Json& args, Json* out) -> FsResult {
+  std::function<bool()> cancel_flag = ctx.cancel;
+  ctx.subagent_op = [this, sid, cancel_flag](const Json& args, Json* out) -> FsResult {
     std::string op = jsonutil::get<std::string>(args, "op", "");
     if (op == "spawn") {
       std::string kind = jsonutil::get<std::string>(args, "kind", "research");
@@ -692,22 +693,35 @@ ToolContext AgentHost::make_ctx(const std::string& sid, bool auto_mode) {
         int64_t waited = 0;
         std::string summary;
         bool done = false;
+        bool failed = false;
+        bool cancelled = false;
         for (;;) {
           {
             std::lock_guard<std::recursive_mutex> host_lock(lock());
             const SubagentRecord* rec = subagents_.find(id);
             if (rec && rec->status != SubagentStatus::kRunning) {
               summary = rec->summary;
+              failed = rec->failed;
               done = true;
             }
           }
           if (done) break;
+          if (cancel_flag && cancel_flag()) {
+            // The parent turn was stopped while this step was blocking: cancel
+            // the subagent instead of leaving the tool wait pinned to it.
+            subagent_cancel(id);
+            cancelled = true;
+            break;
+          }
           if (timeout > 0 && waited >= timeout) break;
           std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
           waited += kPollMs;
         }
         Json res = Json{{"id", id}, {"kind", kind},
-                        {"status", done ? "done" : "running"}};
+                        {"status", cancelled ? "cancelled"
+                                             : (failed ? "failed"
+                                                       : (done ? "done" : "running"))}};
+        if (failed) res["failed"] = true;
         if (!summary.empty()) res["summary"] = summary;
         if (!step.empty()) res["step"] = step;
         if (out) *out = res;
@@ -1175,7 +1189,19 @@ FsResult AgentHost::subagent_spawn(const std::string& sid, const std::string& ki
                            sub_model, sub_depth]() {
     g_in_subagent_thread = true;
     Json out = Json::object();
-    FsResult rr = run_subagent(req, seed, &out);
+    FsResult rr = FsResult::success();
+    // A throw inside a std::thread terminates the PROCESS. run_turn is guarded,
+    // but a failure before/after it (context build, persistence) must still
+    // produce a subagent.done and a failed step instead of a silent hang.
+    try {
+      rr = run_subagent(req, seed, &out);
+    } catch (const std::exception& e) {
+      rr = FsResult::error(ErrCode::kInternal,
+                           std::string("subagent internal error: ") + e.what());
+    } catch (...) {
+      rr = FsResult::error(ErrCode::kInternal, "subagent internal error");
+    }
+    const bool failed = !rr.ok();
     std::string summary = rr.ok()
         ? jsonutil::get<std::string>(out, "summary", "")
         : (rr.message.empty() ? "subagent failed" : rr.message);
@@ -1189,7 +1215,7 @@ FsResult AgentHost::subagent_spawn(const std::string& sid, const std::string& ki
     Json record_json = Json::object();
     {
       std::lock_guard<std::recursive_mutex> host_lock(lock());
-      subagents_.complete_with_summary(sub_id, summary, full);
+      subagents_.complete_with_summary(sub_id, summary, full, failed);
       // Snapshot the finished record while holding the lock, then persist it
       // OUTSIDE the lock: this is file IO, and holding the host lock across it
       // would block every other agent call (the same rule that fixed the
@@ -1214,7 +1240,9 @@ FsResult AgentHost::subagent_spawn(const std::string& sid, const std::string& ki
       }
     }
     Json payload = Json{{"sid", parent}, {"id", sub_id}, {"kind", sub_kind},
-                        {"summary", summary}};
+                        {"summary", summary}, {"task", sub_task},
+                        {"status", failed ? "failed" : "done"}};
+    if (failed) payload["failed"] = true;
     if (!step_snapshot.empty()) payload["step"] = step_snapshot;
     // Persist AFTER releasing the lock: this is file IO, and holding the host
     // lock across it would block every other agent call.

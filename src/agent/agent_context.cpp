@@ -181,6 +181,11 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
           "规划与摘要，逐步的工作过程在侧栏可查、不占主上下文。只有确实一步就能"
           "做完的小事才留在主会话，不要把所有步骤都自己做。");
       out.push_back(
+          "- **主动用 complete_step，不要等用户催**：任何需要读/改多份文件、跑命令"
+          "或多轮工具调用的实现步骤，都算\"一步\"，默认交给 complete-step；"
+          "主会话自己逐步做会把工具过程全部塞进上下文，越做越慢。"
+          "只有在一步只包含一两次只读/简单编辑时才留在主会话。");
+      out.push_back(
           "- 依赖关系：后一步依赖前一步结果时，等它返回摘要再派下一步；"
           "互不依赖的可以一次并行派出。");
     }
@@ -243,6 +248,13 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
           "- Ordering: when a step needs the previous step's result, wait for its "
           "summary before spawning the next; independent steps can go out in "
           "parallel in one go.");
+      out.push_back(
+          "- USE complete-step PROACTIVELY. Any implementation step that reads or "
+          "edits several files, runs commands, or needs more than a couple of tool "
+          "calls is ONE step: delegate it (kind=complete-step) instead of doing it "
+          "inline. Doing it in the main conversation stuffs every tool payload into "
+          "the context and makes the whole session slower. Keep only one or two "
+          "read-only/simple edits inline.");
     }
   }
 

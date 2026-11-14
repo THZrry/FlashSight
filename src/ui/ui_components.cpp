@@ -715,7 +715,8 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
     if (!text_is_blank(m.thoughts[i].text)) { has_thought = true; break; }
   }
   bool has_work = !text_is_blank(m.thinking) || has_thought || !m.tools.empty() ||
-                  !m.interim.empty() || !m.work_live.empty();
+                  !m.interim.empty() || !m.work_live.empty() ||
+                  !m.notices.empty();
   if (has_work) {
     int nfail = 0;
     for (size_t i = 0; i < m.tools.size(); ++i) if (!m.tools[i].ok) ++nfail;
@@ -939,6 +940,14 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       if (!m.work_live.empty()) {
         inner.add(el("div", "work-label").text(tr("子代理过程")));
         inner.add(el("div", "work-note work-subagent").text(m.work_live));
+      }
+      // Human-facing events about the turn (auto-continue reason, interrupt
+      // cause, model switch). A note, not the answer, not a toast.
+      for (size_t n = 0; n < m.notices.size(); ++n) {
+        H note = el("div", "work-note work-event");
+        note.add(el("i", "fa fa-circle-info"));
+        note.add(el("span").text(m.notices[n]));
+        inner.add(note);
       }
       // Legacy single thinking block (old stored turns): the stored turn has one
       // coalesced blob, so it cannot be interleaved. It still uses the same fold

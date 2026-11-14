@@ -33,6 +33,10 @@ struct SubagentRecord {
   std::string cwd;
   int depth = 1;             // 深度（上限 3）
   SubagentStatus status = SubagentStatus::kRunning;
+  // The task finished but its agent loop failed (provider error, tool crash).
+  // Distinct from "done": the parent must see a failed step, not a successful
+  // one with an error sentence inside the summary.
+  bool failed = false;
   int64_t started_at = 0;
   int64_t ended_at = 0;
   std::string summary;       // 回父的 summary（/return 自动执行后只给这个）
@@ -70,7 +74,7 @@ class SubagentManager {
 
   // /return：子代理输出结束后自动执行（只给主代理返回摘要）
   FsResult complete_with_summary(const std::string& id, const std::string& summary,
-                                 const Json& full);
+                                 const Json& full, bool failed = false);
 
   // cancel：取消与超时落库
   FsResult cancel(const std::string& id);

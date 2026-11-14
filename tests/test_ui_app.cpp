@@ -3802,11 +3802,62 @@ FS_TEST(uiapp_interrupt_bar_continues) {
   app.on_backend_event_for_test("loop.interrupted", Json{{"sid", "sess_a"}});
   std::string d = dom.dump();
   EXPECT_TRUE(d.find("interrupt-bar") != std::string::npos);
-  EXPECT_TRUE(d.find("任务已中断") != std::string::npos);
+  EXPECT_TRUE(d.find("会话已中断") != std::string::npos);
   EXPECT_TRUE(d.find("继续") != std::string::npos);
+  EXPECT_TRUE(d.find("忽略") != std::string::npos);
+  EXPECT_TRUE(d.find("复制") != std::string::npos);
   // dismissing it removes the bar
   app.update([](AppState& s) { s.interrupted = false; });
   EXPECT_TRUE(dom.dump().find("interrupt-bar") == std::string::npos);
+}
+
+// A pushed session.status must clear BOTH the active composer and the sidebar
+// row immediately: waiting for a coalesced session.list is how a failed session
+// kept showing "running" after a switch.
+FS_TEST(uiapp_session_status_push_clears_running) {
+  NullDom dom;
+  AppState st = AppState::make();
+  seed_project(st);
+  seed_session(st, "sess_a");
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    s.turn_running = true;
+    s.auto_round = 2;
+    s.projects[0].sessions[0].running = true;
+    s.projects[0].sessions[0].auto_round = 2;
+  });
+  app.on_backend_event_for_test(
+      "session.status",
+      Json{{"sid", "sess_a"}, {"running", false}, {"state", "turnDone"},
+           {"autoRound", 0}, {"error", "provider 429"}});
+  EXPECT_FALSE(app.state().turn_running);
+  EXPECT_EQ(app.state().auto_round, 0);
+  ASSERT_TRUE(!app.state().projects.empty() &&
+              !app.state().projects[0].sessions.empty());
+  const ProjectCard::SessionRow& row = app.state().projects[0].sessions[0];
+  EXPECT_FALSE(row.running);
+  EXPECT_EQ(row.auto_round, 0);
+  EXPECT_EQ(row.last_error, std::string("provider 429"));
+  EXPECT_EQ(row.loop_state, std::string("turnDone"));
+}
+
+// Auto-continue reason / stop reason belong to the WORK LOG, not a toast that
+// disappears in three seconds.
+FS_TEST(uiapp_auto_round_reason_is_a_work_note) {
+  NullDom dom;
+  AppState st = AppState::make();
+  seed_project(st);
+  seed_session(st, "sess_a");
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.on_backend_event_for_test(
+      "auto.next",
+      Json{{"sid", "sess_a"}, {"round", 2}, {"reason", "2 open checklist items"}});
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("自动继续（第 2 轮）：2 open checklist items") !=
+              std::string::npos);
+  EXPECT_TRUE(app.state().toast.empty());
 }
 
 // The git panel is a real view: branch, ahead/behind, two change groups, and a
@@ -4503,7 +4554,10 @@ FS_TEST(uiapp_tool_call_start_and_complete) {
   app.on_backend_event_for_test(
       "tool.update",
       Json{{"name", "read_file"}, {"ok", true},
-           {"summary", "42 lines"}, {"detail", "line1\nline2"}});
+           {"args", Json{{"path", "main.cpp"}}},
+           {"detail", Json{{"startLine", 5}, {"endLine", 10},
+                           {"totalLines", 42}, {"content", "line1\nline2"}}
+                          .dump()}});
   // Completed IN PLACE: still one row, no longer running, verdict visible.
   EXPECT_EQ(app.state().messages.back().tools.size(), 1u);
   EXPECT_FALSE(app.state().messages.back().tools[0].running);
@@ -4514,7 +4568,8 @@ FS_TEST(uiapp_tool_call_start_and_complete) {
   EXPECT_TRUE(app.state().messages.back().tools[0].input.find("main.cpp") !=
               std::string::npos);
   std::string done = dom.dump();
-  EXPECT_TRUE(done.find("42 lines") != std::string::npos);
+  // The one-line label is GENERATED from args/detail now (not sent by the tool).
+  EXPECT_TRUE(done.find("main.cpp 5-10/42 lines") != std::string::npos);
   EXPECT_TRUE(done.find("tool-block running") == std::string::npos);
 
   // A failure marks the row, and the detail is kept for the expandable body.
@@ -5031,6 +5086,39 @@ FS_TEST(uiapp_subagent_events_split_by_kind) {
   EXPECT_TRUE(dom.dump().find("step output") != std::string::npos);
 }
 
+// A complete-step runs INLINE while it works and is packaged into the subagent
+// panel only after it finishes (including a failed finish).
+FS_TEST(uiapp_complete_step_moves_to_panel_when_done) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  app.update([](AppState& s) {
+    seed_session(s, "sess_a");
+    s.side_collapsed = false;
+    s.active_side = "subagents";
+  });
+  app.on_backend_event_for_test(
+      "subagent.started",
+      Json{{"sid", "sess_a"}, {"id", "sa_step"}, {"kind", "complete-step"},
+           {"task", "implement it"}});
+  ASSERT_TRUE(app.state().subagents.size() == 1u);
+  EXPECT_TRUE(app.state().subagents[0].pending);
+  EXPECT_TRUE(dom.dump().find("sa_step") == std::string::npos);
+
+  app.on_backend_event_for_test(
+      "subagent.done",
+      Json{{"sid", "sess_a"}, {"id", "sa_step"}, {"kind", "complete-step"},
+           {"task", "implement it"}, {"summary", "boom"}, {"status", "failed"},
+           {"failed", true}});
+  ASSERT_TRUE(app.state().subagents.size() == 1u);
+  EXPECT_FALSE(app.state().subagents[0].pending);
+  EXPECT_EQ(app.state().subagents[0].status, std::string("failed"));
+  std::string d = dom.dump();
+  EXPECT_TRUE(d.find("sa_step") != std::string::npos);
+  EXPECT_TRUE(d.find("失败") != std::string::npos);
+}
+
 // ---- 第四十三批：todo 悬浮清单 / 思考排在工作过程末尾 / 子代理记录里的工具 ----
 
 // The model's checklist has its own floating panel. Before this, todo.updated
@@ -5342,9 +5430,10 @@ FS_TEST(uiapp_subagent_overview_is_truncated_and_marks_running) {
   EXPECT_FALSE(d.find("SUM_END") != std::string::npos);    // clamped
   // The running card carries the live marker; the done card its result.
   EXPECT_TRUE(d.find("LIVE_MARK") != std::string::npos);
-  // The composer names the send target: step work runs in the subagent, so a
-  // typed 引导 must not silently go to the main session.
-  EXPECT_TRUE(d.find("当前步骤在子代理中执行") != std::string::npos);
+  // The composer names the send target: step work runs inline in the main
+  // conversation (and moves to the subagent panel when done), so a typed 引导
+  // must not silently go to the main session.
+  EXPECT_TRUE(d.find("当前步骤在主界面内联执行") != std::string::npos);
 }
 
 // Detail page order: the WORK (chronological process log) comes before the

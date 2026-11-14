@@ -213,6 +213,71 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
       if (!sub_id.empty()) workflow_on_subagent_done(sub_id);
     }
     emit_event(e, p);
+    // SESSION STATUS IS PUSHED. The sidebar rows used to learn "running" only
+    // from a coalesced session.list refresh (or a 2 s watchdog), so a failure
+    // appeared late and a tab you had just left could keep a stale spinning dot.
+    // Every lifecycle event now carries the authoritative state immediately.
+    const bool status_event =
+        e == "turn.started" || e == "turn.done" || e == "loop.interrupted" ||
+        e == "loop.resumed" || e == "loop.state" || e == "auto.next" ||
+        e == "auto.halted" || e == "loop.paused" ||
+        e == "permission.prompt" || e == "ask.prompt";
+    if (status_event) {
+      std::string sid = jsonutil::get<std::string>(p, "sid", "");
+      if (!sid.empty()) {
+        bool running = false;
+        bool have_running = false;
+        std::string state;
+        int64_t auto_round = agent_host_ ? agent_host_->auto_round(sid) : 0;
+        std::string error;
+        if (e == "turn.started" || e == "loop.resumed") {
+          running = true;
+          have_running = true;
+          state = "planning";
+        } else if (e == "auto.next") {
+          running = true;
+          have_running = true;
+          state = "planning";
+          auto_round = jsonutil::get_int(p, "round", auto_round);
+        } else if (e == "turn.done" || e == "loop.interrupted" ||
+                   e == "loop.paused" || e == "auto.halted") {
+          running = false;
+          have_running = true;
+          state = "turnDone";
+          auto_round = 0;
+          if (e == "loop.interrupted") {
+            error = jsonutil::get<std::string>(p, "error", "");
+          }
+        } else if (e == "loop.state") {
+          std::string s = jsonutil::get<std::string>(p, "state", "");
+          if (s == "suspended" || s == "suspending" || s == "idle" ||
+              s == "turnDone") {
+            running = false;
+            state = s == "suspending" ? "suspended" : s;
+            have_running = true;
+            auto_round = 0;
+          } else if (s == "resumed" || s == "waiting") {
+            running = true;
+            state = s;
+            have_running = true;
+          }
+        } else if (e == "permission.prompt" || e == "ask.prompt") {
+          running = true;
+          state = "waiting";
+          have_running = true;
+        }
+        if (!have_running) {
+          // Anything not covered above reads the host directly; by now the loop
+          // has already settled its state for terminal events.
+          running = agent_host_ && agent_host_->is_running(sid);
+          state = agent_host_ ? agent_host_->loop_state(sid) : "";
+        }
+        Json sp = Json{{"sid", sid}, {"running", running}, {"state", state},
+                       {"autoRound", auto_round}};
+        if (!error.empty()) sp["error"] = error;
+        emit_event("session.status", sp);
+      }
+    }
   };
   // 黑白名单判定（permissions.files.blacklist/whitelist；黑 > 白 > 默认档）
   DenyList* dl = deny_list_.get();
