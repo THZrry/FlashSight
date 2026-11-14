@@ -493,13 +493,22 @@ class FsApi {
   //   status() -> {running, host, port, password, url}
   std::function<bool(int, const std::string&, const std::string&)> ui_server_restart_;
   std::function<Json()> ui_server_status_;
+  std::function<void()> ui_server_stop_;
+  // Web is served BY the server, so a loopback listener is meaningful there.
+  // Native windows are their own UI: a loopback server is pointless, but 0.0.0.0
+  // is still allowed for LAN access. `apply_server_settings` follows this flag.
+  bool ui_server_local_allowed_ = true;
 
  public:
   void attach_ui_server(std::function<bool(int, const std::string&,
                                            const std::string&)> restart,
-                        std::function<Json()> status) {
+                        std::function<Json()> status,
+                        std::function<void()> stop = nullptr,
+                        bool local_allowed = true) {
     ui_server_restart_ = std::move(restart);
     ui_server_status_ = std::move(status);
+    ui_server_stop_ = std::move(stop);
+    ui_server_local_allowed_ = local_allowed;
   }
   // 把 server.* 设置应用到服务器（改绑定/密码时重启）
   void apply_server_settings();

@@ -3,6 +3,7 @@
 #include "test_framework.hpp"
 
 #include "core/fs_api.hpp"
+#include "core/settings_store.hpp"
 #include "ui/ui_api.hpp"
 #include "ui/ui_backend.hpp"
 #include "ui/ui_native_backend.hpp"
@@ -209,4 +210,53 @@ FS_TEST(uiapi_terminal_timeout_is_listed_and_running) {
   }
   EXPECT_TRUE(found);
   ASSERT_TRUE(ts.api.terminal_kill(tid).ok());
+}
+
+// Native builds must START a server for 0.0.0.0 but never for 127.0.0.1; the
+// Web build allows both. Switching 0.0.0.0 -> 127.0.0.1 in a native build stops
+// the server instead of leaving a loopback listener running.
+FS_TEST(uiapi_server_host_rules_by_variant) {
+  fstest::TempDir tmp("srvhost");
+  FsApi api(tmp.path());
+  int restarts = 0, stops = 0;
+  std::string last_host;
+  Json status = Json{{"running", false}, {"host", ""}, {"port", 0}};
+  api.attach_ui_server(
+      [&](int, const std::string& host, const std::string&) {
+        ++restarts;
+        last_host = host;
+        status["running"] = true;
+        status["host"] = host;
+        return true;
+      },
+      [&]() { return status; },
+      [&]() {
+        ++stops;
+        status["running"] = false;
+      },
+      false);
+  api.settings_set(kKeyServerHost, Json("0.0.0.0"), "");
+  EXPECT_EQ(restarts, 1);
+  EXPECT_EQ(last_host, std::string("0.0.0.0"));
+  EXPECT_TRUE(jsonutil::get<bool>(api.server_status().data, "localAllowed", true) == false);
+  api.settings_set(kKeyServerHost, Json("127.0.0.1"), "");
+  EXPECT_EQ(stops, 1);
+  EXPECT_EQ(restarts, 1);
+}
+
+FS_TEST(uiapi_server_loopback_allowed_for_web) {
+  fstest::TempDir tmp("srvweb");
+  FsApi api(tmp.path());
+  int restarts = 0;
+  Json status = Json{{"running", false}};
+  api.attach_ui_server(
+      [&](int, const std::string&, const std::string&) {
+        ++restarts;
+        status["running"] = true;
+        return true;
+      },
+      [&]() { return status; }, [&]() { status["running"] = false; }, true);
+  api.settings_set(kKeyServerHost, Json("127.0.0.1"), "");
+  EXPECT_EQ(restarts, 1);
+  EXPECT_TRUE(jsonutil::get<bool>(api.server_status().data, "localAllowed", false));
 }

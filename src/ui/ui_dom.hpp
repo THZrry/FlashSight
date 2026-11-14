@@ -315,6 +315,16 @@ class IDom {
   // programmatically (inline completion). Without this the browser puts the
   // caret at the END of the new value, and editing a path in the middle jumps.
   virtual void set_text_caret(Node node, int pos) { (void)node; (void)pos; }
+  // Follow a server move (the Web build's page is served BY the server; a port
+  // change retires the old listener). Returns false when the platform has no
+  // navigation (the native window is not served over HTTP).
+  virtual bool navigate(const std::string& url) { (void)url; return false; }
+  // Hostname the page itself was loaded from. Used to build the new URL from the
+  // SAME host (127.0.0.1 stays local; a phone's LAN address is kept) instead of
+  // guessing 0.0.0.0. Empty when unknown.
+  virtual std::string location_host() const { return std::string(); }
+  // Port the page itself was loaded from ("" = default port).
+  virtual std::string location_port() const { return std::string(); }
 
   // --- file picker (upload) ---
   // Clicking `node` opens the OS file chooser. The picked files are sent to the

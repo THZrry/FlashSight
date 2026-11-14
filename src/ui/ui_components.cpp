@@ -860,11 +860,10 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       if (m.tools.size() > kMaxVisibleTools) {
         first_tool = m.tools.size() - kMaxVisibleTools;
       }
-      if (first_tool > 0) {
+      if (first_tool > 0 || m.tools_omitted > 0) {
         // Skip notes/reasoning/guidance that belong to the hidden prefix; they
         // would otherwise all pile up above the first visible tool.
-        while (interim_at < m.interim.size()) {
-          size_t a = interim_at < m.interim_after.size()
+        while (interim_at < m.interim.size()) {          size_t a = interim_at < m.interim_after.size()
                          ? m.interim_after[interim_at]
                          : interim_at;
           if (a >= first_tool) break;
@@ -882,7 +881,7 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           ++guidance_at;
         }
         inner.add(el("div", "work-note dim").text(
-            tr("更早的 ") + itos(static_cast<int>(first_tool)) +
+            tr("更早的 ") + itos(static_cast<int>(first_tool) + m.tools_omitted) +
             tr(" 步已省略；完整记录保存在会话中")));
       }
       flush_guidance(first_tool);

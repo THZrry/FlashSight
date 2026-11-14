@@ -14,7 +14,9 @@
 // ui_assets_gen.hpp by xmake); only the Web build needs the wasm bundle.
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
+#include <thread>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -47,6 +49,67 @@ int run_webview_ui(FsApi* api);
 #include "ui/ui_server.hpp"
 
 namespace {
+
+// Configured listen address/port/password, read straight from settings so the
+// native and Web entry points agree on what "the server" is.
+struct ServerCfg {
+  std::string host = "127.0.0.1";
+  std::string password;
+  int port = 0;
+};
+
+ServerCfg read_server_cfg(fs::FsApi& api) {
+  ServerCfg c;
+  auto get_str = [&api](const char* key, const std::string& def) {
+    fs::FsResult r = api.settings_get(key, "");
+    if (!r.ok()) return def;
+    const fs::Json& v = r.data.contains("value") ? r.data["value"] : fs::Json();
+    return v.is_string() ? v.get<std::string>() : def;
+  };
+  auto get_int = [&api](const char* key, int def) {
+    fs::FsResult r = api.settings_get(key, "");
+    if (!r.ok()) return def;
+    const fs::Json& v = r.data.contains("value") ? r.data["value"] : fs::Json();
+    return v.is_number() ? static_cast<int>(v.get<int64_t>()) : def;
+  };
+  c.host = get_str(fs::kKeyServerHost, "127.0.0.1");
+  if (c.host.empty()) c.host = "127.0.0.1";
+  c.password = get_str(fs::kKeyServerPassword, "");
+  c.port = get_int(fs::kKeyServerPort, 0);
+  return c;
+}
+
+bool loopback_host(const std::string& h) {
+  return h == "127.0.0.1" || h == "localhost" || h == "::1";
+}
+
+// One attach path for all three variants. `local_allowed` is true only for the
+// Web build: a native window never starts a loopback server, but 0.0.0.0 (LAN)
+// is valid everywhere. The server is shared so a stop requested from a REMOTE
+// settings request can tear it down on a separate thread without a use-after-free
+// and without deadlocking the request that asked for it.
+void attach_server(const std::shared_ptr<fs::ui::UiServer>& server, fs::FsApi& api,
+                   bool local_allowed) {
+  server->bind_api(&api);
+  api.attach_ui_server(
+      [server](int p, const std::string& host, const std::string& pw) {
+        return server->restart(p, host, pw).ok();
+      },
+      [server]() {
+        return fs::Json{{"running", server->running()},
+                        {"host", server->host()},
+                        {"port", server->port()},
+                        {"password", server->requires_password()},
+                        {"rebinding", server->rebinding()},
+                        {"error", server->last_error()},
+                        {"lanIp", server->lan_ip()},
+                        {"url", server->url()}};
+      },
+      [server]() {
+        std::thread([server]() { server->stop(); }).detach();
+      },
+      local_allowed);
+}
 
 #if !defined(FS_UI_WHALEUI) && !defined(FS_UI_WEBVIEW)
 // 用系统默认浏览器打开 URL（Windows: start / POSIX: xdg-open）
@@ -102,77 +165,51 @@ int main(int argc, char** argv) {
   std::printf("UI: webview (native window)\n");
 #endif
   std::printf("data root: %s\n", data_root.string().c_str());
+  // Native windows have their own UI. A loopback HTTP server is the Web build's
+  // job; 0.0.0.0 is allowed here for LAN/remote access and is what the settings
+  // page switches on. The server object is attached in every case so a later
+  // change to 0.0.0.0 can start it without restarting the app.
+  std::shared_ptr<fs::ui::UiServer> server =
+      std::make_shared<fs::ui::UiServer>();
+  attach_server(server, api, false);
+  ServerCfg cfg = read_server_cfg(api);
+  if (!loopback_host(cfg.host)) {
+    fs::FsResult sr = server->start(cfg.port, cfg.host, cfg.password);
+    if (sr.ok()) {
+      std::printf("UI server: %s\n", server->url().c_str());
+    } else {
+      std::fprintf(stderr, "UI server not started: %s\n", sr.message.c_str());
+    }
+  }
 #if defined(FS_UI_WHALEUI)
   return fs::ui::run_whale_ui(&api);
 #else
   return fs::ui::run_webview_ui(&api);
 #endif
 #else
-  // Web variant: the browser is the UI (decided at compile time), so the server
-  // IS the app. Same settings as the desktop builds, same auth gate.
-  fs::ui::UiServer server;
-  server.bind_api(&api);
-  api.attach_ui_server(
-      [&server](int p, const std::string& host, const std::string& pw) {
-        return server.restart(p, host, pw).ok();
-      },
-      [&server]() {
-        return fs::Json{{"running", server.running()},
-                    {"host", server.host()},
-                    {"port", server.port()},
-                    {"password", server.requires_password()},
-                    {"rebinding", server.rebinding()},
-                    {"error", server.last_error()},
-                    {"lanIp", server.lan_ip()},
-                    {"url", server.url()}};
-      });
-  std::string srv_host = "127.0.0.1";
-  std::string srv_pw;
-  {
-    auto get_str = [&api](const char* key, const std::string& def) {
-      fs::FsResult r = api.settings_get(key, "");
-      if (!r.ok()) return def;
-      const fs::Json& v = r.data.contains("value") ? r.data["value"] : fs::Json();
-      return v.is_string() ? v.get<std::string>() : def;
-    };
-    auto get_int = [&api](const char* key, int def) {
-      fs::FsResult r = api.settings_get(key, "");
-      if (!r.ok()) return def;
-      const fs::Json& v = r.data.contains("value") ? r.data["value"] : fs::Json();
-      return v.is_number() ? static_cast<int>(v.get<int64_t>()) : def;
-    };
-    srv_host = get_str(fs::kKeyServerHost, "127.0.0.1");
-    srv_pw = get_str(fs::kKeyServerPassword, "");
-    int cfg_port = get_int(fs::kKeyServerPort, 0);
-    if (port <= 0) {
-      port = cfg_port;
-    } else if (port != cfg_port) {
-      // A --port on the command line overrides the saved setting, but the saved
-      // setting is what every later rebind reads (apply_server_settings). Leaving
-      // them out of sync meant: start with --port 8920, touch the listen address,
-      // and the server silently jumped to the OLD saved port - the port "changed
-      // by itself". Persist the override so the config tells the truth.
-      // A --port on the command line overrides the saved setting, but the saved
-      // setting is what every later rebind reads (apply_server_settings). Leaving
-      // them out of sync meant: start with --port 8920, touch the listen address,
-      // and the server silently jumped to the OLD saved port - the port "changed
-      // by itself". Persist the override so the config tells the truth.
-      // (apply_server_settings is a no-op while the server is not running, so this
-      // does not try to rebind.)
-      api.settings_set(fs::kKeyServerPort, fs::Json(port), "");
-    }
+  std::shared_ptr<fs::ui::UiServer> server =
+      std::make_shared<fs::ui::UiServer>();
+  attach_server(server, api, true);
+  ServerCfg cfg = read_server_cfg(api);
+  if (port <= 0) {
+    port = cfg.port;
+  } else if (port != cfg.port) {
+    // A --port on the command line overrides the saved setting, but the saved
+    // setting is what every later rebind reads. Persist the override so the
+    // config tells the truth (a later host change must not jump back).
+    api.settings_set(fs::kKeyServerPort, fs::Json(port), "");
   }
-  fs::FsResult r = server.start(port, srv_host, srv_pw);
+  fs::FsResult r = server->start(port, cfg.host, cfg.password);
   if (!r.ok()) {
     std::fprintf(stderr, "failed to start UI server: %s\n", r.message.c_str());
     return 1;
   }
-  std::printf("UI server: %s%s\n", server.url().c_str(),
-              server.requires_password() ? " (password required remotely)" : "");
+  std::printf("UI server: %s%s\n", server->url().c_str(),
+              server->requires_password() ? " (password required remotely)" : "");
   std::printf("data root: %s\n", data_root.string().c_str());
   std::printf("(press Ctrl+C to quit)\n");
 
-  if (!no_browser) open_browser(server.url());
+  if (!no_browser) open_browser(server->url());
 
   // 阻塞直到 Ctrl+C
   for (;;) {

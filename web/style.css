@@ -2258,6 +2258,12 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
 .sap-msg.user { border-left: 2px solid var(--accent); }
 .sap-msg.assistant { border-left: 2px solid var(--ok, #3fb950); }
 .sap-msg.tool { border-left: 2px solid var(--text-faint); }
+/* Markdown blocks in the subagent record inherit the article styles; give them
+   side padding and let wide tables/code scroll INSIDE the narrow sidebar. */
+.sap-msg > .md-p, .sap-msg > .md-h, .sap-msg > .md-ul, .sap-msg > .md-ol,
+.sap-msg > .md-quote, .sap-msg > .md-code, .sap-msg > .md-table-wrap,
+.sap-msg > .md-table { margin-left: 9px; margin-right: 9px; }
+.sap-msg .md-table-wrap, .sap-msg pre { max-width: 100%; overflow-x: auto; }
 .sap-role {
   font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
   color: var(--text-faint);

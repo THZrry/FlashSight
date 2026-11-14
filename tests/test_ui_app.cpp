@@ -3811,6 +3811,39 @@ FS_TEST(uiapp_interrupt_bar_continues) {
   EXPECT_TRUE(dom.dump().find("interrupt-bar") == std::string::npos);
 }
 
+// A stored turn with thousands of tool rows is trimmed at LOAD time to the 300
+// the work log can show; the omitted count is kept for the notice, and anchor
+// arrays are shifted so notes cannot point at rows that no longer exist.
+FS_TEST(uiapp_stored_tool_rows_are_trimmed_at_load) {
+  NullDom dom;
+  AppState st = AppState::make();
+  UiApp app(dom, st, nullptr);
+  app.mount();
+  Json calls = Json::array();
+  for (int i = 0; i < 350; ++i) {
+    calls.push_back(Json{{"name", "read_file"},
+                         {"args", Json{{"path", "f" + std::to_string(i)}}},
+                         {"detail", Json{{"startLine", 1}, {"endLine", 1}}.dump()},
+                         {"ok", true}});
+  }
+  Json turn = Json{{"role", "assistant"},
+                   {"streamSummary", "done"},
+                   {"toolCalls", calls},
+                   {"thoughts", Json::array({Json{{"text", "early"}, {"after", 0}},
+                                             Json{{"text", "late"}, {"after", 349}}})},
+                   {"interim", Json::array({"before", "after"})},
+                   {"interimAfter", Json::array({10, 340})}};
+  comp::ChatMsg m = app.turn_to_message_for_test(turn, 0);
+  EXPECT_EQ(m.tools.size(), size_t(300));
+  EXPECT_EQ(m.tools_omitted, 50);
+  EXPECT_EQ(m.thoughts.size(), size_t(1));
+  EXPECT_EQ(m.thoughts[0].text, std::string("late"));
+  EXPECT_EQ(m.thoughts[0].after, size_t(299));
+  ASSERT_TRUE(m.interim.size() == 1u);
+  EXPECT_EQ(m.interim[0], std::string("after"));
+  EXPECT_EQ(m.interim_after[0], size_t(290));
+}
+
 // A pushed session.status must clear BOTH the active composer and the sidebar
 // row immediately: waiting for a coalesced session.list is how a failed session
 // kept showing "running" after a switch.
@@ -5367,7 +5400,7 @@ FS_TEST(uiapp_subagent_transcript_shows_tools_with_text) {
     det.row.status = "done";
     det.row.transcript = Json::array(
         {Json{{"role", "assistant"},
-              {"content", "先看看目录结构"},
+              {"content", "## 标题\n\n先看看目录结构"},
               {"toolCalls", Json::array({Json{{"name", "list_dir"}}})}},
          Json{{"role", "tool"}, {"content", "{\"ok\":true}"}}});
     s.subagent_details["sub_1"] = det;
@@ -5382,7 +5415,10 @@ FS_TEST(uiapp_subagent_transcript_shows_tools_with_text) {
   std::string d = dom.dump();
   EXPECT_TRUE(d.find("先看看目录结构") != std::string::npos);
   EXPECT_TRUE(d.find("list_dir") != std::string::npos);
-  EXPECT_TRUE(d.find("工具调用") != std::string::npos);
+  // Markdown is rendered, not dumped into <pre>.
+  EXPECT_TRUE(d.find("md-h") != std::string::npos);
+  // The call is a real tool row now (summary/input/detail), not a name string.
+  EXPECT_TRUE(d.find("tool-block") != std::string::npos);
 }
 
 // The subagent OVERVIEW is a list: one long task/summary must not push every

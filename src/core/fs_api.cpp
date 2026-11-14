@@ -665,25 +665,32 @@ void FsApi::apply_proxy_settings() {
 
 void FsApi::apply_server_settings() {
   if (!ui_server_restart_) return;   // no server in this process (tests)
-  // Before the server has started (i.e. this is being called from main() while
-  // applying command-line overrides), there is no listener to rebind: the start
-  // path will use these values directly. Triggering restart() here created a
-  // worker that bound the port, and then start() bound it again.
-  if (ui_server_status_) {
-    Json st = ui_server_status_();
-    if (!jsonutil::get<bool>(st, "running", false)) return;
-  }
   std::string host = settings_->get_value(kKeyServerHost, Json("127.0.0.1")).is_string()
                          ? settings_->get_value(kKeyServerHost, Json("127.0.0.1"))
                                .get<std::string>()
                          : "127.0.0.1";
   if (host.empty()) host = "127.0.0.1";
+  const bool loopback = host == "127.0.0.1" || host == "localhost" ||
+                        host == "::1";
+  bool running = false;
+  if (ui_server_status_) {
+    Json st = ui_server_status_();
+    running = jsonutil::get<bool>(st, "running", false);
+  }
+  // LOOPBACK IS THE WEB BUILD'S JOB. A native window already has its own UI, so
+  // "127.0.0.1" means "no server". 0.0.0.0 (LAN/remote) is allowed everywhere.
+  if (loopback && !ui_server_local_allowed_) {
+    if (running && ui_server_stop_) ui_server_stop_();
+    return;
+  }
   Json pv = settings_->get_value(kKeyServerPort, Json(0));
   int port = pv.is_number() ? static_cast<int>(pv.get<int64_t>()) : 0;
   std::string pw = settings_->get_value(kKeyServerPassword, Json("")).is_string()
                        ? settings_->get_value(kKeyServerPassword, Json(""))
                              .get<std::string>()
                        : "";
+  // restart() also STARTS a server that is not running (native, after the user
+  // chooses 0.0.0.0).
   ui_server_restart_(port, host, pw);
 }
 
@@ -693,9 +700,12 @@ FsResult FsApi::server_status() {
                                   {"host", ""},
                                   {"port", 0},
                                   {"password", false},
-                                  {"url", ""}});
+                                  {"url", ""},
+                                  {"localAllowed", ui_server_local_allowed_}});
   }
-  return FsResult::success(ui_server_status_());
+  Json st = ui_server_status_();
+  st["localAllowed"] = ui_server_local_allowed_;
+  return FsResult::success(st);
 }
 
 // The page asks these before mounting. The HTTP layer already enforces the

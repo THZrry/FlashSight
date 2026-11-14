@@ -506,6 +506,10 @@ struct AppState {
   struct SubagentDetail {
     bool loaded = false;
     SubagentRow row;
+    // Show every tool call's input/result expanded in the transcript. A single
+    // toggle keeps the record readable by default while still making the work
+    // inspectable (the panel previously printed tool NAMES only).
+    bool tools_open = false;
     // Draft of the 引导 box, which lives HERE (the detail page), not on the
     // overview card: a text field inside a card that opens on click was both
     // misplaced and unreachable (the click bubbled into the card's navigation).
@@ -755,6 +759,8 @@ struct AppState {
   std::string about_version = "0.1.0";
   // Web 服务当前状态（设置-Web 服务页回显；server.status）
   bool server_running = false;
+  // Loopback HTTP is the Web build's job; native builds only allow 0.0.0.0.
+  bool server_local_allowed = true;
   std::string server_host;
   int server_port = 0;
   bool server_requires_password = false;

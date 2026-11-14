@@ -1607,6 +1607,25 @@ class WasmDom : public IDom {
   void set_text_caret(Node node, int pos) override {
     if (node.valid()) fs_dom_set_caret(static_cast<int>(node.id), pos);
   }
+  bool navigate(const std::string& url) override {
+    if (url.empty()) return false;
+    val::global("location").set("href", url);
+    return true;
+  }
+  std::string location_host() const override {
+    try {
+      return val::global("location")["hostname"].as<std::string>();
+    } catch (...) {
+      return std::string();
+    }
+  }
+  std::string location_port() const override {
+    try {
+      return val::global("location")["port"].as<std::string>();
+    } catch (...) {
+      return std::string();
+    }
+  }
 
   void play_animation(Node node, const std::string& cls) override {
     fs_dom_play_animation(static_cast<int>(node.id), cls.c_str());

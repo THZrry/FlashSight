@@ -181,6 +181,11 @@ struct ChatMsg {
   // and interim notes. Empty => legacy `thinking` (one block at the end).
   std::vector<ThinkBlock> thoughts;
   std::vector<ToolBlock> tools;  // flow blocks rendered after the text
+  // Tool rows trimmed at LOAD time (a stored turn can hold thousands after a
+  // long auto run). The full record is still on disk; the work log says how many
+  // earlier rows are omitted. Only the unrendered prefix is dropped, never a DOM
+  // state of a visible row.
+  int tools_omitted = 0;
   // Between-tools narration of the turn, in order. It is NOT the answer - it is
   // the model thinking out loud while it works - so it belongs in the work log and
   // used to be dropped entirely (only the final round's text was kept).

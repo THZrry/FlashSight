@@ -1624,7 +1624,14 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   // like the model answered out of thin air.
   if (m.role == "assistant" && t.contains("toolCalls") && t["toolCalls"].is_array()) {
     const Json& tc = t["toolCalls"];
-    for (size_t k = 0; k < tc.size(); ++k) {
+    // A long auto run can store thousands of rows. Building all of them (with
+    // their input/detail strings) on every open was the remaining large-history
+    // stall. Keep the newest 300 - exactly what the work log can render - and
+    // remember how many were trimmed; the full contract stays on disk.
+    const size_t kToolLoadCap = 300;
+    const size_t first = tc.size() > kToolLoadCap ? tc.size() - kToolLoadCap : 0;
+    m.tools_omitted = static_cast<int>(first);
+    for (size_t k = first; k < tc.size(); ++k) {
       comp::ToolBlock tb;
       tb.name = jsonutil::get<std::string>(tc[k], "name", "");
       // Prefer the stored, already-summarised detail: `args` alone says what was
@@ -1722,6 +1729,39 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       b.rev = next_msg_rev_++;
       m.thoughts.push_back(b);
     }
+  }
+  if (m.tools_omitted > 0) {
+    // Anchors were recorded against the ORIGINAL tool list. Shift them to the
+    // surviving rows and drop notes that belonged to the trimmed prefix.
+    const size_t off = static_cast<size_t>(m.tools_omitted);
+    std::vector<std::string> gi;
+    std::vector<size_t> ga;
+    for (size_t k = 0; k < m.guidance.size(); ++k) {
+      size_t a = k < m.guidance_after.size() ? m.guidance_after[k] : 0;
+      if (a < off) continue;
+      gi.push_back(m.guidance[k]);
+      ga.push_back(a - off);
+    }
+    m.guidance.swap(gi);
+    m.guidance_after.swap(ga);
+    std::vector<comp::ChatMsg::ThinkBlock> ti;
+    for (size_t k = 0; k < m.thoughts.size(); ++k) {
+      if (m.thoughts[k].after < off) continue;
+      m.thoughts[k].after -= off;
+      ti.push_back(m.thoughts[k]);
+    }
+    m.thoughts.swap(ti);
+    std::vector<std::string> ii;
+    std::vector<size_t> ia;
+    bool had_anchors = !m.interim_after.empty();
+    for (size_t k = 0; k < m.interim.size(); ++k) {
+      size_t a = had_anchors ? (k < m.interim_after.size() ? m.interim_after[k] : k) : k;
+      if (a < off) continue;
+      ii.push_back(m.interim[k]);
+      ia.push_back(a - off);
+    }
+    m.interim.swap(ii);
+    m.interim_after.swap(ia);
   }
   return m;
 }
@@ -3685,6 +3725,7 @@ void UiApp::load_subagent_detail(const std::string& subagent_id) {
     row.id = jsonutil::get<std::string>(a, "id", subagent_id);
     row.kind = jsonutil::get<std::string>(a, "kind", "");
     row.status = jsonutil::get<std::string>(a, "status", "");
+    if (jsonutil::get<bool>(a, "failed", false)) row.status = "failed";
     row.task = jsonutil::get<std::string>(a, "task", "");
     row.model = jsonutil::get<std::string>(a, "model", "");
     row.summary = jsonutil::get<std::string>(a, "summary", "");
@@ -4604,6 +4645,24 @@ void UiApp::on_backend_event(const std::string& event, const Json& payload) {
   SlowEventLog slow_event_log(event);
   ++event_count_;
   std::string sid = jsonutil::get<std::string>(payload, "sid", "");
+  if (event == "server.moved") {
+    // The Web page is served BY the listener that is moving. Follow it to the
+    // new port using the SAME host the page was loaded from (127.0.0.1 stays
+    // local, a phone's LAN IP stays that IP); 0.0.0.0 is never a destination.
+    int port = static_cast<int>(jsonutil::get_int(payload, "port", 0));
+    std::string host = jsonutil::get<std::string>(payload, "host", "");
+    update([&](AppState& s) {
+      s.server_host = host;
+      if (port > 0) s.server_port = port;
+    });
+    std::string dest = dom_.location_host();
+    if (dest.empty() && host != "0.0.0.0") dest = host;
+    if (port > 0 && !dest.empty() && dest != "0.0.0.0") {
+      dom_.navigate("http://" + dest + ":" + itos(port) + "/");
+    }
+    refresh_server_status();
+    return;
+  }
   if (event == "session.status") {
     // Authoritative, pushed by the backend on every loop transition. Updating
     // the row here (instead of waiting for a coalesced session.list) is what
@@ -8399,9 +8458,12 @@ VNodePtr UiApp::build_side_panel() {
     } else {
       const AppState::SubagentRow& row = det->row;
       const bool row_running = row.status == "running";
+      const bool row_failed = row.status == "failed";
       H hd = el("div", "sap-head");
-      hd.add(el("span", row_running ? "sa-status running" : "sa-status done")
-                 .text(row_running ? "●" : "✓"));
+      hd.add(el("span", row_running ? "sa-status running"
+                                    : (row_failed ? "sa-status failed" : "sa-status done"))
+                 .text(row_running ? "●" : (row_failed ? "✕" : "✓")));
+      if (row_failed) hd.add(el("span", "sa-running-badge failed").text(tr("失败")));
       if (row_running) hd.add(el("span", "sa-running-badge").text(tr("运行中")));
       hd.add(el("span", "sa-kind").text(row.kind));
       if (!row.model.empty()) hd.add(comp::badge(row.model));
@@ -8414,6 +8476,14 @@ VNodePtr UiApp::build_side_panel() {
       }
       hd.add(comp::icon_button("rotate", tr("刷新"), [this, sub_id](const std::string&) {
         load_subagent_detail(sub_id);
+      }));
+      hd.add(comp::icon_button("list", det->tools_open ? tr("收起工具详情")
+                                                       : tr("显示工具详情"),
+                               [this, sub_id](const std::string&) {
+        std::map<std::string, AppState::SubagentDetail>& all =
+            st_.subagent_details;
+        all[sub_id].tools_open = !all[sub_id].tools_open;
+        render();
       }));
       body.add(hd);
       if (!row.task.empty()) {
@@ -8457,6 +8527,17 @@ VNodePtr UiApp::build_side_panel() {
         body.add(steer);
       }
       if (row.transcript.is_array() && row.transcript.size() > 0) {
+        // Tool results arrive as separate `role:"tool"` messages; pair them with
+        // their call so the panel shows ONE expandable row per call instead of
+        // raw result JSON.
+        std::map<std::string, std::string> tool_results;
+        for (size_t k = 0; k < row.transcript.size(); ++k) {
+          const Json& e = row.transcript[k];
+          if (jsonutil::get<std::string>(e, "role", "") != "tool") continue;
+          std::string id = jsonutil::get<std::string>(e, "toolCallId", "");
+          std::string content = jsonutil::get<std::string>(e, "content", "");
+          if (!id.empty()) tool_results[id] = content;
+        }
         // Say the ORDER out loud. The panel used to print "对话记录 · N" over a
         // list whose summary sat ABOVE it, so it read as if the result came
         // before the work that produced it.
@@ -8466,28 +8547,59 @@ VNodePtr UiApp::build_side_panel() {
         for (size_t k = 0; k < row.transcript.size(); ++k) {
           const Json& e = row.transcript[k];
           std::string role = jsonutil::get<std::string>(e, "role", "");
+          if (role == "tool") continue;  // rendered under its assistant call
           std::string text = jsonutil::get<std::string>(e, "content",
                               jsonutil::get<std::string>(e, "text", ""));
-          // The transcript is shown WHOLE here: this panel exists precisely
-          // because the card could not show it. Tool calls are listed whenever
-          // the message HAS them - the old code only fell back to the names when
-          // the text was empty, so a round that both spoke and called tools
-          // looked like it only spoke.
-          std::string names;
-          if (e.contains("toolCalls") && e["toolCalls"].is_array()) {
-            for (size_t c = 0; c < e["toolCalls"].size(); ++c) {
-              std::string nm = jsonutil::get<std::string>(e["toolCalls"][c], "name", "");
-              if (nm.empty()) continue;
-              if (!names.empty()) names += ", ";
-              names += nm;
-            }
-          }
-          if (text.empty() && names.empty()) continue;
+          const bool has_tools =
+              e.contains("toolCalls") && e["toolCalls"].is_array() &&
+              !e["toolCalls"].empty();
+          if (text.empty() && !has_tools) continue;
           H row_h = el("div", "sap-msg " + (role.empty() ? std::string("note") : role));
           row_h.add(el("div", "sap-role").text(role));
-          if (!text.empty()) row_h.add(el("pre", "sap-body").text(text));
-          if (!names.empty()) {
-            row_h.add(el("div", "sap-tools").text(tr("工具调用") + ": " + names));
+          if (role == "assistant" && !text.empty()) {
+            // The subagent's answer is markdown like the main one. It used to be
+            // dumped into a <pre>, so headings, lists and code fences were shown
+            // as literal source.
+            std::vector<H> blocks = comp::markdown_blocks(text, nullptr, nullptr);
+            for (size_t b = 0; b < blocks.size(); ++b) row_h.add(blocks[b]);
+          } else if (!text.empty()) {
+            row_h.add(el("pre", "sap-body").text(text));
+          }
+          if (has_tools) {
+            for (size_t c = 0; c < e["toolCalls"].size(); ++c) {
+              const Json& call = e["toolCalls"][c];
+              std::string nm = jsonutil::get<std::string>(call, "name", "");
+              if (nm.empty()) continue;
+              std::string id = jsonutil::get<std::string>(call, "id", "");
+              Json args = call.contains("args") ? call["args"] : Json::object();
+              std::string detail;
+              std::map<std::string, std::string>::iterator rit =
+                  tool_results.find(id);
+              if (rit != tool_results.end()) detail = rit->second;
+              bool ok = true;
+              try {
+                Json d = Json::parse(detail);
+                if (d.is_object() && d.contains("ok") && d["ok"].is_boolean()) {
+                  ok = d["ok"].get<bool>();
+                }
+                if (d.is_object() && jsonutil::get<bool>(d, "failed", false)) {
+                  ok = false;
+                }
+              } catch (...) {
+              }
+              comp::ToolBlock tb;
+              tb.name = nm;
+              tb.summary = tool_display_summary(nm, args, detail, ok);
+              tb.detail = detail;
+              tb.ok = ok;
+              tb.expanded = det->tools_open;
+              tb.rev = next_msg_rev_++;
+              if (args.is_object() && !args.empty()) {
+                tb.input = cut_display(dump_safe(args, 2), 6000,
+                                       "\n… (输入已截断)");
+              }
+              row_h.add(comp::tool_block(tb, nullptr, nullptr));
+            }
           }
           body.add(row_h);
         }
@@ -10258,10 +10370,13 @@ void UiApp::refresh_server_status() {
     // read right after the settings write can still see the OLD listener. Poll
     // again shortly instead of reporting a stale port as "current".
     bool pending = jsonutil::get<bool>(r.data, "rebinding", false);
+    const bool srv_running = jsonutil::get<bool>(r.data, "running", false);
+    const int srv_port = static_cast<int>(jsonutil::get_int(r.data, "port", 0));
     update([&](AppState& s) {
-      s.server_running = jsonutil::get<bool>(r.data, "running", false);
+      s.server_running = srv_running;
+      s.server_local_allowed = jsonutil::get<bool>(r.data, "localAllowed", true);
       s.server_host = jsonutil::get<std::string>(r.data, "host", "");
-      s.server_port = static_cast<int>(jsonutil::get_int(r.data, "port", 0));
+      s.server_port = srv_port;
       s.server_requires_password = jsonutil::get<bool>(r.data, "password", false);
       s.server_error = jsonutil::get<std::string>(r.data, "error", "");
       // A LAN URL is only meaningful when listening on all interfaces. Build it
@@ -10280,6 +10395,16 @@ void UiApp::refresh_server_status() {
       dom_.schedule(250, [this]() { refresh_server_status(); });
     } else {
       server_status_polls_ = 0;
+      // Fallback for a lost server.moved frame: if the page is still on the old
+      // port while the server is already listening on a new one, follow it. The
+      // native adapters have no location host, so this only runs in the browser.
+      if (!pending && srv_running && srv_port > 0) {
+        std::string h = dom_.location_host();
+        std::string lp = dom_.location_port();
+        if (!h.empty() && !lp.empty() && lp != itos(srv_port)) {
+          dom_.navigate("http://" + h + ":" + itos(srv_port) + "/");
+        }
+      }
     }
   });
 }
@@ -11643,8 +11768,9 @@ VNodePtr UiApp::build_settings() {
   } else if (sec == "webserver") {
     body.add(comp::section_title(tr("Web 服务")));
     body.add(el("div", "field-hint").text(tr(
-        "Web 版用这个服务提供界面；Webview / WhaleUI 版有原生窗口，不启动服务。"
-        "改动立即生效：端口/地址变化会重新监听（当前页面会断开，请用新地址重开）。"
+        "Web 版需要这个服务来提供界面；Webview / WhaleUI 版有原生窗口，"
+        "默认不开本机服务，但选“局域网 / 远程”(0.0.0.0) 仍会启动，供其他设备访问。"
+        "改动立即生效：端口/地址变化会重新监听，当前网页会跳到新地址。"
         "本机访问始终免密，密码只约束远程来源。")));
     // 监听地址：两个明确的选项，而不是让人填 IP。绝大多数人只需要"仅本机"和
     // "局域网/远程"两种；填错 IP 的结果是服务器起不来，而错误信息在远程端看不见。
@@ -11654,7 +11780,7 @@ VNodePtr UiApp::build_settings() {
       o.value = "127.0.0.1";
       o.icon = "desktop";
       o.title = tr("仅本机");
-      o.desc = tr("只有这台机器能访问（默认）");
+      o.desc = tr("只有这台机器能访问；Web 版才启动本机服务");
       hosts.push_back(o);
       o.value = "0.0.0.0";
       o.icon = "globe";
@@ -11766,7 +11892,10 @@ VNodePtr UiApp::build_settings() {
         body.add(el("div", "settings-note dim").text(tr("局域网地址：") + lan));
       }
     } else {
-      body.add(el("div", "settings-note dim").text(tr("当前没有运行 Web 服务。")));
+      body.add(el("div", "settings-note dim").text(
+          st_.server_local_allowed
+              ? tr("当前没有运行 Web 服务。")
+              : tr("本机服务只在 Web 版启动；本版选“局域网 / 远程”(0.0.0.0) 可开。")));
     }
     // A failed rebind must not look like "the setting did nothing": the address
     // may be taken or the port reserved, and the only place that says so is here.
@@ -12612,6 +12741,7 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   mix(m.text.size());
   mix(m.thinking.size());
   mix(m.tools.size());
+  mix(static_cast<uint64_t>(m.tools_omitted));
   mix(m.summary.size());
   mix(m.plan_path.size());
   mix(m.time.size());
