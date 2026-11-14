@@ -173,6 +173,9 @@ class FsApi {
   FsResult session_approve(const std::string& sid, bool yes);
   // 上下文压缩：强制压缩一次 / 查询水位（含阈值与"是否该压缩"）
   FsResult session_compress(const std::string& sid);
+  // /compact: compress immediately; `hint` is extra user guidance for the
+  // summarizer (not a model turn).
+  FsResult session_compact(const std::string& sid, const std::string& hint);
   FsResult session_context(const std::string& sid);
   // The turn currently streaming for this session (empty when idle). A tab that
   // was closed mid-turn and reopened renders this until the turn is on disk.

@@ -290,6 +290,7 @@ AgentLoop& AgentHost::loop_for(const std::string& sid, bool auto_mode,
       }
       Json ss = full.value("sessionSettings", Json::object());
       opts.model = jsonutil::get<std::string>(ss, "model", "");
+      opts.provider = jsonutil::get<std::string>(ss, "provider", "");
       opts.thinking = jsonutil::get<std::string>(ss, "thinking", "");
     }
   }
@@ -871,6 +872,29 @@ FsResult AgentHost::request_compress(const std::string& sid) {
   return FsResult::success();
 }
 
+FsResult AgentHost::compact_now(const std::string& sid, const std::string& hint) {
+  AgentLoop* loop = nullptr;
+  {
+    std::lock_guard<std::recursive_mutex> host_lock(lock());
+    if (is_running(sid)) {
+      return FsResult::error(ErrCode::kBusy,
+                             "stop the running turn before compacting");
+    }
+    loop = &loop_for(sid, false);
+    // Make the water-level inputs honest even for a session that has not run in
+    // this process yet. force=true bypasses them, but the event still reports
+    // useful numbers.
+    if (deps_.last_prompt_tokens) {
+      loop->set_last_prompt_tokens(deps_.last_prompt_tokens(sid));
+    }
+  }
+  FsResult r = loop->compact_now(hint);
+  if (r.ok()) {
+    emit("context.compacted", Json{{"sid", sid}, {"by", "user"}});
+  }
+  return r;
+}
+
 FsResult AgentHost::context_status(const std::string& sid) {
   std::lock_guard<std::recursive_mutex> host_lock(lock());
   int64_t limit = 0;
@@ -945,10 +969,10 @@ FsResult AgentHost::send(const std::string& sid, const std::string& text,
     loop->set_permission(permission);
     loop->set_auto_mode(auto_mode);
     loop->set_thinking_lang(thinking_lang_);
-    if (deps_.setting) {
-      Json of = deps_.setting("", "session.overfitEnabled", Json(false));
-      loop->set_overfit_enabled(of.is_boolean() ? of.get<bool>() : false);
-    }
+    // 过拟合检测 is intentionally not enabled: the option was removed (it was
+    // never a real behavior and its hint fought auto-continue). A legacy
+    // session.overfitEnabled value is ignored.
+    loop->set_overfit_enabled(false);
     if (thinking_lang_ == "auto") {
       // "auto" is not a language the model can be told to think in: resolve it
       // against the UI locale so the prompt either says a language or nothing.

@@ -136,6 +136,9 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   reg("session.compress", [api](const Json& a) {
     return api->session_compress(s(a, "sid"));
   });
+  reg("session.compact", [api](const Json& a) {
+    return api->session_compact(s(a, "sid"), s(a, "hint"));
+  });
   reg("session.context", [api](const Json& a) {
     return api->session_context(s(a, "sid"));
   });

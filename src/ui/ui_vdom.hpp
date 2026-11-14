@@ -245,6 +245,10 @@ struct VNode {
 
 VNodePtr make_vnode(const std::string& tag);
 VNodePtr make_text(const std::string& text);
+// Deep copy of a VNode tree with NO DOM handles. Event ids are preserved (the
+// caller must keep those handlers alive), so a parsed markdown tree can be
+// cached once and instantiated in a new page without re-parsing it.
+VNodePtr clone_vnode(const VNodePtr& v);
 
 // Fluent builder. Each call returns a new H sharing the same VNode, so chains
 // are safe on temporaries.

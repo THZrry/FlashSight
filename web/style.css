@@ -1603,6 +1603,9 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   white-space: normal;
 }
 .work-note.work-event .fa { font-size: 11px; opacity: .8; }
+/* "显示更早的 N 步": a control, not a dead-end note. */
+.work-note.work-more { cursor: pointer; color: var(--accent); }
+.work-note.work-more:hover { text-decoration: underline; }
 /* User guidance injected mid-turn: the user's voice, distinct from the model's
    narration. */
 .work-guidance {

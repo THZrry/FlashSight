@@ -200,6 +200,18 @@ int main(int argc, char** argv) {
     api.settings_set(fs::kKeyServerPort, fs::Json(port), "");
   }
   fs::FsResult r = server->start(port, cfg.host, cfg.password);
+  if (!r.ok() && loopback_host(cfg.host) && port > 0) {
+    // LOCAL port is a convenience, not a contract: if the preferred one is
+    // taken, use an ephemeral one and show the ACTUAL port in server.status.
+    // Remote (0.0.0.0) keeps the configured port so bookmarks/phones stay stable.
+    fs::FsResult alt = server->start(0, cfg.host, cfg.password);
+    if (alt.ok()) {
+      std::fprintf(stderr,
+                   "preferred port %d busy; UI server on %s instead\n", port,
+                   server->url().c_str());
+      r = alt;
+    }
+  }
   if (!r.ok()) {
     std::fprintf(stderr, "failed to start UI server: %s\n", r.message.c_str());
     return 1;

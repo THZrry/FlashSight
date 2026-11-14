@@ -852,18 +852,19 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
       // A single auto turn can accumulate THOUSANDS of tool rows (the user's
       // WhaleJS session reached 2387). Rendering all of them on every streaming
       // delta made one render take 2.5 s and pushed the WebView renderer to 19 GB
-      // before it crashed. The process is a log, not the full record: keep the
-      // most recent slice while running, and a larger slice when the user opens a
-      // finished turn. The complete tool list stays in the stored turn.
-      const size_t kMaxVisibleTools = m.streaming ? 120 : 300;
+      // before it crashed. The process is a log, not the full record: render a
+      // window, and let the user widen it on demand. The data is never dropped.
+      size_t kMaxVisibleTools =
+          m.tools_shown > 0 ? m.tools_shown : (m.streaming ? 120u : 300u);
       size_t first_tool = 0;
       if (m.tools.size() > kMaxVisibleTools) {
         first_tool = m.tools.size() - kMaxVisibleTools;
       }
-      if (first_tool > 0 || m.tools_omitted > 0) {
+      if (first_tool > 0) {
         // Skip notes/reasoning/guidance that belong to the hidden prefix; they
         // would otherwise all pile up above the first visible tool.
-        while (interim_at < m.interim.size()) {          size_t a = interim_at < m.interim_after.size()
+        while (interim_at < m.interim.size()) {
+          size_t a = interim_at < m.interim_after.size()
                          ? m.interim_after[interim_at]
                          : interim_at;
           if (a >= first_tool) break;
@@ -880,9 +881,16 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           if (a >= first_tool) break;
           ++guidance_at;
         }
-        inner.add(el("div", "work-note dim").text(
-            tr("更早的 ") + itos(static_cast<int>(first_tool) + m.tools_omitted) +
-            tr(" 步已省略；完整记录保存在会话中")));
+        size_t step = first_tool > 100 ? 100 : first_tool;
+        H more = el("div", "work-note dim work-more");
+        more.text(tr("显示更早的 ") + itos(static_cast<int>(step)) +
+                  tr(" 步（共 ") + itos(static_cast<int>(first_tool)) +
+                  tr(" 步未显示）"));
+        if (on_tool_toggle) {
+          EventFn cb = on_tool_toggle;
+          more.on(EventKind::kClick, [cb](const std::string&) { cb("more-tools"); });
+        }
+        inner.add(more);
       }
       flush_guidance(first_tool);
       flush_thoughts(first_tool);
@@ -1235,8 +1243,9 @@ bool is_heading_line(const std::string& s) {
   return n > 0 && n <= 6 && (n == s.size() || s[n] == ' ');
 }
 
-std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
-                               EventFn on_link) {
+static std::vector<H> build_markdown_blocks(const std::string& text,
+                                            EventFn on_copy_code,
+                                            EventFn on_link) {
   std::vector<H> out;
   std::vector<std::string> lines;
   {
@@ -1504,6 +1513,73 @@ std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
     H p = el("p", "md-p");
     inline_md(p, para, on_link);
     out.push_back(p);
+  }
+  return out;
+}
+
+// Parsed markdown is CACHED. A finished turn's answer does not change, so
+// re-parsing the same text when a session is reopened (or when any other render
+// rebuilds the page) is pure repeated work - the "旧历史 markdown 又重渲染" cost.
+// The cached tree is a TEMPLATE: each use gets a deep clone (fresh DOM handles),
+// while the handler ids are kept alive by the app's retain pass.
+namespace {
+struct MdCacheEntry {
+  std::vector<VNodePtr> blocks;
+  std::vector<int> handler_ids;
+};
+std::map<std::string, MdCacheEntry> g_md_cache;
+const size_t kMaxMdCacheEntries = 128;
+
+void collect_md_handlers(const VNodePtr& v, std::vector<int>* out) {
+  if (!v) return;
+  for (size_t i = 0; i < v->events.size(); ++i) out->push_back(v->events[i].hid);
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    collect_md_handlers(v->children[i], out);
+  }
+}
+}  // namespace
+
+void markdown_cache_handler_ids(std::vector<int>* out) {
+  if (!out) return;
+  for (std::map<std::string, MdCacheEntry>::iterator it = g_md_cache.begin();
+       it != g_md_cache.end(); ++it) {
+    out->insert(out->end(), it->second.handler_ids.begin(),
+                it->second.handler_ids.end());
+  }
+}
+
+void markdown_cache_clear() { g_md_cache.clear(); }
+
+std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
+                               EventFn on_link) {
+  if (text.empty()) return std::vector<H>();
+  // A cached tree contains the handlers from its FIRST build. Keep the
+  // no-copy/no-link variant apart from the interactive one.
+  std::string key;
+  key.reserve(text.size() + 3);
+  key += on_copy_code ? 'c' : '-';
+  key += on_link ? 'l' : '-';
+  key += '\x1f';
+  key += text;
+  std::map<std::string, MdCacheEntry>::iterator it = g_md_cache.find(key);
+  if (it == g_md_cache.end()) {
+    if (g_md_cache.size() >= kMaxMdCacheEntries) g_md_cache.clear();
+    std::vector<H> built = build_markdown_blocks(text, on_copy_code, on_link);
+    MdCacheEntry e;
+    for (size_t i = 0; i < built.size(); ++i) {
+      // Store a DETACHED clone: the returned nodes are attached to a page and
+      // will be patched/removed there, which must not mutate the template.
+      VNodePtr tpl = clone_vnode(built[i].get());
+      e.blocks.push_back(tpl);
+      collect_md_handlers(tpl, &e.handler_ids);
+    }
+    it = g_md_cache.insert(std::make_pair(key, e)).first;
+    return built;
+  }
+  std::vector<H> out;
+  out.reserve(it->second.blocks.size());
+  for (size_t i = 0; i < it->second.blocks.size(); ++i) {
+    out.push_back(H(clone_vnode(it->second.blocks[i])));
   }
   return out;
 }

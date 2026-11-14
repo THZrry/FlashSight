@@ -1807,6 +1807,17 @@ FsResult FsApi::session_compress(const std::string& sid) {
   return r;
 }
 
+// /compact: run the compression NOW, optionally with the user's hint.
+FsResult FsApi::session_compact(const std::string& sid, const std::string& hint) {
+  if (!agent_host_) return FsResult::error(ErrCode::kInternal, "no agent host");
+  FsResult r = agent_host_->compact_now(sid, hint);
+  if (r.ok()) {
+    sessions_->append_system_op(
+        sid, "compact", Json{{"by", "user"}, {"hint", hint}});
+  }
+  return r;
+}
+
 // 上下文水位：promptTokens / contextLimit / pct / compressAtPct / shouldCompress
 FsResult FsApi::session_context(const std::string& sid) {
   if (!agent_host_) return FsResult::error(ErrCode::kInternal, "no agent host");
@@ -2921,6 +2932,7 @@ FsResult FsApi::command_list(const std::string& sid) {
   add("git", "Git 面板", "打开 Git 状态与变更", "ui:panel:git", "builtin");
   add("suspend", "挂起", "挂起当前任务（可继续）", "session.suspend", "builtin");
   add("resume", "继续", "继续被挂起的任务", "session.resume", "builtin");
+  add("compact", "压缩上下文", "把当前会话压缩成摘要；可在命令后附加要求", "", "builtin");
   add("usage", "用量面板", "上下文水位与本会话成本", "ui:panel:usage", "builtin");
 
   // Skills: the user-callable ones only (kind == "skill"; built-in MCP entries

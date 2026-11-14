@@ -1339,7 +1339,7 @@ FS_TEST(uiapp_settings_page) {
                             "Endpoint", "会话默认",
                             "输出语言", "并行上限", "手动导入", "搜索 Skill", "长期记忆",
                             "网络总开关", "重新探测", "自动 git init",
-                            "自动探测", "发送消息", "版本"};
+                            "自动探测", "发送 / 换行", "版本"};
   for (size_t i = 0; i < sizeof(sec_keys) / sizeof(sec_keys[0]); ++i) {
     std::string key = sec_keys[i];
     app.update([&](AppState& s) { s.settings_nav = key; });
@@ -3811,10 +3811,10 @@ FS_TEST(uiapp_interrupt_bar_continues) {
   EXPECT_TRUE(dom.dump().find("interrupt-bar") == std::string::npos);
 }
 
-// A stored turn with thousands of tool rows is trimmed at LOAD time to the 300
-// the work log can show; the omitted count is kept for the notice, and anchor
-// arrays are shifted so notes cannot point at rows that no longer exist.
-FS_TEST(uiapp_stored_tool_rows_are_trimmed_at_load) {
+// Full history is kept in memory; only the RENDERED window is pruned. A long
+// turn must not lose its old tool rows (the user's rule: pruning means not
+// redoing work, not dropping data).
+FS_TEST(uiapp_stored_tool_rows_are_kept_and_windowed) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
@@ -3834,14 +3834,10 @@ FS_TEST(uiapp_stored_tool_rows_are_trimmed_at_load) {
                    {"interim", Json::array({"before", "after"})},
                    {"interimAfter", Json::array({10, 340})}};
   comp::ChatMsg m = app.turn_to_message_for_test(turn, 0);
-  EXPECT_EQ(m.tools.size(), size_t(300));
-  EXPECT_EQ(m.tools_omitted, 50);
-  EXPECT_EQ(m.thoughts.size(), size_t(1));
-  EXPECT_EQ(m.thoughts[0].text, std::string("late"));
-  EXPECT_EQ(m.thoughts[0].after, size_t(299));
-  ASSERT_TRUE(m.interim.size() == 1u);
-  EXPECT_EQ(m.interim[0], std::string("after"));
-  EXPECT_EQ(m.interim_after[0], size_t(290));
+  EXPECT_EQ(m.tools.size(), size_t(350));
+  EXPECT_EQ(m.tools_shown, size_t(0));
+  EXPECT_EQ(m.thoughts.size(), size_t(2));
+  EXPECT_EQ(m.interim.size(), size_t(2));
 }
 
 // A pushed session.status must clear BOTH the active composer and the sidebar

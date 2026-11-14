@@ -1324,6 +1324,10 @@ class UiApp {
   // were never consulted before, which made the whole page decorative.
   bool shortcut_matches(const std::string& key, const std::string& action,
                         const std::string& def);
+  // Apply one of the TWO valid Enter bindings everywhere at once: the session
+  // default, the live session and the shortcut table. The two settings used to
+  // disagree because only one of them was written.
+  void apply_enter_binding(const std::string& mode);
   // ---- settings / 环境（CLI 工具探测）----
   void detect_cli_tools();
   // 选文件并把结果写进某个设置键（驱动路径 / CLI 工具路径）

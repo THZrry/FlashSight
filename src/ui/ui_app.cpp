@@ -783,6 +783,7 @@ UiApp::~UiApp() {
   // drop all handlers this app registered (ids are monotonic; a new app starts
   // fresh above the old high-water mark)
   if (unsubscribe_events_) unsubscribe_events_();
+  comp::markdown_cache_clear();
   bus().retain(std::vector<int>());
 }
 
@@ -1624,14 +1625,7 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
   // like the model answered out of thin air.
   if (m.role == "assistant" && t.contains("toolCalls") && t["toolCalls"].is_array()) {
     const Json& tc = t["toolCalls"];
-    // A long auto run can store thousands of rows. Building all of them (with
-    // their input/detail strings) on every open was the remaining large-history
-    // stall. Keep the newest 300 - exactly what the work log can render - and
-    // remember how many were trimmed; the full contract stays on disk.
-    const size_t kToolLoadCap = 300;
-    const size_t first = tc.size() > kToolLoadCap ? tc.size() - kToolLoadCap : 0;
-    m.tools_omitted = static_cast<int>(first);
-    for (size_t k = first; k < tc.size(); ++k) {
+    for (size_t k = 0; k < tc.size(); ++k) {
       comp::ToolBlock tb;
       tb.name = jsonutil::get<std::string>(tc[k], "name", "");
       // Prefer the stored, already-summarised detail: `args` alone says what was
@@ -1729,39 +1723,6 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       b.rev = next_msg_rev_++;
       m.thoughts.push_back(b);
     }
-  }
-  if (m.tools_omitted > 0) {
-    // Anchors were recorded against the ORIGINAL tool list. Shift them to the
-    // surviving rows and drop notes that belonged to the trimmed prefix.
-    const size_t off = static_cast<size_t>(m.tools_omitted);
-    std::vector<std::string> gi;
-    std::vector<size_t> ga;
-    for (size_t k = 0; k < m.guidance.size(); ++k) {
-      size_t a = k < m.guidance_after.size() ? m.guidance_after[k] : 0;
-      if (a < off) continue;
-      gi.push_back(m.guidance[k]);
-      ga.push_back(a - off);
-    }
-    m.guidance.swap(gi);
-    m.guidance_after.swap(ga);
-    std::vector<comp::ChatMsg::ThinkBlock> ti;
-    for (size_t k = 0; k < m.thoughts.size(); ++k) {
-      if (m.thoughts[k].after < off) continue;
-      m.thoughts[k].after -= off;
-      ti.push_back(m.thoughts[k]);
-    }
-    m.thoughts.swap(ti);
-    std::vector<std::string> ii;
-    std::vector<size_t> ia;
-    bool had_anchors = !m.interim_after.empty();
-    for (size_t k = 0; k < m.interim.size(); ++k) {
-      size_t a = had_anchors ? (k < m.interim_after.size() ? m.interim_after[k] : k) : k;
-      if (a < off) continue;
-      ii.push_back(m.interim[k]);
-      ia.push_back(a - off);
-    }
-    m.interim.swap(ii);
-    m.interim_after.swap(ia);
   }
   return m;
 }
@@ -5125,6 +5086,9 @@ void UiApp::render() {
     // collision with the still-bound listeners of the current tree)
     std::vector<int> live;
     collect_handler_ids(tree_, &live);
+    // Cached markdown templates are not always in the current tree, but their
+    // clones will reuse these handler ids on a later page rebuild. Keep them.
+    comp::markdown_cache_handler_ids(&live);
     bus().retain(live);
     // (re)wire the side-panel drag divider; bind_splitter is idempotent, so
     // this works whether the node survived a patch or was just created.
@@ -6939,7 +6903,13 @@ VNodePtr UiApp::build_session() {
     // shifts every index - so an index-captured handler would toggle (or copy,
     // or fork) whatever message now happens to sit at that position. That is
     // exactly why folding stopped working on older turns after scrolling up.
-    H node = comp::chat_message(m, [this, uid](const std::string&) {
+    H node = comp::chat_message(m, [this, uid](const std::string& v) {
+      // Markdown code buttons pass the CODE text; the message action passes "".
+      if (!v.empty()) {
+        dom_.copy_text(v);
+        toast(tr("已复制"));
+        return;
+      }
       int i = find_message_by_uid(uid);
       if (i >= 0) dom_.copy_text(st_.messages[i].text);
       toast(tr("已复制"));
@@ -6952,6 +6922,19 @@ VNodePtr UiApp::build_session() {
           if (i < static_cast<int>(s.messages.size())) {
             s.messages[i].thinking_open = !s.messages[i].thinking_open;
             s.messages[i].rev = next_msg_rev_++;
+          }
+        });
+        return;
+      }
+      if (v == "more-tools") {
+        // Widen the working window; the full tool list was always retained.
+        update([&](AppState& s) {
+          if (i < static_cast<int>(s.messages.size())) {
+            comp::ChatMsg& m = s.messages[i];
+            size_t cur = m.tools_shown > 0 ? m.tools_shown
+                                           : (m.streaming ? 120u : 300u);
+            m.tools_shown = cur + 100;
+            m.rev = next_msg_rev_++;
           }
         });
         return;
@@ -10035,6 +10018,18 @@ void UiApp::load_settings_section(const std::string& section) {
 void UiApp::run_command(const AppState::CommandRow& cmd) {
   update([&](AppState& s) { s.skill_menu_open = false; });
   const std::string& action = cmd.action;
+  if (cmd.name == "compact") {
+    // Put the command in the composer instead of firing immediately: the user
+    // can append a hint ("/compact 保留接口约定") and press Enter.
+    update([&](AppState& s) { s.session_input = "/compact "; });
+    sync_composer_textarea();
+    VNodePtr ta = find_by_key(tree_, "session-input");
+    if (ta && ta->dom.valid()) {
+      dom_.focus(ta->dom);
+      dom_.set_text_caret(ta->dom, 9);
+    }
+    return;
+  }
   if (action.compare(0, 3, "ui:") == 0) {
     std::string what = action.substr(3);
     if (what == "new-session") {
@@ -10503,15 +10498,11 @@ VNodePtr UiApp::build_settings() {
   H cols = el("div", "settings-cols");
   H nav = el("div", "settings-nav");
   std::string last_group;
-  // The Web-service page only exists in the Web build: that is the only variant
-  // whose UI IS the HTTP server. Webview / WhaleUI open a native window and never
-  // start one, so offering "listen address / port / password" there would be a
-  // page of switches that cannot do anything.
-  const bool has_web_server =
-      std::string(dom_.backend_name()) == "wasm" || !backend_;
+  // The Web-service page exists in EVERY variant. 127.0.0.1 is the Web build's
+  // UI transport; 0.0.0.0 is remote access and is valid for native windows too,
+  // so hiding the page there removed a real feature.
   for (size_t i = 0; i < kSettingsNavCount; ++i) {
     const SettingsItem& it = kSettingsNav[i];
-    if (std::string(it.key) == "webserver" && !has_web_server) continue;
     if (last_group != it.group) {
       nav.add(el("div", "snav-grp").text(tr(it.group)));
       last_group = it.group;
@@ -11274,13 +11265,6 @@ VNodePtr UiApp::build_settings() {
       top.add(el("span", "mcp-card-name").text(label));
       top.add(comp::badge(tr("内置")));
       top.add(el("span", "grow"));
-      std::string name = sk.name;
-      top.add(comp::icon_button("eye", tr("查看内容"), [this, name](const std::string&) {
-        call_async("skill.load", Json{{"name", name}},
-                   [this, name](const BackendResult& r) {
-          toast(r.ok ? (tr("已加载 ") + name) : (tr("加载失败：") + r.message));
-        });
-      }));
       card.add(top);
       if (!sk.description.empty()) {
         card.add(el("div", "mcp-card-desc").text(sk.description));
@@ -11757,12 +11741,7 @@ VNodePtr UiApp::build_settings() {
       std::string cur = sv_str(st_.settings_values, "session.default.enterSend", "enter");
       body.add(comp::choice_list(enter, cur == "ctrlEnter" ? "ctrlEnter" : "enter",
                                  [this](const std::string& v) {
-        set_setting("session.default.enterSend", v);
-        std::string sid = active_sid();
-        update([&](AppState& s) { s.enter_send = v; });
-        if (!sid.empty()) {
-          call_async("session.setEnterSend", Json{{"sid", sid}, {"enterSend", v}});
-        }
+        apply_enter_binding(v);
       }));
     }
   } else if (sec == "webserver") {
@@ -12147,15 +12126,41 @@ VNodePtr UiApp::build_settings() {
     body.add(comp::section_title(tr("快捷键")));
     // These bindings are live now (see the global-key handler in render()):
     // 关闭标签页 / 新建标签页 are matched against the document keydown, and
-    // 发送消息 / 换行 drive the composer's Enter behaviour. They used to be four
-    // text fields nothing read back.
+    // 发送消息 / 换行 are the SAME choice as Enter 行为 - two valid pairs, no
+    // free-form third state.
     body.add(comp::hint(tr(
-        "关闭/新建标签页在桌面端与浏览器端均生效；发送/换行由输入框的 Enter 行为决定")));
+        "关闭/新建标签页在桌面端与浏览器端均生效；发送/换行与 Enter 行为同步")));
+    {
+      std::string send = normalize_shortcut(
+          sv_str(st_.settings_values, "shortcuts.发送消息", "Enter"));
+      std::string nl = normalize_shortcut(
+          sv_str(st_.settings_values, "shortcuts.换行", "Shift+Enter"));
+      std::string pair;
+      if (send == "enter" && nl == "shift+enter") pair = "enter";
+      else if (send == "ctrl+enter" && nl == "enter") pair = "ctrlEnter";
+      // Anything else (an old custom binding) selects NEITHER option; picking
+      // one restores a coherent pair.
+      std::vector<comp::ChoiceOption> pairs;
+      comp::ChoiceOption o;
+      o.value = "enter";
+      o.icon = "arrow-right-to-bracket";
+      o.title = tr("Enter 发送");
+      o.desc = tr("Shift+Enter 换行");
+      pairs.push_back(o);
+      o.value = "ctrlEnter";
+      o.icon = "keyboard";
+      o.title = tr("Ctrl+Enter 发送");
+      o.desc = tr("Enter 换行");
+      pairs.push_back(o);
+      body.add(comp::field(tr("发送 / 换行"),
+                           comp::choice_list(pairs, pair, [this](const std::string& v) {
+        apply_enter_binding(v);
+      })));
+    }
     const char* keys[][2] = {
-        {"发送消息", "Enter"},    {"换行", "Shift+Enter"},
         {"关闭标签页", "Ctrl+W"}, {"新建标签页", "Ctrl+T"},
     };
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 2; ++i) {
       H row = el("div", "settings-row");
       std::string action = keys[i][0];
       row.add(el("span", "sr-name").text(action));
@@ -12206,14 +12211,8 @@ VNodePtr UiApp::build_settings() {
     })));
     // NOTE: 会话标签上限 was removed on purpose. The strip scrolls, and 主页 is
     // always there, so a cap only hid tabs the user had open.
-
-    body.add(comp::section_title(tr("会话行为")));
-    body.add(comp::field(tr("过拟合检测"), comp::toggle(
-        sv_bool(st_.settings_values, "session.overfitEnabled", false), "",
-        [this](const std::string&) {
-      bool cur = sv_bool(st_.settings_values, "session.overfitEnabled", false);
-      set_setting("session.overfitEnabled", !cur);
-    }), tr("连续多轮输出高度相似时提示，避免模型原地打转")));
+    // 过拟合检测 was removed too: it was never wired into a real behavior and its
+    // hint fought auto-continue. The setting key is ignored by the backend.
 
     body.add(comp::section_title(tr("数据保留")));
     H days_row = el("div", "stepper");
@@ -12455,6 +12454,45 @@ void UiApp::send_message() {
   }
   // A message may be attachments only (dropping a file and hitting send).
   if (st_.session_input.empty() && st_.attachments.empty()) return;
+  // /compact is a built-in ACTION, not a model turn. Anything after it is a
+  // hint for the summarizer. Catch it before the model-availability guard: a
+  // compact does not need a sendable model and must not be turned into a chat
+  // message.
+  {
+    std::string raw = st_.session_input;
+    size_t b = raw.find_first_not_of(" \t\r\n");
+    if (b != std::string::npos) raw = raw.substr(b);
+    if (raw.compare(0, 8, "/compact") == 0 &&
+        (raw.size() == 8 || raw[8] == ' ' || raw[8] == '\t' ||
+         raw[8] == '\r' || raw[8] == '\n')) {
+      std::string hint = raw.size() > 8 ? raw.substr(8) : std::string();
+      size_t hb = hint.find_first_not_of(" \t\r\n");
+      hint = hb == std::string::npos ? std::string() : hint.substr(hb);
+      std::string sid = active_sid();
+      if (sid.empty()) {
+        toast(tr("请先打开一个会话"));
+        return;
+      }
+      update([&](AppState& s) {
+        s.session_input.clear();
+        s.attachments.clear();
+        s.complete_kind = AppState::CompleteKind::kNone;
+      });
+      VNodePtr ta = find_by_key(tree_, "session-input");
+      if (ta && ta->dom.valid()) dom_.set_attr(ta->dom, "value", "");
+      toast(tr("正在压缩上下文…"));
+      call_async("session.compact", Json{{"sid", sid}, {"hint", hint}},
+                 [this, sid](const BackendResult& r) {
+        if (!r.ok) {
+          toast(tr("压缩失败：") + r.message);
+          return;
+        }
+        add_work_notice(tr("已按你的要求压缩上下文"));
+        refresh_loop_state(sid);
+      });
+      return;
+    }
+  }
   // Same guard as the disabled button: sending without a usable model can only
   // fail in the provider layer, where the error no longer mentions the model.
   // Skipped when there is no backend at all (the local demo path) - that mode has
@@ -12741,7 +12779,7 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   mix(m.text.size());
   mix(m.thinking.size());
   mix(m.tools.size());
-  mix(static_cast<uint64_t>(m.tools_omitted));
+  mix(m.tools_shown);
   mix(m.summary.size());
   mix(m.plan_path.size());
   mix(m.time.size());
@@ -13797,6 +13835,22 @@ bool UiApp::shortcut_matches(const std::string& key, const std::string& action,
   std::string want = sv_str(st_.settings_values, "shortcuts." + action, def);
   if (want.empty()) want = def;
   return normalize_shortcut(want) == normalize_shortcut(key);
+}
+
+void UiApp::apply_enter_binding(const std::string& mode) {
+  const bool ctrl = mode == "ctrlEnter";
+  const std::string send = ctrl ? "Ctrl+Enter" : "Enter";
+  const std::string nl = ctrl ? "Enter" : "Shift+Enter";
+  set_setting("session.default.enterSend", ctrl ? "ctrlEnter" : "enter");
+  set_setting("shortcuts.发送消息", send);
+  set_setting("shortcuts.换行", nl);
+  std::string sid = active_sid();
+  update([&](AppState& s) { s.enter_send = ctrl ? "ctrlEnter" : "enter"; });
+  if (!sid.empty()) {
+    call_async("session.setEnterSend",
+               Json{{"sid", sid}, {"enterSend", ctrl ? "ctrlEnter" : "enter"}});
+  }
+  render();
 }
 
 void UiApp::detect_mcp() {

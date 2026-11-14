@@ -213,6 +213,9 @@ class AgentHost {
   // ----- 上下文压缩 -----
   // 手动压缩：下一轮构建 history 时强制压缩一次（用户点"压缩"或水位提示）。
   FsResult request_compress(const std::string& sid);
+  // /compact: compress NOW (not next turn), with optional user guidance woven
+  // into the summarizer prompt.
+  FsResult compact_now(const std::string& sid, const std::string& hint);
   // 当前水位（给 UI：不依赖 UI 自己算）：{promptTokens, contextLimit, pct,
   // compressAtPct, lastPromptTokens}
   FsResult context_status(const std::string& sid);

@@ -243,6 +243,26 @@ VNodePtr make_text(const std::string& text) {
   return n;
 }
 
+VNodePtr clone_vnode(const VNodePtr& v) {
+  if (!v) return VNodePtr();
+  VNodePtr n(new VNode());
+  n->tag = v->tag;
+  n->text = v->text;
+  n->key = v->key;
+  n->anim = v->anim;
+  n->anim_key = v->anim_key;
+  n->exit_anim = v->exit_anim;
+  n->html = v->html;
+  n->attrs = v->attrs;
+  n->styles = v->styles;
+  n->events = v->events;
+  n->children.reserve(v->children.size());
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    n->children.push_back(clone_vnode(v->children[i]));
+  }
+  return n;
+}
+
 namespace {
 
 void patch_node(IDom& dom, const VNodePtr& oldv, const VNodePtr& neu);

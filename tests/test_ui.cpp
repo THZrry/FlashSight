@@ -518,3 +518,23 @@ FS_TEST(vdom_removed_kind_is_unbound) {
   }
   EXPECT_EQ(offs, 1);
 }
+
+// Parsed markdown is cached: a finished answer is not re-parsed when its page is
+// rebuilt. Each use is a CLONE (fresh DOM handles), while the cached handlers
+// stay registered so the copy button still works.
+FS_TEST(markdown_parse_cache_clones_and_keeps_handlers) {
+  std::string md = "# Title\n\n```cpp\nint x;\n```\n\n[a](https://example.com)";
+  EventFn cp = [](const std::string&) {};
+  EventFn lk = [](const std::string&) {};
+  std::vector<H> a = comp::markdown_blocks(md, cp, lk);
+  std::vector<H> b = comp::markdown_blocks(md, cp, lk);
+  ASSERT_TRUE(a.size() == b.size());
+  ASSERT_TRUE(!a.empty());
+  // A clone, not the same VNode: reusing one pointer would share its DOM handle.
+  EXPECT_TRUE(a[0].get() != b[0].get());
+  std::vector<int> ids;
+  comp::markdown_cache_handler_ids(&ids);
+  EXPECT_TRUE(!ids.empty());
+  comp::markdown_cache_clear();
+  bus().retain(std::vector<int>());
+}

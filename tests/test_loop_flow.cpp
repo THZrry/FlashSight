@@ -1302,3 +1302,43 @@ FS_TEST(loop_exception_in_turn_start_is_terminal) {
   // The failure is visible in the transcript, not only in a toast.
   EXPECT_FALSE(rec.saw("turn.started"));
 }
+
+// /compact runs the summarizer NOW with the user's extra note, not as a next
+// model turn.
+FS_TEST(loop_compact_now_uses_hint_and_saves) {
+  AgentLoop::Options opts;
+  opts.sid = "s_compact_now";
+  opts.permission = "full";
+  ContextInput in;
+  in.lang = ContextLang::kEn;
+  opts.context = in;
+  Recorder rec;
+  opts.event = rec.fn();
+  AgentLoop loop(std::move(opts));
+  loop.context_limit = 100000;
+  Json full = Json::object();
+  full["turns"] = Json::array({
+      Json{{"role", "user"}, {"promptRaw", "old question"}},
+      Json{{"role", "assistant"}, {"streamSummary", "old answer"}},
+  });
+  loop.load_history = [&full](Json* out) -> FsResult {
+    *out = full;
+    return FsResult::success();
+  };
+  Json saved = Json::object();
+  loop.compaction_save = [&saved](const std::string&, const Json& s) { saved = s; };
+  Json summary_req = Json::object();
+  loop.call_model = [&summary_req](const ModelCallRequest& req, ModelCallResult* out,
+                                   const std::function<void(const std::string&)>&) {
+    summary_req = req.messages;
+    out->text = "SUMMARY";
+    return FsResult::success();
+  };
+  ASSERT_TRUE(loop.compact_now("keep the public API").ok());
+  EXPECT_TRUE(jsonutil::get<std::string>(saved, "summary", "")
+                  .find("SUMMARY") != std::string::npos);
+  ASSERT_TRUE(summary_req.is_array() && summary_req.size() >= 2);
+  std::string user = jsonutil::get<std::string>(summary_req[1], "content", "");
+  EXPECT_TRUE(user.find("keep the public API") != std::string::npos);
+  EXPECT_TRUE(rec.saw("context.compressed"));
+}

@@ -181,11 +181,11 @@ struct ChatMsg {
   // and interim notes. Empty => legacy `thinking` (one block at the end).
   std::vector<ThinkBlock> thoughts;
   std::vector<ToolBlock> tools;  // flow blocks rendered after the text
-  // Tool rows trimmed at LOAD time (a stored turn can hold thousands after a
-  // long auto run). The full record is still on disk; the work log says how many
-  // earlier rows are omitted. Only the unrendered prefix is dropped, never a DOM
-  // state of a visible row.
-  int tools_omitted = 0;
+  // How many rows the user asked to reveal beyond the default work-log window.
+  // The full list is always in memory/on disk; only the DOM rows are built for
+  // the visible window (pruning = not doing the same render work again, never
+  // throwing data away).
+  size_t tools_shown = 0;
   // Between-tools narration of the turn, in order. It is NOT the answer - it is
   // the model thinking out loud while it works - so it belongs in the work log and
   // used to be dropped entirely (only the final round's text was kept).
@@ -296,6 +296,11 @@ H turn_summary(const std::string& text);
 std::vector<H> markdown_blocks(const std::string& text,
                                EventFn on_copy_code = nullptr,
                                EventFn on_link = nullptr);
+// The parsed-block cache keeps its event handlers alive across pages; the shell
+// adds these ids to the retain set each render. Clearing the cache is done when
+// the owning UiApp is destroyed.
+void markdown_cache_handler_ids(std::vector<int>* out);
+void markdown_cache_clear();
 
 // ---------- overlays ----------
 H modal(const std::string& title, const std::vector<H>& body,

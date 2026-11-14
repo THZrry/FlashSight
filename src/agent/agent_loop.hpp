@@ -169,6 +169,10 @@ class AgentLoop {
   std::atomic<int64_t> context_limit{0};
   // 用户点"压缩"/UI 提示时置位：下一轮构建 history 时强制压缩一次。
   void request_compress() { compress_requested_.store(true); }
+  // User-invoked `/compact`: compress the durable history NOW, with an optional
+  // extra instruction woven into the summarizer prompt. Returns an error when
+  // there is no history to fold or the summarizer fails.
+  FsResult compact_now(const std::string& hint);
   bool compress_requested() const { return compress_requested_.load(); }
   // Model-called emergency brake (auto_stop): finish this turn, then do not
   // start another auto round. Ordinary uncertainty belongs in plan/todo.
@@ -427,7 +431,8 @@ class AgentLoop {
   std::string runtime_block();
   // Model-backed summary of the whole session. Empty on failure (caller falls
   // back to the deterministic digest).
-  std::string summarize_session(const std::string& material);
+  std::string summarize_session(const std::string& material,
+                                const std::string& hint = std::string());
   // Compact the IN-MEMORY messages after a call crosses the watermark. Used
   // between tool rounds and before an auto round; the next user turn force-
   // compresses the on-disk history (compact_pending_).
@@ -435,7 +440,8 @@ class AgentLoop {
   // Rebuild the durable history from disk when the last call crossed the water
   // level. Optionally returns the rebuilt request messages (used by an auto
   // round). Saves compaction.json and emits context.compressed.
-  bool compress_durable_history(Json* rebuilt);
+  bool compress_durable_history(Json* rebuilt, bool force = false,
+                                const std::string& hint = std::string());
   bool compact_pending_ = false;
 };
 

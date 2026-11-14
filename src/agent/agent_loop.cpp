@@ -213,7 +213,8 @@ std::string AgentLoop::runtime_block() {
   return AgentContext::build_runtime(opts_.context, st);
 }
 
-std::string AgentLoop::summarize_session(const std::string& material) {
+std::string AgentLoop::summarize_session(const std::string& material,
+                                         const std::string& hint) {
   if (!call_model || material.empty()) return std::string();
   bool zh = opts_.context.lang == ContextLang::kZh;
   std::string sys = zh
@@ -232,8 +233,13 @@ std::string AgentLoop::summarize_session(const std::string& material) {
   // A separate usage bucket: the summary call must not become the session's
   // "last prompt" and corrupt the water-level calculation.
   req.session_id = opts_.sid + "#summary";
+  std::string input = material;
+  if (!hint.empty()) {
+    input += zh ? "\n\n[用户附加要求]\n" + hint + "\n请把这一点也纳入摘要。"
+                : "\n\n[USER NOTE]\n" + hint + "\nInclude this in the summary.";
+  }
   req.messages = Json::array({Json{{"role", "system"}, {"content", sys}},
-                              Json{{"role", "user"}, {"content", material}}});
+                              Json{{"role", "user"}, {"content", input}}});
   req.auto_mode = false;
   // Shutdown/abort must also cancel the summary request itself; otherwise the
   // worker join waits for a network timeout after the window is already gone.
@@ -247,16 +253,28 @@ std::string AgentLoop::summarize_session(const std::string& material) {
   return out.text;
 }
 
-bool AgentLoop::compress_durable_history(Json* rebuilt) {
-  if (!load_history || context_limit <= 0 || last_in_tokens_ <= 0) {
-    return false;
+FsResult AgentLoop::compact_now(const std::string& hint) {
+  // A user command is a FORCED compaction: the water-level checks do not apply.
+  // The summarizer still runs on the same durable history the next turn would
+  // use, and saves `compaction.json` so the next request starts compressed.
+  if (!compress_durable_history(nullptr, true, hint)) {
+    return FsResult::error(ErrCode::kIo,
+                           "nothing to compact (or the summarizer failed)");
   }
+  return FsResult::success();
+}
+
+bool AgentLoop::compress_durable_history(Json* rebuilt, bool force,
+                                         const std::string& hint) {
+  if (!load_history) return false;
+  if (!force && (context_limit <= 0 || last_in_tokens_ <= 0)) return false;
   HistoryBuilder::Options hopts = opts_.history;
   hopts.last_prompt_tokens = last_in_tokens_;
   hopts.context_limit = context_limit;
+  hopts.force_compress = force;
   if (call_model) {
-    hopts.model_summarizer = [this](const std::string& material) {
-      return summarize_session(material);
+    hopts.model_summarizer = [this, hint](const std::string& material) {
+      return summarize_session(material, hint);
     };
   }
   if (compaction_load) {
