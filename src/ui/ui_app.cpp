@@ -1053,9 +1053,15 @@ void UiApp::load_projects() {
   });
 }
 
-void UiApp::load_terminals(const std::string& sid) {
+void UiApp::load_terminals(const std::string& sid, int64_t before,
+                           bool append) {
   if (sid.empty()) return;
-  call_async("terminal.list", Json{{"sid", sid}}, [this](const BackendResult& r) {
+  const int kLimit = 200;
+  if (append) st_.term_loading_more = true;
+  call_async("terminal.list",
+             Json{{"sid", sid}, {"before", before}, {"limit", kLimit}},
+             [this, append](const BackendResult& r) {
+    st_.term_loading_more = false;
     if (!r.ok || !r.data.is_array()) return;
     std::vector<TermItem> terms;
     for (size_t i = 0; i < r.data.size(); ++i) {
@@ -1067,12 +1073,24 @@ void UiApp::load_terminals(const std::string& sid) {
       it.status = jsonutil::get<std::string>(t, "status", "running");
       it.kind = jsonutil::get<std::string>(t, "kind", "user");
       it.timed_out = jsonutil::get<bool>(t, "timedOut", false);
+      it.started_at = jsonutil::get_int(t, "startedAt", 0);
       // A closed terminal is still LISTED (it keeps running; closing only
       // removed its tab), so it is not filtered out here - the tab strip skips
       // it and the overview shows it as an inactive row.
-      terms.push_back(it);
+      if (!it.tid.empty()) terms.push_back(it);
     }
-    st_.terminals.swap(terms);
+    st_.term_has_more = (static_cast<int>(r.data.size()) >= 200);
+    if (append) {
+      for (size_t i = 0; i < terms.size(); ++i) {
+        bool known = false;
+        for (size_t k = 0; k < st_.terminals.size(); ++k) {
+          if (st_.terminals[k].tid == terms[i].tid) { known = true; break; }
+        }
+        if (!known) st_.terminals.push_back(terms[i]);
+      }
+    } else {
+      st_.terminals.swap(terms);
+    }
     // A model `terminal_exec` is a command result, not a terminal the user
     // opened. Do not push every one of them into the tab strip; they remain in
     // 所有终端 and can be opened deliberately. Only NEW tids are hidden, so a
@@ -1271,11 +1289,21 @@ void UiApp::save_session_view(const std::string& sid) {
   v.term_cols = st_.term_cols;
   v.term_rows = st_.term_rows;
   v.term_app_keys = st_.term_app_keys;
+  v.term_has_more = st_.term_has_more;
   v.term_order = st_.term_order;
   v.term_hidden = st_.term_hidden;
   v.subagents = st_.subagents;
   v.todos = st_.todos;
   v.todo_open = st_.todo_open;
+}
+
+void UiApp::prune_inactive_views(const std::string& keep_a,
+                                 const std::string& keep_b) {
+  std::vector<std::string> keys = views_.keys();
+  for (size_t i = 0; i < keys.size(); ++i) {
+    if (keys[i] == keep_a || keys[i] == keep_b) continue;
+    views_.get_or_create(keys[i]).release_heavy();
+  }
 }
 
 void UiApp::load_session_view(const std::string& sid) {
@@ -1383,6 +1411,7 @@ void UiApp::load_session_view(const std::string& sid) {
   st_.term_cols = v.term_cols;
   st_.term_rows = v.term_rows;
   st_.term_app_keys = v.term_app_keys;
+  st_.term_has_more = v.term_has_more;
   st_.term_order = v.term_order;
   st_.term_hidden = v.term_hidden;
   st_.subagents = v.subagents;
@@ -1436,6 +1465,7 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   st_.model_picker_focus.clear();
   st_.model_picker_focus_provider.clear();
   st_.skill_menu_open = false;
+  st_.mode_menu_open = false;
   st_.thinking_menu_open = false;
   st_.side_menu_open = false;
   // The inline completion menu is SESSION state too. Left set, the next tab's
@@ -1482,6 +1512,10 @@ void UiApp::switch_tab(const std::string& id, int dir) {
   bool had_view = views_.has(sid);
   load_session_view(sid);
   last_session_key_ = sid;
+  // Only the tab just left and the new one stay fully materialised. Every other
+  // visited session used to keep its messages/subagent transcripts/terminal
+  // grids in RAM for the life of the process.
+  prune_inactive_views(leaving, sid);
   // The user is looking at this tab now: its "new output" dot is spent.
   for (size_t i = 0; i < st_.sessions.size(); ++i) {
     if (st_.sessions[i].id == sid) {
@@ -1649,7 +1683,8 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
         tb.input = cut_display(dump_safe(tc[k]["args"], 2), 6000,
                                "\n… (输入已截断)");
       }
-      if (detail.empty()) detail = tb.input;
+      // Do NOT copy the input into `detail` when a turn stored no result: that
+      // duplicated the args text (once as input, once as output) for every row.
       tb.detail = detail;
       tb.ok = jsonutil::get<bool>(tc[k], "ok", true);
       // A subagent tool call must keep its id across a reload, or the "打开记录"
@@ -1738,11 +1773,16 @@ void UiApp::load_session(const std::string& sid) {
   // memoised tool rows still point at those removed elements, so handing them
   // back leaves rows that CANNOT be clicked ("切页面后工具调用点不开"). Drop both
   // caches before the new page is built; re-rendering is the cost of correctness.
+  //
+  // Drop OTHER sessions' entries too: those pages are gone, so their VNode trees
+  // are dead weight. Keeping them made memory grow with every session visited
+  // and was invisible until the user compared a long-running process with a
+  // freshly started one loading the same history.
   {
     const std::string prefix = "msg:" + sid + ":";
     for (std::map<std::string, MsgNode>::iterator it = msg_nodes_.begin();
          it != msg_nodes_.end();) {
-      if (it->first.compare(0, prefix.size(), prefix) == 0) {
+      if (it->first.compare(0, prefix.size(), prefix) != 0) {
         it = msg_nodes_.erase(it);
       } else {
         ++it;
@@ -2029,6 +2069,36 @@ void UiApp::refresh_session_todos(const std::string& sid) {
 // layout right there, which means setting scrollTop in the same task is exact -
 // the first paint is already at the right place. That is what "提前把布局完成"
 // has to mean in practice: not a deferral, the same frame.
+void UiApp::snapshot_scroll_state(const VNodePtr& v) {
+  if (!v) return;
+  if (v->key.compare(0, 7, "scroll:") == 0 && v->dom.valid()) {
+    ScrollMemory m;
+    m.dom_id = v->dom.id;
+    m.top = dom_.scroll_top(v->dom);
+    scroll_memory_[v->key] = m;
+  }
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    snapshot_scroll_state(v->children[i]);
+  }
+}
+
+void UiApp::restore_scroll_state(const VNodePtr& v) {
+  if (!v) return;
+  if (v->key.compare(0, 7, "scroll:") == 0 && v->dom.valid()) {
+    std::map<std::string, ScrollMemory>::iterator it =
+        scroll_memory_.find(v->key);
+    // Only when the DOM node is NEW. Patching an existing node preserves the
+    // browser's scroll; re-applying the remembered value would fight the user.
+    if (it != scroll_memory_.end() && it->second.dom_id != v->dom.id) {
+      dom_.set_scroll_top(v->dom, it->second.top);
+      it->second.dom_id = v->dom.id;
+    }
+  }
+  for (size_t i = 0; i < v->children.size(); ++i) {
+    restore_scroll_state(v->children[i]);
+  }
+}
+
 void UiApp::request_history_scroll_restore() {
   pending_scroll_apply_ = true;
   pending_scroll_target_ = st_.hist_scroll;
@@ -2994,14 +3064,30 @@ void UiApp::load_subagents(const std::string& sid) {
 //     folder) or, in permissive mode, to the filesystem.
 // Both are HINTS: nothing is inserted until the user picks (Enter/click) or
 // presses Tab.
+// Indices of the rows the menu ACTUALLY draws. The command list is filtered by
+// the typed query here, in the menu builder and in Tab/arrow handling alike;
+// previously Tab indexed the UNFILTERED list, so "/ne" followed by Tab inserted
+// `/new` (row 0) no matter which filtered row was highlighted.
+static std::vector<size_t> visible_complete_indices(const AppState& st) {
+  std::vector<size_t> out;
+  if (st.complete_kind == AppState::CompleteKind::kCommand) {
+    const std::string q = lower_ascii(st.complete_query);
+    for (size_t i = 0; i < st.command_menu.size(); ++i) {
+      const AppState::CommandRow& c = st.command_menu[i];
+      if (!q.empty() && lower_ascii(c.name).find(q) == std::string::npos &&
+          lower_ascii(c.title).find(q) == std::string::npos) {
+        continue;
+      }
+      out.push_back(i);
+    }
+  } else if (st.complete_kind == AppState::CompleteKind::kPath) {
+    for (size_t i = 0; i < st.complete_items.size(); ++i) out.push_back(i);
+  }
+  return out;
+}
+
 int UiApp::complete_row_count() const {
-  if (st_.complete_kind == AppState::CompleteKind::kCommand) {
-    return static_cast<int>(st_.command_menu.size());
-  }
-  if (st_.complete_kind == AppState::CompleteKind::kPath) {
-    return static_cast<int>(st_.complete_items.size());
-  }
-  return 0;
+  return static_cast<int>(visible_complete_indices(st_).size());
 }
 
 void UiApp::update_complete_from_input(const std::string& text, size_t caret) {
@@ -3121,16 +3207,17 @@ void UiApp::update_complete_from_input(const std::string& text, size_t caret) {
 
 void UiApp::accept_complete() {
   if (st_.complete_kind == AppState::CompleteKind::kNone) return;
+  std::vector<size_t> visible = visible_complete_indices(st_);
   int idx = st_.complete_index;
+  if (idx < 0 || idx >= static_cast<int>(visible.size())) return;
+  const size_t row = visible[static_cast<size_t>(idx)];
   std::string insert;
   bool is_dir = false;
   if (st_.complete_kind == AppState::CompleteKind::kCommand) {
-    if (idx < 0 || idx >= static_cast<int>(st_.command_menu.size())) return;
-    insert = "/" + st_.command_menu[static_cast<size_t>(idx)].name + " ";
+    insert = "/" + st_.command_menu[row].name + " ";
   } else {
-    if (idx < 0 || idx >= static_cast<int>(st_.complete_items.size())) return;
-    insert = st_.complete_items[static_cast<size_t>(idx)].first;
-    is_dir = st_.complete_items[static_cast<size_t>(idx)].second;
+    insert = st_.complete_items[row].first;
+    is_dir = st_.complete_items[row].second;
   }
   std::string text = st_.session_input;
   size_t caret = text.size();
@@ -3185,21 +3272,16 @@ VNodePtr UiApp::build_complete_menu() {
   box.key("complete-menu");
   box.anim(anim::kPop);
   int idx = st_.complete_index;
+  std::vector<size_t> visible = visible_complete_indices(st_);
   if (st_.complete_kind == AppState::CompleteKind::kCommand) {
-    if (st_.command_menu.empty()) {
+    if (visible.empty()) {
       box.add(el("div", "complete-item dim").text(tr("（暂无命令）")));
       return box.get();
     }
-    for (size_t i = 0; i < st_.command_menu.size(); ++i) {
-      const AppState::CommandRow& c = st_.command_menu[i];
-      if (!st_.complete_query.empty()) {
-        std::string q = lower_ascii(st_.complete_query);
-        if (lower_ascii(c.name).find(q) == std::string::npos &&
-            lower_ascii(c.title).find(q) == std::string::npos) {
-          continue;
-        }
-      }
-      H it = el("div", static_cast<int>(i) == idx ? "complete-item sel" : "complete-item");
+    for (size_t pos = 0; pos < visible.size(); ++pos) {
+      const AppState::CommandRow& c = st_.command_menu[visible[pos]];
+      H it = el("div", static_cast<int>(pos) == idx ? "complete-item sel"
+                                                    : "complete-item");
       it.add(el("span", "complete-name").text("/" + c.name));
       if (!c.title.empty() && c.title != c.name) {
         it.add(el("span", "complete-title").text(c.title));
@@ -3207,7 +3289,7 @@ VNodePtr UiApp::build_complete_menu() {
       if (!c.description.empty()) {
         it.add(el("span", "complete-desc dim").text(c.description));
       }
-      size_t n = i;
+      size_t n = pos;
       it.on(EventKind::kClick, [this, n](const std::string&) {
         update([&](AppState& s) { s.complete_index = static_cast<int>(n); });
         accept_complete();
@@ -3215,17 +3297,19 @@ VNodePtr UiApp::build_complete_menu() {
       box.add(it);
     }
   } else {
-    if (st_.complete_items.empty()) {
+    if (visible.empty()) {
       box.add(el("div", "complete-item dim").text(tr("（没有匹配的文件）")));
       return box.get();
     }
-    for (size_t i = 0; i < st_.complete_items.size(); ++i) {
+    for (size_t pos = 0; pos < visible.size(); ++pos) {
+      const size_t i = visible[pos];
       bool is_dir2 = st_.complete_items[i].second;
-      H it = el("div", static_cast<int>(i) == idx ? "complete-item sel" : "complete-item");
+      H it = el("div", static_cast<int>(pos) == idx ? "complete-item sel"
+                                                    : "complete-item");
       it.add(el("i", is_dir2 ? "fa fa-folder" : "fa fa-file"));
       it.add(el("span", "complete-name").text(st_.complete_items[i].first +
                                               (is_dir2 ? "/" : "")));
-      size_t n = i;
+      size_t n = pos;
       it.on(EventKind::kClick, [this, n](const std::string&) {
         update([&](AppState& s) { s.complete_index = static_cast<int>(n); });
         accept_complete();
@@ -3831,12 +3915,94 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     std::string sub_id = jsonutil::get<std::string>(payload, "subagentId", "");
     std::string skind = jsonutil::get<std::string>(payload, "subagentKind", "");
     const bool inline_step = (skind == "complete-step");
-    if (event == "stream.delta" || event == "tool.start") {
-      std::string nm = jsonutil::get<std::string>(payload, "name", "");
-      std::string piece = jsonutil::get<std::string>(payload, "text", "");
-      if (event == "tool.start" && !nm.empty()) {
-        piece = "\n[" + tr("调用") + " " + nm + "]";
+    // Real tool rows, not just "[调用 read_file]" text. The subagent's record is
+    // fetched only when it finishes, so the detail page used to sit empty while
+    // it worked; and a complete-step is supposed to look like normal work in the
+    // main log until it is packaged into the panel. Both views get the same
+    // live row, updated in place by callId.
+    if (event == "tool.start" || event == "tool.update") {
+      const std::string call_id =
+          jsonutil::get<std::string>(payload, "callId", "");
+      const std::string nm = jsonutil::get<std::string>(payload, "name", "");
+      Json args = payload.contains("args") && payload["args"].is_object()
+                      ? payload["args"]
+                      : Json::object();
+      const std::string detail =
+          jsonutil::get<std::string>(payload, "detail", "");
+      const bool ok = jsonutil::get<bool>(payload, "ok", true);
+      const bool starting = (event == "tool.start");
+      const std::string row_key = "sub:" + sub_id + ":" + call_id;
+      if (!sub_id.empty() && !call_id.empty()) {
+        auto apply_live = [&](std::vector<comp::ToolBlock>* tools) {
+          if (!tools) return;
+          comp::ToolBlock* tb = nullptr;
+          for (size_t i = 0; i < tools->size(); ++i) {
+            if ((*tools)[i].key == row_key) {
+              tb = &(*tools)[i];
+              break;
+            }
+          }
+          if (!tb) {
+            comp::ToolBlock fresh;
+            fresh.key = row_key;
+            fresh.name = nm.empty() ? std::string("tool") : nm;
+            fresh.subagent_id = sub_id;
+            tools->push_back(fresh);
+            tb = &tools->back();
+          }
+          if (starting && !args.empty()) {
+            tb->input = cut_display(dump_safe(args, 2), 4000,
+                                    "\n… (输入已截断)");
+          }
+          if (!detail.empty()) tb->detail = detail;
+          tb->ok = ok;
+          tb->running = starting;
+          tb->summary = tool_display_summary(tb->name, args, tb->detail, ok);
+          tb->rev = next_msg_rev_++;
+        };
+        std::vector<AppState::SubagentRow>& rows =
+            is_active ? st_.subagents : views_.get_or_create(sid).subagents;
+        for (size_t k = 0; k < rows.size(); ++k) {
+          if (rows[k].id != sub_id) continue;
+          apply_live(&rows[k].live_tools);
+          // Bounded: a long-running agent must not grow this without limit. The
+          // stored transcript is the complete record once it finishes.
+          if (rows[k].live_tools.size() > 240) {
+            rows[k].live_tools.erase(
+                rows[k].live_tools.begin(),
+                rows[k].live_tools.begin() +
+                    static_cast<long>(rows[k].live_tools.size() - 240));
+          }
+          break;
+        }
+        std::map<std::string, AppState::SubagentDetail>::iterator dit =
+            st_.subagent_details.find(sub_id);
+        if (dit != st_.subagent_details.end() && dit->second.loaded) {
+          apply_live(&dit->second.row.live_tools);
+          if (dit->second.row.live_tools.size() > 240) {
+            dit->second.row.live_tools.erase(
+                dit->second.row.live_tools.begin(),
+                dit->second.row.live_tools.begin() +
+                    static_cast<long>(dit->second.row.live_tools.size() - 240));
+          }
+        }
+        if (inline_step) {
+          std::vector<comp::ChatMsg>& msgs =
+              is_active ? st_.messages : views_.get_or_create(sid).messages;
+          int& total =
+              is_active ? st_.history_total : views_.get_or_create(sid).history_total;
+          comp::ChatMsg& msg =
+              ensure_turn_message(msgs, total, &next_msg_rev_, now_ms());
+          apply_live(&msg.tools);
+          msg.rev = next_msg_rev_++;
+        }
       }
+      // The pump paints live rows at a human pace; no render per event.
+      subagent_stream_dirty_ = true;
+      return;
+    }
+    if (event == "stream.delta") {
+      std::string piece = jsonutil::get<std::string>(payload, "text", "");
       if (!sub_id.empty()) {
         std::vector<AppState::SubagentRow>& rows =
             is_active ? st_.subagents : views_.get_or_create(sid).subagents;
@@ -4077,11 +4243,28 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         s.interrupted = false;
         s.interrupt_reason.clear();
         s.turn_running = true;
+        s.suspended = false;
+        // 继续 does not emit turn.started, so the live stopwatch had no message
+        // to hang on and only appeared after the first tool finished. Mark the
+        // resumed answer streaming now.
+        comp::ChatMsg& msg = ensure_turn_message(
+            s.messages, s.history_total, &next_msg_rev_, now_ms());
+        msg.streaming = true;
+        msg.now_ms = now_ms();
+        if (msg.started_at <= 0) msg.started_at = now_ms();
+        msg.rev = next_msg_rev_++;
       });
     } else {
       vp->interrupted = false;
       vp->interrupt_reason.clear();
       vp->turn_running = true;
+      vp->suspended = false;
+      comp::ChatMsg& msg = ensure_turn_message(
+          vp->messages, vp->history_total, &next_msg_rev_, now_ms());
+      msg.streaming = true;
+      msg.now_ms = now_ms();
+      if (msg.started_at <= 0) msg.started_at = now_ms();
+      msg.rev = next_msg_rev_++;
     }
     render();
   } else if (event == "thinking.delta") {
@@ -4433,8 +4616,11 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
       found = true;
       subs[i].status = failed ? "failed" : "done";
       // A complete-step is moved from the inline view into the subagent panel
-      // HERE, when its work is finished - not before.
+      // HERE, when its work is finished - not before. The live rows are now
+      // represented by the stored transcript the detail page fetches.
       subs[i].pending = false;
+      subs[i].live_text.clear();
+      std::vector<comp::ToolBlock>().swap(subs[i].live_tools);
       if (!summary.empty()) subs[i].summary = summary;
       if (ended > 0) subs[i].ended_at = ended;
       if (subs[i].ended_at <= 0) subs[i].ended_at = now_ms();
@@ -4454,11 +4640,26 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // fold that view back: the record stays in the subagent panel and the main
     // transcript keeps only the tool row + summary.
     std::vector<comp::ChatMsg>& msgs = is_active ? st_.messages : vp->messages;
+    const std::string row_prefix = "sub:" + id + ":";
     for (size_t i = 0; i < msgs.size(); ++i) {
-      if (msgs[i].work_live_id != id) continue;
-      msgs[i].work_live.clear();
-      msgs[i].work_live_id.clear();
-      msgs[i].rev = next_msg_rev_++;
+      bool touched = false;
+      if (msgs[i].work_live_id == id) {
+        msgs[i].work_live.clear();
+        msgs[i].work_live_id.clear();
+        touched = true;
+      }
+      // Move the complete-step's real tool rows out of the main log: they now
+      // live in the subagent panel's transcript.
+      std::vector<comp::ToolBlock>& tools = msgs[i].tools;
+      for (size_t k = 0; k < tools.size();) {
+        if (tools[k].key.compare(0, row_prefix.size(), row_prefix) == 0) {
+          tools.erase(tools.begin() + static_cast<long>(k));
+          touched = true;
+        } else {
+          ++k;
+        }
+      }
+      if (touched) msgs[i].rev = next_msg_rev_++;
     }
     // A transcript tab for this agent should show the final state too (it was
     // opened while the agent was still running, which is the common case).
@@ -4467,6 +4668,8 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     if (d != st_.subagent_details.end()) {
       d->second.row.status = failed ? "failed" : "done";
       d->second.row.pending = false;
+      d->second.row.live_text.clear();
+      std::vector<comp::ToolBlock>().swap(d->second.row.live_tools);
       if (!summary.empty()) d->second.row.summary = summary;
       if (ended > 0) d->second.row.ended_at = ended;
       if (d->second.loaded) load_subagent_detail(id);
@@ -5001,10 +5204,32 @@ std::string UiApp::debug_stats() const {
   for (size_t i = 0; i < st_.projects.size(); ++i) {
     sessions += st_.projects[i].sessions.size();
   }
-  char buf[768];
+  // Inactive session views are a large hidden cost: every visited tab used to
+  // keep its transcript/tool payloads/terminal grids. Report them so [res]
+  // shows whether pruning works instead of guessing.
+  size_t view_msgs = 0, view_tools = 0, view_terms = 0;
+  std::vector<std::string> vkeys = views_.keys();
+  for (size_t vi = 0; vi < vkeys.size(); ++vi) {
+    const SessionView* v = views_.find(vkeys[vi]);
+    if (!v) continue;
+    for (size_t i = 0; i < v->messages.size(); ++i) {
+      view_msgs += v->messages[i].text.size();
+      for (size_t k = 0; k < v->messages[i].tools.size(); ++k) {
+        view_tools += v->messages[i].tools[k].input.size() +
+                      v->messages[i].tools[k].detail.size();
+      }
+    }
+    for (std::map<std::string, std::string>::const_iterator it =
+             v->term_outputs.begin(); it != v->term_outputs.end(); ++it) {
+      view_terms += it->second.size();
+    }
+  }
+  char buf[896];
   std::snprintf(
       buf, sizeof(buf),
       "msgs=%d tools=%d msg_bytes=%d tool_bytes=%d msg_nodes=%d views=%d "
+      "view_msgs=%d view_tools=%d view_terms=%d "
+      "md_cache_bytes=%d tool_cache_bytes=%d "
       "details=%d subagents=%d ops=%d todos=%d terms=%d term_bytes=%d "
       "term_grids=%d grid_bytes=%d term_order=%d term_hidden=%d "
       "projects=%d sessions=%d tabs=%d side_tabs=%d wakes=%d "
@@ -5012,6 +5237,10 @@ std::string UiApp::debug_stats() const {
       static_cast<int>(st_.messages.size()), static_cast<int>(tools),
       static_cast<int>(msg_bytes), static_cast<int>(tool_bytes),
       static_cast<int>(msg_nodes_.size()), static_cast<int>(views_.size()),
+      static_cast<int>(view_msgs), static_cast<int>(view_tools),
+      static_cast<int>(view_terms),
+      static_cast<int>(comp::markdown_cache_bytes()),
+      static_cast<int>(comp::tool_block_cache_bytes()),
       static_cast<int>(st_.subagent_details.size()),
       static_cast<int>(st_.subagents.size()),
       static_cast<int>(st_.session_ops.size()),
@@ -5069,6 +5298,10 @@ void UiApp::render() {
         }
       }
     }
+    // Remember where every keyed scroll container was BEFORE the patch. When a
+    // key is recreated (the side panel swaps its body per tab), its old offset
+    // is restored below - no business code copies it into a view struct.
+    snapshot_scroll_state(tree_);
     patch(dom_, tree_, neu, root_);
     // Ship this frame's DOM writes as one batch before anything below READS the
     // DOM (the scroll restore reads real heights, the wiring binds handlers to
@@ -5077,6 +5310,9 @@ void UiApp::render() {
     dom_.flush();
     tree_ = neu;
     last_rendered_tab_ = st_.active_tab;
+    // Restore keyed scroll containers first; the transcript's own pending
+    // restore below is more precise (anchored to a message) and must win.
+    restore_scroll_state(tree_);
     // The transcript (if this render created one) is in the DOM now, so a
     // pending restore can be applied against the REAL height in this same task -
     // before the browser paints. Doing it in a later tick is what made a return
@@ -5206,6 +5442,14 @@ void UiApp::render() {
             s.model_picker_open = false;
             s.model_picker_owner.clear();
           });
+        });
+      }
+    }
+    if (st_.mode_menu_open) {
+      VNodePtr pop = find_by_key(tree_, "mode-menu");
+      if (pop && pop->dom.valid()) {
+        dom_.bind_outside_click(pop->dom, [this]() {
+          update([&](AppState& s) { s.mode_menu_open = false; });
         });
       }
     }
@@ -5339,9 +5583,11 @@ void UiApp::render() {
         update([&](AppState& s) { s.ctx_open = false; });
         return;
       }
-      if (st_.skill_menu_open || st_.thinking_menu_open || st_.side_menu_open) {
+      if (st_.skill_menu_open || st_.mode_menu_open ||
+          st_.thinking_menu_open || st_.side_menu_open) {
         update([&](AppState& s) {
           s.skill_menu_open = false;
+          s.mode_menu_open = false;
           s.thinking_menu_open = false;
           s.side_menu_open = false;
         });
@@ -6926,19 +7172,6 @@ VNodePtr UiApp::build_session() {
         });
         return;
       }
-      if (v == "more-tools") {
-        // Widen the working window; the full tool list was always retained.
-        update([&](AppState& s) {
-          if (i < static_cast<int>(s.messages.size())) {
-            comp::ChatMsg& m = s.messages[i];
-            size_t cur = m.tools_shown > 0 ? m.tools_shown
-                                           : (m.streaming ? 120u : 300u);
-            m.tools_shown = cur + 100;
-            m.rev = next_msg_rev_++;
-          }
-        });
-        return;
-      }
       if (v.compare(0, 6, "think:") == 0) {
         int ti = std::atoi(v.substr(6).c_str());
         update([&](AppState& s) {
@@ -7344,6 +7577,13 @@ VNodePtr UiApp::build_session() {
         s.interrupt_reason.clear();
         s.turn_running = true;
         s.stop_pending = false;
+        // Start the stopwatch with the click, not with the first finished tool.
+        comp::ChatMsg& msg = ensure_turn_message(
+            s.messages, s.history_total, &next_msg_rev_, now_ms());
+        msg.streaming = true;
+        msg.now_ms = now_ms();
+        if (msg.started_at <= 0) msg.started_at = now_ms();
+        msg.rev = next_msg_rev_++;
       });
       call_async("session.continue",
                  Json{{"sid", sid}, {"guidance", ""}, {"suppressQueue", false}},
@@ -7688,71 +7928,51 @@ VNodePtr UiApp::build_session() {
     // a read instead of trusting the last broadcast.
     if (open && !active_sid().empty()) refresh_session_todos(active_sid());
   }, "ghost"));
-  // 自动挡: a toggle button, not a select - it is one bit and it is switched
-  // often. The label says which mode is active.
-  // 顺序：自动挡 在 批准模式 前面。先决定"谁来做"（人/AI），再决定"做到什么
-  // 程度能自己动手"（权限级别），读起来是从粗到细；反过来就成了"先定权限再定
-  // 谁来跑"，很别扭。批准模式也因此在最外侧——它点开的下拉朝外展开。
+  // ONE mode control replaces the old 自动 toggle + 文件权限 select. The old
+  // pair had a dead corner: auto only ever worked with "full", and full vs
+  // permissive gated the same things in practice, so there were really three
+  // combinations, not six. Rich rows (icon + name + description) instead of a
+  // native <select>: the user explicitly rejected the dropdown look.
   {
-    H auto_btn = comp::icon_text_button(st_.auto_mode ? "robot" : "hand",
-                                        st_.auto_mode ? tr("自动") : tr("手动"),
-                                        [this](const std::string&) {
-      bool next = !st_.auto_mode;
-      std::string sid = active_sid();
-      update([&](AppState& s) { s.auto_mode = next; });
-      if (!sid.empty()) {
-        call_async("session.setAutoMode", Json{{"sid", sid}, {"autoMode", next}});
+    const std::string mode = current_mode();
+    const std::string icon =
+        mode == "auto" ? "robot" : (mode == "manual" ? "hand" : "user-shield");
+    const std::string label =
+        mode == "auto" ? tr("自动") : (mode == "manual" ? tr("手动") : tr("半自动"));
+    H wrap = el("div", "mode-wrap");
+    H btn = comp::icon_text_button(icon, label, [this](const std::string&) {
+      update([&](AppState& s) { s.mode_menu_open = !s.mode_menu_open; });
+    }, mode == "auto" ? "ghost on" : "ghost");
+    btn.attr("title", tr("模式：手动=逐次批准；半自动=项目内放行；自动=自动继续+完全放行"));
+    wrap.add(btn);
+    if (st_.mode_menu_open) {
+      H pop = el("div", "mode-menu");
+      pop.key("mode-menu");
+      struct ModeOpt {
+        const char* value;
+        const char* icon;
+        const char* title;
+        const char* desc;
+      };
+      const ModeOpt opts[] = {
+          {"manual", "hand", "手动", "每次写文件、执行命令都先询问"},
+          {"semi", "user-shield", "半自动", "项目内直接执行；系统操作（其他目录/终端/网络）询问"},
+          {"auto", "robot", "自动", "自动继续推进；完全放行，不再询问"},
+      };
+      for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); ++i) {
+        std::string v = opts[i].value;
+        H row = el("div", v == mode ? "mode-menu-item sel" : "mode-menu-item");
+        row.on(EventKind::kClick, [this, v](const std::string&) { apply_mode(v); });
+        row.add(el("i", std::string("fa fa-") + opts[i].icon));
+        H txt = el("div", "mode-opt-text");
+        txt.add(el("div", "mode-opt-title").text(tr(opts[i].title)));
+        txt.add(el("div", "mode-opt-desc dim").text(tr(opts[i].desc)));
+        row.add(txt);
+        pop.add(row);
       }
-    }, st_.auto_mode ? "ghost on" : "ghost");
-    auto_btn.attr("title", st_.auto_mode ? tr("自动模式（点击切到手动）")
-                                        : tr("手动模式（点击切到自动）"));
-    left_tools.add(auto_btn);
-    // No manual "定时/自动唤醒" button: scheduling a wake is the MODEL's action
-    // (it calls session.schedule when it decides to retry later). A user-facing
-    // button duplicated that, and its only real use - cancelling a pending wake -
-    // belongs next to 挂起 and appears only while one is actually pending.
-  }
-  // (The inline "schedule a wake in N minutes" form is gone with the button.)
-  // 权限: a compact select, but with the three levels spelled out (the values
-  // alone - approve/permissive/full - mean nothing). The wording states what
-  // each level actually gates: 宽松 = 项目内放行、项目外/系统操作要问。
-  {
-    H perm_sel = el("div", "bar-group");
-    std::vector<std::string> perms;
-    perms.push_back(tr("逐次批准"));
-    perms.push_back(tr("宽松"));
-    perms.push_back(tr("完全放行"));
-    H sel = comp::select(perms, st_.perm_index, [this](const std::string& v) {
-      int idx = std::atoi(v.c_str());
-      std::string perm = idx == 0 ? "approve" : idx == 2 ? "full" : "permissive";
-      std::string sid = active_sid();
-      update([&](AppState& s) {
-        s.perm_index = idx;
-        s.permission = perm;
-      });
-      if (!sid.empty()) {
-        call_async("session.setPermission", Json{{"sid", sid}, {"permission", perm}},
-                   [this, sid, perm](const BackendResult& r) {
-          if (r.ok) return;
-          if (r.code == "confirm-required") {
-            call_async("session.requestPermissionToken",
-                       Json{{"sid", sid}, {"newPermission", perm}},
-                       [this, sid, perm](const BackendResult& t) {
-              std::string token = jsonutil::get<std::string>(t.data, "token", "");
-              if (token.empty()) return;
-              call_async("session.setPermissionConfirm",
-                         Json{{"sid", sid}, {"permission", perm}, {"token", token}});
-            });
-          }
-        });
-      }
-    });
-    // One lookup key per tooltip: splitting a sentence across adjacent literals
-    // makes the translation table miss it (the concatenated text is what the
-    // user sees, but each literal is looked up separately).
-    sel.attr("title", tr("文件权限：逐次批准 = 每次写文件都问；宽松 = 项目内直接做、系统操作（其他文件夹读写/终端/网络）询问；完全放行 = 不再询问"));
-    perm_sel.add(sel);
-    left_tools.add(perm_sel);
+      wrap.add(pop);
+    }
+    left_tools.add(wrap);
   }
   tools.add(left_tools);
   H grow = el("span", "grow");
@@ -8280,7 +8500,10 @@ VNodePtr UiApp::build_side_panel() {
   // rise inside a right-hand panel reads as the content jumping up. The exit
   // intent is declared too, so the old body slides out while the new one slides
   // in (a real two-view swap) instead of fading in place under the new one.
-  body.key("side-body:" + st_.active_side);
+  // The `scroll:` prefix opts this node into the framework's keyed scroll
+  // memory. Switching side tabs recreates the body, and the framework restores
+  // the position each tab had - no per-panel bookkeeping in the business layer.
+  body.key("scroll:side-body:" + st_.active_side);
   body.anim(anim::kSlideLeft).anim_key("side:" + st_.active_side);
   body.exit(anim::kExitLeft);
   // Stagger, exactly like the page transition: the incoming panel waits until
@@ -8294,7 +8517,7 @@ VNodePtr UiApp::build_side_panel() {
   // delay - so the animation restarted with 0s and the panel snapped in.
   // The flag is dropped once the stagger + slide has certainly finished.
   {
-    std::string body_key = "side-body:" + st_.active_side;
+    std::string body_key = "scroll:side-body:" + st_.active_side;
     if (side_entering_key_ != body_key) {
       side_entering_key_ = body_key;
       dom_.schedule(480, [this, body_key]() {
@@ -8508,6 +8731,28 @@ VNodePtr UiApp::build_side_panel() {
           send_subagent_steer_text(sub_id, it->second.steer_draft, running);
         }));
         body.add(steer);
+      }
+      // Work in progress, live. This is the actual tool stream (name/input/
+      // result), not a one-line "调用 read_file" hint, and it is visible while
+      // the agent runs instead of appearing all at once when it reports.
+      if (!row.live_tools.empty() || !row.live_text.empty()) {
+        body.add(el("div", "sap-label").text(
+            tr("实时过程（运行中，最新在最后）")));
+        if (!row.live_text.empty()) {
+          body.add(el("div", "work-note work-subagent").text(row.live_text));
+        }
+        EventFn live_toggle = [this, sub_id](const std::string&) {
+          std::map<std::string, AppState::SubagentDetail>::iterator it =
+              st_.subagent_details.find(sub_id);
+          if (it == st_.subagent_details.end()) return;
+          it->second.tools_open = !it->second.tools_open;
+          render();
+        };
+        for (size_t k = 0; k < row.live_tools.size(); ++k) {
+          comp::ToolBlock tb = row.live_tools[k];
+          tb.expanded = det->tools_open;
+          body.add(comp::tool_block(tb, live_toggle, nullptr));
+        }
       }
       if (row.transcript.is_array() && row.transcript.size() > 0) {
         // Tool results arrive as separate `role:"tool"` messages; pair them with
@@ -9524,6 +9769,23 @@ VNodePtr UiApp::build_terminal_drawer() {
       item.add(pre);
       list.add(item);
     }
+    if (st_.term_has_more) {
+      int64_t cursor = 0;
+      for (size_t i = st_.terminals.size(); i-- > 0;) {
+        if (st_.terminals[i].started_at > 0) {
+          cursor = st_.terminals[i].started_at;
+          break;
+        }
+      }
+      std::string sid = active_sid();
+      list.add(comp::button(
+          st_.term_loading_more ? tr("加载中…") : tr("加载更多终端"),
+          [this, sid, cursor](const std::string&) {
+        if (cursor > 0 && !st_.term_loading_more) {
+          load_terminals(sid, cursor, true);
+        }
+      }, "ghost"));
+    }
     if (st_.terminals.empty()) {
       list.add(comp::empty_state(tr("点「新增」启动一个终端"), "", nullptr));
     }
@@ -10443,10 +10705,20 @@ void UiApp::refresh_server_status(bool wait_for_change) {
       // Fallback for a lost server.moved frame: if the page is still on the old
       // port while the server is already listening on a new one, follow it. The
       // native adapters have no location host, so this only runs in the browser.
-      if (!pending && srv_running && srv_port > 0) {
-        std::string h = dom_.location_host();
+      //
+      // LOCAL ONLY, and once. A remote client may reach the app through a
+      // different public port (port forwarding, reverse proxy, default :80);
+      // comparing the server's bind port with its location port then navigates
+      // it on EVERY status read, which is the "远程访问不停刷新" loop. A real
+      // port change still travels as `server.moved`, which the page follows.
+      const std::string h = dom_.location_host();
+      const bool local_page = h.empty() ? false
+          : (h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "[::1]");
+      if (!pending && srv_running && srv_port > 0 && local_page &&
+          !server_nav_attempted_) {
         std::string lp = dom_.location_port();
-        if (!h.empty() && !lp.empty() && lp != itos(srv_port)) {
+        if (!lp.empty() && lp != itos(srv_port)) {
+          server_nav_attempted_ = true;
           dom_.navigate("http://" + h + ":" + itos(srv_port) + "/");
         }
       }
@@ -11225,6 +11497,39 @@ VNodePtr UiApp::build_settings() {
       call_async("thinking.setLang", Json{{"lang", l.empty() ? "auto" : l}});
     }), tr("影响工具/skill 说明的双语选择")));
 
+    body.add(comp::section_title(tr("失败重试")));
+    // The GLOBAL retry policy. The per-model fields already existed, but a model
+    // that did not override them had no visible global value to inherit, and the
+    // backend never read one at all (the defaults were hard-coded).
+    body.add(comp::field(tr("重试次数"), comp::text_input(
+        itos(sv_int(st_.settings_values, "model.retry.max", 3)), "3",
+        nullptr,
+        [this](const std::string& v) {
+      int n = std::atoi(v.c_str());
+      if (n < 0) n = 0;
+      if (n > 10) n = 10;
+      set_setting("model.retry.max", n);
+    },
+        [this](const std::string& v) {
+      int n = std::atoi(v.c_str());
+      if (n < 0) n = 0;
+      if (n > 10) n = 10;
+      set_setting("model.retry.max", n);
+    }), tr("网络/5xx/429 等失败自动重试（0=不重试）；余额不足、主机不可达不重试")));
+    body.add(comp::field(tr("退避基数"), comp::text_input(
+        itos(sv_int(st_.settings_values, "model.retry.backoffMs", 1000)), "1000",
+        nullptr,
+        [this](const std::string& v) {
+      int n = std::atoi(v.c_str());
+      if (n < 100) n = 100;
+      set_setting("model.retry.backoffMs", n);
+    },
+        [this](const std::string& v) {
+      int n = std::atoi(v.c_str());
+      if (n < 100) n = 100;
+      set_setting("model.retry.backoffMs", n);
+    }), tr("毫秒；按 1x/2x/4x 递增")));
+
     body.add(comp::section_title(tr("压缩")));
     // ONE control. The threshold triggers a FULL compression of the history.
     // Short view is not a setting and not part of the threshold: it is only the
@@ -11687,84 +11992,59 @@ VNodePtr UiApp::build_settings() {
       body.add(comp::field(tr("默认思考档"), lvl,
                            lv.empty() ? tr("该模型没有可配档位") : ""));
     }
-    // 文件权限：三档 + "记忆上次"。做成带说明的选择列表而不是下拉框——光看
-    // "permissive" 没人知道它到底放行了什么。
-    {
-      std::vector<comp::ChoiceOption> perms;
-      comp::ChoiceOption o;
-      o.value = "approve";
-      o.icon = "hand";
-      o.title = tr("逐次批准");
-      o.desc = tr("每次写文件、执行命令都先问一次");
-      perms.push_back(o);
-      o.value = "permissive";
-      o.icon = "folder";
-      o.title = tr("宽松");
-      o.desc = tr("项目内操作直接放行；系统操作（其他文件夹读写、终端、网络）询问");
-      perms.push_back(o);
-      o.value = "full";
-      o.icon = "bolt";
-      o.title = tr("完全放行");
-      o.desc = tr("不再询问（仅在你信任当前项目时使用）");
-      perms.push_back(o);
-      o.value = "remember";
-      o.icon = "clock";
-      o.title = tr("记忆上次");
-      o.desc = tr("新会话沿用上一次会话的选择");
-      perms.push_back(o);
-      body.add(comp::section_title(tr("文件权限")));
-      // The stored value is the LEVEL; "记住上次" is a separate flag. Reading the
-      // level back directly meant picking 记忆上次 wrote the literal string
-      // "remember" into a permission field and the next render could not match
-      // any option, so the choice never showed as selected.
-      std::string perm_sel = sv_bool(st_.settings_values,
-                                     "session.default.filePermRemember", false)
-                                 ? "remember"
-                                 : sv_str(st_.settings_values,
-                                          "session.default.filePerm", "permissive");
-      body.add(comp::choice_list(perms, perm_sel, [this](const std::string& v) {
-        if (v == "remember") {
-          set_setting("session.default.filePermRemember", true);
-          return;
-        }
-        set_setting("session.default.filePermRemember", false);
-        set_setting("session.default.filePerm", v);
-      }));
-    }
-    // 自动模式：同样三态 + 记忆，语义和文件权限一致。
+    // ONE default mode. 文件权限 and 自动模式 used to be two independent
+    // settings, which produced six combinations for three real behaviours -
+    // "full" and "permissive" gated the same things and auto only worked with
+    // one of them. The stored keys stay the same (filePerm + autoMode) so old
+    // sessions keep their meaning; this page writes them as a pair.
     {
       std::vector<comp::ChoiceOption> modes;
       comp::ChoiceOption o;
-      o.value = "auto";
-      o.icon = "robot";
-      o.title = tr("自动");
-      o.desc = tr("移除 ask 工具，高风险操作降级处理");
-      modes.push_back(o);
       o.value = "manual";
       o.icon = "hand";
       o.title = tr("手动");
-      o.desc = tr("每轮都由你决定下一步");
+      o.desc = tr("每次写文件、执行命令都先询问");
+      modes.push_back(o);
+      o.value = "semi";
+      o.icon = "user-shield";
+      o.title = tr("半自动");
+      o.desc = tr("项目内直接执行；系统操作（其他目录/终端/网络）询问");
+      modes.push_back(o);
+      o.value = "auto";
+      o.icon = "robot";
+      o.title = tr("自动");
+      o.desc = tr("自动继续推进；完全放行，不再询问");
       modes.push_back(o);
       o.value = "remember";
       o.icon = "clock";
       o.title = tr("记忆上次");
       o.desc = tr("新会话沿用上一次会话的选择");
       modes.push_back(o);
-      body.add(comp::section_title(tr("自动模式")));
-      // Same split as 文件权限: the mode is one setting, "记住上次" is a flag.
-      // Reading the flag as a mode made the selected option impossible to match.
-      std::string cur_auto =
-          sv_bool(st_.settings_values, "session.default.autoModeRemember", false)
-              ? "remember"
-              : (sv_bool(st_.settings_values, "session.default.autoMode", false)
-                     ? "auto"
-                     : "manual");
-      body.add(comp::choice_list(modes, cur_auto, [this](const std::string& v) {
+      body.add(comp::section_title(tr("默认模式")));
+      const bool remember =
+          sv_bool(st_.settings_values, "session.default.filePermRemember", false) ||
+          sv_bool(st_.settings_values, "session.default.autoModeRemember", false);
+      const std::string cur =
+          remember ? "remember"
+                   : (sv_bool(st_.settings_values, "session.default.autoMode", false)
+                          ? "auto"
+                          : (sv_str(st_.settings_values,
+                                    "session.default.filePerm", "permissive") ==
+                                     "approve"
+                                 ? "manual"
+                                 : "semi"));
+      body.add(comp::choice_list(modes, cur, [this](const std::string& v) {
         if (v == "remember") {
+          set_setting("session.default.filePermRemember", true);
           set_setting("session.default.autoModeRemember", true);
           return;
         }
+        set_setting("session.default.filePermRemember", false);
         set_setting("session.default.autoModeRemember", false);
+        const std::string perm = v == "manual"
+                                     ? "approve"
+                                     : (v == "auto" ? "full" : "permissive");
+        set_setting("session.default.filePerm", perm);
         set_setting("session.default.autoMode", v == "auto");
       }));
     }
@@ -11940,26 +12220,55 @@ VNodePtr UiApp::build_settings() {
       bool cur = sv_bool(st_.settings_values, "permissions.network.verifyCert", true);
       set_setting("permissions.network.verifyCert", !cur);
     })));
-    // 代理：只有主机 + 端口，留空/0 就是直连。
-    //
-    // There used to be a three-way choice above these fields (跟随系统 / 自定义 /
-    // 关闭), but nothing ever read it: the network layer applies host+port
-    // unconditionally, so "关闭" still proxied and "跟随系统" did not follow
-    // anything. A control that lies is worse than no control - the two fields are
-    // the whole truth, so show them and nothing else.
+    // 代理: 无 / 跟随系统 / 自定义. The three-way choice was removed because it
+    // was not wired; now it IS: "system" resolves the OS proxy (WinHTTP/IE on
+    // Windows, HTTPS_PROXY/HTTP_PROXY/ALL_PROXY elsewhere) and "none" really
+    // clears the proxy. The default is 跟随系统, which is what a desktop app
+    // should do - the old default was "no proxy" unless host/port were filled.
     body.add(comp::section_title(tr("代理")));
     {
-      body.add(comp::field(tr("代理主机"), comp::text_input(
-          sv_str(st_.settings_values, "permissions.network.proxyHost", ""), "127.0.0.1",
-          [this](const std::string& v) {
-        set_setting("permissions.network.proxyHost", v);
-      }), "如 127.0.0.1（留空 = 直连）"));
-      body.add(comp::field(tr("代理端口"), comp::text_input(
-          std::to_string(sv_int(st_.settings_values, "permissions.network.proxyPort", 0)), "",
-          [this](const std::string& v) {
-        int p = std::atoi(v.c_str());
-        set_setting("permissions.network.proxyPort", p > 0 ? p : 0);
-      }), tr("如 7890")));
+      std::string mode = sv_str(st_.settings_values,
+                                "permissions.network.proxyMode", "");
+      if (mode.empty()) {
+        mode = sv_str(st_.settings_values, "permissions.network.proxyHost", "").empty()
+                   ? "system"
+                   : "custom";
+      }
+      std::vector<comp::ChoiceOption> opts;
+      comp::ChoiceOption o;
+      o.value = "none";
+      o.icon = "ban";
+      o.title = tr("无");
+      o.desc = tr("直连，不使用代理");
+      opts.push_back(o);
+      o.value = "system";
+      o.icon = "desktop";
+      o.title = tr("跟随系统");
+      o.desc = tr("使用操作系统的代理设置（默认）");
+      opts.push_back(o);
+      o.value = "custom";
+      o.icon = "gear";
+      o.title = tr("自定义");
+      o.desc = tr("手动填写代理主机与端口");
+      opts.push_back(o);
+      body.add(comp::choice_list(opts, mode, [this](const std::string& v) {
+        set_setting("permissions.network.proxyMode", v);
+      }));
+      if (mode == "custom") {
+        body.add(comp::field(tr("代理主机"), comp::text_input(
+            sv_str(st_.settings_values, "permissions.network.proxyHost", ""),
+            "127.0.0.1",
+            [this](const std::string& v) {
+          set_setting("permissions.network.proxyHost", v);
+        }), "如 127.0.0.1"));
+        body.add(comp::field(tr("代理端口"), comp::text_input(
+            std::to_string(sv_int(st_.settings_values,
+                                   "permissions.network.proxyPort", 0)), "",
+            [this](const std::string& v) {
+          int p = std::atoi(v.c_str());
+          set_setting("permissions.network.proxyPort", p > 0 ? p : 0);
+        }), tr("如 7890")));
+      }
     }
 
     // ---- 搜索（search_web 工具的后端）----
@@ -12606,7 +12915,13 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   // turn, the bubbles are created on that reply. The reverse race (UI idle,
   // backend queues) still removes the optimistic pair, which is rare and cannot
   // be known in advance.
-  const bool likely_guidance = st_.turn_running || st_.auto_round > 0;
+  // A parked (suspended) loop is resumed by this send, and the text becomes
+  // guidance for the SAME turn. Treating it as a new user message appended a
+  // bubble after the paused answer while the backend continued the old turn,
+  // which is exactly the "历史顺序错乱" report (and the label stayed 恢复 because
+  // `suspended` was never cleared).
+  const bool resuming = st_.suspended;
+  const bool likely_guidance = st_.turn_running || st_.auto_round > 0 || resuming;
   if (likely_guidance) {
     pending_guidance_sid_ = sid;
     pending_guidance_text_ = shown;
@@ -12625,6 +12940,21 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
       m.uid = next_live_uid;
       s.messages.push_back(m);
       s.history_total += 1;  // one more turn now exists on disk
+    }
+    if (resuming) {
+      s.suspended = false;
+      s.turn_running = true;
+      s.stop_pending = false;
+      // The paused answer continues in place; keep its stopwatch running rather
+      // than waiting for the first tool of the resumed work to create one.
+      for (size_t i = s.messages.size(); i-- > 0;) {
+        if (s.messages[i].role != "assistant") continue;
+        s.messages[i].streaming = true;
+        if (s.messages[i].started_at <= 0) s.messages[i].started_at = now_ms();
+        s.messages[i].now_ms = now_ms();
+        s.messages[i].rev = next_msg_rev_++;
+        break;
+      }
     }
     s.session_input.clear();
     s.attachments.clear();
@@ -12823,7 +13153,6 @@ uint64_t UiApp::message_sig(const comp::ChatMsg& m) {
   mix(m.text.size());
   mix(m.thinking.size());
   mix(m.tools.size());
-  mix(m.tools_shown);
   mix(m.summary.size());
   mix(m.plan_path.size());
   mix(m.time.size());
@@ -13898,6 +14227,45 @@ void UiApp::apply_enter_binding(const std::string& mode) {
     call_async("session.setEnterSend",
                Json{{"sid", sid}, {"enterSend", ctrl ? "ctrlEnter" : "enter"}});
   }
+  render();
+}
+
+std::string UiApp::current_mode() const {
+  if (st_.auto_mode) return "auto";
+  if (st_.permission == "approve") return "manual";
+  return "semi";
+}
+
+void UiApp::apply_mode(const std::string& mode) {
+  const std::string perm =
+      mode == "manual" ? "approve" : (mode == "auto" ? "full" : "permissive");
+  const bool auto_on = (mode == "auto");
+  const std::string sid = active_sid();
+  update([&](AppState& s) {
+    s.mode_menu_open = false;
+    s.permission = perm;
+    s.perm_index = perm == "approve" ? 0 : (perm == "full" ? 2 : 1);
+    s.auto_mode = auto_on;
+  });
+  if (sid.empty()) {
+    render();
+    return;
+  }
+  call_async("session.setAutoMode", Json{{"sid", sid}, {"autoMode", auto_on}});
+  // Permission upgrades require a confirmation token from the backend. Same
+  // flow the old select used; it is one place so the two controls cannot drift.
+  call_async("session.setPermission", Json{{"sid", sid}, {"permission", perm}},
+             [this, sid, perm](const BackendResult& r) {
+    if (r.ok || r.code != "confirm-required") return;
+    call_async("session.requestPermissionToken",
+               Json{{"sid", sid}, {"newPermission", perm}},
+               [this, sid, perm](const BackendResult& t) {
+      std::string token = jsonutil::get<std::string>(t.data, "token", "");
+      if (token.empty()) return;
+      call_async("session.setPermissionConfirm",
+                 Json{{"sid", sid}, {"permission", perm}, {"token", token}});
+    });
+  });
   render();
 }
 

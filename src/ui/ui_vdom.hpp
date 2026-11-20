@@ -156,9 +156,22 @@ class KeyedStore {
   // reference to `key`'s stashed value, creating a default when absent
   T& get_or_create(const std::string& key) { return map_[key]; }
   bool has(const std::string& key) const { return map_.find(key) != map_.end(); }
+  const T* find(const std::string& key) const {
+    typename std::map<std::string, T>::const_iterator it = map_.find(key);
+    return it == map_.end() ? nullptr : &it->second;
+  }
   void erase(const std::string& key) { map_.erase(key); }
   void clear() { map_.clear(); }
   size_t size() const { return map_.size(); }
+  std::vector<std::string> keys() const {
+    std::vector<std::string> out;
+    out.reserve(map_.size());
+    for (typename std::map<std::string, T>::const_iterator it = map_.begin();
+         it != map_.end(); ++it) {
+      out.push_back(it->first);
+    }
+    return out;
+  }
 
  private:
   std::map<std::string, T> map_;

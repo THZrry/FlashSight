@@ -182,7 +182,10 @@ class FsApi {
   FsResult session_live_turn(const std::string& sid);
 
   // ----- terminal.*（注册表部分 P1；spawn/exec 实际执行 P3 reproc）-----
-  FsResult terminal_list(const std::string& sid);
+  // `before` is a startedAt cursor (0 = newest page); `limit` bounds one page.
+  // A hard 50-row cap used to hide every older terminal from the UI entirely.
+  FsResult terminal_list(const std::string& sid, int64_t before = 0,
+                         int limit = 200);
   FsResult terminal_show(const std::string& tid);
   // 用户终端：起一个"设置里的那个 shell"的交互式会话（不是让用户自己敲命令）
   // {sid, shell, label, cwd, cols, rows} -> {tid, status, shell, label, terminal}

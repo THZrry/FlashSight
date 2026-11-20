@@ -811,6 +811,17 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     int id = static_cast<int>(jsonutil::get_int(args, "id", 0));
     bool done = jsonutil::get<bool>(args, "done", true);
     if (!todos_.check(owner, id, done, now)) {
+      // An OLD id (the list was cleared/erased) is a state, not an error: the
+      // model gets done/pending/dismissed instead of "todo item not found".
+      std::string last;
+      if (todos_.last_status(owner, id, &last)) {
+        return FsResult::success(Json{{"id", id},
+                                      {"status", last},
+                                      {"done", last == "done"},
+                                      {"pending", todos_.pending_count(owner)},
+                                      {"total",
+                                       static_cast<int64_t>(todos_.to_json(owner).size())}});
+      }
       return FsResult::error(ErrCode::kNotFound, "todo item not found");
     }
     // A completed list STAYS: the backend keeps the task list for the whole
@@ -819,6 +830,7 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
     save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", todos_.to_json(owner)}});
     return FsResult::success(Json{{"id", id},
+                                  {"status", done ? "done" : "pending"},
                                   {"done", done},
                                   {"pending", todos_.pending_count(owner)},
                                   {"total", static_cast<int64_t>(todos_.to_json(owner).size())}});
@@ -837,10 +849,12 @@ FsResult AgentHost::todo_op(const std::string& owner, const Json& args) {
                                   {"total", static_cast<int64_t>(todos_.to_json(owner).size())}});
   }
   if (op == "clear") {
+    int dismissed = todos_.pending_count(owner);  // unfinished = dismissed
     todos_.clear(owner);
     save_todos(owner);
     emit("todo.updated", Json{{"owner", owner}, {"items", Json::array()}});
-    return FsResult::success(Json{{"pending", 0}, {"total", 0}});
+    return FsResult::success(Json{{"pending", 0}, {"total", 0},
+                                  {"dismissed", dismissed}});
   }
   return FsResult::error(ErrCode::kInvalidArg, "unknown todo op: " + op);
 }

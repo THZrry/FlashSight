@@ -181,11 +181,8 @@ struct ChatMsg {
   // and interim notes. Empty => legacy `thinking` (one block at the end).
   std::vector<ThinkBlock> thoughts;
   std::vector<ToolBlock> tools;  // flow blocks rendered after the text
-  // How many rows the user asked to reveal beyond the default work-log window.
-  // The full list is always in memory/on disk; only the DOM rows are built for
-  // the visible window (pruning = not doing the same render work again, never
-  // throwing data away).
-  size_t tools_shown = 0;
+  // Every tool row of a turn is rendered. A turn is capped at 200 calls at the
+  // source, so there is no row window to fold open.
   // Between-tools narration of the turn, in order. It is NOT the answer - it is
   // the model thinking out loud while it works - so it belongs in the work log and
   // used to be dropped entirely (only the final round's text was kept).
@@ -293,13 +290,19 @@ H turn_summary(const std::string& text);
 // pressed. `on_link` (optional) receives a link's TARGET when that anchor is
 // clicked - bound per anchor, so a click anywhere else in the message can never
 // be mistaken for a link.
+// `use_cache` must be false for text that is still streaming: each delta is a
+// different document, so caching prefixes only retains trees nobody will reuse.
 std::vector<H> markdown_blocks(const std::string& text,
                                EventFn on_copy_code = nullptr,
-                               EventFn on_link = nullptr);
+                               EventFn on_link = nullptr,
+                               bool use_cache = true);
 // The parsed-block cache keeps its event handlers alive across pages; the shell
 // adds these ids to the retain set each render. Clearing the cache is done when
 // the owning UiApp is destroyed.
 void markdown_cache_handler_ids(std::vector<int>* out);
+// Bytes of SOURCE text retained by the parse caches (for the [res] log).
+size_t markdown_cache_bytes();
+size_t tool_block_cache_bytes();
 void markdown_cache_clear();
 
 // ---------- overlays ----------

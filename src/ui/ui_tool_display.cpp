@@ -30,8 +30,8 @@ std::string tool_display_summary(const std::string& name, const Json& args,
   // A failed call is a failed call for every tool except the two where the
   // subject still matters (which command/agent failed). The row's red state
   // carries the rest.
-  if (!ok && name.rfind("subagent_", 0) != 0 && name != "terminal_exec" &&
-      name != "terminal_spawn") {
+  if (!ok && name.rfind("subagent_", 0) != 0 && name != "complete_step" &&
+      name != "terminal_exec" && name != "terminal_spawn") {
     return "failed";
   }
   Json d = Json::object();
@@ -80,11 +80,13 @@ std::string tool_display_summary(const std::string& name, const Json& args,
     if (cmd.empty()) cmd = str(args, "cmd");
     return cmd.empty() ? (ok ? "ok" : "failed") : cut(cmd, 100);
   }
-  if (name.compare(0, 9, "subagent_") == 0) {
+  if (name.compare(0, 9, "subagent_") == 0 || name == "complete_step") {
     std::string id = str(d, "id", str(args, "id"));
     std::string status = str(d, "status");
     if (status.empty()) status = ok ? "ok" : "failed";
-    if (!id.empty()) return id + " · " + status;
+    std::string step = str(d, "step", str(args, "step"));
+    std::string head = !step.empty() ? step : id;
+    if (!head.empty()) return head + " · " + status;
     return status;
   }
   if (name.compare(0, 5, "todo_") == 0) {

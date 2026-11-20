@@ -181,7 +181,11 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   });
 
   // ---- terminal.* ----
-  reg("terminal.list", [api](const Json& a) { return api->terminal_list(s(a, "sid")); });
+  reg("terminal.list", [api](const Json& a) {
+    return api->terminal_list(s(a, "sid"),
+                              jsonutil::get_int(a, "before", 0),
+                              static_cast<int>(jsonutil::get_int(a, "limit", 200)));
+  });
   reg("terminal.show", [api](const Json& a) { return api->terminal_show(s(a, "tid")); });
   // 用户终端：起"设置里的那个 shell"，不需要用户输入命令
   reg("terminal.spawn", [api](const Json& a) {

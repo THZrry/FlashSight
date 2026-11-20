@@ -559,7 +559,7 @@ target("fs_core")
         -- d3d11/dxgi: Desktop Duplication, the primary capture path (it reads the
         -- DWM-composited surface, which GDI cannot on several real setups).
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
-                     "ole32", "uuid", "crypt32", "bcrypt", "psapi")
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
     else
         -- std::thread (the UI server's listen thread, the terminal pollers,
         -- reproc's drain threads) needs -pthread; dl is what the webview Linux
@@ -827,7 +827,7 @@ target("flashsight-web")
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
-                     "ole32", "uuid", "crypt32", "bcrypt", "psapi")
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
     else
         add_syslinks("pthread", "dl")
     end
@@ -867,7 +867,7 @@ target("flashsight-whaleui")
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
-                     "ole32", "uuid", "crypt32", "bcrypt", "psapi")
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
     else
         add_syslinks("pthread", "dl")
     end
@@ -950,7 +950,7 @@ target("fs_tests")
     add_cxxflags("-Wall")
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
-                     "ole32", "uuid", "crypt32", "bcrypt", "psapi")
+                     "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
     else
         -- std::thread (the UI server's listen thread, the terminal pollers) needs
         -- -pthread; dlopen is used by nothing yet but the webview Linux backend

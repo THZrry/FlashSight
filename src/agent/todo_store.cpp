@@ -30,14 +30,30 @@ bool TodoStore::erase(const std::string& owner, int id) {
   if (it == items_.end()) return false;
   for (size_t i = 0; i < it->second.size(); ++i) {
     if (it->second[i].id == id) {
+      removed_[owner][id] = it->second[i].done ? "done" : "dismissed";
       it->second.erase(it->second.begin() + static_cast<long>(i));
+      while (removed_[owner].size() > 200) {
+        removed_[owner].erase(removed_[owner].begin());
+      }
       return true;
     }
   }
   return false;
 }
 
-void TodoStore::clear(const std::string& owner) { items_.erase(owner); }
+void TodoStore::clear(const std::string& owner) {
+  std::map<std::string, std::vector<TodoItem>>::iterator it = items_.find(owner);
+  if (it != items_.end()) {
+    for (size_t i = 0; i < it->second.size(); ++i) {
+      removed_[owner][it->second[i].id] =
+          it->second[i].done ? "done" : "dismissed";
+    }
+    while (removed_[owner].size() > 200) {
+      removed_[owner].erase(removed_[owner].begin());
+    }
+  }
+  items_.erase(owner);
+}
 
 void TodoStore::restore(const std::string& owner, const Json& items) {
   if (!items.is_array()) return;
@@ -74,6 +90,17 @@ Json TodoStore::to_json(const std::string& owner) const {
     arr.push_back(j);
   }
   return arr;
+}
+
+bool TodoStore::last_status(const std::string& owner, int id,
+                            std::string* status) const {
+  std::map<std::string, std::map<int, std::string>>::const_iterator it =
+      removed_.find(owner);
+  if (it == removed_.end()) return false;
+  std::map<int, std::string>::const_iterator sit = it->second.find(id);
+  if (sit == it->second.end()) return false;
+  if (status) *status = sit->second;
+  return true;
 }
 
 int TodoStore::pending_count(const std::string& owner) const {

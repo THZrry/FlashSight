@@ -33,12 +33,19 @@ class TodoStore {
   void restore(const std::string& owner, const Json& items);
   // 未完成数（"只要未完成，自动开启下一轮"判定用）
   int pending_count(const std::string& owner) const;
+  // Status of an item that is no longer in the list because it was cleared or
+  // erased: "done" if it had been completed, "dismissed" if it was still
+  // pending. Returns false when the id was never seen. A late todo_check on an
+  // old id then answers with a state instead of "not found".
+  bool last_status(const std::string& owner, int id, std::string* status) const;
   // 全部 owner（落库用）
   std::vector<std::string> owners() const;
 
  private:
   std::map<std::string, std::vector<TodoItem>> items_;
   std::map<std::string, int> next_id_;
+  // Last state of removed items, bounded per owner (ids ascend).
+  std::map<std::string, std::map<int, std::string>> removed_;
 };
 
 }  // namespace fs

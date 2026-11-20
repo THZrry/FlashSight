@@ -228,6 +228,34 @@ const char* kGlueJs = R"JS(
   // Push state the C++ mirror needs. Called BEFORE the app handler runs.
   function push(what, id, v) { post('fs_ui_push', [what, id | 0, String(v == null ? '' : v)]); }
 
+  // FOCUS IS FRAMEWORK STATE, not an app binding. The adapter's is_focused()
+  // mirror never received a value because no page binds a focus event, so every
+  // render wrote the state `value` back into the focused composer and moved the
+  // caret to the end while a background turn was painting. Track it on the
+  // document instead of per node, and only for real focus changes.
+  document.addEventListener('focusin', function (ev) {
+    var id = ev.target && ev.target.__fsId;
+    if (id) push('focus', id, '1');
+  }, true);
+  document.addEventListener('focusout', function (ev) {
+    var id = ev.target && ev.target.__fsId;
+    if (id) push('focus', id, '0');
+  }, true);
+
+  // SCROLL IS FRAMEWORK STATE TOO. The C++ adapter reads scroll_top() from a
+  // mirror, which used to be updated only for nodes with a bound scroll event -
+  // so the side panel's scroll position always read back as 0. Capture every
+  // scroll (scroll events do not bubble, hence the capture phase) and keep the
+  // mirror current for the generic keyed-scroll restore.
+  document.addEventListener('scroll', function (ev) {
+    var el = ev.target;
+    if (!el || !el.__fsId) return;
+    var top = el.scrollTop | 0;
+    var sh = el.scrollHeight | 0;
+    var ch = el.clientHeight | 0;
+    push('scroll', el.__fsId, top + '\x1f' + sh + '\x1f' + ch);
+  }, true);
+
   // The text field an edit command (paste/cut/copy/select-all) belongs to. The
   // menu click moves focus to the menu, so `document.activeElement` is the wrong
   // element by then; the contextmenu target is the field the user right-clicked.
@@ -414,8 +442,13 @@ const char* kGlueJs = R"JS(
     switch (op) {
       case 'root':
         S.nodes[1] = document.getElementById('fs-root') || document.body;
+        S.nodes[1].__fsId = 1;
         return;
-      case 'create':  S.nodes[i] = document.createElement(a); return;
+      case 'create': {
+        S.nodes[i] = document.createElement(a);
+        S.nodes[i].__fsId = i;
+        return;
+      }
       case 'text':    S.nodes[i] = document.createTextNode(a); return;
       case 'append':
         if (el && el2) {

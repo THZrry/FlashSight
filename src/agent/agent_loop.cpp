@@ -941,7 +941,7 @@ FsResult AgentLoop::execute_tool(const std::string& name, const Json& args) {
   // A SUBAGENT's summary is the deliverable of a complete-step, so that one is
   // kept: it is the answer the main agent asked for.
   const bool summary_is_payload =
-      name.rfind("subagent_", 0) == 0;
+      name.rfind("subagent_", 0) == 0 || name == "complete_step";
   if (!summary_is_payload) result.erase("summary");
   pending_tool_results_.push_back(
       Json{{"name", name}, {"args", args}, {"id", current_call_id_},
@@ -1418,6 +1418,42 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
     // saw a result). Stop the loop and end the turn with an explanation - an
     // error return would leave the UI thinking the send itself failed.
     Json calls = result.tool_calls;
+    // A turn is capped at 200 executed calls. This is the SOURCE-side bound that
+    // replaces the old "hide older rows" window: the data simply never grows past
+    // what the transcript can reasonably hold and render. The remainder of an
+    // over-budget group is dropped (the model is told the turn was split), since
+    // its assistant message would otherwise carry calls that never ran.
+    const size_t kMaxToolCallsPerTurn = 200;
+    bool tool_budget_hit = false;
+    if (executed_calls_.size() >= kMaxToolCallsPerTurn) {
+      stop_code = "round-limit";
+      stop_note = zh
+          ? "本轮工具调用达到上限（" + std::to_string(kMaxToolCallsPerTurn) +
+                " 次），已自动开新一轮。请先审视已完成的工作与当前进度，再决定下一步。"
+          : "this turn reached the tool-call limit (" +
+                std::to_string(kMaxToolCallsPerTurn) +
+                "); a new round was started automatically. Review what you have "
+                "done and where the task stands before continuing.";
+      break;
+    }
+    if (calls.is_array() &&
+        executed_calls_.size() + calls.size() > kMaxToolCallsPerTurn) {
+      Json trimmed = Json::array();
+      const size_t remaining = kMaxToolCallsPerTurn - executed_calls_.size();
+      for (size_t ci = 0; ci < calls.size() && ci < remaining; ++ci) {
+        trimmed.push_back(calls[ci]);
+      }
+      calls = trimmed;
+      tool_budget_hit = true;
+      stop_code = "round-limit";
+      stop_note = zh
+          ? "本轮工具调用达到上限（" + std::to_string(kMaxToolCallsPerTurn) +
+                " 次），已自动开新一轮。请先审视已完成的工作与当前进度，再决定下一步。"
+          : "this turn reached the tool-call limit (" +
+                std::to_string(kMaxToolCallsPerTurn) +
+                "); a new round was started automatically. Review what you have "
+                "done and where the task stands before continuing.";
+    }
     std::string signature = calls.dump();
     if (signature == last_signature) {
       ++repeat_count;
@@ -1496,6 +1532,7 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
       return FsResult::success();
     }
     if (state_ == LoopState::kIdle) return FsResult::success();  // suspended
+    if (tool_budget_hit) break;  // end the turn at the 200-call source bound
 
     // User guidance that arrived during the tool work is carried into the next
     // model call of THIS turn.
@@ -1806,6 +1843,22 @@ FsResult AgentLoop::run_loop_impl(Json messages, const std::string& model, const
   current_auto_round_.store(0);
   current_auto_reason_.clear();
   auto_continues_ = 0;
+  // A normally finished turn is on disk; the request transcript and its save
+  // point are dead weight from here on. Keeping BOTH `saved_messages_` and
+  // `last_messages_` meant two full copies of the conversation (tool args and
+  // results included) per session loop. Interrupted/parked turns return before
+  // this point and keep their save point; a subagent still needs its transcript
+  // for the final summary, hence the `unattended` guard.
+  if (!opts_.unattended) {
+    saved_messages_ = Json::array();
+    saved_valid_ = false;
+    last_messages_ = Json::array();
+    gate_messages_ = Json::array();
+    gate_calls_ = Json::array();
+    gate_tool_msgs_ = Json::array();
+    applied_steering_.clear();
+    applied_steering_after_.clear();
+  }
   return FsResult::success();
 }
 

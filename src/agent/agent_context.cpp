@@ -175,16 +175,17 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
       // keeps the plan and the summaries; each step's working context lives in
       // its own subagent transcript.
       out.push_back(
-          "- **规划完就必须派活**：清单建好后，默认逐项 subagent_spawn"
-          "（kind=complete-step，task 写清该项的验收标准，step 填该项标题，"
-          "todoId 填对应 id）。complete-step 会阻塞并直接返回摘要，主会话只保留"
-          "规划与摘要，逐步的工作过程在侧栏可查、不占主上下文。只有确实一步就能"
-          "做完的小事才留在主会话，不要把所有步骤都自己做。");
+          "- **规划完就必须派活**：清单建好后，默认逐项调用 `complete_step`"
+          "（task 写清该项的验收标准，step 填该项标题，todoId 填对应 id）。"
+          "complete_step 会阻塞并直接返回摘要，真实的工具调用在主会话内联显示、"
+          "结束后移入子代理记录；主会话只保留规划与摘要，不占主上下文。只有确实"
+          "一步就能做完的小事才留在主会话，不要把所有步骤都自己做。");
       out.push_back(
-          "- **主动用 complete_step，不要等用户催**：任何需要读/改多份文件、跑命令"
-          "或多轮工具调用的实现步骤，都算\"一步\"，默认交给 complete-step；"
+          "- **主动用 `complete_step`，不要等用户催**：任何需要读/改多份文件、跑命令"
+          "或多轮工具调用的实现步骤，都算\"一步\"，默认调用 `complete_step`；"
           "主会话自己逐步做会把工具过程全部塞进上下文，越做越慢。"
-          "只有在一步只包含一两次只读/简单编辑时才留在主会话。");
+          "只有一步只包含一两次只读/简单编辑时才留在主会话。不要用 "
+          "`subagent_spawn(kind=complete-step)` 代替它。");
       out.push_back(
           "- 依赖关系：后一步依赖前一步结果时，等它返回摘要再派下一步；"
           "互不依赖的可以一次并行派出。");
@@ -236,25 +237,25 @@ std::string AgentContext::work_guidance(const ContextInput& in) {
         "terminal instead of substituting \"should be\" or \"usually\" for evidence.");
     if (in.allow_subagents) {
       out.push_back(
-          "- **After planning, delegate.** Once the checklist exists, spawn one "
-          "complete-step per item (kind=complete-step, task = that item's "
-          "acceptance criteria, step = the item title, todoId = its id). A "
-          "complete-step BLOCKS and returns its summary, so the main conversation "
-          "keeps the plan and the summaries while each step's working context "
-          "stays in its own transcript - readable in the side panel, not counted "
-          "against this conversation. Only a genuinely one-step task stays "
-          "inline; do not do every step here.");
+          "- **After planning, delegate.** Once the checklist exists, call "
+          "`complete_step` once per item (task = that item's acceptance criteria, "
+          "step = the item title, todoId = its id). It BLOCKS and returns a "
+          "summary; its real tool calls are shown inline and then archived in the "
+          "subagent record, so the main conversation keeps the plan and summaries "
+          "while each step's working context stays out of it. Only a genuinely "
+          "one-step task stays inline; do not do every step here.");
       out.push_back(
           "- Ordering: when a step needs the previous step's result, wait for its "
           "summary before spawning the next; independent steps can go out in "
           "parallel in one go.");
       out.push_back(
-          "- USE complete-step PROACTIVELY. Any implementation step that reads or "
-          "edits several files, runs commands, or needs more than a couple of tool "
-          "calls is ONE step: delegate it (kind=complete-step) instead of doing it "
-          "inline. Doing it in the main conversation stuffs every tool payload into "
-          "the context and makes the whole session slower. Keep only one or two "
-          "read-only/simple edits inline.");
+          "- USE `complete_step` PROACTIVELY. Any implementation step that reads "
+          "or edits several files, runs commands, or needs more than a couple of "
+          "tool calls is ONE step: delegate it with `complete_step` instead of "
+          "doing it inline. Doing it in the main conversation stuffs every tool "
+          "payload into the context and makes the whole session slower. Keep only "
+          "one or two read-only/simple edits inline. Do not use "
+          "`subagent_spawn(kind=complete-step)` in its place.");
     }
   }
 

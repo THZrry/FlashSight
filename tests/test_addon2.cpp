@@ -295,7 +295,12 @@ FS_TEST(addon2_plan_review) {
   FsResult pd = api.plan_update(sid, done);
   ASSERT_TRUE(pd.ok());
   EXPECT_EQ(pd.data["status"].get<std::string>(), std::string("done"));
-  EXPECT_TRUE(pd.data["content"].get<std::string>().find("build feature X") !=
+  // A write returns a compact summary, not the whole document (the model just
+  // sent it and the caller only needs status/path/seq).
+  EXPECT_FALSE(pd.data.contains("content"));
+  FsResult after = api.plan_get(sid);
+  ASSERT_TRUE(after.ok());
+  EXPECT_TRUE(after.data["content"].get<std::string>().find("build feature X") !=
               std::string::npos);
   // ...and an active status can be restored the same way.
   Json again = Json::object();
@@ -310,7 +315,9 @@ FS_TEST(addon2_plan_review) {
   FsResult np = api.plan_update(sid, next_plan);
   ASSERT_TRUE(np.ok());
   EXPECT_EQ(jsonutil::get_int(np.data, "seq", 0), int64_t(2));
-  EXPECT_TRUE(np.data.contains("plans") && np.data["plans"].size() >= 2);
+  // The version list is no longer echoed by every get/update; only the CURRENT
+  // document is returned.
+  EXPECT_FALSE(np.data.contains("plans"));
   EXPECT_TRUE(ghc::filesystem::exists(
       ghc::filesystem::path(np.data["path"].get<std::string>())));
 
@@ -540,6 +547,7 @@ FS_TEST(addon2_todo_tool_layer) {
   FsResult chk = host.tools().invoke(ctx, "todo_check", Json{{"id", id}});
   ASSERT_TRUE(chk.ok());
   EXPECT_TRUE(chk.data["done"].get<bool>());
+  EXPECT_EQ(chk.data["status"].get<std::string>(), std::string("done"));
   EXPECT_EQ((int)chk.data["pending"].get<int>(), 0);
   FsResult lst = host.tools().invoke(ctx, "todo_list", Json::object());
   ASSERT_TRUE(lst.ok());
@@ -561,6 +569,14 @@ FS_TEST(addon2_todo_tool_layer) {
   FsResult clr = host.tools().invoke(ctx, "todo_clear", Json::object());
   ASSERT_TRUE(clr.ok());
   EXPECT_EQ((int)host.tools().invoke(ctx, "todo_list", Json::object()).data["items"].size(), 0);
+  // A late check answers with a state instead of "not found": a completed item
+  // was done, an unfinished one was dismissed by the clear.
+  FsResult old_done = host.tools().invoke(ctx, "todo_check", Json{{"id", id}});
+  ASSERT_TRUE(old_done.ok());
+  EXPECT_EQ(old_done.data["status"].get<std::string>(), std::string("done"));
+  FsResult old_gone = host.tools().invoke(ctx, "todo_check", Json{{"id", id2}});
+  ASSERT_TRUE(old_gone.ok());
+  EXPECT_EQ(old_gone.data["status"].get<std::string>(), std::string("dismissed"));
 }
 
 // A reopened session must show the WHOLE checklist, including items already

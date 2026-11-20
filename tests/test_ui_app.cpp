@@ -3835,7 +3835,6 @@ FS_TEST(uiapp_stored_tool_rows_are_kept_and_windowed) {
                    {"interimAfter", Json::array({10, 340})}};
   comp::ChatMsg m = app.turn_to_message_for_test(turn, 0);
   EXPECT_EQ(m.tools.size(), size_t(350));
-  EXPECT_EQ(m.tools_shown, size_t(0));
   EXPECT_EQ(m.thoughts.size(), size_t(2));
   EXPECT_EQ(m.interim.size(), size_t(2));
 }
@@ -5352,10 +5351,9 @@ FS_TEST(uiapp_compaction_is_session_scoped) {
   EXPECT_TRUE(app.state().context_compacted);
 }
 
-// A 47-round auto turn reached 2387 tool rows; rendering all of them on every
-// streaming delta took 2.5 s per frame and pushed the WebView renderer to 19 GB.
-// The live work log keeps only the newest slice; the full record stays stored.
-FS_TEST(uiapp_huge_work_log_is_sliced) {
+// No folding: every tool row of a turn is rendered. The bound belongs at the
+// source (200 calls per turn), not to a hidden window that still keeps the data.
+FS_TEST(uiapp_work_log_renders_all_tools) {
   NullDom dom;
   AppState st = AppState::make();
   UiApp app(dom, st, nullptr);
@@ -5366,7 +5364,7 @@ FS_TEST(uiapp_huge_work_log_is_sliced) {
     m.role = "assistant";
     m.streaming = true;
     m.work_open = true;
-    for (int i = 0; i < 400; ++i) {
+    for (int i = 0; i < 200; ++i) {
       comp::ToolBlock tb;
       tb.name = "TOOL_" + std::to_string(i);
       tb.summary = "x";
@@ -5375,17 +5373,9 @@ FS_TEST(uiapp_huge_work_log_is_sliced) {
     s.messages.push_back(m);
   });
   std::string d = dom.dump();
-  EXPECT_TRUE(d.find("更早的") != std::string::npos);
-  EXPECT_TRUE(d.find("TOOL_399") != std::string::npos);
-  EXPECT_TRUE(d.find("TOOL_0") == std::string::npos);
-  // Finished turn opened by the user: a larger slice, still bounded.
-  app.update([](AppState& s) {
-    s.messages[0].streaming = false;
-    s.messages[0].work_touched = true;
-  });
-  d = dom.dump();
-  EXPECT_TRUE(d.find("TOOL_399") != std::string::npos);
-  EXPECT_TRUE(d.find("TOOL_0") == std::string::npos);
+  EXPECT_TRUE(d.find("更早的") == std::string::npos);
+  EXPECT_TRUE(d.find("TOOL_0") != std::string::npos);
+  EXPECT_TRUE(d.find("TOOL_199") != std::string::npos);
 }
 
 // A provider that sends "\n" between tokens can open a reasoning row with no

@@ -538,3 +538,19 @@ FS_TEST(markdown_parse_cache_clones_and_keeps_handlers) {
   comp::markdown_cache_clear();
   bus().retain(std::vector<int>());
 }
+
+// Live text must NEVER enter the parse cache: every streaming delta is a
+// different document, so caching prefixes retains trees nobody can reuse (it
+// was a large, invisible part of the process growth during long runs).
+FS_TEST(markdown_streaming_does_not_fill_the_cache) {
+  comp::markdown_cache_clear();
+  std::string growing;
+  for (int i = 0; i < 40; ++i) {
+    growing += "streamed paragraph " + std::to_string(i) + "\n\n";
+    comp::markdown_blocks(growing, nullptr, nullptr, false);
+  }
+  EXPECT_EQ(comp::markdown_cache_bytes(), size_t(0));
+  comp::markdown_blocks("# final\n\nbody", nullptr, nullptr, true);
+  EXPECT_TRUE(comp::markdown_cache_bytes() > 0);
+  comp::markdown_cache_clear();
+}

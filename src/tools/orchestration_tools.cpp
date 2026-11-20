@@ -181,6 +181,46 @@ void register_orchestration_tools(ToolRegistry* registry) {
       });
   }
   {
+    // A first-class name for the most important delegation. The model had to
+    // spell `subagent_spawn(kind:"complete-step", wait:true)` and mostly did not
+    // use it, doing the steps inline; a dedicated tool with a short description
+    // is what makes it the default for implementation work.
+    ToolDef def;
+    def.name = "complete_step";
+    def.description =
+        "执行一个独立实现步骤（上下文隔离，阻塞返回摘要）. Run ONE self-contained "
+        "implementation step in an isolated subagent, blocking until it reports, "
+        "and get only its summary back into this conversation. The real tool "
+        "calls are shown inline while it works and then archived in the subagent "
+        "panel. USE THIS FOR EVERY implementation step: any work that reads or "
+        "changes multiple files or runs several commands is one step, and doing "
+        "it inline is what makes the main context explode. Do not wait for the "
+        "user to ask; after planning, delegate step by step. `task` must be "
+        "self-contained (the subagent cannot see this conversation).";
+    Json params = Json::object();
+    params["type"] = "object";
+    params["properties"] = obj({
+        {"task", obj({{"type", "string"},
+                      {"description", "目标 + 已知信息 + 验收标准（自包含）"}})},
+        {"step", obj({{"type", "string"},
+                      {"description", "清单项标题（用于进度显示与结果归档）"}})},
+        {"todoId", obj({{"type", "integer"},
+                        {"description", "对应 todo 项 id；完成后自动勾选"}})},
+        {"model", obj({{"type", "string"}, {"description", "空=继承父"}})},
+        {"timeoutMs", obj({{"type", "integer"}, {"description", "0=不限"}})},
+    });
+    params["required"] = Json::array({"task"});
+    def.parameters = params;
+    registry->register_tool("complete_step", def,
+      [](const ToolContext& ctx, const Json& args) -> FsResult {
+        Json req = args;
+        req["op"] = "spawn";
+        req["kind"] = "complete-step";
+        req["wait"] = true;
+        return need(ctx, ctx.subagent_op, req);
+      });
+  }
+  {
     ToolDef def;
     def.name = "subagent_list";
     def.description = "列出本会话的子代理及状态. List this session's subagents.";

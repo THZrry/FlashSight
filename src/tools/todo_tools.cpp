@@ -70,7 +70,9 @@ void register_todo_tools(ToolRegistry* registry) {
     ToolDef def;
     def.name = "todo_check";
     def.description =
-        "勾选/取消勾选进程任务. Mark a process task done (done=true) or not (done=false).";
+        "勾选/取消勾选进程任务. Mark a process task done (done=true) or not "
+        "(done=false). Returns {status: done|pending|dismissed}; an id that was "
+        "cleared while still unfinished reports `dismissed` instead of an error.";
     Json params = base_params();
     Json props = Json::object();
     props["id"] = Json{{"type", "integer"}, {"description", "任务 id"}};

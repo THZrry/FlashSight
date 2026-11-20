@@ -23,12 +23,44 @@ ProviderRuntime::ProviderRuntime(const ProviderConn& conn, const NetClient* net,
 bool ProviderRuntime::should_retry(const FsResult& r, const ChatResponse& resp,
                                    int attempt) const {
   if (attempt >= policy_.max_retries) return false;
-  if (r.code == ErrCode::kTimeout) return policy_.retry_on_timeout;
-  if (r.code == ErrCode::kNetwork) return policy_.retry_on_network;
-  if (r.code == ErrCode::kRemote && resp.http_status >= 500 && resp.http_status < 600) {
-    return policy_.retry_on_5xx;
+  if (r.code == ErrCode::kCancelled) return false;
+  // Retry is the DEFAULT for a failed request, not an opt-in for three codes.
+  // A relay that answers 502, 429, a truncated stream or an empty_error reply is
+  // exactly the unstable case the setting exists for; the old predicate only
+  // retried timeout/network/5xx, so "3 retries" did nothing for most failures.
+  //
+  // Only genuinely terminal answers are excluded:
+  //   * auth / bad-request / not-found (the same request cannot start working);
+  //   * insufficient balance or quota (waiting cannot add credit);
+  //   * host unreachable / DNS / offline (the relay is gone or there is no link).
+  const int status = resp.http_status;
+  if (status == 400 || status == 401 || status == 403 || status == 404 ||
+      status == 422) {
+    return false;
   }
-  return false;
+  std::string msg = r.message;
+  if (!resp.error.empty()) {
+    if (!msg.empty()) msg += " ";
+    msg += resp.error;
+  }
+  for (size_t i = 0; i < msg.size(); ++i) {
+    if (msg[i] >= 'A' && msg[i] <= 'Z') msg[i] = static_cast<char>(msg[i] - 'A' + 'a');
+  }
+  static const char* kNoRetry[] = {
+      "insufficient", "balance", "quota", "credit", "billing", "余额", "额度",
+      "could not resolve", "name or service not known", "getaddrinfo",
+      "connection refused", "no route to host", "network is unreachable",
+      "failed to connect", "connect timeout", "offline", "dns",
+  };
+  for (size_t k = 0; k < sizeof(kNoRetry) / sizeof(kNoRetry[0]); ++k) {
+    if (msg.find(kNoRetry[k]) != std::string::npos) return false;
+  }
+  // 429 and 5xx are explicitly retryable; so is any other remote/I-O/timeout
+  // failure that produced no output (the caller checks `emitted` separately).
+  (void)policy_.retry_on_timeout;
+  (void)policy_.retry_on_network;
+  (void)policy_.retry_on_5xx;
+  return true;
 }
 
 void ProviderRuntime::record_usage(const ChatRequest& req, const ChatResponse& resp,

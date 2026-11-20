@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "core/folder_picker.hpp"
+#include "core/system_proxy.hpp"
 #include "fs_git.hpp"
 #include "fs_image.hpp"
 #include "fs_path.hpp"
@@ -99,7 +100,8 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
         sid, tid.is_string() ? tid.get<std::string>() : "", patch);
   };
   const Clock* clk = clock_;
-  deps.call_model = [ps, mt, net, us, clk](
+  SettingsStore* gset = settings_.get();
+  deps.call_model = [ps, mt, net, us, clk, gset](
                         const ModelCallRequest& req, ModelCallResult* out,
                         const std::function<void(const std::string&)>& on_delta)
       -> FsResult {
@@ -180,6 +182,21 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     creq.cancel = req.cancel;          // 停止生成 -> abort the SSE transfer
     creq.reasoning_delta = req.on_reasoning;
     ProviderRuntime runtime(conn, net, us, clk);
+    // GLOBAL retry policy first, then the per-model override. The global keys
+    // were exposed in no UI and never read, so every model silently used the
+    // hard-coded 3/1000; a model configured for 3 retries now actually retries.
+    if (gset) {
+      Json gm = gset->get_value("model.retry.max", Json(3));
+      if (gm.is_number()) {
+        int n = static_cast<int>(gm.get<int64_t>());
+        if (n >= 0) runtime.retry_policy().max_retries = n;
+      }
+      Json gb = gset->get_value("model.retry.backoffMs", Json(1000));
+      if (gb.is_number()) {
+        int64_t n = gb.get<int64_t>();
+        if (n >= 100) runtime.retry_policy().backoff_ms = n;
+      }
+    }
     // PER-MODEL retry settings (Settings > model > advanced). 0 = the global
     // default. Without this the fields were written and never read: a flaky
     // relay behaved the same for a model configured for 5 retries and one for 0.
@@ -660,7 +677,24 @@ void FsApi::apply_proxy_settings() {
                          : "";
   Json pv = settings_->get_value(kKeyNetworkProxyPort, Json(0));
   int port = pv.is_number() ? static_cast<int>(pv.get<int64_t>()) : 0;
-  if (net_) net_->set_default_proxy(host, port);
+  Json mv = settings_->get_value("permissions.network.proxyMode", Json(""));
+  std::string mode = mv.is_string() ? mv.get<std::string>() : std::string();
+  if (mode.empty()) {
+    // Migration: an old config with host/port means custom; no config means the
+    // new default, 跟随系统代理.
+    mode = host.empty() ? "system" : "custom";
+  }
+  if (!net_) return;
+  if (mode == "none") {
+    net_->set_default_proxy("", 0);
+    return;
+  }
+  if (mode == "custom") {
+    net_->set_default_proxy(host, port);
+    return;
+  }
+  SystemProxy sp = system_http_proxy();
+  net_->set_default_proxy(sp.host, sp.port);
 }
 
 void FsApi::apply_server_settings() {
@@ -2429,7 +2463,8 @@ FsResult FsApi::terminal_search(const std::string& tid, const std::string& query
   return FsResult::success(Json{{"matches", matches}, {"scanned", scanned}});
 }
 
-FsResult FsApi::terminal_list(const std::string& sid) {
+FsResult FsApi::terminal_list(const std::string& sid, int64_t before,
+                              int limit) {
   // First, hydrate the registry with records left by a previous run: the LIST is
   // the only entry point the UI has, and a terminal that is not in the registry
   // cannot be listed, shown or replayed. `add_saved` marks them exited and never
@@ -2497,8 +2532,19 @@ FsResult FsApi::terminal_list(const std::string& sid) {
   std::sort(real.begin(), real.end(), [](const Json& a, const Json& b) {
     return jsonutil::get_int(a, "startedAt", 0) > jsonutil::get_int(b, "startedAt", 0);
   });
-  const size_t kMaxListed = 50;
-  for (size_t i = 0; i < real.size() && i < kMaxListed; ++i) arr.push_back(real[i]);
+  // Paged, not truncated. `before` is the startedAt of the oldest row already
+  // shown; the page continues strictly older than it, so a 10k-terminal
+  // session can be walked to the end instead of silently losing everything
+  // past the 50th.
+  if (limit <= 0) limit = 200;
+  if (limit > 1000) limit = 1000;
+  size_t emitted = 0;
+  for (size_t i = 0; i < real.size() && emitted < static_cast<size_t>(limit); ++i) {
+    int64_t started = jsonutil::get_int(real[i], "startedAt", 0);
+    if (before > 0 && started >= before) continue;
+    arr.push_back(real[i]);
+    ++emitted;
+  }
   return FsResult::success(arr);
 }
 FsResult FsApi::terminal_show(const std::string& tid) {
@@ -3158,7 +3204,8 @@ FsResult FsApi::settings_set(const std::string& key, const Json& value, const st
                                   : store_for(pid).set_project(key, value));
   if (!r.ok()) return r;
   // 代理设置变化立即生效到网络客户端（无需重启）
-  if (key == kKeyNetworkProxyHost || key == kKeyNetworkProxyPort) {
+  if (key == kKeyNetworkProxyHost || key == kKeyNetworkProxyPort ||
+      key == "permissions.network.proxyMode") {
     apply_proxy_settings();
   }
   // Web 服务设置（监听地址/端口/密码）：值变了才重启内嵌服务器。

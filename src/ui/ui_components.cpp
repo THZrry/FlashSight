@@ -1,6 +1,7 @@
 // ui_components.cpp - Composers implementation.
 #include "ui_components.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -634,10 +635,34 @@ std::string fmt_duration(int64_t ms) {
 std::string fmt_clock(int64_t ms) {
   if (ms <= 0) return std::string();
   time_t t = static_cast<time_t>(ms / 1000);
-  struct tm* g = localtime(&t);
-  if (!g) return std::string();
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), "%02d:%02d", g->tm_hour, g->tm_min);
+  struct tm g;
+#ifdef _WIN32
+  if (localtime_s(&g, &t) != 0) return std::string();
+#else
+  struct tm* gp = localtime(&t);
+  if (!gp) return std::string();
+  g = *gp;
+#endif
+  time_t now = time(nullptr);
+  struct tm n;
+#ifdef _WIN32
+  if (localtime_s(&n, &now) != 0) return std::string();
+#else
+  struct tm* np = localtime(&now);
+  if (!np) return std::string();
+  n = *np;
+#endif
+  char buf[32];
+  if (g.tm_year == n.tm_year && g.tm_mon == n.tm_mon && g.tm_mday == n.tm_mday) {
+    std::snprintf(buf, sizeof(buf), "%02d:%02d", g.tm_hour, g.tm_min);
+  } else if (g.tm_year == n.tm_year) {
+    std::snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d", g.tm_mon + 1,
+                  g.tm_mday, g.tm_hour, g.tm_min);
+  } else {
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d",
+                  g.tm_year + 1900, g.tm_mon + 1, g.tm_mday, g.tm_hour,
+                  g.tm_min);
+  }
   return std::string(buf);
 }
 
@@ -849,52 +874,12 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
           add_thought(thought_at++);
         }
       };
-      // A single auto turn can accumulate THOUSANDS of tool rows (the user's
-      // WhaleJS session reached 2387). Rendering all of them on every streaming
-      // delta made one render take 2.5 s and pushed the WebView renderer to 19 GB
-      // before it crashed. The process is a log, not the full record: render a
-      // window, and let the user widen it on demand. The data is never dropped.
-      size_t kMaxVisibleTools =
-          m.tools_shown > 0 ? m.tools_shown : (m.streaming ? 120u : 300u);
-      size_t first_tool = 0;
-      if (m.tools.size() > kMaxVisibleTools) {
-        first_tool = m.tools.size() - kMaxVisibleTools;
-      }
-      if (first_tool > 0) {
-        // Skip notes/reasoning/guidance that belong to the hidden prefix; they
-        // would otherwise all pile up above the first visible tool.
-        while (interim_at < m.interim.size()) {
-          size_t a = interim_at < m.interim_after.size()
-                         ? m.interim_after[interim_at]
-                         : interim_at;
-          if (a >= first_tool) break;
-          ++interim_at;
-        }
-        while (thought_at < m.thoughts.size() &&
-               m.thoughts[thought_at].after < first_tool) {
-          ++thought_at;
-        }
-        while (guidance_at < m.guidance.size()) {
-          size_t a = guidance_at < m.guidance_after.size()
-                         ? m.guidance_after[guidance_at]
-                         : 0;
-          if (a >= first_tool) break;
-          ++guidance_at;
-        }
-        size_t step = first_tool > 100 ? 100 : first_tool;
-        H more = el("div", "work-note dim work-more");
-        more.text(tr("显示更早的 ") + itos(static_cast<int>(step)) +
-                  tr(" 步（共 ") + itos(static_cast<int>(first_tool)) +
-                  tr(" 步未显示）"));
-        if (on_tool_toggle) {
-          EventFn cb = on_tool_toggle;
-          more.on(EventKind::kClick, [cb](const std::string&) { cb("more-tools"); });
-        }
-        inner.add(more);
-      }
-      flush_guidance(first_tool);
-      flush_thoughts(first_tool);
-      for (size_t i = first_tool; i < m.tools.size(); ++i) {
+      // Render the WHOLE work log. Hiding rows behind a "显示更早" fold was an
+      // ineffective memory optimisation (the data was still retained) and the
+      // user explicitly rejected it. Memory is bounded at the source instead:
+      // a turn may execute at most 200 tool calls (AgentLoop), and the caches
+      // that used to duplicate these rows are bounded by bytes.
+      for (size_t i = 0; i < m.tools.size(); ++i) {
         // Guidance was applied after the tools that had already run; it comes
         // before the next round's reasoning. Then the reasoning, then this
         // round's narration (both share the tool anchor; see below).
@@ -994,7 +979,8 @@ H chat_message(const ChatMsg& m, EventFn on_copy, EventFn on_tool_toggle,
   // sentence - the user asked for the counter, not a new hint.
   // assistant: article-like, no bubble, no name
   H body = el("div", "article");
-  std::vector<H> blocks = markdown_blocks(m.text, on_copy, on_link);
+  std::vector<H> blocks =
+      markdown_blocks(m.text, on_copy, on_link, !m.streaming);
   for (size_t i = 0; i < blocks.size(); ++i) body.add(blocks[i]);
   if (m.streaming) body.add(el("span", "caret"));
   wrap.add(body);
@@ -1177,19 +1163,28 @@ namespace {
 // tab switch detaches every node - reusing them leaves rows whose handlers can
 // never fire ("切页面后工具调用点不开").
 std::map<std::string, H> g_tool_block_cache;
-std::deque<std::string> g_tool_block_order;
+std::deque<std::pair<std::string, size_t> > g_tool_block_order;
+size_t g_tool_block_bytes = 0;
 }  // namespace
 
 void tool_block_cache_clear() {
   g_tool_block_cache.clear();
   g_tool_block_order.clear();
+  g_tool_block_bytes = 0;
 }
 
 H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
                     EventFn on_open_subagent, const std::string& gen) {
   std::map<std::string, H>& cache = g_tool_block_cache;
-  std::deque<std::string>& order = g_tool_block_order;
-  const size_t kMaxCachedBlocks = 4000;
+  std::deque<std::pair<std::string, size_t> >& order = g_tool_block_order;
+  // A turn is capped at 200 calls, so 256 entries cover the live one. The old
+  // 4000-entry cache retained VNode trees for rows from many earlier turns -
+  // a second copy of their detail/input text - and was a large part of the
+  // process growth. Bound by text bytes as well as count.
+  const size_t kMaxCachedBlocks = 256;
+  const size_t kMaxCachedBytes = 12 * 1024 * 1024;
+  const size_t row_bytes = b.name.size() + b.summary.size() + b.detail.size() +
+                           b.input.size() + b.subagent_id.size() + b.icon.size();
   // `gen` is part of the identity: a cached VNode may only be reused while the
   // surrounding rows are CONTINUOUSLY attached. When the work fold closes, the
   // rows are exit-animated and removed; handing the same VNode back on reopen
@@ -1214,9 +1209,16 @@ H tool_block_cached(const ToolBlock& b, EventFn on_toggle,
   // VNode back safe (the diff pairs it with itself and skips the subtree).
   node.key("tb:" + gen + ":" + b.key);
   cache.insert(std::make_pair(key, node));
-  order.push_back(key);
-  while (order.size() > kMaxCachedBlocks) {
-    cache.erase(order.front());
+  order.push_back(std::make_pair(key, row_bytes));
+  g_tool_block_bytes += row_bytes;
+  while (!order.empty() &&
+         (order.size() > kMaxCachedBlocks || g_tool_block_bytes > kMaxCachedBytes)) {
+    cache.erase(order.front().first);
+    if (g_tool_block_bytes >= order.front().second) {
+      g_tool_block_bytes -= order.front().second;
+    } else {
+      g_tool_block_bytes = 0;
+    }
     order.pop_front();
   }
   return node;
@@ -1526,9 +1528,36 @@ namespace {
 struct MdCacheEntry {
   std::vector<VNodePtr> blocks;
   std::vector<int> handler_ids;
+  size_t bytes = 0;
 };
 std::map<std::string, MdCacheEntry> g_md_cache;
-const size_t kMaxMdCacheEntries = 128;
+std::deque<std::string> g_md_order;
+size_t g_md_bytes = 0;
+// A parsed VNode tree costs many times its source text. The cache used to keep
+// 128 ENTRIES with the full text in the KEY (a second copy) and no byte bound;
+// long histories therefore held tens of MB of trees from sessions the user had
+// already left. Bound it by source bytes instead, and never cache a live
+// (streaming) message: every delta would park another partial tree.
+const size_t kMaxMdCacheEntries = 64;
+const size_t kMaxMdCacheBytes = 512 * 1024;
+const size_t kMaxSingleMdEntryBytes = 64 * 1024;
+
+uint64_t md_hash(const std::string& s, uint64_t basis) {
+  uint64_t h = basis;
+  for (size_t i = 0; i < s.size(); ++i) {
+    h ^= static_cast<unsigned char>(s[i]);
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+void md_cache_erase(const std::string& key) {
+  std::map<std::string, MdCacheEntry>::iterator it = g_md_cache.find(key);
+  if (it == g_md_cache.end()) return;
+  if (g_md_bytes >= it->second.bytes) g_md_bytes -= it->second.bytes;
+  else g_md_bytes = 0;
+  g_md_cache.erase(it);
+}
 
 void collect_md_handlers(const VNodePtr& v, std::vector<int>* out) {
   if (!v) return;
@@ -1548,40 +1577,63 @@ void markdown_cache_handler_ids(std::vector<int>* out) {
   }
 }
 
-void markdown_cache_clear() { g_md_cache.clear(); }
+void markdown_cache_clear() {
+  g_md_cache.clear();
+  g_md_order.clear();
+  g_md_bytes = 0;
+}
+
+size_t markdown_cache_bytes() { return g_md_bytes; }
+size_t tool_block_cache_bytes() { return g_tool_block_bytes; }
 
 std::vector<H> markdown_blocks(const std::string& text, EventFn on_copy_code,
-                               EventFn on_link) {
+                               EventFn on_link, bool use_cache) {
   if (text.empty()) return std::vector<H>();
   // A cached tree contains the handlers from its FIRST build. Keep the
   // no-copy/no-link variant apart from the interactive one.
   std::string key;
-  key.reserve(text.size() + 3);
-  key += on_copy_code ? 'c' : '-';
-  key += on_link ? 'l' : '-';
-  key += '\x1f';
-  key += text;
-  std::map<std::string, MdCacheEntry>::iterator it = g_md_cache.find(key);
-  if (it == g_md_cache.end()) {
-    if (g_md_cache.size() >= kMaxMdCacheEntries) g_md_cache.clear();
-    std::vector<H> built = build_markdown_blocks(text, on_copy_code, on_link);
-    MdCacheEntry e;
-    for (size_t i = 0; i < built.size(); ++i) {
-      // Store a DETACHED clone: the returned nodes are attached to a page and
-      // will be patched/removed there, which must not mutate the template.
-      VNodePtr tpl = clone_vnode(built[i].get());
-      e.blocks.push_back(tpl);
-      collect_md_handlers(tpl, &e.handler_ids);
+  if (use_cache && text.size() <= kMaxSingleMdEntryBytes) {
+    char head[96];
+    std::snprintf(head, sizeof(head), "%c%c:%zu:%016llx:%016llx",
+                  on_copy_code ? 'c' : '-', on_link ? 'l' : '-', text.size(),
+                  static_cast<unsigned long long>(
+                      md_hash(text, 1469598103934665603ULL)),
+                  static_cast<unsigned long long>(
+                      md_hash(text, 1099511628211ULL)));
+    key = head;
+  }
+  if (!key.empty()) {
+    std::map<std::string, MdCacheEntry>::iterator it = g_md_cache.find(key);
+    if (it != g_md_cache.end()) {
+      std::vector<H> out;
+      out.reserve(it->second.blocks.size());
+      for (size_t i = 0; i < it->second.blocks.size(); ++i) {
+        out.push_back(H(clone_vnode(it->second.blocks[i])));
+      }
+      return out;
     }
-    it = g_md_cache.insert(std::make_pair(key, e)).first;
-    return built;
   }
-  std::vector<H> out;
-  out.reserve(it->second.blocks.size());
-  for (size_t i = 0; i < it->second.blocks.size(); ++i) {
-    out.push_back(H(clone_vnode(it->second.blocks[i])));
+  std::vector<H> built = build_markdown_blocks(text, on_copy_code, on_link);
+  if (key.empty()) return built;
+  MdCacheEntry e;
+  e.bytes = text.size();
+  for (size_t i = 0; i < built.size(); ++i) {
+    // Store a DETACHED clone: the returned nodes are attached to a page and
+    // will be patched/removed there, which must not mutate the template.
+    VNodePtr tpl = clone_vnode(built[i].get());
+    e.blocks.push_back(tpl);
+    collect_md_handlers(tpl, &e.handler_ids);
   }
-  return out;
+  g_md_cache.insert(std::make_pair(key, e));
+  g_md_order.push_back(key);
+  g_md_bytes += e.bytes;
+  while (!g_md_order.empty() &&
+         (g_md_order.size() > kMaxMdCacheEntries ||
+          g_md_bytes > kMaxMdCacheBytes)) {
+    md_cache_erase(g_md_order.front());
+    g_md_order.pop_front();
+  }
+  return built;
 }
 
 // ---------- overlays ----------

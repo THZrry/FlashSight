@@ -124,7 +124,9 @@ Json PlanStore::get(const std::string& sid) const {
   out["path"] = "";
   out["seq"] = 0;
   out["turnId"] = "";
-  out["plans"] = Json::array();
+  // NOTE: the full version list (`plans`) used to be included in every get.
+  // The model only needs the CURRENT document, and the UI needs its path; the
+  // list of every historical plan path was pure context/serialization weight.
   if (!path_fn_ || sid.empty()) return out;
   ghc::filesystem::path base = path_fn_(sid);
   ghc::filesystem::path dir = base.parent_path();
@@ -195,7 +197,6 @@ Json PlanStore::get(const std::string& sid) const {
             ft.time_since_epoch()).count());
   }
   out["updatedAt"] = ms;
-  out["plans"] = list(sid);
   return out;
 }
 
@@ -326,7 +327,16 @@ FsResult PlanStore::update(const std::string& sid, const std::string& content,
     ghc::filesystem::rename(tmp, p, ec);
     if (ec) return FsResult::error(ErrCode::kIo, "cannot replace plan document");
   }
-  return FsResult::success(get(sid));
+  // A write does not need to echo the whole document back. The model just wrote
+  // it, and the UI only uses exists/status/path/seq. Returning get() duplicated
+  // the entire plan into the tool result and the plan.update event.
+  Json info = Json::object();
+  info["exists"] = true;
+  info["status"] = st;
+  info["path"] = p.string();
+  info["seq"] = seq;
+  info["turnId"] = turn_id;
+  return FsResult::success(info);
 }
 
 bool PlanStore::del(const std::string& sid) {

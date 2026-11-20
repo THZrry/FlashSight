@@ -184,6 +184,8 @@ struct TermItem {
   // The backstop budget fired (a foreground command was handed to the
   // background). Shown in the overview so "still running" has a reason.
   bool timed_out = false;
+  // Cursor for the paged terminal list (newest page first).
+  int64_t started_at = 0;
 };
 
 // A wake-up the backend will fire for this session (auto mode). Declared at
@@ -403,6 +405,8 @@ struct AppState {
   // transcript's own tool blocks, so it cannot drift from what is on screen.)
   // ---- composer / skill picker ----
   bool skill_menu_open = false;
+  // The unified 手动/半自动/自动 picker (rich rows: icon + name + description).
+  bool mode_menu_open = false;
   // The 思考档位 list opened by the composer's thinking button. It is the ONLY
   // thinking control (the old select + dead icon button pair read as two).
   bool thinking_menu_open = false;
@@ -437,6 +441,9 @@ struct AppState {
 
   // ---- terminal ----
   std::vector<TermItem> terminals;
+  // Paged list: true when the last page was full, so 所有终端 offers 加载更多.
+  bool term_has_more = false;
+  bool term_loading_more = false;
   std::string active_term;   // terminal used for 停止 etc.
   bool terminal_open = false;
   int term_height = 340;     // drawer height (px); dragged on the top edge
@@ -494,6 +501,11 @@ struct AppState {
     // from the tagged stream.delta events, so the panel can show live work
     // instead of just "running".
     std::string live_text;
+    // Real tool rows of the running subagent, built from its tool.start/update
+    // events. The record's transcript only exists after it finishes, so without
+    // this the detail page sat empty until the very end ("跑完才一块更新").
+    // Bounded like the main work log; replaced by the stored transcript on done.
+    std::vector<comp::ToolBlock> live_tools;
     // A complete-step runs INLINE in the main conversation while it works; it
     // is only "packaged" into the subagent panel when it finishes. The row still
     // exists (the composer bar and routing need its id) but the panel hides it.
@@ -953,6 +965,7 @@ struct SessionView {
   bool workflow_runs_loaded = false;
 
   std::vector<TermItem> terminals;
+  bool term_has_more = false;
   std::string active_term;
   bool terminal_open = false;
   int term_height = 340;
@@ -981,6 +994,30 @@ struct SessionView {
   // todo.updated must land there, not on whatever tab is active).
   std::vector<AppState::TodoItem> todos;
   bool todo_open = false;
+
+  // Drop the parts that scale with conversation length / terminal output while
+  // keeping the cheap UI state (scroll, draft, model, panel choices). Used for
+  // views that have been inactive for a while: every visited session used to
+  // keep its whole transcript + terminal grids in memory, so a long-running
+  // process used roughly twice what a fresh one did loading the same history.
+  // `load_session` re-fetches the history when the tab is opened again.
+  void release_heavy() {
+    std::vector<comp::ChatMsg>().swap(messages);
+    std::vector<AppState::SubagentRow>().swap(subagents);
+    std::vector<AppState::OpRow>().swap(session_ops);
+    std::vector<AppState::TodoItem>().swap(todos);
+    std::map<std::string, std::string>().swap(term_outputs);
+    std::map<std::string, Json>().swap(term_grids);
+    std::map<std::string, std::string>().swap(term_input_log);
+    steering_items = Json::array();
+    loaded = false;
+    session_loaded = false;
+    history_total = 0;
+    history_start = 0;
+    history_has_more = false;
+    history_loading_older = false;
+    model_check_sid.clear();
+  }
 };
 
 // UiApp: owns the render loop. backend_ is the transport to the core
@@ -1025,7 +1062,8 @@ class UiApp {
   // Pull project.list / session.list from the backend into AppState.
   void load_projects();
   // Pull terminal.list for the active session.
-  void load_terminals(const std::string& sid);
+  void load_terminals(const std::string& sid, int64_t before = 0,
+                      bool append = false);
   // Open (or focus) a session tab and load its history from the backend.
   void open_session(const std::string& sid, const std::string& title = "");
   // Load a project's session list into its card.
@@ -1331,6 +1369,12 @@ class UiApp {
   // default, the live session and the shortcut table. The two settings used to
   // disagree because only one of them was written.
   void apply_enter_binding(const std::string& mode);
+  // One permission/automation choice replaces the old "自动" toggle plus
+  // "文件权限" select: manual (approve + no auto), semi (permissive + no auto),
+  // auto (full + auto). The three old combinations collapsed because full and
+  // permissive were effectively the same gate and auto only ever worked with it.
+  std::string current_mode() const;
+  void apply_mode(const std::string& mode);
   // ---- settings / 环境（CLI 工具探测）----
   void detect_cli_tools();
   // 选文件并把结果写进某个设置键（驱动路径 / CLI 工具路径）
@@ -1413,6 +1457,9 @@ class UiApp {
   // listener matches the saved host/port (a stop has no `rebinding` flag to
   // watch, so without this the page kept displaying the retired address).
   bool server_status_wait_ = false;
+  // The status-based fallback navigation is one-shot AND local-only; a remote
+  // page behind port forwarding must never be yanked to the bind port.
+  bool server_nav_attempted_ = false;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
   bool render_pending_ = false;
   // ask the next render to focus the terminal surface (only on spawn / tab
@@ -1509,6 +1556,10 @@ class UiApp {
   void save_session_view(const std::string& sid);
   // load views_[sid] into the flat session fields (fresh defaults when absent)
   void load_session_view(const std::string& sid);
+  // Release the heavy history/terminal payload of views other than the two
+  // given ids. Called on a tab switch: the target and the tab just left stay
+  // instant, older views are re-fetched when opened again.
+  void prune_inactive_views(const std::string& keep_a, const std::string& keep_b);
   // switch to `id`, saving the current tab's view and restoring the target's
   void switch_tab(const std::string& id, int dir = 0);
   // pull a session's info + its NEWEST page of history into its view
@@ -1524,6 +1575,17 @@ class UiApp {
   void request_history_scroll_restore();
   // Apply a pending restore; called at the end of render(), after the patch.
   void apply_pending_history_scroll();
+  // Framework-level element state: remember the scroll offset of every KEYED
+  // node and restore it when that key is recreated. Business code only has to
+  // give the node a stable key; it no longer needs to copy offsets into its own
+  // view struct (the side panel lost its scroll on every tab switch that way).
+  void snapshot_scroll_state(const VNodePtr& v);
+  void restore_scroll_state(const VNodePtr& v);
+  struct ScrollMemory {
+    uint64_t dom_id = 0;
+    int top = 0;
+  };
+  std::map<std::string, ScrollMemory> scroll_memory_;
   // prepend the previous page of history (called when the user scrolls to the top)
   void load_older_history();
   // keep a pinned view at the end after content was appended (call AFTER render)
