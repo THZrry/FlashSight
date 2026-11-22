@@ -127,7 +127,15 @@ void dump_dom(whaleui_window_t* win) {
   std::vector<std::pair<whaleui_dom_element_t*, int> > stack;
   stack.push_back(std::make_pair(root, 0));
   int shown = 0;
-  while (!stack.empty() && shown < 80) {
+  // FS_UI_DEBUG_LIMIT caps how many elements the dump prints. The default 80
+  // only reaches the sidebar, so a later dump (taken after the async project
+  // load) never showed the main area - the one thing the dump exists to check.
+  int limit = 80;
+  if (const char* lim = std::getenv("FS_UI_DEBUG_LIMIT")) {
+    int v = std::atoi(lim);
+    if (v > 0) limit = v;
+  }
+  while (!stack.empty() && shown < limit) {
     whaleui_dom_element_t* el = stack.back().first;
     int depth = stack.back().second;
     stack.pop_back();
