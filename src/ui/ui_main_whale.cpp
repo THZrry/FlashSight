@@ -113,6 +113,11 @@ int debug_mode() {
   return v[0] == '1' ? 1 : 0;
 }
 
+bool debug_opacity() {
+  const char* v = std::getenv("FS_UI_DEBUG_OPACITY");
+  return v && *v && v[0] != '0';
+}
+
 void dump_dom(whaleui_window_t* win) {
   whaleui_dom_document_t* doc = whaleui_window_get_document(win);
   whaleui_dom_element_t* root = whaleui_dom_get_element_by_id(doc, "fs-root");
@@ -141,13 +146,33 @@ void dump_dom(whaleui_window_t* win) {
     stack.pop_back();
     whaleui_dom_rect_t r;
     bool have = whaleui_dom_get_bounding_client_rect(el, &r) == 0;
-    char line[512];
-    std::snprintf(line, sizeof(line), "%*s<%s class=\"%s\"> %s %.0f,%.0f %.0fx%.0f\n",
+    // FS_UI_DEBUG_OPACITY=1 adds the computed opacity and animation of every
+    // element. "Invisible but laid out" is by far the hardest failure to see
+    // from a box dump: the geometry is perfect and the pixel is not there,
+    // which is exactly what a stuck entrance animation (opacity 0) looks like.
+    char opa[32] = {0};
+    char anim[64] = {0};
+    if (debug_opacity()) {
+      whaleui_style_declaration_t* d =
+          whaleui_dom_get_computed_style(el, nullptr);
+      if (d) {
+        whaleui_style_declaration_get(d, "opacity", opa, sizeof(opa));
+        whaleui_style_declaration_get(d, "animation", anim, sizeof(anim));
+        whaleui_style_declaration_destroy(d);
+      }
+    }
+    char line[768];
+    std::snprintf(line, sizeof(line),
+                  "%*s<%s class=\"%s\"> %s %.0f,%.0f %.0fx%.0f%s%s\n",
                   depth * 2, "", whaleui_dom_tag_name(el),
                   whaleui_dom_get_attribute(el, "class") ? whaleui_dom_get_attribute(el, "class") : "",
                   have ? "" : "NO-BOX",
                   have ? r.x : 0.0f, have ? r.y : 0.0f,
-                  have ? r.width : 0.0f, have ? r.height : 0.0f);
+                  have ? r.width : 0.0f, have ? r.height : 0.0f,
+                  opa[0] ? " opacity=" : "", opa[0] ? opa : "");
+    if (anim[0]) {
+      std::fprintf(stderr, "%*s   animation=\"%s\"\n", depth * 2, "", anim);
+    }
     std::fprintf(stderr, "%s", line);
     ++shown;
     std::vector<whaleui_dom_element_t*> kids;
