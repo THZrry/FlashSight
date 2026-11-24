@@ -25,6 +25,8 @@
 #include <regex>
 #include <set>
 #include <thread>
+#include <functional>
+#include <vector>
 
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #include <windows.h>
@@ -86,6 +88,70 @@ class SlowEventLog {
   }
   std::string name_;
   int64_t t0_;
+};
+
+// Per-pass timing split for UiApp::render(). `[slow] render` reports a total
+// and nothing else, and the parts of a pass are unrelated work: rebuilding the
+// shell from state, diffing that tree into the DOM (the one that issues every
+// write), moving the layout forward so the writes are measurable, restoring
+// scroll positions, and re-wiring handlers. When the total is slow the split
+// says which of them it was; the cost when nothing is slow is a handful of
+// steady_clock reads per pass.
+class SlowSplit {
+ public:
+  template <typename Fn>
+  auto mark(const char* name, Fn&& fn) -> decltype(fn()) {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (fn_ == nullptr) fn_ = name;  // first segment of this pass
+    auto out = fn();
+    const auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    parts_.push_back(Part{name, static_cast<int64_t>(dt)});
+    return out;
+  }
+  // Mark a segment that returns nothing.
+  void mark_void(const char* name, std::function<void()> fn) {
+    mark(name, [&fn]() { fn(); return 0; });
+  }
+  // Start a new pass: the split describes ONE pass, and a pass that asked for
+  // itself again is a different measurement.
+  void reset() { parts_.clear(); fn_ = nullptr; }
+  // Print every segment plus the share of `total_ms` it took. Ordered by
+  // decreasing cost: the first line is the answer.
+  void report(const char* tag, const int64_t total_ms) const {
+    if (parts_.empty()) return;
+    std::vector<Part> sorted = parts_;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const Part& a, const Part& b) { return a.us > b.us; });
+    const char* env = std::getenv("FS_RES_LOG");
+    const bool to_file = !(env && std::strcmp(env, "0") == 0);
+    std::string path;
+    if (to_file) {
+      const char* tmp = std::getenv("TEMP");
+      path = std::string(tmp && *tmp ? tmp : ".") + "\\flashsight_res.log";
+    }
+    FILE* f = (to_file && !path.empty()) ? std::fopen(path.c_str(), "a") : nullptr;
+    for (const Part& p : sorted) {
+      std::fprintf(stderr, "[slow] %s part=%s us=%lld share=%d%%\n", tag,
+                   p.name, static_cast<long long>(p.us),
+                   total_ms > 0 ? static_cast<int>(p.us / 10 / total_ms) : 0);
+      if (f) {
+        std::fprintf(f, "[slow] %s part=%s us=%lld share=%d%%\n", tag, p.name,
+                     static_cast<long long>(p.us),
+                     total_ms > 0 ? static_cast<int>(p.us / 10 / total_ms) : 0);
+      }
+    }
+    if (f) std::fclose(f);
+  }
+
+ private:
+  struct Part {
+    const char* name;
+    int64_t us;
+  };
+  std::vector<Part> parts_;
+  const char* fn_ = nullptr;
 };
 
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
@@ -5277,11 +5343,13 @@ void UiApp::render() {
       std::chrono::steady_clock::now().time_since_epoch()).count();
   render_in_progress_ = true;
   int render_passes = 0;
+  SlowSplit split;
   do {
+    split.reset();
     render_pending_ = false;
     ++render_count_;
     ++render_passes;
-    VNodePtr neu = build_shell();
+    VNodePtr neu = split.mark("build_shell", [this] { return build_shell(); });
     // Exit direction belongs to the MOVE, not to the page: a page's exit_anim
     // was baked in when it was CREATED, so a page opened by a forward move
     // would always slide out to the left even when you go back. Stamp the
@@ -5302,26 +5370,32 @@ void UiApp::render() {
     // key is recreated (the side panel swaps its body per tab), its old offset
     // is restored below - no business code copies it into a view struct.
     snapshot_scroll_state(tree_);
-    patch(dom_, tree_, neu, root_);
+    split.mark_void("patch", [this, &neu] { patch(dom_, tree_, neu, root_); });
     // Ship this frame's DOM writes as one batch before anything below READS the
     // DOM (the scroll restore reads real heights, the wiring binds handlers to
     // live nodes). A bridged adapter buffers per-node writes; without this they
     // would still be sitting in its buffer while those calls execute.
-    dom_.flush();
+    split.mark_void("dom_flush", [this] { dom_.flush(); });
     tree_ = neu;
     last_rendered_tab_ = st_.active_tab;
     // Restore keyed scroll containers first; the transcript's own pending
     // restore below is more precise (anchored to a message) and must win.
-    restore_scroll_state(tree_);
+    split.mark_void("scroll_restore", [this] { restore_scroll_state(tree_); });
     // The transcript (if this render created one) is in the DOM now, so a
     // pending restore can be applied against the REAL height in this same task -
     // before the browser paints. Doing it in a later tick is what made a return
     // visit show the top of the transcript and jump afterwards.
-    apply_pending_history_scroll();
+    split.mark_void("hist_scroll", [this] { apply_pending_history_scroll(); });
     // drop handlers from the previous generation (ids are monotonic, so no
     // collision with the still-bound listeners of the current tree)
     std::vector<int> live;
-    collect_handler_ids(tree_, &live);
+    split.mark_void("retain_handlers", [this, &live] {
+      collect_handler_ids(tree_, &live);
+      // Cached markdown templates are not always in the current tree, but their
+      // clones will reuse these handler ids on a later page rebuild. Keep them.
+      comp::markdown_cache_handler_ids(&live);
+      bus().retain(live);
+    });
     // Cached markdown templates are not always in the current tree, but their
     // clones will reuse these handler ids on a later page rebuild. Keep them.
     comp::markdown_cache_handler_ids(&live);
@@ -5643,7 +5717,7 @@ void UiApp::render() {
     }
     // drop exit-animated nodes whose animation has finished (they are no longer
     // part of the tree, so nothing else would ever remove them)
-    sweep_exits(dom_, now_ms());
+    split.mark_void("sweep_exits", [this] { sweep_exits(dom_, now_ms()); });
   } while (render_pending_ && render_passes < 16);
   if (render_pending_) {
     // A render that keeps asking for another pass is a feedback loop, not a
@@ -5658,7 +5732,23 @@ void UiApp::render() {
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     const int64_t dt = now - render_t0;
+    // FS_SLOW_SPLIT=1 reports the split of EVERY pass, not just the slow ones.
+    // The 200ms threshold is the right default (a line per pass would flood the
+    // log), but it also means a slow pass can only be explained on a machine
+    // that reproduces it. With the switch on, any run shows where a pass goes.
+    static const bool always_split = [] {
+      const char* v = std::getenv("FS_SLOW_SPLIT");
+      return v && *v && v[0] != '0';
+    }();
+    if (always_split) {
+      split.report("render-any", dt);
+    }
     if (dt >= 200) {
+      // Which part of the pass actually took the time. The segments above do
+      // not add up to `dt` - wiring, focus and the term bindings run between
+      // them - so a gap is itself information: it means the cost is in code no
+      // bracket covers yet.
+      split.report("render", dt);
       std::fprintf(stderr,
                    "[slow] render ms=%lld msgs=%d tab=%s nodes=%d\n",
                    static_cast<long long>(dt),
