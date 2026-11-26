@@ -769,9 +769,11 @@ FS_TEST(addon2_plan_catalog_key_and_remote_guard) {
   FsResult cat = api.plan_list();
   ASSERT_TRUE(cat.ok());
   EXPECT_EQ((int)cat.data["providers"].size(), 7);
-  // OAuth login from a remote page cannot complete a loopback redirect.
+  // OAuth login and plan key entry are both local-only (no remote redirect /
+  // no remote credential injection).
   FsResult remote = api.plan_start("claude", true);
   EXPECT_FALSE(remote.ok());
+  EXPECT_FALSE(api.plan_add_key("qwen", "sk-plan-remote", "", true).ok());
   // A subscription API key is allowed (no browser) and creates plan_qwen.
   FsResult key = api.plan_add_key("qwen", "sk-plan-test", "", false);
   ASSERT_TRUE(key.ok());

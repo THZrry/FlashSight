@@ -813,7 +813,13 @@ FsResult PlanManager::disconnect(const std::string& connection_id) {
 
 FsResult PlanManager::add_key(const std::string& provider, const std::string& key,
                               const std::string& region, bool remote) {
-  (void)remote;  // key entry has no browser redirect; remote is safe
+  // A remote page cannot complete plan login either; keep the whole plans UI
+  // local-only so a phone cannot add credentials to this machine.
+  if (remote) {
+    return FsResult::error(
+        ErrCode::kNotSupported,
+        "coding-plan setup is disabled for remote connections; do it on the machine running FlashSight");
+  }
   const PlanProvider* def = find_plan(provider);
   if (!def) return FsResult::error(ErrCode::kInvalidArg, "unknown plan provider");
   if (key.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty key");
