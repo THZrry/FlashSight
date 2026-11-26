@@ -130,6 +130,9 @@ extern const char* const kExitFade;   // fades/scales out in place
 bool known(const std::string& name);
 // CSS class the framework applies for `name` ("" when unknown).
 std::string css_class(const std::string& name);
+std::string css_class(const char* name);
+// Compare two static intent strings (nullptr-safe).
+bool same_intent(const char* a, const char* b);
 // Every registered name (tests assert the app only uses these).
 const std::vector<std::string>& all();
 
@@ -224,9 +227,10 @@ struct VNode {
   std::string tag;   // empty => text node
   std::string text;  // text content (text node, or element shortcut)
   std::string key;   // diff identity for lists
-  // Declared mount animation (an anim:: intent name). Applied as a class on
-  // creation; see anim_key for replaying it on an existing node.
-  std::string anim;
+  // Declared mount animation (an anim:: intent name). Always one of the static
+  // intent strings, so a pointer is enough: a std::string here cost 32 bytes on
+  // EVERY node (millions of nodes in a long transcript).
+  const char* anim = nullptr;
   // Replay token. A mount animation fires when the node is CREATED, so a node
   // that survives a patch never animates again - which is why an animation could
   // be "swallowed": it played while the panel was still empty (a load was in
@@ -240,7 +244,7 @@ struct VNode {
   // real cross-transition: the outgoing page and the incoming page coexist as
   // two separate DOM subtrees for the duration of the animation, instead of one
   // set of elements being given both animations at once.
-  std::string exit_anim;
+  const char* exit_anim = nullptr;  // static intent string (see anim)
   // Raw HTML content, written with innerHTML instead of child nodes. Only for
   // text that is already markup and is expensive to build as nodes: a
   // highlighted code block is one string of hundreds of spans, and creating
@@ -269,6 +273,7 @@ class H {
  public:
   explicit H(VNodePtr n) : n_(n) {}
   H cls(const std::string& c) {
+    if (c.empty()) return *this;
     for (size_t i = 0; i < n_->attrs.size(); ++i) {
       if (n_->attrs[i].key == "class") {  // merge so anim() can append
         if (!n_->attrs[i].value.empty()) n_->attrs[i].value += " ";
@@ -284,10 +289,19 @@ class H {
     return *this;
   }
   H attr(const std::string& k, const std::string& v) {
+    if (k.empty()) return *this;
+    // Do not store what the browser already defaults to. `type="text"` on an
+    // input is the default and `class=""`/empty title/placeholder carry no
+    // information; every one of these used to occupy a VAttr on every node.
+    if (k == "type" && v == "text" && n_->tag == "input") return *this;
+    if (v.empty() && (k == "class" || k == "title" || k == "placeholder")) {
+      return *this;
+    }
     n_->attrs.push_back(VAttr{k, v});
     return *this;
   }
   H style(const std::string& k, const std::string& v) {
+    if (k.empty() || v.empty()) return *this;
     n_->styles.push_back(VStyle{k, v});
     return *this;
   }
@@ -298,7 +312,7 @@ class H {
   // Mount animation, declared by intent (see the anim registry above). The
   // framework maps the intent to the class it applies; an unknown intent adds
   // nothing, so a typo cannot silently produce a dead class.
-  H anim(const std::string& intent) {
+  H anim(const char* intent) {
     n_->anim = intent;
     std::string c = anim::css_class(intent);
     return c.empty() ? *this : cls(c);
@@ -310,7 +324,7 @@ class H {
     return *this;
   }
   // Exit intent: what this node does when it leaves the tree (see VNode::exit_anim).
-  H exit(const std::string& intent) {
+  H exit(const char* intent) {
     n_->exit_anim = intent;
     return *this;
   }

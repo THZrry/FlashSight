@@ -367,37 +367,31 @@ Json SessionManager::read_subagent_record(const std::string& sid,
 
 
 FsResult SessionManager::update_session_settings(const std::string& sid,
-                                                 const Json& fields) {  Json full;
-  FsResult r = load_full_checked(sid, &full);
-  if (!r.ok()) return r;
-  if (!full.contains("sessionSettings") || !full["sessionSettings"].is_object()) {
-    full["sessionSettings"] = Json::object();
-  }
-  for (auto it = fields.begin(); it != fields.end(); ++it) {
-    full["sessionSettings"][it.key()] = it.value();
-  }
-  std::string err;
-  // Through the store, never a raw write of full.json: the turns live in shards
-  // now, so a direct write would save the head without them (and silently drop
-  // every change made to `full["turns"]`).
-  bool ok = make_store(sid).save_full(sid, full, &err);
-  return ok ? FsResult::success() : FsResult::error(ErrCode::kIo, err);
+                                                 const Json& fields) {
+  // HEAD ONLY. sessionSettings are not part of the transcript; loading every
+  // shard and calling save_full here rewrote the ENTIRE history on every send
+  // (model/provider/thinking/permission are all set per turn).
+  return make_store(sid).update_head(sid, [&](Json* full) {
+    if (!full->contains("sessionSettings") || !(*full)["sessionSettings"].is_object()) {
+      (*full)["sessionSettings"] = Json::object();
+    }
+    for (auto it = fields.begin(); it != fields.end(); ++it) {
+      (*full)["sessionSettings"][it.key()] = it.value();
+    }
+  });
 }
 
 // 重命名会话：title 存在 meta 里（不是 sessionSettings —— 它是身份的一部分，
 // 不是模型调用的参数），列表页读的就是它。
 FsResult SessionManager::rename_session(const std::string& sid, const std::string& title) {
   if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty sid");
-  Json full;
-  FsResult r = load_full_checked(sid, &full);
+  FsResult r = make_store(sid).update_head(sid, [&](Json* full) {
+    if (!full->contains("meta") || !(*full)["meta"].is_object()) {
+      (*full)["meta"] = Json::object();
+    }
+    (*full)["meta"]["title"] = title;
+  });
   if (!r.ok()) return r;
-  if (!full.contains("meta") || !full["meta"].is_object()) {
-    full["meta"] = Json::object();
-  }
-  full["meta"]["title"] = title;
-  std::string err;
-  bool ok = make_store(sid).save_full(sid, full, &err);
-  if (!ok) return FsResult::error(ErrCode::kIo, err);
   return FsResult::success(Json{{"sid", sid}, {"title", title}});
 }
 
@@ -414,20 +408,14 @@ FsResult SessionManager::rename_session_by_user(const std::string& sid,
 
 FsResult SessionManager::set_meta_flag(const std::string& sid, const Json& fields) {
   if (sid.empty()) return FsResult::error(ErrCode::kInvalidArg, "empty sid");
-  Json full;
-  FsResult r = load_full_checked(sid, &full);
-  if (!r.ok()) return r;
-  if (!full.contains("meta") || !full["meta"].is_object()) {
-    full["meta"] = Json::object();
-  }
-  for (auto it = fields.begin(); it != fields.end(); ++it) {
-    full["meta"][it.key()] = it.value();
-  }
-  std::string err;
-  if (!make_store(sid).save_full(sid, full, &err)) {
-    return FsResult::error(ErrCode::kIo, err);
-  }
-  return FsResult::success();
+  return make_store(sid).update_head(sid, [&](Json* full) {
+    if (!full->contains("meta") || !(*full)["meta"].is_object()) {
+      (*full)["meta"] = Json::object();
+    }
+    for (auto it = fields.begin(); it != fields.end(); ++it) {
+      (*full)["meta"][it.key()] = it.value();
+    }
+  });
 }
 
 FsResult SessionManager::set_model(const std::string& sid, const std::string& model) {
@@ -496,15 +484,15 @@ FsResult SessionManager::set_permission_confirm(const std::string& sid,
 }
 
 FsResult SessionManager::refresh_config(const std::string& sid) {
-  Json full;
-  FsResult r = load_full_checked(sid, &full);
+  Json head;
+  FsResult r = make_store(sid).load_head(sid, &head);
   if (!r.ok()) return r;
-  int64_t ver = jsonutil::get_int(full, "configVersion", 0) + 1;
-  full["configVersion"] = ver;
-  full["continuousFailures"] = 0;
-  std::string err;
-  bool ok = make_store(sid).save_full(sid, full, &err);
-  if (!ok) return FsResult::error(ErrCode::kIo, err);
+  const int64_t ver = jsonutil::get_int(head, "configVersion", 0) + 1;
+  r = make_store(sid).update_head(sid, [ver](Json* full) {
+    (*full)["configVersion"] = ver;
+    (*full)["continuousFailures"] = 0;
+  });
+  if (!r.ok()) return r;
   return append_system_op(sid, "refreshConfig", Json{{"configVersion", ver}});
 }
 FsResult SessionManager::rollback(const std::string& sid, const std::string& turn_id,

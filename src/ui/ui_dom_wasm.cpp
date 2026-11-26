@@ -1596,6 +1596,11 @@ class WasmDom : public IDom {
   void copy_text(const std::string& text) override {
     fs_dom_copy_text(text.c_str());
   }
+  void open_url(const std::string& url) override {
+    // A new tab is the browser equivalent of "open in the system browser".
+    emscripten::val::global("window").call<emscripten::val>(
+        "open", url, std::string("_blank"), std::string("noopener"));
+  }
 
   bool exec_edit(const std::string& command) override {
     fs_dom_exec_edit(command.c_str());

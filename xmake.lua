@@ -137,6 +137,13 @@ option("whaleui_pkgdir")
     set_description("xmake package cache holding WhaleUI's dependencies")
 option_end()
 
+-- Linux webview runs on GTK4 + WebKitGTK 6.0. Declared as system pkg-config
+-- packages (optional so a Web/WhaleUI build without GTK still configures).
+if is_plat("linux", "bsd") then
+    add_requires("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0",
+                 {system = true, optional = true})
+end
+
 -- wasm needs a smaller include set (no mbedtls/httplib/md4c/reproc)
 wasm_includedirs = {
     "src",
@@ -915,24 +922,12 @@ if not is_plat("wasm") then
             add_frameworks("WebKit")
             add_syslinks("dl")
         elseif is_plat("linux", "bsd") then
-            -- GTK3 + WebKitGTK 4.1 is the oldest pairing webview supports that
-            -- current distros still package. webview.h picks the GTK3/GTK4 code
-            -- path from GTK_MAJOR_VERSION, so both flag sets must come from the
-            -- same pair. find_package returns structured links/linkdirs/
-            -- includedirs; splitting pkg-config's output by hand would lose the
-            -- ordering xmake applies to links (and break on paths with spaces).
-            local gtk = find_package("pkgconfig::gtk+-3.0")
-            local wk = find_package("pkgconfig::webkit2gtk-4.1")
-            if not gtk or not wk then
-                raise("--variant=webview on Linux needs libgtk-3-dev and libwebkit2gtk-4.1-dev " ..
-                      "(pkg-config must find gtk+-3.0 and webkit2gtk-4.1)")
-            end
-            for _, pkg in ipairs({gtk, wk}) do
-                add_includedirs(pkg.includedirs or {})
-                add_defines(pkg.defines or {})
-                add_linkdirs(pkg.linkdirs or {})
-                add_links(pkg.links or {})
-            end
+            -- GTK4 + WebKitGTK 6.0. webview.h selects its GTK4 code path from
+            -- GTK_MAJOR_VERSION, so GTK3 + WebKitGTK 4.x was the old pairing.
+            -- `add_requires("pkgconfig::...")` declares system pkg-config
+            -- packages; `find_package` was the wrong API here (it returns a
+            -- table but does not register the package for linking).
+            add_packages("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0")
             add_syslinks("dl")
         end
     target_end()

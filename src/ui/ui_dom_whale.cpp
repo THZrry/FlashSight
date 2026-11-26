@@ -36,6 +36,7 @@
 
 #ifdef FS_UI_WHALEUI
 
+#include <cstdlib>
 #include <ghc/filesystem.hpp>
 #include <whaleui.h>
 
@@ -558,6 +559,15 @@ class WhaleDom : public IDom {
     // WhaleUI exposes the system clipboard through its C API (SDL-backed), so
     // copy works even though the engine has no element value/selection API.
     whaleui_clipboard_set_text(text.c_str());
+  }
+  void open_url(const std::string& url) override {
+#ifdef _WIN32
+    std::system(("start \"\" \"" + url + "\"").c_str());
+#elif defined(__APPLE__)
+    std::system(("open \"" + url + "\" >/dev/null 2>&1 &").c_str());
+#else
+    std::system(("xdg-open \"" + url + "\" >/dev/null 2>&1 &").c_str());
+#endif
   }
 
   // ---- file picker (upload) ----------------------------------------------

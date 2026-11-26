@@ -579,6 +579,23 @@ struct AppState {
   };
   std::vector<ProviderRow> providers;
   bool providers_loaded = false;
+  // Coding-plan subscriptions (OAuth/poll/key + quotas). The catalog is static
+  // per provider; connections carry the last usage read.
+  Json plan_catalog = Json::array();
+  Json plan_connections = Json::array();
+  bool plans_loaded = false;
+  bool plan_usage_loading = false;
+  // The small login window: address + 复制/打开/关闭/验证.
+  bool plan_modal_open = false;
+  bool plan_remote = false;
+  std::string plan_provider;
+  std::string plan_flow;
+  std::string plan_url;
+  std::string plan_status;
+  std::string plan_error;
+  std::string plan_key_draft;
+  std::string plan_region;
+  bool plan_key_mode = false;
   // 余额 / 额度（provider.balances）：一家一行。status = ok | unsupported |
   // failed；失败的原因在 note 里，UI 原样显示（"获取失败：HTTP 401"），绝不补 0。
   struct BalanceRow {
@@ -1081,6 +1098,18 @@ class UiApp {
   void attach_live_turn(const std::string& sid);
   // Load provider list + detected shells into settings.
   void load_providers();
+  // Coding plans: catalog + connections, OAuth/login flow, quotas.
+  void load_plans(bool force = false);
+  void start_plan(const std::string& provider);
+  void add_plan_key(const std::string& provider, const std::string& key,
+                    const std::string& region);
+  void verify_plan();
+  void poll_plan_flow();
+  void close_plan_modal();
+  void refresh_plan_usage();
+  bool ui_remote() const;
+  VNodePtr build_plan_box();
+  VNodePtr build_plan_modal();
   void load_shells();
   // Load subagents for a session.
   void load_subagents(const std::string& sid);
@@ -1460,6 +1489,7 @@ class UiApp {
   // The status-based fallback navigation is one-shot AND local-only; a remote
   // page behind port forwarding must never be yanked to the bind port.
   bool server_nav_attempted_ = false;
+  bool plan_poll_inflight_ = false;
   // Is this subagent's detail tab the visible side panel? Used to paint its
   // live work immediately instead of waiting for the generic pump tick.
   bool subagent_detail_visible(const std::string& id) const;
@@ -1467,8 +1497,10 @@ class UiApp {
   // Focus is framework state: if a keyed input/textarea was focused and the
   // render recreates that node, put focus back (otherwise a queue/status render
   // silently dropped the caret).
-  void snapshot_focus(const VNodePtr& v);
-  void restore_focus(const VNodePtr& v);
+  // One traversal handles BOTH scroll offsets and focus (two separate walks per
+  // render was measurable on a 6k-node transcript).
+  void snapshot_ui_state(const VNodePtr& v);
+  void restore_ui_state(const VNodePtr& v);
   std::string focus_memory_key_;
   uint64_t focus_memory_dom_ = 0;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
@@ -1586,12 +1618,7 @@ class UiApp {
   void request_history_scroll_restore();
   // Apply a pending restore; called at the end of render(), after the patch.
   void apply_pending_history_scroll();
-  // Framework-level element state: remember the scroll offset of every KEYED
-  // node and restore it when that key is recreated. Business code only has to
-  // give the node a stable key; it no longer needs to copy offsets into its own
-  // view struct (the side panel lost its scroll on every tab switch that way).
-  void snapshot_scroll_state(const VNodePtr& v);
-  void restore_scroll_state(const VNodePtr& v);
+  // Framework-level element state: keyed scroll offsets (see snapshot_ui_state).
   struct ScrollMemory {
     uint64_t dom_id = 0;
     int top = 0;

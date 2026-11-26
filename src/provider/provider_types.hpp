@@ -82,6 +82,9 @@ struct ProviderConn {
   ApiKind kind = ApiKind::kOpenAIChat;
   std::string base_url;  // endpoint（如 https://api.openai.com/v1）
   std::string api_key;   // 前期明文；TODO 迁钥匙串
+  // OAuth access token instead of an API key: Anthropic expects
+  // `Authorization: Bearer` plus its oauth betas, not `x-api-key`.
+  bool oauth = false;
   std::map<std::string, std::string> custom_headers;  // 自定义 header（provider.md §5）
   bool enabled = true;
   // 发送会话亲和头 x-opencode-session（opencode 系套餐端点需要；与形态无关）。

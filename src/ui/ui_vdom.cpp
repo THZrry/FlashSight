@@ -2,6 +2,7 @@
 #include "ui_vdom.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <string>
 #include <unordered_set>
 
@@ -59,6 +60,17 @@ std::string css_class(const std::string& name) {
     if (name == kTable[i].name) return kTable[i].cls;
   }
   return std::string();
+}
+std::string css_class(const char* name) {
+  if (!name || !*name) return std::string();
+  for (int i = 0; i < kCount; ++i) {
+    if (std::strcmp(name, kTable[i].name) == 0) return kTable[i].cls;
+  }
+  return std::string();
+}
+bool same_intent(const char* a, const char* b) {
+  if (!a || !b) return a == b;
+  return std::strcmp(a, b) == 0;
 }
 
 const std::vector<std::string>& all() {
@@ -137,12 +149,14 @@ void start_exit(IDom& dom, const VNodePtr& oldv) {
   }
   std::string cls = class_attr_of(*oldv);
   bool page = is_page_class(cls);
-  std::string intent = oldv->exit_anim;
-  if (intent.empty()) {
+  const char* intent = oldv->exit_anim;
+  if (!intent || !*intent) {
     // Rows, cards and popovers leave with a short fade; a whole page fades too
     // (its direction comes from the caller's explicit exit intent).
-    if (oldv->anim == anim::kEnter || oldv->anim == anim::kList ||
-        oldv->anim == anim::kPop || oldv->anim == anim::kDrawer ||
+    if (anim::same_intent(oldv->anim, anim::kEnter) ||
+        anim::same_intent(oldv->anim, anim::kList) ||
+        anim::same_intent(oldv->anim, anim::kPop) ||
+        anim::same_intent(oldv->anim, anim::kDrawer) ||
         has_visual_class(cls) || page) {
       intent = anim::kExitFade;
     }
@@ -152,7 +166,10 @@ void start_exit(IDom& dom, const VNodePtr& oldv) {
     dom.remove(oldv->dom);
     return;
   }
-  if (intent == anim::kExitLeft || intent == anim::kExitRight) page = true;
+  if (anim::same_intent(intent, anim::kExitLeft) ||
+      anim::same_intent(intent, anim::kExitRight)) {
+    page = true;
+  }
   // The EXIT must start immediately: the node's own animation-delay belongs to
   // the entrance it played when it was created (.2s stagger), and inheriting it
   // here would hold the old page still for .2s before it even starts leaving -

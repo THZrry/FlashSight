@@ -40,9 +40,11 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -1274,6 +1276,17 @@ class WebViewDom : public IDom {
     }
 #endif
     call("copy", 0, 0, text, "");
+  }
+  void open_url(const std::string& url) override {
+#ifdef _WIN32
+    ::ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+    std::string cmd = "open \"" + url + "\" >/dev/null 2>&1 &";
+    std::system(cmd.c_str());
+#else
+    std::string cmd = "xdg-open \"" + url + "\" >/dev/null 2>&1 &";
+    std::system(cmd.c_str());
+#endif
   }
   bool exec_edit(const std::string& command) override {
     // document.execCommand is deprecated but is the only synchronous way to

@@ -18,6 +18,7 @@
 #include "fs_random.hpp"
 #include "core/deny_list.hpp"
 #include "core/lock_arbiter.hpp"
+#include "core/plan_manager.hpp"
 #include "core/plan_store.hpp"
 #include "core/project_manager.hpp"
 #include "core/session_manager.hpp"
@@ -331,6 +332,17 @@ class FsApi {
   // 每家一行：status = ok | unsupported | failed；失败的原因写在 note 里
   // （"获取失败: HTTP 401"），不支持的写 "该供应商没有公开的余额接口"。
   FsResult provider_balances();
+  // ----- plan.* (coding-plan subscriptions: OAuth + quotas) -----
+  FsResult plan_list();
+  FsResult plan_start(const std::string& provider, bool remote);
+  FsResult plan_poll(const std::string& flowId);
+  FsResult plan_complete(const std::string& flowId, const std::string& code,
+                         const std::string& state);
+  FsResult plan_cancel(const std::string& flowId);
+  FsResult plan_disconnect(const std::string& connectionId);
+  FsResult plan_add_key(const std::string& provider, const std::string& key,
+                        const std::string& region, bool remote);
+  FsResult plan_usage(const std::string& connectionId);
   // ----- model.*（逐模型设置：能力/档位/重试/启用/图标）-----
   // 某 provider 的完整模型列表（用户 + API + 预置兜底，含档位与图标）
   FsResult model_list(const std::string& providerId);
@@ -422,6 +434,9 @@ class FsApi {
   SettingsStore& store_for(const std::string& pid);
   // 项目注册表里查 pid 的路径（未注册返回空串）
   std::string path_for(const std::string& pid) const;
+  // A plan connection became usable: create/update the matching ProviderConn
+  // and its known models. Called with the connection's real tokens.
+  void mirror_plan_connection(const Json& conn);
   // 工作流：启动某步（spawn 其 agents 的子代理）
   FsResult start_step(WorkflowRun* run, const std::string& stepId);
   // 工作流：子代理完成时推进（全 settled -> done/failed，再启下一步）
@@ -479,6 +494,7 @@ class FsApi {
   std::unique_ptr<ProviderStore> providers_;
   std::unique_ptr<ModelTable> model_table_;
   std::unique_ptr<HttplibNetClient> net_;
+  std::unique_ptr<PlanManager> coding_plans_;
   // P3: agent 宿主（Loop/工具/子代理/唤醒/引导队列）
   std::unique_ptr<AgentHost> agent_host_;
   std::unique_ptr<McpRegistry> mcp_registry_;

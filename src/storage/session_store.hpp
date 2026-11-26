@@ -1,6 +1,7 @@
 // session_store.hpp - session files read/write (full.json, runtime.json, patches/)
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,19 @@ class SessionFileStore {
   // shards are read and concatenated), so every caller sees the same shape it
   // always did.
   FsResult load_full(const std::string& sid, Json* out) const;
+  // HEAD-ONLY read/write. meta/sessionSettings/systemOps live in full.json; the
+  // turn shards are not touched. A settings or title write must never load and
+  // re-save the whole history (that rewrote every shard on every send).
+  FsResult load_head(const std::string& sid, Json* out) const;
+  FsResult update_head(const std::string& sid,
+                       const std::function<void(Json*)>& mutate);
+  // Turn count without reading the shards (turnCount in the head; one migration
+  // read for sessions written before that field existed).
+  int turn_count(const std::string& sid);
+  // Read only the shards covering [start,end). The UI pages 30 turns at a time;
+  // concatenating a 1000-turn history for that was pure I/O and a JSON copy of
+  // the whole transcript on every open.
+  Json load_turns_range(const std::string& sid, int start, int end);
   // Write a full.json-shaped object back: `turns` goes to the shards, everything
   // else to full.json. Used by the paths that replace the whole history
   // (rollback, fork, forget).

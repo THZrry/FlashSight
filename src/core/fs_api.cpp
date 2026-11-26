@@ -79,6 +79,8 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   model_table_->set_preset(builtin_models_preset());
   HttpRequest sample;
   net_.reset(new HttplibNetClient(sample));
+  coding_plans_.reset(new PlanManager(root_, net_.get(), clock_));
+  coding_plans_->set_ready_fn([this](const Json& c) { mirror_plan_connection(c); });
   // P3: agent 宿主
   mcp_registry_.reset(new McpRegistry());
   AgentHostDeps deps;
@@ -101,7 +103,8 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   };
   const Clock* clk = clock_;
   SettingsStore* gset = settings_.get();
-  deps.call_model = [ps, mt, net, us, clk, gset](
+  PlanManager* planm = coding_plans_.get();
+  deps.call_model = [ps, mt, net, us, clk, gset, planm](
                         const ModelCallRequest& req, ModelCallResult* out,
                         const std::function<void(const std::string&)>& on_delta)
       -> FsResult {
@@ -181,6 +184,14 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
     creq.session_id = req.session_id;  // kPlan: x-opencode-session 亲和 id
     creq.cancel = req.cancel;          // 停止生成 -> abort the SSE transfer
     creq.reasoning_delta = req.on_reasoning;
+    // A plan connection's access token is short-lived; refresh it here, on the
+    // turn thread, before the provider client builds its auth header.
+    if (planm && conn.id.rfind("plan_", 0) == 0) {
+      std::string fresh;
+      if (planm->touch_provider(conn.id, &fresh) && !fresh.empty()) {
+        conn.api_key = fresh;
+      }
+    }
     ProviderRuntime runtime(conn, net, us, clk);
     // GLOBAL retry policy first, then the per-model override. The global keys
     // were exposed in no UI and never read, so every model silently used the
@@ -1636,8 +1647,12 @@ FsResult FsApi::session_get(const std::string& sid) {
 // Everything except the transcript. Kept separate so opening a long session does
 // not transfer (and then discard) hundreds of turns just to read the model name.
 FsResult FsApi::session_info(const std::string& sid) {
+  // HEAD ONLY. This runs on every session open; concatenating every turn shard
+  // just to report turnCount made opening a long history read the whole
+  // transcript (and allocate a second copy of it) before the first page.
+  SessionFileStore store = sessions_->make_store(sid);
   Json full;
-  FsResult r = sessions_->load_full(sid, &full);
+  FsResult r = store.load_head(sid, &full);
   if (!r.ok()) return r;
   Json out = Json::object();
   if (full.contains("meta")) out["meta"] = full["meta"];
@@ -1645,9 +1660,7 @@ FsResult FsApi::session_info(const std::string& sid) {
   out["systemOps"] = full.contains("systemOps") && full["systemOps"].is_array()
                          ? full["systemOps"]
                          : Json::array();
-  out["turnCount"] = full.contains("turns") && full["turns"].is_array()
-                         ? static_cast<int>(full["turns"].size())
-                         : 0;
+  out["turnCount"] = store.turn_count(sid);
   // Same self-healing as session_get: a dangling pid is recovered from meta.cwd.
   if (out.contains("meta") && out["meta"].is_object()) {
     std::string pid = jsonutil::get<std::string>(out["meta"], "pid", "");
@@ -1667,19 +1680,18 @@ FsResult FsApi::session_info(const std::string& sid) {
 // The slice is returned with its absolute start index so the client can keep
 // prepending without guessing.
 FsResult FsApi::session_turns(const std::string& sid, int before, int limit) {
-  Json full;
-  FsResult r = sessions_->load_full(sid, &full);
-  if (!r.ok()) return r;
-  const Json& turns = full.contains("turns") && full["turns"].is_array()
-                          ? full["turns"]
-                          : Json::array();
-  int total = static_cast<int>(turns.size());
+  SessionFileStore store = sessions_->make_store(sid);
+  Json head;
+  FsResult hr = store.load_head(sid, &head);
+  if (!hr.ok()) return hr;
+  const int total = store.turn_count(sid);
   if (limit <= 0) limit = 30;
   int end = (before < 0 || before > total) ? total : before;
   int start = end - limit;
   if (start < 0) start = 0;
-  Json slice = Json::array();
-  for (int i = start; i < end; ++i) slice.push_back(turns[i]);
+  // Read only the shards covering [start,end): a page is 16-32 turns, not the
+  // entire transcript.
+  Json slice = store.load_turns_range(sid, start, end);
   return FsResult::success(Json{{"turns", slice},
                                 {"start", start},
                                 {"total", total},
@@ -1724,9 +1736,35 @@ FsResult FsApi::session_send(const std::string& sid, const std::string& text,
   std::string sess_provider = jsonutil::get<std::string>(ss, "provider", "");
   // AgentHost::send takes the lock around its own setup and releases it for the
   // model call; the turn's callbacks re-take it one at a time.
-  return agent_host_->send(sid, text, attachments, auto_mode, perm, sess_model,
-                           jsonutil::get<std::string>(ss, "thinking", ""),
-                           sess_provider);
+  FsResult sent = agent_host_->send(
+      sid, text, attachments, auto_mode, perm, sess_model,
+      jsonutil::get<std::string>(ss, "thinking", ""), sess_provider);
+  // Auto mode + a plan window exhausted: stop here and wake 5 minutes after the
+  // quota resets, so the task finishes without burning the unlocked window on a
+  // failed request loop. Only a real reset time schedules a wake; a balance/API
+  // key error has none.
+  if (!sent.ok() && auto_mode && coding_plans_ && !sid.empty()) {
+    std::string why = sent.message;
+    for (size_t i = 0; i < why.size(); ++i) {
+      if (why[i] >= 'A' && why[i] <= 'Z') why[i] = static_cast<char>(why[i] - 'A' + 'a');
+    }
+    const bool limitish = why.find("quota") != std::string::npos ||
+                          why.find("limit") != std::string::npos ||
+                          why.find("429") != std::string::npos ||
+                          why.find("额度") != std::string::npos;
+    if (limitish) {
+      int64_t at = coding_plans_->resume_at_ms();
+      if (at <= 0) {
+        coding_plans_->refresh_usage("");
+        at = coding_plans_->resume_at_ms();
+      }
+      if (at > 0) {
+        agent_host_->wakes().schedule(sid, WakeSource::kTimer, at,
+                                      "plan quota reset");
+      }
+    }
+  }
+  return sent;
 }
 
 FsResult FsApi::session_append(const std::string& sid, const std::string& text) {
@@ -3824,6 +3862,209 @@ FsResult FsApi::provider_balances() {
     rows.push_back(row);
   }
   return FsResult::success(Json{{"providers", rows}});
+}
+
+// ----- plan.*（订阅套餐：OAuth/轮询/API key + 额度）-----
+namespace {
+struct PlanModelDef {
+  const char* id;
+  const char* name;
+  int64_t ctx;
+};
+const PlanModelDef* plan_model_defs(const std::string& provider, size_t* n) {
+  static const PlanModelDef claude[] = {
+      {"claude-opus-5-5", "Claude Opus 5.5", 200000},
+      {"claude-sonnet-5-5", "Claude Sonnet 5.5", 200000},
+      {"claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200000},
+  };
+  static const PlanModelDef codex[] = {
+      {"gpt-6.2-sol", "GPT 6.2 Sol", 400000},
+      {"gpt-6.1-sol", "GPT 6.1 Sol", 400000},
+      {"gpt-6-sol", "GPT 6.0 Sol", 400000},
+  };
+  static const PlanModelDef gemini[] = {
+      {"gemini-3.1-pro-preview", "Gemini 3.1 Pro", 1000000},
+      {"gemini-3-pro-preview", "Gemini 3 Pro", 1000000},
+      {"gemini-3-flash-preview", "Gemini 3 Flash", 1000000},
+  };
+  static const PlanModelDef glm[] = {
+      {"glm-5.3", "GLM 5.3", 200000},
+      {"glm-5.2", "GLM 5.2", 200000},
+      {"glm-4.7", "GLM 4.7", 200000},
+  };
+  static const PlanModelDef qwen[] = {
+      {"qwen4-max", "Qwen4 Max", 256000},
+      {"qwen3.8-max", "Qwen3.8 Max", 256000},
+      {"qwen3.8-flash", "Qwen3.8 Flash", 256000},
+      {"deepseek-v4-pro", "DeepSeek V4 Pro", 256000},
+  };
+  static const PlanModelDef volc[] = {
+      {"Doubao-Seed-2.0-Code", "Doubao Seed 2.0 Code", 256000},
+      {"DeepSeek-V4-Pro", "DeepSeek V4 Pro", 128000},
+      {"GLM-5.1", "GLM 5.1", 128000},
+  };
+  static const PlanModelDef tencent[] = {
+      {"hunyuan-turbos-latest", "Hunyuan TurboS", 200000},
+      {"hunyuan-t1-latest", "Hunyuan T1", 256000},
+  };
+  struct Row { const char* key; const PlanModelDef* defs; size_t n; };
+  static const Row rows[] = {
+      {"claude", claude, sizeof(claude) / sizeof(claude[0])},
+      {"codex", codex, sizeof(codex) / sizeof(codex[0])},
+      {"gemini", gemini, sizeof(gemini) / sizeof(gemini[0])},
+      {"glm", glm, sizeof(glm) / sizeof(glm[0])},
+      {"qwen", qwen, sizeof(qwen) / sizeof(qwen[0])},
+      {"volc", volc, sizeof(volc) / sizeof(volc[0])},
+      {"tencent", tencent, sizeof(tencent) / sizeof(tencent[0])},
+  };
+  for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+    if (provider == rows[i].key) {
+      if (n) *n = rows[i].n;
+      return rows[i].defs;
+    }
+  }
+  if (n) *n = 0;
+  return nullptr;
+}
+}  // namespace
+
+void FsApi::mirror_plan_connection(const Json& c) {
+  std::string provider = jsonutil::get<std::string>(c, "provider", "");
+  std::string access = jsonutil::get<std::string>(c, "accessToken", "");
+  if (provider.empty() || access.empty()) return;
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  const std::string pid = "plan_" + provider;
+  ProviderConn conn = providers_->get(pid);
+  conn.id = pid;
+  conn.name = jsonutil::get<std::string>(c, "label", pid);
+  conn.api_key = access;
+  conn.enabled = true;
+  conn.oauth = (provider == "claude");
+  conn.custom_headers.clear();
+  if (provider == "claude") {
+    conn.kind = ApiKind::kAnthropic;
+    conn.base_url = "https://api.anthropic.com/v1";
+    conn.custom_headers["anthropic-beta"] =
+        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14";
+    conn.custom_headers["User-Agent"] = "claude-cli/2.0.0 (external, sdk-cli)";
+    conn.custom_headers["X-App"] = "cli";
+  } else if (provider == "codex") {
+    conn.kind = ApiKind::kOpenAIResponse;
+    conn.base_url = "https://chatgpt.com/backend-api/codex";
+    conn.custom_headers["originator"] = "codex_cli_rs";
+    conn.custom_headers["version"] = "0.167.1";
+    conn.custom_headers["User-Agent"] = "codex_cli_rs/0.167.1";
+    conn.custom_headers["OpenAI-Beta"] = "codex-1";
+    std::string account = jsonutil::get<std::string>(c, "accountId", "");
+    if (!account.empty()) conn.custom_headers["ChatGPT-Account-ID"] = account;
+  } else if (provider == "gemini") {
+    conn.kind = ApiKind::kOpenAIChat;
+    conn.base_url = "https://generativelanguage.googleapis.com/v1beta/openai";
+  } else if (provider == "glm") {
+    conn.kind = ApiKind::kOpenAIChat;
+    std::string region = jsonutil::get<std::string>(c, "region", "");
+    conn.base_url = region == "cn"
+                        ? "https://open.bigmodel.cn/api/coding/paas/v4"
+                        : "https://api.z.ai/api/coding/paas/v4";
+  } else if (provider == "qwen") {
+    conn.kind = ApiKind::kOpenAIChat;
+    conn.base_url = "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1";
+  } else if (provider == "volc") {
+    conn.kind = ApiKind::kOpenAIChat;
+    conn.base_url = "https://ark.cn-beijing.volces.com/api/coding/v3";
+  } else if (provider == "tencent") {
+    conn.kind = ApiKind::kOpenAIChat;
+    conn.base_url = "https://api.hunyuan.cloud.tencent.com/v1";
+  } else {
+    return;
+  }
+  providers_->upsert(conn);
+  size_t n = 0;
+  const PlanModelDef* defs = plan_model_defs(provider, &n);
+  std::vector<ModelEntry> models;
+  for (size_t i = 0; i < n; ++i) {
+    ModelEntry m;
+    m.id = defs[i].id;
+    m.display = defs[i].name;
+    m.caps.tool_use = true;
+    m.caps.vision = true;
+    m.caps.context_len = defs[i].ctx;
+    m.caps.max_output = 65536;
+    m.from_api = true;
+    m.enabled = true;
+    models.push_back(m);
+  }
+  if (!models.empty()) {
+    model_table_->set_api_models(pid, models);
+    settings_->set_global(kKeyProviderApiModels, model_table_->api_models_json());
+  }
+}
+
+FsResult FsApi::plan_list() {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return FsResult::success(coding_plans_->list());
+}
+FsResult FsApi::plan_start(const std::string& provider, bool remote) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return coding_plans_->start(provider, remote);
+}
+FsResult FsApi::plan_poll(const std::string& flowId) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return coding_plans_->poll(flowId);
+}
+FsResult FsApi::plan_complete(const std::string& flowId, const std::string& code,
+                              const std::string& state) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return coding_plans_->complete(flowId, code, state);
+}
+FsResult FsApi::plan_cancel(const std::string& flowId) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return coding_plans_->cancel(flowId);
+}
+FsResult FsApi::plan_disconnect(const std::string& connectionId) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  std::string provider;
+  {
+    Json list = coding_plans_->list();
+    const Json& conns = list.contains("connections") ? list["connections"]
+                                                      : Json::array();
+    for (size_t i = 0; i < conns.size(); ++i) {
+      if (jsonutil::get<std::string>(conns[i], "id", "") == connectionId) {
+        provider = jsonutil::get<std::string>(conns[i], "provider", "");
+        break;
+      }
+    }
+  }
+  FsResult r = coding_plans_->disconnect(connectionId);
+  if (!r.ok() || provider.empty()) return r;
+  // Drop the mirrored provider when this was its last connection; a stale
+  // disabled endpoint would keep showing up in the picker.
+  bool still = false;
+  {
+    Json list = coding_plans_->list();
+    const Json& conns = list.contains("connections") ? list["connections"]
+                                                      : Json::array();
+    for (size_t i = 0; i < conns.size(); ++i) {
+      if (jsonutil::get<std::string>(conns[i], "provider", "") == provider) still = true;
+    }
+  }
+  if (!still) {
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    const std::string pid = "plan_" + provider;
+    providers_->remove(pid);
+    model_table_->set_api_models(pid, std::vector<ModelEntry>());
+    settings_->set_global(kKeyProviderApiModels, model_table_->api_models_json());
+  }
+  return r;
+}
+FsResult FsApi::plan_add_key(const std::string& provider, const std::string& key,
+                             const std::string& region, bool remote) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return coding_plans_->add_key(provider, key, region, remote);
+}
+FsResult FsApi::plan_usage(const std::string& connectionId) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return coding_plans_->refresh_usage(connectionId);
 }
 
 // ----- model.*（逐模型设置）-----

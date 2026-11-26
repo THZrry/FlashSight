@@ -759,3 +759,64 @@ FS_TEST(addon2_fsapi_continue_and_approve) {
   // 未知会话 continue 报 not-found
   EXPECT_FALSE(api.session_continue("s_nope", "x").ok());
 }
+
+// Coding plans: remote OAuth is refused (no local callback), a plan API key is
+// stored and mirrored into a real provider with its model table.
+FS_TEST(addon2_plan_catalog_key_and_remote_guard) {
+  fstest::TempDir td("a2plan2");
+  FakeClockA2 clock(1000);
+  FsApi api(ghc::filesystem::path(td.path()), &clock, nullptr);
+  FsResult cat = api.plan_list();
+  ASSERT_TRUE(cat.ok());
+  EXPECT_EQ((int)cat.data["providers"].size(), 7);
+  // OAuth login from a remote page cannot complete a loopback redirect.
+  FsResult remote = api.plan_start("claude", true);
+  EXPECT_FALSE(remote.ok());
+  // A subscription API key is allowed (no browser) and creates plan_qwen.
+  FsResult key = api.plan_add_key("qwen", "sk-plan-test", "", false);
+  ASSERT_TRUE(key.ok());
+  FsResult ps = api.provider_list_providers();
+  ASSERT_TRUE(ps.ok());
+  bool have = false;
+  for (size_t i = 0; i < ps.data.size(); ++i) {
+    if (jsonutil::get<std::string>(ps.data[i], "id", "") == "plan_qwen") have = true;
+  }
+  EXPECT_TRUE(have);
+  FsResult ml = api.model_list("plan_qwen");
+  ASSERT_TRUE(ml.ok());
+  EXPECT_TRUE(ml.data["models"].size() >= 3);
+}
+
+// Paged history reads only the shards covering the page. A wrong absolute
+// offset in the range reader makes every page except the first empty.
+FS_TEST(addon2_session_turns_range_paging) {
+  fstest::TempDir td("a2page");
+  FakeClockA2 clock(1000);
+  FsApi api(ghc::filesystem::path(td.path()), &clock, nullptr);
+  ghc::filesystem::path proj_dir = ghc::filesystem::path(td.path()) / "proj";
+  ghc::filesystem::create_directories(proj_dir);
+  FsResult pr = api.project_create(proj_dir.string());
+  ASSERT_TRUE(pr.ok());
+  std::string pid = pr.data["pid"].get<std::string>();
+  FsResult sr = api.session_new(pid, proj_dir.string());
+  ASSERT_TRUE(sr.ok());
+  std::string sid = sr.data["sid"].get<std::string>();
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_TRUE(api.session_send(sid, "echo " + std::to_string(i),
+                                 Json::object()).ok());
+  }
+  FsResult info = api.session_info(sid);
+  ASSERT_TRUE(info.ok());
+  const int total = static_cast<int>(jsonutil::get_int(info.data, "turnCount", 0));
+  ASSERT_TRUE(total >= 10);
+  FsResult p1 = api.session_turns(sid, -1, 5);
+  ASSERT_TRUE(p1.ok());
+  EXPECT_EQ((int)p1.data["turns"].size(), 5);
+  EXPECT_EQ((int)jsonutil::get_int(p1.data, "start", 0), total - 5);
+  FsResult p2 = api.session_turns(sid, total - 5, 5);
+  ASSERT_TRUE(p2.ok());
+  EXPECT_EQ((int)p2.data["turns"].size(), 5);
+  EXPECT_EQ((int)jsonutil::get_int(p2.data, "start", 0), total - 10);
+  ASSERT_TRUE(p1.data["turns"].size() > 0 && p2.data["turns"].size() > 0);
+  EXPECT_TRUE(p1.data["turns"][0].dump() != p2.data["turns"][0].dump());
+}

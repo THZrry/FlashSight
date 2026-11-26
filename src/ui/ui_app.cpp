@@ -592,7 +592,7 @@ void add_class(const VNodePtr& v, const std::string& cls) {
 
 // Apply an animation INTENT to an already-built subtree (see the anim registry
 // in ui_vdom.hpp). Used by the page builders, which return a finished tree.
-void add_anim(const VNodePtr& v, const std::string& intent) {
+void add_anim(const VNodePtr& v, const char* intent) {
   if (!v) return;
   v->anim = intent;
   add_class(v, anim::css_class(intent));
@@ -2149,28 +2149,7 @@ void UiApp::refresh_session_todos(const std::string& sid) {
 // layout right there, which means setting scrollTop in the same task is exact -
 // the first paint is already at the right place. That is what "提前把布局完成"
 // has to mean in practice: not a deferral, the same frame.
-void UiApp::snapshot_focus(const VNodePtr& v) {
-  if (!v) return;
-  if (!v->key.empty() && v->dom.valid() &&
-      (v->tag == "input" || v->tag == "textarea") && dom_.is_focused(v->dom)) {
-    focus_memory_key_ = v->key;
-    focus_memory_dom_ = v->dom.id;
-  }
-  for (size_t i = 0; i < v->children.size(); ++i) snapshot_focus(v->children[i]);
-}
-
-void UiApp::restore_focus(const VNodePtr& v) {
-  if (!v) return;
-  if (!focus_memory_key_.empty() && v->key == focus_memory_key_ &&
-      v->dom.valid() && v->dom.id != focus_memory_dom_) {
-    if (!dom_.is_focused(v->dom)) dom_.focus(v->dom);
-    focus_memory_dom_ = v->dom.id;
-    return;
-  }
-  for (size_t i = 0; i < v->children.size(); ++i) restore_focus(v->children[i]);
-}
-
-void UiApp::snapshot_scroll_state(const VNodePtr& v) {
+void UiApp::snapshot_ui_state(const VNodePtr& v) {
   if (!v) return;
   if (v->key.compare(0, 7, "scroll:") == 0 && v->dom.valid()) {
     ScrollMemory m;
@@ -2178,12 +2157,17 @@ void UiApp::snapshot_scroll_state(const VNodePtr& v) {
     m.top = dom_.scroll_top(v->dom);
     scroll_memory_[v->key] = m;
   }
+  if (!v->key.empty() && v->dom.valid() &&
+      (v->tag == "input" || v->tag == "textarea") && dom_.is_focused(v->dom)) {
+    focus_memory_key_ = v->key;
+    focus_memory_dom_ = v->dom.id;
+  }
   for (size_t i = 0; i < v->children.size(); ++i) {
-    snapshot_scroll_state(v->children[i]);
+    snapshot_ui_state(v->children[i]);
   }
 }
 
-void UiApp::restore_scroll_state(const VNodePtr& v) {
+void UiApp::restore_ui_state(const VNodePtr& v) {
   if (!v) return;
   if (v->key.compare(0, 7, "scroll:") == 0 && v->dom.valid()) {
     std::map<std::string, ScrollMemory>::iterator it =
@@ -2195,8 +2179,13 @@ void UiApp::restore_scroll_state(const VNodePtr& v) {
       it->second.dom_id = v->dom.id;
     }
   }
+  if (!focus_memory_key_.empty() && v->key == focus_memory_key_ &&
+      v->dom.valid() && v->dom.id != focus_memory_dom_) {
+    if (!dom_.is_focused(v->dom)) dom_.focus(v->dom);
+    focus_memory_dom_ = v->dom.id;
+  }
   for (size_t i = 0; i < v->children.size(); ++i) {
-    restore_scroll_state(v->children[i]);
+    restore_ui_state(v->children[i]);
   }
 }
 
@@ -2889,6 +2878,353 @@ void UiApp::attach_live_turn(const std::string& sid) {
     render();
     follow_history_if_pinned();
   });
+}
+
+bool UiApp::ui_remote() const {
+  // An empty host means a native window (no page origin): local. A non-loopback
+  // host means this UI was opened from another machine over the LAN.
+  std::string h = dom_.location_host();
+  if (h.empty()) return false;
+  return !(h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "[::1]");
+}
+
+void UiApp::load_plans(bool force) {
+  if (!backend_) return;
+  if (st_.plans_loaded && !force) return;
+  st_.plan_remote = ui_remote();
+  call_async("plan.list", Json::object(), [this](const BackendResult& r) {
+    if (!r.ok) return;
+    st_.plan_catalog = r.data.contains("providers") && r.data["providers"].is_array()
+                           ? r.data["providers"] : Json::array();
+    st_.plan_connections =
+        r.data.contains("connections") && r.data["connections"].is_array()
+            ? r.data["connections"] : Json::array();
+    st_.plans_loaded = true;
+    render();
+  }, true);
+}
+
+void UiApp::start_plan(const std::string& provider) {
+  if (provider.empty()) return;
+  if (ui_remote()) {
+    toast(tr("远程连接不能添加套餐：授权回调需要在本机浏览器完成"));
+    return;
+  }
+  update([&](AppState& s) {
+    s.plan_modal_open = true;
+    s.plan_provider = provider;
+    s.plan_flow.clear();
+    s.plan_url.clear();
+    s.plan_status = "starting";
+    s.plan_error.clear();
+    s.plan_key_draft.clear();
+    s.plan_key_mode = false;
+  });
+  call_async("plan.start", Json{{"provider", provider}, {"remote", false}},
+             [this, provider](const BackendResult& r) {
+    if (!r.ok) {
+      update([&](AppState& s) {
+        s.plan_status = "error";
+        s.plan_error = r.message;
+      });
+      return;
+    }
+    std::string url = jsonutil::get<std::string>(r.data, "url", "");
+    std::string flow = jsonutil::get<std::string>(r.data, "flowId", "");
+    update([&](AppState& s) {
+      s.plan_url = url;
+      s.plan_flow = flow;
+      s.plan_status = "pending";
+      s.plan_error.clear();
+    });
+    if (!url.empty()) dom_.open_url(url);
+    poll_plan_flow();
+  });
+}
+
+void UiApp::add_plan_key(const std::string& provider, const std::string& key,
+                         const std::string& region) {
+  if (provider.empty() || key.empty()) return;
+  if (ui_remote()) {
+    toast(tr("远程连接不能添加套餐"));
+    return;
+  }
+  call_async("plan.addKey", Json{{"provider", provider}, {"key", key},
+                                 {"region", region}, {"remote", false}},
+             [this](const BackendResult& r) {
+    if (!r.ok) {
+      update([&](AppState& s) { s.plan_error = r.message; s.plan_status = "error"; });
+      return;
+    }
+    update([&](AppState& s) {
+      s.plan_modal_open = false;
+      s.plan_flow.clear();
+      s.plan_status.clear();
+    });
+    toast(tr("套餐已连接"));
+    load_plans(true);
+    load_providers();
+  });
+}
+
+void UiApp::poll_plan_flow() {
+  if (plan_poll_inflight_) return;
+  if (!st_.plan_modal_open || st_.plan_flow.empty()) return;
+  plan_poll_inflight_ = true;
+  const std::string flow = st_.plan_flow;
+  call_async("plan.poll", Json{{"flowId", flow}}, [this, flow](const BackendResult& r) {
+    plan_poll_inflight_ = false;
+    if (!st_.plan_modal_open || st_.plan_flow != flow) return;
+    std::string status = r.ok ? jsonutil::get<std::string>(r.data, "status", "pending")
+                              : "error";
+    if (!r.ok) {
+      update([&](AppState& s) {
+        s.plan_status = "error";
+        s.plan_error = r.message;
+      });
+      return;
+    }
+    if (status == "ready") {
+      update([&](AppState& s) {
+        s.plan_modal_open = false;
+        s.plan_flow.clear();
+        s.plan_status.clear();
+      });
+      toast(tr("套餐已连接"));
+      load_plans(true);
+      load_providers();
+      return;
+    }
+    if (status == "error") {
+      update([&](AppState& s) {
+        s.plan_status = "error";
+        s.plan_error = jsonutil::get<std::string>(r.data, "error", tr("授权失败"));
+      });
+      return;
+    }
+    dom_.schedule(900, [this]() { poll_plan_flow(); });
+  }, true);
+}
+
+void UiApp::verify_plan() {
+  if (st_.plan_flow.empty()) return;
+  plan_poll_inflight_ = false;
+  poll_plan_flow();
+}
+
+void UiApp::close_plan_modal() {
+  if (!st_.plan_flow.empty()) {
+    call_async("plan.cancel", Json{{"flowId", st_.plan_flow}}, nullptr, true);
+  }
+  update([&](AppState& s) {
+    s.plan_modal_open = false;
+    s.plan_flow.clear();
+    s.plan_url.clear();
+    s.plan_status.clear();
+    s.plan_error.clear();
+    s.plan_key_draft.clear();
+  });
+}
+
+void UiApp::refresh_plan_usage() {
+  if (st_.plan_usage_loading) return;
+  st_.plan_usage_loading = true;
+  render();
+  call_async("plan.usage", Json{{"connectionId", ""}}, [this](const BackendResult& r) {
+    st_.plan_usage_loading = false;
+    if (!r.ok) {
+      toast(tr("额度刷新失败：") + r.message);
+      render();
+      return;
+    }
+    load_plans(true);
+    render();
+  }, true);
+}
+
+VNodePtr UiApp::build_plan_box() {
+  // Recomputed here, not only after the async list: the first paint on a remote
+  // page must not briefly offer a login that cannot complete.
+  st_.plan_remote = ui_remote();
+  H box = el("div", "plan-box");
+  H head = el("div", "plan-box-head");
+  head.add(el("span", "plan-box-title").text(tr("订阅套餐")));
+  if (st_.plan_remote) {
+    head.add(el("span", "plan-box-remote").text(
+        tr("远程连接不能添加套餐（授权回调需要在本机浏览器完成）")));
+  }
+  head.add(el("span", "grow"));
+  head.add(comp::icon_button("rotate", tr("刷新额度"), [this](const std::string&) {
+    refresh_plan_usage();
+  }));
+  box.add(head);
+  const Json& conns = st_.plan_connections;
+  for (size_t i = 0; i < st_.plan_catalog.size(); ++i) {
+    const Json& p = st_.plan_catalog[i];
+    std::string pid = jsonutil::get<std::string>(p, "id", "");
+    if (pid.empty()) continue;
+    std::string name = jsonutil::get<std::string>(p, "name", pid);
+    std::string auth = jsonutil::get<std::string>(p, "auth", "");
+    Json conn = Json::object();
+    for (size_t k = 0; k < conns.size(); ++k) {
+      if (jsonutil::get<std::string>(conns[k], "provider", "") == pid) {
+        conn = conns[k];
+        break;
+      }
+    }
+    H card = el("div", "plan-card");
+    H top = el("div", "plan-card-top");
+    top.add(el("span", "plan-name").text(name));
+    if (!conn.empty()) {
+      top.add(comp::badge(tr("已连接")));
+      std::string plan = jsonutil::get<std::string>(conn, "plan", "");
+      if (!plan.empty() && plan != name) top.add(el("span", "plan-plan dim").text(plan));
+    } else {
+      top.add(el("span", "plan-off dim").text(tr("未连接")));
+    }
+    top.add(el("span", "grow"));
+    if (!conn.empty()) {
+      std::string cid = jsonutil::get<std::string>(conn, "id", "");
+      H acts = el("span", "plan-acts");
+      acts.add(comp::button(tr("断开"), [this, cid](const std::string&) {
+        if (cid.empty()) return;
+        call_async("plan.disconnect", Json{{"connectionId", cid}},
+                   [this](const BackendResult&) { load_plans(true); load_providers(); },
+                   true);
+      }, "ghost"));
+      top.add(acts);
+    }
+    card.add(top);
+    // Quotas from the last read. Never invent a number: a plan whose gateway
+    // has no quota API says so.
+    if (!conn.empty()) {
+      const Json& u = conn.contains("usage") ? conn["usage"] : Json::object();
+      const Json& qs = u.contains("quotas") ? u["quotas"] : Json::array();
+      H qrow = el("div", "plan-quotas");
+      if (qs.is_array() && !qs.empty()) {
+        for (size_t k = 0; k < qs.size(); ++k) {
+          std::string key = jsonutil::get<std::string>(qs[k], "key", "");
+          double remain = jsonutil::get_number(qs[k], "remaining", 0);
+          double used = jsonutil::get_number(qs[k], "used", 0);
+          H chip = el("div", remain <= 0.01 ? "plan-quota empty" : "plan-quota");
+          chip.add(el("span", "pq-key").text(key));
+          chip.add(el("span", "pq-val").text(itos(static_cast<int>(remain)) + "%"));
+          chip.attr("title", tr("已用 ") + itos(static_cast<int>(used)) + "%");
+          qrow.add(chip);
+        }
+      } else {
+        std::string err = jsonutil::get<std::string>(u, "error", "");
+        qrow.add(el("span", "plan-quota-note dim").text(
+            err.empty() ? tr("额度：尚未读取") : tr("额度：") + err));
+      }
+      card.add(qrow);
+    }
+    H foot = el("div", "plan-card-foot");
+    if (auth == "apikey" || pid == "glm") {
+      foot.add(comp::button(tr("使用 API Key"), [this, pid, auth](const std::string&) {
+        if (ui_remote()) {
+          toast(tr("远程连接不能添加套餐"));
+          return;
+        }
+        update([&](AppState& s) {
+          s.plan_modal_open = true;
+          s.plan_key_mode = true;
+          s.plan_provider = pid;
+          s.plan_status.clear();
+          s.plan_error.clear();
+          s.plan_key_draft.clear();
+          s.plan_region = "intl";
+        });
+      }, "ghost"));
+    }
+    if (auth != "apikey") {
+      std::string label = conn.empty() ? tr("连接") : tr("重新登录");
+      H b = comp::button(label, [this, pid](const std::string&) { start_plan(pid); },
+                         conn.empty() ? "primary" : "ghost");
+      if (st_.plan_remote) {
+        b.cls("disabled");
+        b.attr("title", tr("远程连接不能添加套餐"));
+      }
+      foot.add(b);
+    }
+    card.add(foot);
+    box.add(card);
+  }
+  if (st_.plan_catalog.empty()) {
+    box.add(el("div", "plan-empty dim").text(tr("正在读取套餐列表…")));
+  }
+  return box.get();
+}
+
+VNodePtr UiApp::build_plan_modal() {
+  H back = el("div", "modal-layer");
+  back.key("plan-modal-layer");
+  back.on(EventKind::kClick, [this](const std::string&) { close_plan_modal(); });
+  H box = el("div", "plan-modal");
+  box.on(EventKind::kClick, [](const std::string&) {});
+  std::string name = st_.plan_provider;
+  for (size_t i = 0; i < st_.plan_catalog.size(); ++i) {
+    if (jsonutil::get<std::string>(st_.plan_catalog[i], "id", "") == st_.plan_provider) {
+      name = jsonutil::get<std::string>(st_.plan_catalog[i], "name", name);
+      break;
+    }
+  }
+  box.add(el("div", "plan-modal-title").text(name));
+  if (st_.plan_key_mode) {
+    box.add(el("div", "field-hint").text(
+        tr("粘贴该套餐的订阅 API Key（见官网控制台）；它只保存在本机。")));
+    H inp = comp::text_input(st_.plan_key_draft, "API Key", [this](const std::string& v) {
+      st_.plan_key_draft = v;
+    });
+    inp.key("plan-key-input");
+    box.add(inp);
+    if (st_.plan_provider == "glm") {
+      std::vector<std::string> regions;
+      regions.push_back(tr("国际站 (z.ai)"));
+      regions.push_back(tr("国内站 (bigmodel)"));
+      box.add(comp::select(regions, st_.plan_region == "cn" ? 1 : 0,
+                           [this](const std::string& v) {
+        st_.plan_region = std::atoi(v.c_str()) == 1 ? "cn" : "intl";
+      }));
+    }
+    H acts = el("div", "plan-modal-acts");
+    acts.add(comp::button(tr("验证"), [this](const std::string&) {
+      add_plan_key(st_.plan_provider, st_.plan_key_draft, st_.plan_region);
+    }, "primary"));
+    acts.add(comp::button(tr("关闭"), [this](const std::string&) { close_plan_modal(); },
+                          "ghost"));
+    box.add(acts);
+  } else {
+    box.add(el("div", "field-hint").text(
+        tr("在浏览器完成授权；回调会自动返回。若页面只显示一段代码，请复制到下面点“验证”。")));
+    H url = el("input", "text-input plan-url");
+    url.attr("type", "text");
+    url.attr("value", st_.plan_url);
+    url.attr("readonly", "1");
+    box.add(url);
+    std::string status = st_.plan_status;
+    if (status == "pending" || status == "starting") {
+      box.add(el("div", "plan-status dim").text(
+          status == "starting" ? tr("正在创建授权…") : tr("等待浏览器授权…")));
+    } else if (status == "error") {
+      box.add(el("div", "plan-status err").text(st_.plan_error));
+    }
+    H acts = el("div", "plan-modal-acts");
+    acts.add(comp::button(tr("复制"), [this](const std::string&) {
+      dom_.copy_text(st_.plan_url);
+      toast(tr("已复制授权地址"));
+    }, "ghost"));
+    acts.add(comp::button(tr("打开"), [this](const std::string&) {
+      if (!st_.plan_url.empty()) dom_.open_url(st_.plan_url);
+    }, "ghost"));
+    acts.add(comp::button(tr("验证"), [this](const std::string&) { verify_plan(); },
+                          "primary"));
+    acts.add(comp::button(tr("关闭"), [this](const std::string&) { close_plan_modal(); },
+                          "ghost"));
+    box.add(acts);
+  }
+  back.add(box);
+  return back.get();
 }
 
 void UiApp::load_providers() {
@@ -5505,8 +5841,7 @@ void UiApp::render() {
     // Remember where every keyed scroll container was BEFORE the patch. When a
     // key is recreated (the side panel swaps its body per tab), its old offset
     // is restored below - no business code copies it into a view struct.
-    snapshot_focus(tree_);
-    snapshot_scroll_state(tree_);
+    snapshot_ui_state(tree_);
     split.mark_void("patch", [this, &neu] { patch(dom_, tree_, neu, root_); });
     // Ship this frame's DOM writes as one batch before anything below READS the
     // DOM (the scroll restore reads real heights, the wiring binds handlers to
@@ -5517,10 +5852,9 @@ void UiApp::render() {
     last_rendered_tab_ = st_.active_tab;
     // If a keyed input/textarea was recreated by this render, give it focus
     // back before the scroll restore (focusing can scroll).
-    split.mark_void("focus_restore", [this] { restore_focus(tree_); });
-    // Restore keyed scroll containers first; the transcript's own pending
-    // restore below is more precise (anchored to a message) and must win.
-    split.mark_void("scroll_restore", [this] { restore_scroll_state(tree_); });
+    // One pass restores focus and keyed scroll containers. The transcript's own
+    // pending restore below is more precise (anchored to a message) and wins.
+    split.mark_void("ui_state_restore", [this] { restore_ui_state(tree_); });
     // The transcript (if this render created one) is in the DOM now, so a
     // pending restore can be applied against the REAL height in this same task -
     // before the browser paints. Doing it in a later tick is what made a return
@@ -5973,6 +6307,9 @@ VNodePtr UiApp::build_shell() {
     page->anim_key = "modal:settings";
     overlay.add(page);
     win.add(overlay);
+  }
+  if (st_.plan_modal_open) {
+    win.add(build_plan_modal());
   }
   return win.get();
 }
@@ -10512,6 +10849,7 @@ void UiApp::load_settings_section(const std::string& section) {
   if (section == "providers" && !st_.providers_loaded) {
     load_providers();
   }
+  if (section == "providers") load_plans();
   if (section == "providers" && !st_.provider_templates_loaded) {
     load_provider_templates();
   }
@@ -11112,6 +11450,9 @@ VNodePtr UiApp::build_settings() {
           static_cast<int>(st_.provider_creating),
           static_cast<int>(st_.pv_template_picked), st_.provider_selected.c_str(),
           st_.provider_templates.size());
+    // Subscription plans live ABOVE the endpoint fields: a plan is a login, a
+    // provider is an endpoint, and the login is what decides which endpoint.
+    body.add(build_plan_box());
     // --- 供应商：左列表（选择/新建），右侧编辑或模板向导 ---
     H two = el("div", "pv-two");
     two.key("pv-two");

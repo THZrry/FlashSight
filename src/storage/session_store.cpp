@@ -156,6 +156,95 @@ FsResult SessionFileStore::load_full(const std::string& sid, Json* out) const {
   return FsResult::success();
 }
 
+FsResult SessionFileStore::load_head(const std::string& sid, Json* out) const {
+  if (!full_exists(sid)) {
+    return FsResult::error(ErrCode::kNotFound, "session not found: " + sid);
+  }
+  std::ifstream ifs(full_path(sid).string(), std::ios::binary);
+  if (!ifs) {
+    return FsResult::error(ErrCode::kIo,
+                           "cannot open full.json: " + full_path(sid).string());
+  }
+  std::stringstream ss;
+  ss << ifs.rdbuf();
+  Json j;
+  try {
+    j = Json::parse(ss.str());
+  } catch (const std::exception& e) {
+    return FsResult::error(ErrCode::kParse,
+                           std::string("full.json parse: ") + e.what());
+  }
+  if (out) *out = std::move(j);
+  return FsResult::success();
+}
+
+FsResult SessionFileStore::update_head(
+    const std::string& sid, const std::function<void(Json*)>& mutate) {
+  Json head;
+  FsResult r = load_head(sid, &head);
+  if (!r.ok()) return r;
+  if (mutate) mutate(&head);
+  std::string err;
+  if (!jsonutil::write_atomic(full_path(sid).string(), head, &err)) {
+    return FsResult::error(ErrCode::kIo, err);
+  }
+  return FsResult::success();
+}
+
+int SessionFileStore::turn_count(const std::string& sid) {
+  Json head;
+  if (!load_head(sid, &head).ok()) return 0;
+  if (head.contains("turnCount") && head["turnCount"].is_number()) {
+    return static_cast<int>(head["turnCount"].get<int64_t>());
+  }
+  std::error_code ec;
+  bool have_shard = ghc::filesystem::is_regular_file(ps_.turn_shard(sid, 0), ec);
+  int count = 0;
+  if (!have_shard && head.contains("turns") && head["turns"].is_array()) {
+    count = static_cast<int>(head["turns"].size());
+  } else {
+    Json all;
+    if (!load_full(sid, &all).ok()) return 0;
+    count = all.contains("turns") && all["turns"].is_array()
+                ? static_cast<int>(all["turns"].size())
+                : 0;
+  }
+  head["turnCount"] = count;
+  std::string err;
+  jsonutil::write_atomic(full_path(sid).string(), head, &err);
+  return count;
+}
+
+Json SessionFileStore::load_turns_range(const std::string& sid, int start,
+                                        int end) {
+  Json out = Json::array();
+  const int total = turn_count(sid);
+  if (start < 0) start = 0;
+  if (end > total) end = total;
+  if (start >= end) return out;
+  int first_shard = start / kTurnsPerShard;
+  int last_shard = (end - 1) / kTurnsPerShard;
+  for (int s = first_shard; s <= last_shard; ++s) {
+    int abs = s * kTurnsPerShard;
+    std::ifstream ifs(ps_.turn_shard(sid, s).string(), std::ios::binary);
+    if (!ifs) break;
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    Json part;
+    try {
+      part = Json::parse(ss.str());
+    } catch (...) {
+      break;
+    }
+    if (!part.is_array()) continue;
+    for (size_t k = 0; k < part.size(); ++k, ++abs) {
+      if (abs < start || abs >= end) continue;
+      out.push_back(part[k]);
+    }
+  }
+  return out;
+}
+
 // Write a full.json-shaped object back: turns go to shards, everything else to
 // full.json (which is small and cheap to rewrite).
 bool SessionFileStore::save_full(const std::string& sid, const Json& full,
@@ -178,29 +267,48 @@ FsResult SessionFileStore::append_turn(const std::string& sid, const Json& turn)
   // file - O(n) JSON work per turn, with the file growing without bound (the
   // user's session reached 90 KB in six turns). The count lives in full.json
   // (tiny), so an append only touches the LAST shard plus that head file.
+  // HEAD ONLY. The head carries `turnCount`; reading every shard just to learn
+  // the count made each append O(history) in I/O (and a settings write used to
+  // go further and REWRITE every shard - see update_session_settings).
   Json head;
-  FsResult r = load_full(sid, &head);
+  FsResult r = load_head(sid, &head);
   if (!r.ok()) return r;
-  int count = static_cast<int>(head.contains("turns") && head["turns"].is_array()
-                                   ? head["turns"].size() : 0);
-  int shard_idx = count / kTurnsPerShard;
-
+  bool have_shard = false;
+  {
+    std::error_code ec;
+    have_shard = ghc::filesystem::is_regular_file(ps_.turn_shard(sid, 0), ec);
+  }
+  Json inline_turns = head.contains("turns") && head["turns"].is_array()
+                          ? head["turns"]
+                          : Json::array();
   // MIGRATION: a legacy session keeps its turns inline in full.json and has no
   // shard files. Append the new turn at the end of that inline array and let
   // save_full fan the whole thing out to shards; from then on every append
   // touches only the last shard.
-  {
-    std::error_code ec;
-    bool have_shard = ghc::filesystem::is_regular_file(ps_.turn_shard(sid, 0), ec);
-    if (!have_shard && count > 0) {
-      head["turns"].push_back(turn);
-      std::string merr;
-      if (!save_full(sid, head, &merr)) {
-        return FsResult::error(ErrCode::kIo, merr);
-      }
-      return FsResult::success();
+  if (!have_shard && !inline_turns.empty()) {
+    inline_turns.push_back(turn);
+    head["turns"] = inline_turns;
+    std::string merr;
+    if (!save_full(sid, head, &merr)) {
+      return FsResult::error(ErrCode::kIo, merr);
     }
+    return FsResult::success();
   }
+  int count = 0;
+  if (head.contains("turnCount") && head["turnCount"].is_number()) {
+    count = static_cast<int>(head["turnCount"].get<int64_t>());
+  } else if (have_shard) {
+    // One-time upgrade for sessions written before turnCount existed.
+    Json all;
+    FsResult fr = load_full(sid, &all);
+    if (!fr.ok()) return fr;
+    count = static_cast<int>(all.contains("turns") && all["turns"].is_array()
+                                 ? all["turns"].size()
+                                 : 0);
+  } else {
+    count = static_cast<int>(inline_turns.size());
+  }
+  int shard_idx = count / kTurnsPerShard;
 
   // Read only that shard, append, write it back.
   Json part = Json::array();
@@ -229,8 +337,10 @@ FsResult SessionFileStore::append_turn(const std::string& sid, const Json& turn)
   if (!jsonutil::write_atomic(ps_.turn_shard(sid, shard_idx).string(), part, &err)) {
     return FsResult::error(ErrCode::kIo, err);
   }
-  // The head file keeps no inline turns any more (they are in the shard now).
+  // The head file keeps no inline turns any more (they are in the shard now),
+  // but it DOES keep the running count so the next append is head-only.
   if (head.contains("turns")) head.erase("turns");
+  head["turnCount"] = count + 1;
   if (!jsonutil::write_atomic(full_path(sid).string(), head, &err)) {
     return FsResult::error(ErrCode::kIo, err);
   }
@@ -238,13 +348,13 @@ FsResult SessionFileStore::append_turn(const std::string& sid, const Json& turn)
 }
 
 FsResult SessionFileStore::append_system_op(const std::string& sid, const Json& op) {
-  Json full;
-  FsResult r = load_full(sid, &full);
-  if (!r.ok()) return r;
-  full["systemOps"].push_back(op);
-  std::string err;
-  if (!save_full(sid, full, &err)) return FsResult::error(ErrCode::kIo, err);
-  return FsResult::success();
+  // systemOps live in the head; appending one must not touch the turn shards.
+  return update_head(sid, [&](Json* full) {
+    if (!full->contains("systemOps") || !(*full)["systemOps"].is_array()) {
+      (*full)["systemOps"] = Json::array();
+    }
+    (*full)["systemOps"].push_back(op);
+  });
 }
 
 FsResult SessionFileStore::trim_turns(const std::string& sid, size_t keep) {

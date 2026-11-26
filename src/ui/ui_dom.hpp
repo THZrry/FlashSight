@@ -289,6 +289,9 @@ class IDom {
   // Win32 clipboard on desktop), so it lives in the adapter like the file
   // picker: the UI only says "copy this".
   virtual void copy_text(const std::string& text) { (void)text; }
+  // Open an external URL in the system browser (OAuth authorization pages).
+  // `navigate` would replace the app page itself.
+  virtual void open_url(const std::string& url) { (void)url; }
 
   // Editing commands on the FOCUSED element: "cut" | "copy" | "paste" |
   // "selectAll". The app draws its own menu over text fields instead of the

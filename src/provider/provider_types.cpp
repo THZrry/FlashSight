@@ -115,6 +115,7 @@ Json ProviderConn::to_json() const {
   // legacy kPlan is reported as the shape it really is (openai-chat)
   j["kind"] = api_kind_display_str(kind);
   j["baseUrl"] = base_url;
+  j["oauth"] = oauth;
   // api_key 不写入 to_json（避免误泄漏到日志/事件）；持久化用 to_json_persist
   j["enabled"] = enabled;
   j["sendSession"] = send_session || kind == ApiKind::kPlan;
@@ -140,9 +141,10 @@ ProviderConn ProviderConn::from_json(const Json& j) {
   // header, so an old file keeps working without a migration step
   p.send_session = jsonutil::get<bool>(j, "sendSession", k == ApiKind::kPlan);
   p.kind = (k == ApiKind::kPlan) ? ApiKind::kOpenAIChat : k;
-  p.base_url = jsonutil::get<std::string>(j, "baseUrl", "");
-  p.api_key = jsonutil::get<std::string>(j, "apiKey", "");
-  p.enabled = jsonutil::get<bool>(j, "enabled", true);
+    p.base_url = jsonutil::get<std::string>(j, "baseUrl", "");
+    p.api_key = jsonutil::get<std::string>(j, "apiKey", "");
+    p.oauth = jsonutil::get<bool>(j, "oauth", false);
+    p.enabled = jsonutil::get<bool>(j, "enabled", true);
   p.has_quota = jsonutil::get<bool>(j, "hasQuota", false);
   p.quota_value = jsonutil::get_number(j, "quotaValue", 0.0);
   p.quota_kind = jsonutil::get<std::string>(j, "quotaKind", "unknown");

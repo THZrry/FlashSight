@@ -427,6 +427,27 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   // 余额/额度：一家一行，status 告诉 UI 是查到了、不支持还是获取失败
   reg("provider.balances", [api](const Json&) { return api->provider_balances(); });
 
+  // ---- plan.*（订阅套餐 OAuth/轮询/API key）----
+  reg("plan.list", [api](const Json&) { return api->plan_list(); });
+  reg("plan.start", [api](const Json& a) {
+    return api->plan_start(s(a, "provider"), b(a, "remote", false));
+  });
+  reg("plan.poll", [api](const Json& a) { return api->plan_poll(s(a, "flowId")); });
+  reg("plan.complete", [api](const Json& a) {
+    return api->plan_complete(s(a, "flowId"), s(a, "code"), s(a, "state"));
+  });
+  reg("plan.cancel", [api](const Json& a) { return api->plan_cancel(s(a, "flowId")); });
+  reg("plan.disconnect", [api](const Json& a) {
+    return api->plan_disconnect(s(a, "connectionId"));
+  });
+  reg("plan.addKey", [api](const Json& a) {
+    return api->plan_add_key(s(a, "provider"), s(a, "key"), s(a, "region"),
+                             b(a, "remote", false));
+  });
+  reg("plan.usage", [api](const Json& a) {
+    return api->plan_usage(s(a, "connectionId"));
+  });
+
   // ---- model.*（逐模型设置：能力/档位/重试/启用/图标）----
   reg("model.list", [api](const Json& a) { return api->model_list(s(a, "providerId")); });
   reg("model.save", [api](const Json& a) {
@@ -547,7 +568,10 @@ FsResult UiApi::call(const std::string& method, const Json& args) {
   // manager operations. None of them touch the maps this lock protects.
   if (!api_ || method == "session.send" || method == "session.continue" ||
       method == "session.resume" || method == "tool.invoke" ||
-      method == "provider.balances" || method == "terminal.grid" ||
+      method == "provider.balances" || method == "plan.start" ||
+      method == "plan.poll" || method == "plan.complete" ||
+      method == "plan.addKey" || method == "plan.usage" ||
+      method == "terminal.grid" ||
       method == "terminal.poll" || method == "terminal.kill" ||
       method == "terminal.tick") {
     return it->second(args);

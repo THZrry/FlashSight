@@ -531,7 +531,12 @@ FsResult ProviderClient::chat_anthropic(const ChatRequest& req, ChatResponse* ou
   http.method = "POST";
   http.url = conn_.base_url + "/messages";
   http.headers["Content-Type"] = "application/json";
-  http.headers["x-api-key"] = conn_.api_key;
+  if (conn_.oauth) {
+    // Plan connections carry an OAuth access token, not an API key.
+    http.headers["Authorization"] = "Bearer " + conn_.api_key;
+  } else {
+    http.headers["x-api-key"] = conn_.api_key;
+  }
   http.headers["anthropic-version"] = "2023-06-01";
   for (auto& kv : conn_.custom_headers) {
     http.headers[kv.first] = subst_session(kv.second, req.session_id);
