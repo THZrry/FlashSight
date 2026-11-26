@@ -107,7 +107,8 @@ def mingw_bin_dirs():
         exe = shutil.which(tool)
         if exe:
             dirs.append(Path(exe).resolve().parent)
-    for env in ("MINGW_PREFIX", "MSYSTEM_PREFIX", "LLVM_MINGW_DIR", "LLVM_MINGW_ROOT"):
+    for env in ("MINGW_DIR", "MINGW_PREFIX", "MSYSTEM_PREFIX",
+                "LLVM_MINGW_DIR", "LLVM_MINGW_ROOT"):
         val = os.environ.get(env)
         if val:
             p = Path(val)
@@ -156,8 +157,8 @@ def write_readme(dest, variant, version, platform):
     ]
     if variant == "webview" and platform.startswith("linux"):
         lines += [
-            "Runtime requirement: WebKitGTK 4.1 + GTK 3, e.g. on Debian/Ubuntu:",
-            "  sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0",
+            "Runtime requirement: WebKitGTK 6.0 + GTK 4, e.g. on Debian/Ubuntu:",
+            "  sudo apt install libgtk-4-1 libwebkitgtk-6.0-4",
             "",
         ]
     if variant == "webview" and platform.startswith("windows"):
@@ -173,6 +174,13 @@ def write_readme(dest, variant, version, platform):
             "no separate asset files are needed.",
             "",
         ]
+    lines += [
+        "Gemini Code Assist plan login: the Google OAuth client secret is not",
+        "shipped in the repository. Set FLASHSIGHT_GOOGLE_CLIENT_SECRET in the",
+        "environment before starting FlashSight, then connect the plan in",
+        "Settings > Providers.",
+        "",
+    ]
     dest.write_text("\n".join(lines), encoding="utf-8")
 
 

@@ -165,6 +165,15 @@ int64_t now_ms_clock(const Clock* c) {
   return c ? c->now_ms() : WallClock().now_ms();
 }
 
+// Google's installed-app client secret is not a real security boundary, but it
+// is still a credential and must not live in the repository (GitHub secret
+// scanning blocks it). Supply it at runtime instead:
+//   FLASHSIGHT_GOOGLE_CLIENT_SECRET=...
+std::string google_client_secret() {
+  const char* v = std::getenv("FLASHSIGHT_GOOGLE_CLIENT_SECRET");
+  return (v && *v) ? std::string(v) : std::string();
+}
+
 // Quota reset times arrive as an epoch (Codex/GLM) or ISO-8601 (Claude/Gemini).
 int64_t reset_ms(const Json& q) {
   if (!q.is_object() || !q.contains("resetAt")) return 0;
@@ -530,9 +539,15 @@ FsResult PlanManager::exchange_tokens(Flow* f, const std::string& code) {
     form["client_id"] = def->client_id;
     form["redirect_uri"] = f->redirect_uri;
     form["code_verifier"] = f->verifier;
-    if (def->client_secret && *def->client_secret) {
-      form["client_secret"] = def->client_secret;
+    std::string secret = def->client_secret ? def->client_secret : "";
+    if (std::string(def->id) == "gemini") secret = google_client_secret();
+    if (std::string(def->id) == "gemini" && secret.empty()) {
+      return FsResult::error(
+          ErrCode::kNotSupported,
+          "Google OAuth needs FLASHSIGHT_GOOGLE_CLIENT_SECRET (the client secret "
+          "is intentionally not stored in the repository)");
     }
+    if (!secret.empty()) form["client_secret"] = secret;
     req.headers["Content-Type"] = "application/x-www-form-urlencoded";
     req.body = form_body(form);
   }
@@ -1120,7 +1135,13 @@ FsResult PlanManager::refresh_conn(Conn* c) {
       form["scope"] = "openid profile email offline_access";
     } else {
       form["client_id"] = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-      form["client_secret"] = "";
+      std::string secret = google_client_secret();
+      if (secret.empty()) {
+        return FsResult::error(
+            ErrCode::kNotSupported,
+            "Google OAuth refresh needs FLASHSIGHT_GOOGLE_CLIENT_SECRET");
+      }
+      form["client_secret"] = secret;
     }
     HttpRequest req;
     req.method = "POST";

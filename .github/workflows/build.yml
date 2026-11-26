@@ -22,6 +22,7 @@ name: build
 # See doc-internal/ui-whaleui.md.
 on:
   push:
+    branches: [main, master]
     tags:
       - "v*"
   release:
@@ -201,11 +202,11 @@ jobs:
         if: matrix.os != 'windows-latest' && matrix.os != 'macos-14'
         run: |
           sudo apt-get update
-          # WebKitGTK 4.1 + GTK3 are what the webview Linux backend compiles
+          # GTK4 + WebKitGTK 6.0 are what the Linux webview backend compiles
           # against (see the webview_host target in xmake.lua).
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            libgtk-3-dev libwebkit2gtk-4.1-dev
+            build-essential pkg-config file curl \
+            libgtk-4-dev libwebkitgtk-6.0-dev
 
       - name: Install Emscripten
         uses: mymindstorm/setup-emsdk@v14
@@ -361,6 +362,32 @@ jobs:
               if size < 1_000_000:
                   sys.exit("%s is suspiciously small" % a.name)
           PY
+
+      - name: Build AppImages (Linux)
+        if: startsWith(matrix.name, 'linux-')
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          web_exe="$(find build -path '*/.objs/*' -prune -o -type f -name flashsight-web -print | head -n1)"
+          wv_exe="$(find build -path '*/.objs/*' -prune -o -type f -name flashsight-webview -print | head -n1)"
+          if [ "${{ steps.want.outputs.web }}" = "1" ]; then
+            bash scripts/make_appimage.sh web "$web_exe" \
+              "dist/flashsight-${VERSION}-${{ matrix.name }}-web.AppImage" \
+              "$VERSION" "${{ matrix.arch }}"
+          fi
+          if [ "${{ steps.want.outputs.webview }}" = "1" ]; then
+            bash scripts/make_appimage.sh webview "$wv_exe" \
+              "dist/flashsight-${VERSION}-${{ matrix.name }}-webview.AppImage" \
+              "$VERSION" "${{ matrix.arch }}"
+          fi
+
+      - name: Verify AppImages (Linux)
+        if: startsWith(matrix.name, 'linux-')
+        run: |
+          for f in dist/*.AppImage; do
+            size=$(stat -c%s "$f")
+            echo "$f $size bytes"
+            test "$size" -gt 1000000
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
