@@ -3872,13 +3872,7 @@ FS_TEST(uiapp_stored_tool_rows_are_kept_and_windowed) {
                         {"streamSummary", "done"},
                         {"toolCalls", cs}};
   comp::ChatMsg sm = app.turn_to_message_for_test(step_turn, 0);
-  bool have_output = false;
-  for (size_t i = 0; i < sm.notices.size(); ++i) {
-    if (sm.notices[i].find("implemented the parser") != std::string::npos) {
-      have_output = true;
-    }
-  }
-  EXPECT_TRUE(have_output);
+  EXPECT_TRUE(sm.summary.find("implemented the parser") != std::string::npos);
   EXPECT_EQ(m.interim.size(), size_t(2));
 }
 

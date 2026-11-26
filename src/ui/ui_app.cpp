@@ -1772,8 +1772,11 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
             if (jsonutil::get<std::string>(d, "kind", "") == "complete-step") {
               std::string out = jsonutil::get<std::string>(d, "summary", "");
               if (!out.empty()) {
-                m.notices.push_back(tr("步骤输出：") +
-                                    cut_display(out, 1600, "…"));
+                // The summary block under the answer is always visible; the work
+                // log is collapsed by default on a finished turn, which is where
+                // the output used to disappear.
+                if (!m.summary.empty()) m.summary += "\n";
+                m.summary += tr("步骤输出：") + cut_display(out, 1200, "…");
               }
             }
           } catch (...) {
@@ -4853,8 +4856,9 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     if (kind == "complete-step" && !summary.empty()) {
       for (size_t i = msgs.size(); i-- > 0;) {
         if (msgs[i].role != "assistant") continue;
-        msgs[i].notices.push_back(tr("步骤输出：") +
-                                  cut_display(summary, 1600, "…"));
+        if (!msgs[i].summary.empty()) msgs[i].summary += "\n";
+        msgs[i].summary += tr("步骤输出：") + cut_display(summary, 1200, "…");
+        msgs[i].work_open = true;
         msgs[i].rev = next_msg_rev_++;
         break;
       }
