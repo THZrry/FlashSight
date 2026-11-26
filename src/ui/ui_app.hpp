@@ -594,6 +594,7 @@ struct AppState {
   std::string plan_status;
   std::string plan_error;
   std::string plan_key_draft;
+  std::string plan_code_draft;
   std::string plan_region;
   bool plan_key_mode = false;
   // 余额 / 额度（provider.balances）：一家一行。status = ok | unsupported |
@@ -1104,6 +1105,7 @@ class UiApp {
   void add_plan_key(const std::string& provider, const std::string& key,
                     const std::string& region);
   void verify_plan();
+  void complete_plan_code();
   void poll_plan_flow();
   void close_plan_modal();
   void refresh_plan_usage();

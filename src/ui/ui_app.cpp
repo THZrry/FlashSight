@@ -2918,6 +2918,7 @@ void UiApp::start_plan(const std::string& provider) {
     s.plan_status = "starting";
     s.plan_error.clear();
     s.plan_key_draft.clear();
+    s.plan_code_draft.clear();
     s.plan_key_mode = false;
   });
   call_async("plan.start", Json{{"provider", provider}, {"remote", false}},
@@ -3008,8 +3009,37 @@ void UiApp::poll_plan_flow() {
 
 void UiApp::verify_plan() {
   if (st_.plan_flow.empty()) return;
+  if (!st_.plan_code_draft.empty()) {
+    complete_plan_code();
+    return;
+  }
   plan_poll_inflight_ = false;
   poll_plan_flow();
+}
+
+void UiApp::complete_plan_code() {
+  if (st_.plan_flow.empty() || st_.plan_code_draft.empty()) return;
+  const std::string code = st_.plan_code_draft;
+  call_async("plan.complete",
+             Json{{"flowId", st_.plan_flow}, {"code", code}, {"state", ""}},
+             [this](const BackendResult& r) {
+    if (!r.ok) {
+      update([&](AppState& s) {
+        s.plan_status = "error";
+        s.plan_error = r.message;
+      });
+      return;
+    }
+    update([&](AppState& s) {
+      s.plan_modal_open = false;
+      s.plan_flow.clear();
+      s.plan_status.clear();
+      s.plan_code_draft.clear();
+    });
+    toast(tr("套餐已连接"));
+    load_plans(true);
+    load_providers();
+  });
 }
 
 void UiApp::close_plan_modal() {
@@ -3023,6 +3053,7 @@ void UiApp::close_plan_modal() {
     s.plan_status.clear();
     s.plan_error.clear();
     s.plan_key_draft.clear();
+    s.plan_code_draft.clear();
   });
 }
 
@@ -3202,6 +3233,13 @@ VNodePtr UiApp::build_plan_modal() {
     url.attr("value", st_.plan_url);
     url.attr("readonly", "1");
     box.add(url);
+    // Manual fallback for providers whose page shows the code instead of
+    // redirecting (Claude does this on some browsers).
+    H code = comp::text_input(
+        st_.plan_code_draft, tr("授权码（页面只显示代码时粘贴到这里）"),
+        [this](const std::string& v) { st_.plan_code_draft = v; });
+    code.key("plan-code-input");
+    box.add(code);
     std::string status = st_.plan_status;
     if (status == "pending" || status == "starting") {
       box.add(el("div", "plan-status dim").text(
