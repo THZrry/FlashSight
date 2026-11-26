@@ -1792,7 +1792,7 @@ FS_TEST(uiapp_guidance_send_draws_no_bubble) {
     BackendResult call(const std::string& method, const Json&) override {
       BackendResult r;
       r.ok = true;
-      if (method == "session.send") r.data = Json{{"queued", true}};
+      if (method == "session.send") r.data = Json{{"queued", true}, {"id", 7}};
       if (method == "steering.list") r.data = Json::array();
       if (method == "model.allEnabled") {
         r.data = Json{{"models", Json::array({Json{{"id", "m1"}}})}};
@@ -1815,6 +1815,26 @@ FS_TEST(uiapp_guidance_send_draws_no_bubble) {
   // No user echo, no assistant placeholder: the item is only in the queue.
   EXPECT_EQ(app.state().messages.size(), before);
   EXPECT_TRUE(app.state().session_input.empty());
+  // ...and it is in the queue IMMEDIATELY, with the backend id, not after a
+  // steering.list round trip.
+  ASSERT_TRUE(app.state().steering_items.is_array());
+  ASSERT_TRUE(app.state().steering_items.size() == 1);
+  EXPECT_EQ(jsonutil::get_int(app.state().steering_items[0], "id", 0), int64_t(7));
+  EXPECT_EQ(jsonutil::get<std::string>(app.state().steering_items[0], "text", ""),
+            std::string("guide this"));
+  // When the next request consumes it, the row leaves the queue and the text is
+  // in the transcript immediately (it is no longer editable).
+  app.on_backend_event_for_test(
+      "steering.applied",
+      Json{{"sid", "sess_a"}, {"text", "guide this"}, {"tools", 0}});
+  EXPECT_TRUE(app.state().steering_items.empty());
+  bool in_transcript = false;
+  for (size_t i = 0; i < app.state().messages.size(); ++i) {
+    for (size_t k = 0; k < app.state().messages[i].guidance.size(); ++k) {
+      if (app.state().messages[i].guidance[k] == "guide this") in_transcript = true;
+    }
+  }
+  EXPECT_TRUE(in_transcript);
 }
 
 // If the UI thought a turn was running but the backend starts a new one, the
@@ -3836,6 +3856,29 @@ FS_TEST(uiapp_stored_tool_rows_are_kept_and_windowed) {
   comp::ChatMsg m = app.turn_to_message_for_test(turn, 0);
   EXPECT_EQ(m.tools.size(), size_t(350));
   EXPECT_EQ(m.thoughts.size(), size_t(2));
+  // complete_step's OUTPUT survives a reload: the summary lives in the stored
+  // tool detail, and it is shown as a work note instead of being buried in the
+  // collapsed JSON.
+  Json cs = Json::array();
+  cs.push_back(Json{{"name", "complete_step"},
+                    {"args", Json{{"task", "x"}}},
+                    {"ok", true},
+                    {"detail", Json{{"id", "sub_1"},
+                                    {"kind", "complete-step"},
+                                    {"status", "done"},
+                                    {"summary", "implemented the parser"}}
+                                   .dump()}});
+  Json step_turn = Json{{"role", "assistant"},
+                        {"streamSummary", "done"},
+                        {"toolCalls", cs}};
+  comp::ChatMsg sm = app.turn_to_message_for_test(step_turn, 0);
+  bool have_output = false;
+  for (size_t i = 0; i < sm.notices.size(); ++i) {
+    if (sm.notices[i].find("implemented the parser") != std::string::npos) {
+      have_output = true;
+    }
+  }
+  EXPECT_TRUE(have_output);
   EXPECT_EQ(m.interim.size(), size_t(2));
 }
 

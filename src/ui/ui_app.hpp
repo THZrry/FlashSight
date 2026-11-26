@@ -1460,6 +1460,17 @@ class UiApp {
   // The status-based fallback navigation is one-shot AND local-only; a remote
   // page behind port forwarding must never be yanked to the bind port.
   bool server_nav_attempted_ = false;
+  // Is this subagent's detail tab the visible side panel? Used to paint its
+  // live work immediately instead of waiting for the generic pump tick.
+  bool subagent_detail_visible(const std::string& id) const;
+  int64_t last_subagent_detail_paint_ms_ = 0;
+  // Focus is framework state: if a keyed input/textarea was focused and the
+  // render recreates that node, put focus back (otherwise a queue/status render
+  // silently dropped the caret).
+  void snapshot_focus(const VNodePtr& v);
+  void restore_focus(const VNodePtr& v);
+  std::string focus_memory_key_;
+  uint64_t focus_memory_dom_ = 0;
   bool render_in_progress_ = false;  // nested render deferral (sync backends)
   bool render_pending_ = false;
   // ask the next render to focus the terminal surface (only on spawn / tab

@@ -1759,12 +1759,23 @@ comp::ChatMsg UiApp::turn_to_message(const Json& t, int64_t abs_index) {
       // RESULT; the stored turn keeps that same result in `detail`, so recover it
       // the same way (the id is also written as a first-class field for turns
       // saved after this change).
-      if (tb.name == "subagent_spawn" || tb.name == "subagent_follow_up") {
+      if (tb.name == "subagent_spawn" || tb.name == "subagent_follow_up" ||
+          tb.name == "complete_step") {
         tb.subagent_id = jsonutil::get<std::string>(tc[k], "subagentId", "");
         if (tb.subagent_id.empty()) {
           try {
             Json d = Json::parse(detail);
             tb.subagent_id = jsonutil::get<std::string>(d, "id", "");
+            // The step's OUTPUT is the summary the subagent returned. Keep it
+            // visible in the transcript on reload instead of burying it in the
+            // (collapsed) tool JSON.
+            if (jsonutil::get<std::string>(d, "kind", "") == "complete-step") {
+              std::string out = jsonutil::get<std::string>(d, "summary", "");
+              if (!out.empty()) {
+                m.notices.push_back(tr("步骤输出：") +
+                                    cut_display(out, 1600, "…"));
+              }
+            }
           } catch (...) {
           }
         }
@@ -2135,6 +2146,27 @@ void UiApp::refresh_session_todos(const std::string& sid) {
 // layout right there, which means setting scrollTop in the same task is exact -
 // the first paint is already at the right place. That is what "提前把布局完成"
 // has to mean in practice: not a deferral, the same frame.
+void UiApp::snapshot_focus(const VNodePtr& v) {
+  if (!v) return;
+  if (!v->key.empty() && v->dom.valid() &&
+      (v->tag == "input" || v->tag == "textarea") && dom_.is_focused(v->dom)) {
+    focus_memory_key_ = v->key;
+    focus_memory_dom_ = v->dom.id;
+  }
+  for (size_t i = 0; i < v->children.size(); ++i) snapshot_focus(v->children[i]);
+}
+
+void UiApp::restore_focus(const VNodePtr& v) {
+  if (!v) return;
+  if (!focus_memory_key_.empty() && v->key == focus_memory_key_ &&
+      v->dom.valid() && v->dom.id != focus_memory_dom_) {
+    if (!dom_.is_focused(v->dom)) dom_.focus(v->dom);
+    focus_memory_dom_ = v->dom.id;
+    return;
+  }
+  for (size_t i = 0; i < v->children.size(); ++i) restore_focus(v->children[i]);
+}
+
 void UiApp::snapshot_scroll_state(const VNodePtr& v) {
   if (!v) return;
   if (v->key.compare(0, 7, "scroll:") == 0 && v->dom.valid()) {
@@ -3104,6 +3136,10 @@ void UiApp::load_subagents(const std::string& sid) {
         if (st_.subagents[k].id == row.id) {
           row.open = st_.subagents[k].open;
           row.live_text = st_.subagents[k].live_text;
+          // The list is poll-driven and arrives while the agent runs; without
+          // this the freshly streamed tool rows were wiped on every refresh,
+          // which is why the page "seemed to update but showed nothing".
+          row.live_tools = st_.subagents[k].live_tools;
         }
       }
       rows.push_back(row);
@@ -3821,6 +3857,18 @@ void UiApp::open_subagent_tab(const std::string& subagent_id,
   load_subagent_detail(subagent_id);
 }
 
+bool UiApp::subagent_detail_visible(const std::string& id) const {
+  if (id.empty() || st_.side_collapsed) return false;
+  for (size_t i = 0; i < st_.side_tabs.size(); ++i) {
+    if (st_.side_tabs[i].id == st_.active_side &&
+        st_.side_tabs[i].kind == "subagent" &&
+        st_.side_tabs[i].subagent_id == id) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void UiApp::load_subagent_detail(const std::string& subagent_id) {
   if (subagent_id.empty()) return;
   // Pass the session too: when the in-memory record is gone (the process
@@ -3849,6 +3897,15 @@ void UiApp::load_subagent_detail(const std::string& subagent_id) {
       AppState::SubagentDetail& d = s.subagent_details[subagent_id];
       d.row = row;
       d.loaded = true;
+      // The record endpoint only has FINISHED work; merge the live rows the
+      // event stream already produced so opening the page mid-run shows the work
+      // immediately instead of an empty "running" page until the next event.
+      for (size_t i = 0; i < s.subagents.size(); ++i) {
+        if (s.subagents[i].id != subagent_id) continue;
+        d.row.live_text = s.subagents[i].live_text;
+        d.row.live_tools = s.subagents[i].live_tools;
+        break;
+      }
     });
   });
 }
@@ -4012,7 +4069,10 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
             comp::ToolBlock fresh;
             fresh.key = row_key;
             fresh.name = nm.empty() ? std::string("tool") : nm;
-            fresh.subagent_id = sub_id;
+            // Do NOT attach the subagent id to every inner tool row: tool_block
+            // renders "打开记录" for any row carrying one, which put that button
+            // on every single tool. Only the subagent's own spawn/complete_step
+            // row owns the link.
             tools->push_back(fresh);
             tb = &tools->back();
           }
@@ -4051,6 +4111,22 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
                 dit->second.row.live_tools.begin() +
                     static_cast<long>(dit->second.row.live_tools.size() - 240));
           }
+          // Paint the detail page / overview NOW, not on the next 250 ms pump
+          // tick. Tool events are low-frequency; without this the page looked
+          // frozen while the model was working.
+          if (is_active) {
+            bool panel_live = subagent_detail_visible(sub_id);
+            if (!panel_live && !st_.side_collapsed) {
+              for (size_t sti = 0; sti < st_.side_tabs.size(); ++sti) {
+                if (st_.side_tabs[sti].id == st_.active_side &&
+                    st_.side_tabs[sti].kind == "subagents") {
+                  panel_live = true;
+                  break;
+                }
+              }
+            }
+            if (panel_live) render();
+          }
         }
         if (inline_step) {
           std::vector<comp::ChatMsg>& msgs =
@@ -4088,6 +4164,22 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
           if (dit->second.row.live_text.size() > 2000) {
             dit->second.row.live_text.erase(
                 0, dit->second.row.live_text.size() - 2000);
+          }
+          const int64_t now = now_ms();
+          bool panel_live = subagent_detail_visible(sub_id);
+          if (!panel_live && !st_.side_collapsed) {
+            for (size_t sti = 0; sti < st_.side_tabs.size(); ++sti) {
+              if (st_.side_tabs[sti].id == st_.active_side &&
+                  st_.side_tabs[sti].kind == "subagents") {
+                panel_live = true;
+                break;
+              }
+            }
+          }
+          if (is_active && panel_live &&
+              now - last_subagent_detail_paint_ms_ >= 150) {
+            last_subagent_detail_paint_ms_ = now;
+            render();
           }
         }
       }
@@ -4243,20 +4335,47 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
   } else if (event == "steering.applied") {
     std::string text = jsonutil::get<std::string>(payload, "text", "");
     std::vector<comp::ChatMsg>& msgs = is_active ? st_.messages : vp->messages;
-    if (!text.empty() && !msgs.empty() && msgs.back().role == "assistant") {
-      comp::ChatMsg& m = msgs.back();
-      m.guidance.push_back(text);
-      int64_t anchor = jsonutil::get_int(payload, "tools", -1);
-      m.guidance_after.push_back(
-          anchor >= 0 ? static_cast<size_t>(anchor) : m.tools.size());
-      m.work_open = true;
-      m.rev = next_msg_rev_++;
+    // The item is now part of the request (the backend already appended it as a
+    // user message), so it can no longer be edited. Move it from the queue into
+    // the transcript in THIS event - waiting for steering.list left an editable-
+    // looking row above the composer for seconds after the model had moved on.
+    {
+      Json& items =
+          is_active ? st_.steering_items : views_.get_or_create(sid).steering_items;
+      for (size_t i = 0; i < items.size();) {
+        std::string body = jsonutil::get<std::string>(items[i], "text", "");
+        bool applied = !body.empty() && text.find(body) != std::string::npos;
+        if (applied || jsonutil::get_int(items[i], "id", 0) == -1) {
+          items.erase(items.begin() + static_cast<long>(i));
+        } else {
+          ++i;
+        }
+      }
     }
-    if (is_active) {
-      st_.toast = "已把本轮引导带入下一次模型调用";
-      st_.toast_deadline_ms = now_ms() + kToastMs;
+    int64_t anchor = jsonutil::get_int(payload, "tools", -1);
+    if (!text.empty()) {
+      comp::ChatMsg* target = nullptr;
+      for (size_t i = msgs.size(); i-- > 0;) {
+        if (msgs[i].role == "assistant") {
+          target = &msgs[i];
+          break;
+        }
+      }
+      if (!target) {
+        int& total = is_active ? st_.history_total : vp->history_total;
+        target = &ensure_turn_message(msgs, total, &next_msg_rev_, now_ms());
+      }
+      if (target) {
+        target->guidance.push_back(text);
+        target->guidance_after.push_back(anchor >= 0
+                                             ? static_cast<size_t>(anchor)
+                                             : target->tools.size());
+        target->work_open = true;
+        target->rev = next_msg_rev_++;
+      }
     }
-    if (!sid.empty()) refresh_steering(sid);
+    if (is_active) render();
+    if (!sid.empty()) refresh_steering(sid);  // reconcile with the host queue
   } else if (event == "turn.started") {
     ++turn_epoch_;
     // A send made while the UI believed a turn was running drew no bubble. If
@@ -4617,7 +4736,8 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
     // A subagent tool's result carries the id it created, so the work-log row can
     // offer "打开记录". Without it the row only proved a subagent had run.
     std::string subagent_id;
-    if (name == "subagent_spawn" || name == "subagent_follow_up") {
+    if (name == "subagent_spawn" || name == "subagent_follow_up" ||
+        name == "complete_step") {
       try {
         Json d = Json::parse(detail);
         subagent_id = jsonutil::get<std::string>(d, "id", "");
@@ -4726,6 +4846,18 @@ void UiApp::apply_session_event(const std::string& sid, const std::string& event
         }
       }
       if (touched) msgs[i].rev = next_msg_rev_++;
+    }
+    // The step's OUTPUT, not just its tool rows. The tool result carries the
+    // summary the model receives; the user should see it too instead of having
+    // to open the subagent record and hunt for it.
+    if (kind == "complete-step" && !summary.empty()) {
+      for (size_t i = msgs.size(); i-- > 0;) {
+        if (msgs[i].role != "assistant") continue;
+        msgs[i].notices.push_back(tr("步骤输出：") +
+                                  cut_display(summary, 1600, "…"));
+        msgs[i].rev = next_msg_rev_++;
+        break;
+      }
     }
     // A transcript tab for this agent should show the final state too (it was
     // opened while the agent was still running, which is the common case).
@@ -5369,6 +5501,7 @@ void UiApp::render() {
     // Remember where every keyed scroll container was BEFORE the patch. When a
     // key is recreated (the side panel swaps its body per tab), its old offset
     // is restored below - no business code copies it into a view struct.
+    snapshot_focus(tree_);
     snapshot_scroll_state(tree_);
     split.mark_void("patch", [this, &neu] { patch(dom_, tree_, neu, root_); });
     // Ship this frame's DOM writes as one batch before anything below READS the
@@ -5378,6 +5511,9 @@ void UiApp::render() {
     split.mark_void("dom_flush", [this] { dom_.flush(); });
     tree_ = neu;
     last_rendered_tab_ = st_.active_tab;
+    // If a keyed input/textarea was recreated by this render, give it focus
+    // back before the scroll restore (focusing can scroll).
+    split.mark_void("focus_restore", [this] { restore_focus(tree_); });
     // Restore keyed scroll containers first; the transcript's own pending
     // restore below is more precise (anchored to a message) and must win.
     split.mark_void("scroll_restore", [this] { restore_scroll_state(tree_); });
@@ -7444,6 +7580,10 @@ VNodePtr UiApp::build_session() {
   // appends here while a turn is running.
   if (!st_.steering_items.empty()) {
     H q = el("div", "steer-queue");
+    // Keyed: it is inserted/removed ABOVE the composer. An unkeyed sibling
+    // shifted the composer's children by position, recreating the textarea and
+    // dropping focus whenever an auto-guidance row appeared.
+    q.key("steer-queue");
     q.add(el("div", "steer-q-head").text(tr("引导队列 · 下一次调用带上")));
     for (size_t i = 0; i < st_.steering_items.size(); ++i) {
       const Json& it = st_.steering_items[i];
@@ -7539,6 +7679,10 @@ VNodePtr UiApp::build_session() {
   }
   // ---- composer (embedded in the center column, under the history) ----
   H comp_box = el("div", "composer");
+  // Stable identity. The queue above it comes and goes; without a key the
+  // position-based diff recreated this subtree (textarea included) when the
+  // queue appeared, which is the focus loss on terminal auto-guidance.
+  comp_box.key("composer");
   // Right-click anywhere in the composer (including the textarea) opens the
   // app's own edit menu. The browser's menu is suppressed globally, so without
   // this a right-click in the input did nothing at all.
@@ -9017,6 +9161,23 @@ VNodePtr UiApp::build_side_panel() {
         live.add(el("span", "sa-live-label").text(tr("正在做")));
         live.add(el("div", "sa-live-text").text(live_text));
         card.add(live);
+      }
+      // Real tool progress on the card too: the text above narrates, these rows
+      // are what it is actually doing. Last three only - the detail page has the
+      // full live list.
+      if (a.status == "running" && !a.live_tools.empty()) {
+        H lt = el("div", "sa-live-tools");
+        size_t from = a.live_tools.size() > 3 ? a.live_tools.size() - 3 : 0;
+        for (size_t k = from; k < a.live_tools.size(); ++k) {
+          const comp::ToolBlock& tb = a.live_tools[k];
+          H row = el("div", "sa-live-tool");
+          row.add(el("span", tb.running ? "sa-live-dot running" : "sa-live-dot")
+                      .text(tb.running ? "●" : (tb.ok ? "✓" : "✕")));
+          row.add(el("span", "sa-live-tool-name").text(tb.name));
+          row.add(el("span", "sa-live-tool-sum dim").text(tb.summary));
+          lt.add(row);
+        }
+        card.add(lt);
       }
       // The RESULT is the first thing a finished card should answer. It used to
       // be hidden entirely whenever the transcript existed (the toggle branch
@@ -13015,6 +13176,17 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
   if (likely_guidance) {
     pending_guidance_sid_ = sid;
     pending_guidance_text_ = shown;
+    // Show it in the queue IMMEDIATELY. Waiting for the backend's
+    // steering.queued event and then an async steering.list took seconds on a
+    // busy turn, which read as "my message was swallowed". The placeholder gets
+    // the real id when the send reply arrives; a failure removes it.
+    update([&](AppState& s) {
+      Json item = Json::object();
+      item["id"] = -1;
+      item["text"] = shown;
+      item["kind"] = "round-end";
+      s.steering_items.push_back(item);
+    });
   } else {
     pending_guidance_sid_.clear();
     pending_guidance_text_.clear();
@@ -13116,6 +13288,14 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
         pending_guidance_sid_.clear();
         pending_guidance_text_.clear();
         update([&](AppState& s) {
+          for (size_t i = 0; i < s.steering_items.size(); ++i) {
+            if (jsonutil::get_int(s.steering_items[i], "id", 0) == -1 &&
+                jsonutil::get<std::string>(s.steering_items[i], "text", "") == shown) {
+              s.steering_items.erase(s.steering_items.begin() +
+                                     static_cast<long>(i));
+              break;
+            }
+          }
           if (s.session_input.empty()) s.session_input = shown;
           if (s.attachments.empty()) s.attachments = attachments;
         });
@@ -13154,6 +13334,18 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
       return;
     }
     if (jsonutil::get<bool>(r.data, "queued", false)) {
+      const int64_t real_id = jsonutil::get_int(r.data, "id", 0);
+      update([&](AppState& s) {
+        for (size_t i = 0; i < s.steering_items.size(); ++i) {
+          Json& it = s.steering_items[i];
+          if (jsonutil::get_int(it, "id", 0) != -1) continue;
+          if (jsonutil::get<std::string>(it, "text", "") != shown) continue;
+          // Adopt the backend id now so 编辑/删除/立即 work without waiting for
+          // the list refresh. -1 stays only if the reply carried no id.
+          if (real_id > 0) it["id"] = real_id;
+          break;
+        }
+      });
       if (!likely_guidance) {
         // Rare stale-UI race: the backend turned a send we drew as a new turn
         // into guidance. Take the optimistic bubbles back out; the item now
@@ -13176,15 +13368,26 @@ void UiApp::dispatch_message(const std::string& sid, const std::string& text,
       }
       pending_guidance_sid_.clear();
       pending_guidance_text_.clear();
-      refresh_steering(sid);
+      // Do NOT re-list here: the optimistic item is already on screen with the
+      // backend id, and a list reply that races the host's push would clear it.
       toast(tr("已加入本轮引导，将在下一次调用带上"));
       return;
     }
     // It was NOT queued: the backend started a new turn despite the stale
     // "running" flag. `turn.started` has already inserted the question and the
-    // assistant placeholder; nothing to draw here.
+    // assistant placeholder; the optimistic queue item must go.
     pending_guidance_sid_.clear();
     pending_guidance_text_.clear();
+    update([&](AppState& s) {
+      for (size_t i = 0; i < s.steering_items.size(); ++i) {
+        if (jsonutil::get_int(s.steering_items[i], "id", 0) == -1 &&
+            jsonutil::get<std::string>(s.steering_items[i], "text", "") == shown) {
+          s.steering_items.erase(s.steering_items.begin() +
+                                 static_cast<long>(i));
+          break;
+        }
+      }
+    });
   });
 }
 

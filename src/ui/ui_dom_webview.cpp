@@ -860,13 +860,26 @@ const char* kGlueJs = R"JS(
         });
         return;
       case 'copy':
-        try { navigator.clipboard.writeText(a); } catch (e) {
+        // execCommand FIRST (synchronous, works without a clipboard permission
+        // prompt); the async API's rejection was unhandled before, so a failed
+        // writeText left the button doing nothing.
+        (function () {
+          var ok = false;
           try {
             var ta = document.createElement('textarea');
-            ta.value = a; document.body.appendChild(ta); ta.select();
-            document.execCommand('copy'); document.body.removeChild(ta);
-          } catch (e2) {}
-        }
+            ta.value = a;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+          } catch (e) {}
+          if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(a).catch(function () {});
+          }
+        })();
         return;
       case 'execEdit':
         // Runs a browser edit command against the field the menu was opened on.
@@ -1231,6 +1244,35 @@ class WebViewDom : public IDom {
   // ---- clipboard / files -------------------------------------------------
 
   void copy_text(const std::string& text) override {
+#ifdef _WIN32
+    // Copy in-process. The JS path used navigator.clipboard.writeText (a
+    // Promise whose rejection was not caught) and a document.execCommand
+    // fallback that WebView2 often refuses when the gesture crossed the C++
+    // round trip - so the copy buttons did nothing in the native window.
+    const int need = ::MultiByteToWideChar(CP_UTF8, 0, text.c_str(),
+                                           static_cast<int>(text.size()),
+                                           nullptr, 0);
+    if (need >= 0 && ::OpenClipboard(nullptr)) {
+      ::EmptyClipboard();
+      HGLOBAL mem = ::GlobalAlloc(GMEM_MOVEABLE,
+                                  (static_cast<size_t>(need) + 1) * sizeof(wchar_t));
+      if (mem) {
+        wchar_t* dst = static_cast<wchar_t*>(::GlobalLock(mem));
+        if (dst) {
+          if (need > 0) {
+            ::MultiByteToWideChar(CP_UTF8, 0, text.c_str(),
+                                  static_cast<int>(text.size()), dst, need);
+          }
+          dst[need] = L'\0';
+          ::GlobalUnlock(mem);
+          if (::SetClipboardData(CF_UNICODETEXT, mem)) mem = nullptr;
+        }
+        if (mem) ::GlobalFree(mem);
+      }
+      ::CloseClipboard();
+      return;
+    }
+#endif
     call("copy", 0, 0, text, "");
   }
   bool exec_edit(const std::string& command) override {

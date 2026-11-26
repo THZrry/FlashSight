@@ -2309,6 +2309,17 @@ table.stat-table th { background: var(--panel); color: var(--text-dim); font-wei
   white-space: pre-wrap; word-break: break-word;
   max-height: 9em; overflow: auto;
 }
+.sa-live-tools {
+  margin-top: 4px; display: flex; flex-direction: column; gap: 2px;
+  font-family: var(--mono); font-size: 11px;
+}
+.sa-live-tool { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.sa-live-dot { color: var(--ok); flex: none; }
+.sa-live-dot.running { color: var(--accent); }
+.sa-live-tool-name { flex: none; color: var(--text); }
+.sa-live-tool-sum {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* Steering is a typed instruction; the box has to look like one. */
 .sa-steer { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
 .sa-steer .text-input { flex: 1; min-width: 0; font-size: 12px; }

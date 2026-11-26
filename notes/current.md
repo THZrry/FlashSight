@@ -3496,3 +3496,12 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **i18n**：新增模式、重试、代理、终端分页、实时过程等英文条目；缺条目仍回退中文（但不再只显示中文的已知新提示）。
   - **测试/构建**：516 用例 4510 断言全过；新增/更新 `markdown_streaming_does_not_fill_the_cache`、`uiapp_work_log_renders_all_tools`、todo dismissed/done 断言、plan 紧凑返回断言。web/whaleui 已重链；用户正在运行 `flashsight-webview.exe`（旧二进制，525MB），正式文件被占用，最新为 `build\windows\x64\release\flashsight-webview-new.exe`（含新 host 库），隔离 `--root temp\fsroot3` 实测模式菜单、Tab 当前候选、侧栏滚动、300 条历史加载（private 26MB）。**没有关闭用户的 FlashSight**。
   - **未完成**：供应商套餐 OAuth（GPT Plus/Claude/Gemini/Z.ai/火山/阿里/腾讯 Coding Plan）需要各家的 OAuth 应用标识、授权/刷新协议与额度接口；本轮没有可据以实现和验证的协议资料，未做假入口。需要用户提供各家 OAuth 客户端信息或允许按“导入官方 CLI 凭据”的方案实现。
+
+
+<143>(FOLLOW-UP): 引导即时显示/即时进历史、complete-step 输出与“打开记录”、终端自动引导抢焦点、子代理实时页、WebView 复制。参考 `temp/codingplans/reference1.md` 已收到，套餐 OAuth 按用户要求放到这批之后再做。
+  - **引导时序**：发送后立即在队列里插入本地占位项（id=-1，kind=round-end），不再等 `steering.queued` → `steering.list` 的两次往返（忙轮时那几秒看起来像消息被吞了）；`session.send` 回复的 id 立刻回填到占位项，失败/变成新轮则移除。`steering.applied` 到达时在**同一事件**里把对应项从队列移除、追加到当前 assistant 的 guidance（带 tool anchor）并立即 render，不等 `steering.list`；之后只做一次后台 reconcile。新增 `uiapp_guidance_send_draws_no_bubble` 的 id/即时队列/移动断言。
+  - **complete-step 输出**：`subagent.done` 后把 summary 作为“步骤输出：…”工作注释写进主消息；重新打开会话时 `turn_to_message` 从 complete_step 的工具 detail 里解析 kind/summary，同样生成这条注释（不再只藏在折叠的工具 JSON 里）。主 tool.update/加载路径也把 `complete_step` 纳入 subagentId 提取，所以“打开记录”只出现在这一条 complete-step 行上；子代理内部的每一条 live 工具行不再带 subagent_id（之前每个工具都长出“打开记录”）。
+  - **子代理实时页**：`load_subagents` 的轮询刷新现在保留 `live_tools`（之前只保留 live_text，列表一刷新工具行就被清空，看起来在更新但不显示）；打开详情时把内存里正在运行的 `live_text/live_tools` 合并进 detail row（记录接口只有已完成的 transcript）；详情页/子代理总览可见时 tool.start/update 立即 render，流式文本最多 150ms 一次 render；总览卡片新增最近 3 条真实工具行（名称+摘要+状态）。
+  - **终端自动引导焦点**：根因是 guidance queue 在 composer **前面插入/删除**，两者都没有 key，按位置 diff 时 composer 子树（含 textarea）被重建。`steer-queue` 与 `composer` 现在都有稳定 key；另外增加框架级 focus 快照/恢复：render 前记录唯一聚焦的 keyed input/textarea（key+dom id），patch 后仅当该 key 的 DOM 节点被重建时重新 focus，同节点 patch 不动（不会跟用户点击抢焦点）。
+  - **WebView 复制**：`copy_text` 改为在 C++ 进程内直接写 Win32 剪贴板（OpenClipboard/SetClipboardData CF_UNICODETEXT），不再依赖 WebView2 里缺少用户手势的 `navigator.clipboard.writeText`（其 Promise 拒绝还未被 catch）；glue 的 `copy` 顺序改为先同步 execCommand，失败再 async API 且 catch。隔离 webview 实测点击消息“复制”后剪贴板从 SENTINEL 变成正文 24 字符。
+  - **构建**：516 用例 4517 断言全过；web/whaleui 重链；用户仍在运行旧 `flashsight-webview.exe`，最新在 `build\windows\x64\release\flashsight-webview-new.exe`。**没有关闭用户的 FlashSight**。
