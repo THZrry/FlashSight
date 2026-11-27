@@ -3557,3 +3557,11 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **图标**：`packaging/flashsight.svg` 去掉白底、viewBox 裁成 `349 347.5 1355 1355`（logo 横向约 98%），透明背景；重新生成 256×256 ICO（PNG 压缩、alpha 透明，约 8KB）。`packaging/flashsight.rc` 继续把 ICO 嵌入三个 Windows exe；本地 `ExtractAssociatedIcon` 角像素 alpha=0。
   - **验证**：520 用例 4572 断言全过（mingw 平台）；`build/mingw/x86_64/release` 下 web/webview/whaleui 均带资源重链；`is_plat("windows","mingw")` 同时保留默认 windows 平台兼容。Linux GTK 编译和 Windows arm64 的 `llvm-rc` 仍需 CI 实测。
 
+
+<150>(CI/PLATFORM): Linux 非 Windows 诊断代码、Windows 两次构建状态隔离、macOS runner、WhaleUI CI 定位。
+  - **Linux `DWORD`**：`ui_main_webview.cpp` 的 `[res]` 资源日志在所有平台都用了 `DWORD/GetProcessHandleCount/GetCurrentProcess/%TEMP%\\...`。现在 Windows 分支保留句柄数，Linux/macOS 用 `handles=0` + `$TMPDIR`/`/tmp`，不再编译失败；`std::system` 的 `warn_unused_result` 也显式接收返回值。macOS 同样走非 Windows 分支。
+  - **Windows 第一遍/第二遍**：CI 改成每个 target 前都重新 `xmake f`，让两次 `xmake build` 完全独立；Windows 使用 `-p mingw`（不是 windows 平台 + mingw toolchain），并且**不再全局导出 CC/CXX**（全局 CC/CXX 会被 xmake 当成显式 host 工具，后续 target 反而回退找裸 `cc`）。CI 仍把 mingw bin 放进 PATH。本机按相同顺序（configure → build web → configure → build webview）验证通过；Windows arm64 仍需 CI 实跑。
+  - **macOS**：`macos-14` 托管 runner 已被 GitHub 退役，排队即报 `configuration 'macos-14-arm64-us-default' is not supported`；矩阵改为 `macos-15`，Linux 依赖条件的 macOS 排除改成 `startsWith(matrix.os, 'macos-')`。
+  - **WhaleUI**：删掉独立的 `whaleui` job 和 dispatch 开关。`flashsight-whaleui` 是同一应用的第三个 target，本来就在所有平台存在，只要求 `--whaleui_libdir`；因为 WhaleUI 引擎不在本仓库且当前已知不可用，CI 在所有平台禁用（不是只支持 x64），release 不再等待一个单独 job。将来引擎可用时把它加回 main build 的 targets 即可。
+  - **验证**：YAML 重新解析通过；mingw 平台下 web/webview/whaleui 均能构建；520 用例 4572 断言全过。Linux GTK 实际编译与 macOS Xcode 构建仍需 CI 验证。
+

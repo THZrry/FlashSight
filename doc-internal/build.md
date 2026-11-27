@@ -84,16 +84,15 @@ flashsight*"**，那个 fallback 正是错的二进制进发布包的原因。
 `build/<plat>/<arch>/release` 查找，可执行文件名按平台带不带 `.exe`，所以
 macOS / Linux 的 job 也适用。
 
-`workflow_dispatch` 用三个独立的布尔开关（`web` / `webview` / `whaleui`）选择
-编译哪些变体，而不是一个三选一的下拉：可以只编 webview 迭代，也可以两个都编。
-`whaleui` 开关还要同时设置仓库变量 `ENABLE_WHALEUI=true` 才会生效。
+`workflow_dispatch` 用两个独立的布尔开关（`web` / `webview`）选择编译哪些
+变体，而不是一个二选一的下拉：可以只编 webview 迭代，也可以两个都编。
 
-WhaleUI 是**可选的独立 job**（`whaleui`），默认跳过：它需要 clone WhaleUI
-仓库、先用它自己的 xmake 构建 `libwhaleui-full`，再让 xmake 装 lexbor /
-utf8proc / SDL3 / SDL3_ttf / SDL3_image 这些 xrepo 依赖——是另一个仓库、另一
-套依赖，时间也长得多。要打开就把仓库变量 `ENABLE_WHALEUI` 设为 `true`（换
-fork 用 `WHALEUI_REPO`）。release job 用 `always() + result 检查`，所以它被跳
-过时不会挡住发布，跑了就会等它并把它的包一起挂上去。
+WhaleUI 是**同一个应用的第三个变体**，不是单独的构建系统/job：`flashsight-whaleui`
+target 在所有平台都存在，只要求通过 `--whaleui_libdir` 传入已构建的 WhaleUI
+静态库。但本仓库不 vendor WhaleUI 引擎，而且它目前已知不可用，所以 CI 矩阵
+**在所有平台都禁用** WhaleUI（不是只支持 x64）；本地要尝试时用
+`xmake f --whaleui_libdir=...` 再 `xmake build flashsight-whaleui`。将来引擎可用
+后，只需把这个 target 加回 main build 的 targets 列表，不需要单独的 job。
 
 依赖：`scripts/fetch_3rdparty.py`（幂等，Windows/macOS/Linux 通用），
 mbedtls 由 `mbedtls_src` 目标从源码编译（见文首说明）。

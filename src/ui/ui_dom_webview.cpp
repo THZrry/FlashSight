@@ -1282,10 +1282,12 @@ class WebViewDom : public IDom {
     ::ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
     std::string cmd = "open \"" + url + "\" >/dev/null 2>&1 &";
-    std::system(cmd.c_str());
+    const int rc = std::system(cmd.c_str());
+    (void)rc;
 #else
     std::string cmd = "xdg-open \"" + url + "\" >/dev/null 2>&1 &";
-    std::system(cmd.c_str());
+    const int rc = std::system(cmd.c_str());
+    (void)rc;
 #endif
   }
   bool exec_edit(const std::string& command) override {

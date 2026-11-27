@@ -32,6 +32,10 @@
 
 #include <webview.h>
 
+#ifdef _WIN32
+#include <windows.h>  // GetProcessHandleCount in the [res] diagnostic
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -219,11 +223,23 @@ int run_webview_ui(FsApi* api) {
                     std::chrono::steady_clock::now().time_since_epoch()).count());
             if (res_on && now - last_log >= 30000) {
               last_log = now;
-              DWORD handles = 0;
-              ::GetProcessHandleCount(::GetCurrentProcess(), &handles);
+              // Handle count is a Windows diagnostic. Linux/macOS still write
+              // the [res] line (DOM/memory/auto state) with handles=0 instead
+              // of failing to compile on DWORD/GetProcessHandleCount.
+              unsigned long handles = 0;
+#ifdef _WIN32
+              DWORD win_handles = 0;
+              if (::GetProcessHandleCount(::GetCurrentProcess(), &win_handles)) {
+                handles = static_cast<unsigned long>(win_handles);
+              }
               const char* tmp = std::getenv("TEMP");
               std::string path = std::string(tmp && *tmp ? tmp : ".") +
                                  "\\flashsight_res.log";
+#else
+              const char* tmp = std::getenv("TMPDIR");
+              std::string path = std::string(tmp && *tmp ? tmp : "/tmp") +
+                                 "/flashsight_res.log";
+#endif
               if (FILE* f = std::fopen(path.c_str(), "a")) {
                 std::fprintf(f, "[res] %lld %s handles=%lu pump_gap_ms=%lld\n",
                              static_cast<long long>(now / 1000),

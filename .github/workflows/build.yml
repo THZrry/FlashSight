@@ -15,10 +15,12 @@ name: build
 # and switching variants only recompiles the two backend files plus main.cpp.
 # Building them separately would compile the whole project twice.
 #
-# WhaleUI needs a WhaleUI checkout and a build of its engine, which this repo
-# does not vendor. It therefore runs in its own opt-in job: set the repository
-# variable ENABLE_WHALEUI=true (and WHALEUI_REPO if the fork differs) to turn it
-# on, and use the `whaleui` dispatch input to include it in a manual run.
+# WhaleUI is a THIRD variant of the same app, not a separate build system: the
+# flashsight-whaleui target exists on every platform and only needs a built
+# WhaleUI engine passed via --whaleui_libdir. This repo does not vendor that
+# engine and it is currently not usable in CI, so the CI matrix intentionally
+# does NOT build WhaleUI (all platforms disabled, not just x64). Build it
+# locally with `xmake f --whaleui_libdir=...` + `xmake build flashsight-whaleui`.
 # See doc-internal/ui-whaleui.md.
 on:
   push:
@@ -37,11 +39,6 @@ on:
         description: "Build the WebView variant (native window, OS web engine)"
         type: boolean
         default: true
-      whaleui:
-        description: "Build the WhaleUI variant (needs ENABLE_WHALEUI=true)"
-        type: boolean
-        default: false
-
 permissions:
   contents: write
 
@@ -115,7 +112,7 @@ jobs:
               },
               {
                 "name": "macos-arm64",
-                "os": "macos-14",
+                "os": "macos-15",
                 "arch": "arm64",
                 "toolchain": "",
                 "mingw": "",
@@ -193,13 +190,11 @@ jobs:
             exit 1
           }
           "MINGW_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # xmake finds the target-prefixed compilers via --mingw, but a few
-          # sub-tools fall back to PATH/CC; keep both pointed at the cross
-          # toolchain so a webview-only compile never asks for a missing `cc`.
+          # -p mingw resolves cc/cxx/windres from --mingw; keep the cross bin
+          # dir on PATH for xmake's helper probes, but do NOT export CC/CXX:
+          # a global CC/CXX is treated as an explicit host tool and can make
+          # the next xmake build fall back to a bare `cc`.
           "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "CC=$gcc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CXX=$($dir)\bin\aarch64-w64-mingw32-g++.exe" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "llvm-mingw at $dir"
           & $gcc --version | Select-Object -First 1
 
@@ -211,11 +206,9 @@ jobs:
           # the GitHub PATH. xmake's C fallback (`cc`) otherwise fails with
           # "cannot get program for cc" on the webview target.
           echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
-          echo "CC=x86_64-w64-mingw32-gcc" >> "$GITHUB_ENV"
-          echo "CXX=x86_64-w64-mingw32-g++" >> "$GITHUB_ENV"
 
       - name: Install Linux dependencies
-        if: matrix.os != 'windows-latest' && matrix.os != 'macos-14'
+        if: matrix.os != 'windows-latest' && !startsWith(matrix.os, 'macos-')
         run: |
           sudo apt-get update
           # GTK4 + WebKitGTK 6.0 are what the Linux webview backend compiles
@@ -249,23 +242,19 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             web="${{ github.event.inputs.web }}"
             webview="${{ github.event.inputs.webview }}"
-            whaleui="${{ github.event.inputs.whaleui }}"
           else
             web=true
             webview=true
-            whaleui=false
           fi
           [ "$web" = "true" ] && web=1 || web=0
           [ "$webview" = "true" ] && webview=1 || webview=0
-          [ "$whaleui" = "true" ] && whaleui=1 || whaleui=0
           if [ "$web" = "0" ] && [ "$webview" = "0" ]; then
             echo "at least one of web/webview must be enabled"
             exit 1
           fi
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "webview=$webview" >> "$GITHUB_OUTPUT"
-          echo "whaleui=$whaleui" >> "$GITHUB_OUTPUT"
-          echo "selected: web=$web webview=$webview whaleui=$whaleui"
+          echo "selected: web=$web webview=$webview"
 
       - name: Configure
         run: |
@@ -277,8 +266,9 @@ jobs:
           # with "cannot get program for cc".
           if [ -n "${{ matrix.plat }}" ]; then
             args+=(--plat=${{ matrix.plat }})
-          fi
-          if [ -n "${{ matrix.toolchain }}" ]; then
+          elif [ -n "${{ matrix.toolchain }}" ]; then
+            # -p mingw already selects the mingw toolchain; passing it again
+            # is redundant and has confused arm64 probing on some versions.
             args+=(--toolchain=${{ matrix.toolchain }})
           fi
           if [ -n "${MINGW_DIR:-}" ]; then
@@ -292,12 +282,21 @@ jobs:
           targets=()
           if [ "${{ steps.want.outputs.web }}" = "1" ]; then targets+=(flashsight-web); fi
           if [ "${{ steps.want.outputs.webview }}" = "1" ]; then targets+=(flashsight-webview); fi
-          # Build ONE target per invocation. xmake's build task accepts a
-          # single target name across the versions we pin; passing a second
-          # name makes it print `invalid argument: flashsight-webview` (the
-          # first target still builds, which is why the error moved from
-          # flashsight-web to the second name after the previous fix).
+          # Build ONE target per invocation (xmake's build task takes one
+          # name), and reconfigure before EACH target. This is deliberate: on
+          # some xmake versions building the wasm/Web target first leaves the
+          # next invocation looking for a bare `cc` (the "first build passes,
+          # second says cannot get program for cc" failure). A fresh f before
+          # each target makes every invocation independent.
+          cfg=(-y -m release --arch=${{ matrix.arch }})
+          if [ -n "${{ matrix.plat }}" ]; then cfg+=(--plat=${{ matrix.plat }}); fi
+          if [ -n "${{ matrix.toolchain }}" ] && [ -z "${{ matrix.plat }}" ]; then
+            cfg+=(--toolchain=${{ matrix.toolchain }})
+          fi
+          if [ -n "${MINGW_DIR:-}" ]; then cfg+=(--mingw="$MINGW_DIR"); fi
           for t in "${targets[@]}"; do
+            echo "xmake f ${cfg[*]}"
+            xmake f "${cfg[@]}" >/dev/null
             echo "xmake build $t"
             xmake build "$t"
           done
@@ -429,136 +428,13 @@ jobs:
           retention-days: 14
 
   # ------------------------------------------------------------------------
-  # WhaleUI variant (opt-in).
-  #
-  # FlashSight links WhaleUI's own engine, which this repo does not vendor: the
-  # job has to clone WhaleUI, build its static library, and let xmake install
-  # its xrepo dependencies (lexbor, utf8proc, SDL3, SDL3_ttf, SDL3_image). That
-  # is a different repository and a much longer build, so it is OFF by default.
-  #
-  # Enable with the repository variable ENABLE_WHALEUI=true; point
-  # WHALEUI_REPO at your fork if needed. Windows x86_64 only for now: that is
-  # the platform the engine has been built and tested on.
-  # ------------------------------------------------------------------------
-  whaleui:
-    needs: prepare
-    if: |
-      vars.ENABLE_WHALEUI == 'true' &&
-      (github.event_name != 'workflow_dispatch' || github.event.inputs.whaleui == 'true')
-    name: windows-x86_64-whaleui
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install xmake
-        uses: xmake-io/github-action-setup-xmake@v1
-        with:
-          xmake-version: ${{ env.XMAKE_VERSION }}
-          actions-cache-folder: .xmake-cache
-
-      - name: Install MSYS2 mingw64
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: mingw64
-          update: false
-          install: mingw-w64-x86_64-gcc
-
-      - name: Set toolchain paths
-        run: |
-          echo "MINGW_DIR=C:/msys64/mingw64" >> "$GITHUB_ENV"
-          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
-
-      # The engine lives in its own repository; check it out next to this one.
-      - name: Checkout WhaleUI
-        run: |
-          repo="${WHALEUI_REPO:-https://github.com/THZrry/WhaleUI.git}"
-          ref="${WHALEUI_REF:-main}"
-          echo "cloning $repo ($ref)"
-          git clone --depth 1 --branch "$ref" "$repo" ../WhaleUI \
-            || git clone --depth 1 "$repo" ../WhaleUI
-        env:
-          WHALEUI_REPO: ${{ vars.WHALEUI_REPO }}
-          WHALEUI_REF: ${{ vars.WHALEUI_REF }}
-
-      - name: Build WhaleUI
-        run: |
-          cd ../WhaleUI
-          # The xrepo packages (lexbor, utf8proc, SDL3, SDL3_ttf, SDL3_image)
-          # install during configure. libwhaleui-full is what FlashSight links.
-          # `-p mingw` makes the output land in build/mingw/<arch>/<mode>,
-          # which is the layout the local build uses too.
-          xmake f -y -p mingw -m release --toolchain=mingw --mingw="$MINGW_DIR"
-          xmake build whaleui-full
-
-      - name: Fetch 3rdparty (FlashSight)
-        run: python scripts/fetch_3rdparty.py
-
-      - name: Configure (whaleui)
-        run: |
-          # WhaleUI's output directory depends on how it was configured
-          # (build/<plat>/<arch>/<mode>, and the plat name differs between
-          # `-p mingw` and a host build), so locate the archive rather than
-          # hardcoding a layout.
-          LIB=$(find ../WhaleUI/build -name 'libwhaleui-full.a' | head -1)
-          if [ -z "$LIB" ]; then
-            echo "libwhaleui-full.a not found under ../WhaleUI/build"
-            exit 1
-          fi
-          LIBDIR=$(dirname "$LIB")
-          echo "whaleui libdir: $LIBDIR"
-          xmake f -y -m release --arch=x86_64 --toolchain=mingw \
-            --mingw="$MINGW_DIR" \
-            --whaleui_libdir="$LIBDIR" \
-            --whaleui_dir="$(cd ../WhaleUI && pwd)"
-
-      - name: Build (whaleui)
-        run: xmake build flashsight-whaleui
-
-      # WhaleUI reads its stylesheet from disk (through the engine's VFS), so
-      # the build copies web/ next to the exe and the package has to carry it.
-      - name: Verify assets and package
-        run: |
-          python - <<'PY'
-          import pathlib, sys
-          root = next(p for p in pathlib.Path("build").glob("*/*/release") if p.is_dir())
-          exe = root / "flashsight-whaleui.exe"
-          if not exe.is_file():
-              sys.exit("missing flashsight-whaleui.exe in %s" % root)
-          web = root / "web"
-          if not (web / "style.css").is_file():
-              sys.exit("web/style.css was not copied next to the exe")
-          print("whaleui exe ok, assets:", sorted(p.name for p in web.iterdir()))
-          PY
-          python scripts/package.py --variant whaleui \
-            --build-dir build --out dist \
-            --version "${{ needs.prepare.outputs.version }}" \
-            --platform windows-x86_64
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: flashsight-windows-x86_64-whaleui
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 14
-
-  # ------------------------------------------------------------------------
   # Attach every artifact to the release that triggered the run.
   # ------------------------------------------------------------------------
   release:
-    needs: [prepare, build, whaleui]
-    # `whaleui` is opt-in (vars.ENABLE_WHALEUI), so it is normally SKIPPED and
-    # must not block the release. Listing it in `needs` still makes the release
-    # wait for it when it does run, so its archive is attached too.
+    needs: [prepare, build]
     if: |
       always() &&
       needs.prepare.result == 'success' && needs.build.result == 'success' &&
-      (needs.whaleui.result == 'success' || needs.whaleui.result == 'skipped') &&
       (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
