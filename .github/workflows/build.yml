@@ -274,8 +274,8 @@ jobs:
           if [ -n "${MINGW_DIR:-}" ]; then
             args+=(--mingw="$MINGW_DIR")
           fi
-          echo "xmake f ${args[*]}"
-          xmake f "${args[@]}"
+          echo "xmake f -c ${args[*]}"
+          xmake f -c "${args[@]}"
 
       - name: Build selected targets
         run: |
@@ -295,10 +295,18 @@ jobs:
           fi
           if [ -n "${MINGW_DIR:-}" ]; then cfg+=(--mingw="$MINGW_DIR"); fi
           for t in "${targets[@]}"; do
-            echo "xmake f ${cfg[*]}"
-            xmake f "${cfg[@]}" >/dev/null
-            echo "xmake build $t"
-            xmake build "$t"
+            echo "xmake f -c ${cfg[*]}"
+            # -c clears the cached configuration first. Some xmake versions
+            # keep a target-level platform/toolchain (the wasm target's
+            # set_plat/set_toolchains) in the config after a build; the next
+            # target then probes a missing `cc`. Clearing before each target
+            # makes the two invocations independent.
+            xmake f -c "${cfg[@]}" >/dev/null
+            echo "xmake build -v $t"
+            # -v is required here: the Windows webview failure is a toolchain
+            # probe ("cannot get program for cc"), and the verbose log names
+            # the target/toolchain that triggered it.
+            xmake build -v "$t"
           done
 
       # The two failures that actually shipped a broken package: a webview exe

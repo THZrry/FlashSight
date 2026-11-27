@@ -1466,14 +1466,35 @@ FsResult FsApi::session_ai_title(const std::string& sid) {
   if (nl != std::string::npos) title = title.substr(0, nl);
   title = utf8::truncate(title, 120);
   // Strip surrounding quotes the model often adds despite being told not to.
-  while (!title.empty() && (title.front() == '"' || title.front() == '\'' ||
-                            title.front() == '「' || title.front() == ' ')) {
-    title.erase(title.begin());
+  // Multi-byte CJK punctuation must be STRING literals: '「' / '」' / '。' are
+  // 3 UTF-8 bytes and clang rejects them as character literals
+  // ("character too large for enclosing character literal type").
+  static const char* kFront[] = {"\"", "'", "「", " "};
+  static const char* kBack[] = {"\"", "'", "」", " ", "。", "."};
+  bool cut = true;
+  while (cut && !title.empty()) {
+    cut = false;
+    for (size_t i = 0; i < sizeof(kFront) / sizeof(kFront[0]); ++i) {
+      std::string q(kFront[i]);
+      if (title.compare(0, q.size(), q) == 0) {
+        title.erase(0, q.size());
+        cut = true;
+        break;
+      }
+    }
   }
-  while (!title.empty() && (title.back() == '"' || title.back() == '\'' ||
-                            title.back() == '」' || title.back() == ' ' ||
-                            title.back() == '。' || title.back() == '.')) {
-    title.pop_back();
+  cut = true;
+  while (cut && !title.empty()) {
+    cut = false;
+    for (size_t i = 0; i < sizeof(kBack) / sizeof(kBack[0]); ++i) {
+      std::string q(kBack[i]);
+      if (title.size() >= q.size() &&
+          title.compare(title.size() - q.size(), q.size(), q) == 0) {
+        title.erase(title.size() - q.size());
+        cut = true;
+        break;
+      }
+    }
   }
   if (title.empty()) {
     return FsResult::error(ErrCode::kParse, "model returned an empty title");

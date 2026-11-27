@@ -3565,3 +3565,10 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **WhaleUI**：删掉独立的 `whaleui` job 和 dispatch 开关。`flashsight-whaleui` 是同一应用的第三个 target，本来就在所有平台存在，只要求 `--whaleui_libdir`；因为 WhaleUI 引擎不在本仓库且当前已知不可用，CI 在所有平台禁用（不是只支持 x64），release 不再等待一个单独 job。将来引擎可用时把它加回 main build 的 targets 即可。
   - **验证**：YAML 重新解析通过；mingw 平台下 web/webview/whaleui 均能构建；520 用例 4572 断言全过。Linux GTK 实际编译与 macOS Xcode 构建仍需 CI 验证。
 
+
+<151>(CI/MAC/WIN): macOS 多字节字符字面量、Linux aarch64 AppImage 404、Windows 两构建隔离与 -v 诊断。
+  - **macOS**：clang 拒绝 `'「'`/`'」'`/`'。'` 这种多字节 char literal（`character too large for enclosing character literal type`）。标题清理改为 UTF-8 string 比较数组（前后引号/括号/句号），按完整字节序列 erase；全仓再扫一遍非 ASCII char literal，剩余只在注释里。
+  - **Linux aarch64 404**：`make_appimage.sh` 还在用旧 `AppImage/AppImageKit/releases/.../appimagetool-aarch64.AppImage`，该仓库没有 aarch64 资产。改用当前官方 `AppImage/appimagetool/releases/download/continuous/appimagetool-$arch.AppImage`（x86_64/aarch64 都有）。
+  - **Windows 两次构建**：CI 在**每个 target 前执行 `xmake f -c`**（清配置缓存后重新写入 `-p mingw --mingw`），再做 `xmake build -v`；`-v` 是用户要求的诊断，下一次失败会打印具体 target/工具探测。并继续不导出全局 `CC`/`CXX`（会被 xmake 当成显式 host 工具，后续回退裸 `cc`）。本机按 configure(-c) → build web → configure(-c) → build webview 顺序通过；仍未复现 CI 的 cc 失败，需要新日志定位是哪个 target/资源规则触发。
+  - **验证**：520 用例 4572 断言全过；mingw 下三变体重链；YAML 解析通过。macOS Xcode、Linux aarch64 实际构建仍需 CI。
+

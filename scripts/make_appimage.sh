@@ -59,7 +59,9 @@ Run: ./$(basename "$out") [--port N] [--root PATH]
 EOF
 
 tool="$work/appimagetool-$arch.AppImage"
-url="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$arch.AppImage"
+# AppImageKit's continuous appimagetool has no aarch64 asset (404); the
+# standalone AppImage/appimagetool repo publishes both x86_64 and aarch64.
+url="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$arch.AppImage"
 if command -v curl >/dev/null 2>&1; then
   curl -fsSL "$url" -o "$tool"
 else
