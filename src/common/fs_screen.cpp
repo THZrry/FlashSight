@@ -11,8 +11,8 @@
 // duplication already held by another process), which is exactly why BitBlt
 // stays as the fallback rather than being deleted.
 //
-// macOS: CoreGraphics. CGDisplayCreateImage gives a CGImage which is redrawn
-// into our own RGBA buffer.
+// macOS: the system `screencapture` CLI (macOS 15 obsoletes the CoreGraphics
+// image APIs) decoded into our RGBA buffer through stb.
 //
 // Linux: X11 XGetImage on the root window. Wayland has no portable capture API
 // (it is deliberately restricted to the portal), so the capture reports that
@@ -33,8 +33,17 @@
 #include <X11/Xutil.h>
 #endif
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
+#if defined(__APPLE__)
+#include <fstream>
+#include <iterator>
+#include <sstream>
+#include <unistd.h>
+#include <utility>
+#endif
 
 namespace fs {
 namespace screen {
@@ -404,61 +413,77 @@ Support support() {
 
 namespace {
 
-Capture from_cg(CGImageRef img, const std::string& note) {
+// macOS 15 (Sequoia) marks CGWindowListCreateImage/CGDisplayCreateImage as
+// UNAVAILABLE in the SDK, so the old CoreGraphics path no longer compiles with
+// the Xcode 16 toolchain. `screencapture` is a system binary that still uses
+// the supported capture path (and the same Screen Recording permission prompt),
+// so use it and decode the PNG with stb. It keeps this file free of ObjC while
+// working from macOS 12 through 15+.
+Capture capture_with_screencapture(const std::string& args,
+                                   const std::string& note) {
   Capture out;
-  if (!img) {
-    out.error = "CGImage capture returned null (screen recording permission?)";
+  char tmpl[] = "/tmp/flashsight_capXXXXXX";
+  int fd = mkstemp(tmpl);
+  if (fd < 0) {
+    out.error = "cannot create a temporary capture path";
     return out;
   }
-  size_t w = CGImageGetWidth(img);
-  size_t h = CGImageGetHeight(img);
-  if (w == 0 || h == 0) {
-    CGImageRelease(img);
-    out.error = "captured image is empty";
+  ::close(fd);
+  std::string path(tmpl);
+  std::remove(path.c_str());  // let screencapture create it
+
+  std::string cmd = "screencapture -x -t png ";
+  if (!args.empty()) cmd += args + " ";
+  cmd += "\"" + path + "\" 2>/dev/null";
+  int rc = std::system(cmd.c_str());
+  if (rc != 0) {
+    std::remove(path.c_str());
+    out.error = "screencapture failed (screen recording permission?)";
     return out;
   }
-  out.image.width = static_cast<int>(w);
-  out.image.height = static_cast<int>(h);
-  out.image.rgba.assign(w * h * 4, 255);
-  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-  CGContextRef ctx = CGBitmapContextCreate(out.image.rgba.data(), w, h, 8, w * 4, cs,
-                                           kCGImageAlphaPremultipliedLast |
-                                               kCGBitmapByteOrder32Big);
-  CGColorSpaceRelease(cs);
-  if (!ctx) {
-    CGImageRelease(img);
-    out.error = "CGBitmapContextCreate failed";
+  std::ifstream in(path, std::ios::binary);
+  std::string bytes((std::istreambuf_iterator<char>(in)),
+                    std::istreambuf_iterator<char>());
+  in.close();
+  std::remove(path.c_str());
+  if (bytes.empty()) {
+    out.error = "screencapture produced no image";
     return out;
   }
-  CGContextDrawImage(ctx, CGRectMake(0, 0, static_cast<CGFloat>(w),
-                                     static_cast<CGFloat>(h)), img);
-  CGContextRelease(ctx);
-  CGImageRelease(img);
+  image::Image img;
+  std::string err;
+  if (!image::decode(bytes, &img, &err)) {
+    out.error = "cannot decode screencapture output: " + err;
+    return out;
+  }
+  out.image = std::move(img);
   out.ok = true;
   out.note = note;
-  out.backend = "coregraphics";
+  out.backend = "screencapture";
   return out;
 }
 
 }  // namespace
 
 Capture capture_region(int x, int y, int w, int h) {
-  CGRect rect = CGRectMake(x, y, w, h);
-  CGImageRef img = CGWindowListCreateImage(rect, kCGWindowListOptionOnScreenOnly,
-                                           kCGNullWindowID, kCGWindowImageDefault);
-  return from_cg(img, "region " + std::to_string(w) + "x" + std::to_string(h));
+  if (w <= 0 || h <= 0) {
+    Capture out;
+    out.error = "region width/height must be positive";
+    return out;
+  }
+  std::ostringstream opts;
+  opts << "-R" << x << "," << y << "," << w << "," << h;
+  return capture_with_screencapture(
+      opts.str(), "region " + std::to_string(w) + "x" + std::to_string(h));
 }
 
 Capture capture_desktop() {
-  CGImageRef img = CGWindowListCreateImage(CGRectInfinite, kCGWindowListOptionOnScreenOnly,
-                                           kCGNullWindowID, kCGWindowImageDefault);
-  return from_cg(img, "desktop");
+  return capture_with_screencapture("", "desktop");
 }
 
 Capture capture_window() {
-  // The frontmost on-screen window: window 0 of the frontmost application is
-  // not addressable without the owning pid, so the on-screen list is filtered
-  // by layer 0 (normal windows) and the first entry is used.
+  // The frontmost on-screen normal window. CGWindowListCopyWindowInfo is not
+  // obsoleted (only CreateImage is), so the window id is still available.
   CFArrayRef list = CGWindowListCopyWindowInfo(
       kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
       kCGNullWindowID);
@@ -488,10 +513,8 @@ Capture capture_window() {
     out.error = "no normal window on screen";
     return out;
   }
-  CGImageRef img = CGWindowListCreateImage(CGRectNull,
-                                           kCGWindowListOptionIncludingWindow,
-                                           target, kCGWindowImageBoundsIgnoreFraming);
-  return from_cg(img, "window");
+  return capture_with_screencapture("-l" + std::to_string(target) + " -o",
+                                    "window");
 }
 
 Support support() {
@@ -499,8 +522,8 @@ Support support() {
   s.desktop = true;
   s.region = true;
   s.window = true;
-  s.backend = "coregraphics";
-  s.note = "CoreGraphics (needs Screen Recording permission)";
+  s.backend = "screencapture";
+  s.note = "macOS screencapture (needs Screen Recording permission)";
   return s;
 }
 

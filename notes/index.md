@@ -1966,3 +1966,10 @@ The process of project: P0 环境搭建
   - **打包**：Windows 现在用 llvm-mingw，`package.py` 的导入表检查补 `llvm-objdump`/target-prefixed objdump fallback，避免漏带 `libc++.dll`/`libunwind.dll`。
   - **验证**：520 用例 4572 断言全过；web/webview/whaleui 重链；窗口图标此前实测 WM_GETICON 0/1/2 非零；favicon 200。
 
+
+<155>(MAC/CI): macOS 15 废弃 CGWindowListCreateImage；改用系统 screencapture。
+  - **编译错误**：macOS 15 SDK 把 `CGWindowListCreateImage`（以及 `CGDisplayCreateImage*`）标为 unavailable，Xcode 16 直接编译失败。纯 C++ 接 ScreenCaptureKit 需要 ObjC shim/blocks，代价高；改用系统 `screencapture` CLI（`-R` 区域、`-l<windowid>` 窗口、无参数桌面），输出 PNG 后用现有 stb `image::decode` 解成 RGBA。保留 `CGWindowListCopyWindowInfo` 枚举窗口 id（这个 API 未被 obsolete），backend 标为 “screencapture”，权限提示仍是系统 Screen Recording。
+  - **file://**：用户直接打开 `web/index.html` 时是 opaque origin，`sessionStorage`/wasm fetch 必失败；页面现在先检测 `location.protocol === 'file:'` 并显示“请用 flashsight-web 启动”，不再抛 SecurityError。Web 版必须通过内置 HTTP 服务访问；远程访问同理，资源都是相对 HTTP 路径，不应使用 file://。
+  - **容器查询**：旧 WebKitGTK/Firefox 不支持 `@container`，已加 `@supports not (container-type: inline-size)` 的 viewport fallback；现代引擎保留 container 行为。
+  - **验证**：520 用例 4572 断言全过；web/webview/whaleui 重链；YAML 与 shell 语法通过。macOS 实际编译仍需 CI。
+

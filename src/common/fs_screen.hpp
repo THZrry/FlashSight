@@ -10,7 +10,8 @@
 //             GDI BitBlt when duplication is unavailable (RDP, no GPU, older
 //             Windows). BitBlt alone returns a black frame on a composited
 //             desktop, which is why the newer API is tried first.
-//   macOS   : CGDisplayCreateImage / CGWindowListCreateImage
+//   macOS   : system `screencapture` CLI (CoreGraphics image APIs are
+//             unavailable in the macOS 15 SDK)
 //   Linux   : X11 XGetImage on the root window (X11 only; Wayland has no
 //             portable capture API and says so)
 //
