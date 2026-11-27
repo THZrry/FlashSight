@@ -134,6 +134,24 @@ std::string shell_html() {
   return html;
 }
 
+// The exe resource gives Explorer its icon, but WebView2's top-level window
+// uses its own class icon. Apply it once after create and once from the message
+// loop (WebView2 may replace the class icon during its own initialization).
+void apply_window_icon(webview_t w) {
+#ifdef _WIN32
+  if (HWND hwnd = static_cast<HWND>(webview_get_window(w))) {
+    HICON icon = static_cast<HICON>(
+        ::LoadIconW(::GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1)));
+    if (icon) {
+      ::SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
+      ::SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
+    }
+  }
+#else
+  (void)w;
+#endif
+}
+
 }  // namespace
 
 int run_webview_ui(FsApi* api) {
@@ -145,19 +163,7 @@ int run_webview_ui(FsApi* api) {
   }
   webview_set_title(w, "FlashSight");
   webview_set_size(w, 1280, 820, WEBVIEW_HINT_NONE);
-#ifdef _WIN32
-  // The exe resource (packaging/flashsight.rc) gives Explorer/the taskbar its
-  // icon, but WebView2's top-level window uses its own class icon. Set both
-  // WM_SETICON sizes on the real HWND explicitly.
-  if (HWND hwnd = static_cast<HWND>(webview_get_window(w))) {
-    HICON icon = static_cast<HICON>(
-        ::LoadIconW(::GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1)));
-    if (icon) {
-      ::SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
-      ::SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
-    }
-  }
-#endif
+  apply_window_icon(w);
 
   // ORDER MATTERS: webview_init registers a document-creation script, so the
   // glue has to be installed BEFORE the first document is loaded. Doing it the
@@ -165,6 +171,9 @@ int run_webview_ui(FsApi* api) {
   // the window stays blank.
   webview_install_glue(w);
   webview_set_html(w, shell_html().c_str());
+  // Re-apply once the WebView2 message loop is running.
+  webview_dispatch(w, [](webview_t wv, void*) { apply_window_icon(wv); },
+                   nullptr);
 
   IDom* dom = make_webview_dom(w);
   NativeBackend backend(api);  // in-process FsApi calls, no HTTP

@@ -77,7 +77,7 @@ jobs:
         name: Build matrix
         run: |
           # One entry per (runner, target arch). Supported today:
-          #   windows-x86_64   native MSYS2 mingw64
+          #   windows-x86_64   llvm-mingw x86_64
           #   windows-arm64    llvm-mingw aarch64 (cross from the x64 runner)
           #   macos-arm64      Xcode clang, WKWebView
           #   linux-x86_64     gcc, GTK4 + WebKitGTK 6.0
@@ -98,7 +98,8 @@ jobs:
                 "arch": "x86_64",
                 "plat": "mingw",
                 "toolchain": "mingw",
-                "mingw": "msys2",
+                "mingw": "llvm",
+                "emsdk": "3.1.61",
                 "py": "python"
               },
               {
@@ -108,6 +109,7 @@ jobs:
                 "plat": "mingw",
                 "toolchain": "mingw",
                 "mingw": "llvm",
+                "emsdk": "3.1.61",
                 "py": "python"
               },
               {
@@ -116,6 +118,7 @@ jobs:
                 "arch": "arm64",
                 "toolchain": "",
                 "mingw": "",
+                "emsdk": "3.1.61",
                 "py": "python3"
               },
               {
@@ -124,6 +127,7 @@ jobs:
                 "arch": "x86_64",
                 "toolchain": "gcc",
                 "mingw": "",
+                "emsdk": "3.1.61",
                 "py": "python3"
               },
               {
@@ -132,6 +136,7 @@ jobs:
                 "arch": "arm64",
                 "toolchain": "gcc",
                 "mingw": "",
+                "emsdk": "3.1.47",
                 "py": "python3"
               }
             ]
@@ -163,60 +168,34 @@ jobs:
           xmake-version: ${{ env.XMAKE_VERSION }}
           actions-cache-folder: .xmake-cache
 
-      - name: Install MSYS2 mingw64 (Windows x86_64)
-        if: matrix.mingw == 'msys2'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: mingw64
-          update: false
-          install: mingw-w64-x86_64-toolchain
-
-      - name: Install llvm-mingw (Windows arm64)
+      - name: Install llvm-mingw (Windows x86_64 and arm64)
         if: matrix.mingw == 'llvm'
         shell: pwsh
         run: |
-          # llvm-mingw provides target-prefixed gcc-named driver wrappers, which
-          # is exactly what xmake's mingw toolchain looks for with
-          # --arch=arm64 (aarch64-w64-mingw32-gcc). Its own find_mingw.lua has a
-          # dedicated branch for this prefix.
+          # Both Windows targets use the same official llvm-mingw package. It
+          # contains target-prefixed gcc/g++ wrappers for x86_64 AND aarch64.
+          # Do not use MSYS2 here: its mingw64/bin can be empty in CI, which is
+          # what produced "missing .../x86_64-w64-mingw32-gcc.exe".
           $ver = "20240417"
           $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/llvm-mingw-$ver-ucrt-x86_64.zip"
           Invoke-WebRequest -Uri $url -OutFile llvm-mingw.zip
           Expand-Archive llvm-mingw.zip -DestinationPath C:\llvm-mingw -Force
           $dir = (Get-ChildItem C:\llvm-mingw -Directory | Select-Object -First 1).FullName
-          $gcc = Join-Path $dir "bin\aarch64-w64-mingw32-gcc.exe"
-          $gxx = Join-Path $dir "bin\aarch64-w64-mingw32-g++.exe"
+          $prefix = if ("${{ matrix.arch }}" -eq "arm64") {
+            "aarch64-w64-mingw32"
+          } else {
+            "x86_64-w64-mingw32"
+          }
+          $gcc = Join-Path $dir "bin\$prefix-gcc.exe"
+          $gxx = Join-Path $dir "bin\$prefix-g++.exe"
           if (-not (Test-Path $gcc) -or -not (Test-Path $gxx)) {
-            Write-Error "llvm-mingw is missing aarch64-w64-mingw32-gcc/g++ under $dir\bin"
+            Write-Error "llvm-mingw is missing $prefix-gcc/g++ under $dir\bin"
             exit 1
           }
           "MINGW_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # -p mingw resolves cc/cxx/windres from --mingw; keep the cross bin
-          # dir on PATH for xmake's helper probes, but do NOT export CC/CXX:
-          # a global CC/CXX is treated as an explicit host tool and can make
-          # the next xmake build fall back to a bare `cc`.
           "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          Write-Host "llvm-mingw at $dir"
+          Write-Host "llvm-mingw at $dir, prefix $prefix"
           & $gcc --version | Select-Object -First 1
-
-      - name: Set MSYS2 mingw dir
-        if: matrix.mingw == 'msys2'
-        run: |
-          echo "MINGW_DIR=C:/msys64/mingw64" >> "$GITHUB_ENV"
-          # setup-msys2 exposes the MSYS shell, not necessarily mingw64/bin to
-          # the GitHub PATH. xmake's C fallback (`cc`) otherwise fails with
-          # "cannot get program for cc" on the webview target.
-          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
-          # Fail with the directory listing instead of a later xmake `cc`
-          # probe if the toolchain package did not land where we think.
-          for tool in x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++; do
-            f="C:/msys64/mingw64/bin/$tool.exe"
-            if [ ! -f "$f" ]; then
-              echo "missing $f"
-              ls -l C:/msys64/mingw64/bin | head -40 || true
-              exit 1
-            fi
-          done
 
       - name: Install Linux dependencies
         if: matrix.os != 'windows-latest' && !startsWith(matrix.os, 'macos-')
@@ -231,7 +210,7 @@ jobs:
       - name: Install Emscripten
         uses: mymindstorm/setup-emsdk@v14
         with:
-          version: ${{ env.EMSDK_VERSION }}
+          version: ${{ matrix.emsdk || env.EMSDK_VERSION }}
           actions-cache-folder: .emsdk-cache
 
       # ---- dependencies ---------------------------------------------------
@@ -288,8 +267,8 @@ jobs:
             else
               prefix=x86_64-w64-mingw32
             fi
-            # MSYS2 often has no un-prefixed gcc.exe; --mingw alone then fails
-            # detection. Pass the target-prefixed compilers explicitly.
+            # llvm-mingw/MSYS2 may have no un-prefixed gcc.exe; --mingw alone
+            # then fails detection. Pass target-prefixed compilers explicitly.
             args+=(--mingw="$MINGW_DIR"
                    --cc="$MINGW_DIR/bin/$prefix-gcc.exe"
                    --cxx="$MINGW_DIR/bin/$prefix-g++.exe")

@@ -2,6 +2,7 @@
 #include "fs_patch.hpp"
 
 #include <fstream>
+#include <sstream>
 
 namespace fs {
 

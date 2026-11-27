@@ -3580,3 +3580,11 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **窗口图标/favicon**：Windows webview 创建窗口后用 `webview_get_window` 取 HWND，`WM_SETICON` 设置 BIG/SMALL 图标（资源 ID 1）；新增 `web/favicon.svg`，`index.html` 加了 `<link rel="icon">`，asset packer 把 favicon 嵌入，`/favicon.svg` 实测 HTTP 200（image/svg+xml, 5034 bytes）。Windows exe 图标、ICO 透明 alpha 仍保留。
   - **验证**：520 用例 4572 断言全过；mingw 下 web/webview/whaleui 均链接；YAML 与 shell 语法校验通过；测试 webview 进程已停止，用户正在运行的正式 FlashSight 未关闭。
 
+
+<153>(CI/MAC/WIN/UI): Windows x64 改用 llvm-mingw、Mac sstream、Linux aarch64 emsdk；窗口图标实际生效。
+  - **Windows 真因**：CI 的 MSYS2 `C:/msys64/mingw64/bin` 实测是空目录（`total 0`），所以 `--mingw` 和显式 gcc 路径都不可能找到编译器。现在 x64 与 arm64 **都下载同一个官方 llvm-mingw zip**（x86_64 host，包含 x86_64/aarch64 前缀 gcc/g++ wrapper），用 matrix.arch 选 `x86_64-w64-mingw32` / `aarch64-w64-mingw32`，显式传 `--cc/--cxx`；不再依赖 MSYS2。MSYS2 job 步骤删除。
+  - **Mac**：`fs_patch.cpp` 使用了 `std::stringstream` 但只 include `<fstream>`；libstdc++ 间接带入，libc++ 不保证，clang 报 undefined template。补 `<sstream>`；全仓检查 stringstream 用户都已有该 include。
+  - **Linux aarch64 404**：除了 `make_appimage.sh` 的 `arm64→aarch64` 归一化，另一个 404 来自 **emsdk 3.1.61 没有 linux-arm64 二进制**。矩阵新增 `emsdk` 字段：linux-aarch64 用 3.1.47（已知有 arm64 构建），其余 3.1.61；setup-emsdk 读 `matrix.emsdk || env.EMSDK_VERSION`。
+  - **窗口图标**：`WM_SETICON` 现在在创建后设置一次，并在 WebView2 消息循环内再设置一次（避免 WebView2 初始化覆盖）；实测 `WM_GETICON` 的 0/1/2 都返回非零 HICON。favicon `/favicon.svg` 仍返回 200；ICO alpha=0。
+  - **验证**：520 用例 4572 断言全过；web/webview/whaleui 重链；YAML 解析通过。Windows llvm-mingw x64/arm64、Linux aarch64 和 macOS 仍需 CI 实跑。
+
