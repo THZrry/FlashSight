@@ -880,6 +880,12 @@ target("flashsight-web")
     add_files("src/main.cpp")
     add_deps("fs_ui", "fs_core", "mbedtls_src")
     add_cxxflags("-Wall")
+    if is_plat("macosx") then
+        -- Symbols from fs_core: CFConstantString (CoreFoundation), CGWindow
+        -- (CoreGraphics) and kSecPolicy* (Security). Frameworks on a static
+        -- dependency do not propagate to the final link line.
+        add_frameworks("Foundation", "CoreFoundation", "CoreGraphics", "Security")
+    end
     if is_plat("windows", "mingw") then
         add_files("packaging/flashsight.rc")
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
@@ -908,6 +914,10 @@ target("flashsight-webview")
     if is_plat("linux", "bsd") then
         add_packages("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0")
     end
+    if is_plat("macosx") then
+        add_frameworks("Foundation", "CoreFoundation", "CoreGraphics", "Security",
+                       "WebKit")
+    end
     if is_plat("windows", "mingw") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi",
@@ -929,6 +939,9 @@ target("flashsight-whaleui")
     add_deps("fs_ui_host_whaleui", "fs_ui", "fs_core", "mbedtls_src")
     add_headerfiles(web_assets)
     add_cxxflags("-Wall")
+    if is_plat("macosx") then
+        add_frameworks("Foundation", "CoreFoundation", "CoreGraphics", "Security")
+    end
     if is_plat("windows", "mingw") then
         add_files("packaging/flashsight.rc")
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
@@ -1001,6 +1014,9 @@ target("fs_tests")
     add_deps("fs_ui", "fs_core")
     add_deps("mbedtls_src")
     add_cxxflags("-Wall")
+    if is_plat("macosx") then
+        add_frameworks("Foundation", "CoreFoundation", "CoreGraphics", "Security")
+    end
     if is_plat("windows", "mingw") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")

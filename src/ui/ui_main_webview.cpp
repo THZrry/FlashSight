@@ -152,6 +152,12 @@ void apply_window_icon(webview_t w) {
 #endif
 }
 
+// JS glue calls this on DOMContentLoaded (before the C++ UI is mounted).
+void on_page_ready(const char*, const char*, void* arg) {
+  auto* flag = static_cast<std::atomic<bool>*>(arg);
+  if (flag) flag->store(true);
+}
+
 }  // namespace
 
 int run_webview_ui(FsApi* api) {
@@ -164,6 +170,10 @@ int run_webview_ui(FsApi* api) {
   webview_set_title(w, "FlashSight");
   webview_set_size(w, 1280, 820, WEBVIEW_HINT_NONE);
   apply_window_icon(w);
+
+  std::shared_ptr<std::atomic<bool> > page_ready =
+      std::make_shared<std::atomic<bool> >(false);
+  webview_bind(w, "fs_ui_ready", on_page_ready, page_ready.get());
 
   // ORDER MATTERS: webview_init registers a document-creation script, so the
   // glue has to be installed BEFORE the first document is loaded. Doing it the
@@ -181,15 +191,8 @@ int run_webview_ui(FsApi* api) {
   {
     AppState st = AppState::make();
     UiApp ui(*dom, st, &backend);
-    ui.mount();
-
-    // Diagnostics: inspect the live page + simulate a click, so a "nothing
-    // happens" report can be told apart from "the adapter never bound".
-    if (std::getenv("FS_UI_WEBVIEW_DEBUG")) {
-      webview_dispatch(w, [](webview_t wv, void* ud) {
-        webview_debug_probe(wv, ud);
-      }, dom);
-    }
+    std::shared_ptr<std::atomic<bool> > mounted =
+        std::make_shared<std::atomic<bool> >(false);
 
     // Backend events + the terminal poller. webview has no timer of its own, so
     // a C++ thread drives them and hops onto the UI thread through
@@ -204,15 +207,21 @@ int run_webview_ui(FsApi* api) {
     // shared flag first.
     struct PumpCtx {
       UiApp* app = nullptr;
+      IDom* dom = nullptr;
       // Captured BY VALUE by the dispatch lambda below: reading through a pointer
       // to a stack object would be the same use-after-free we are fixing.
       std::shared_ptr<std::atomic<bool> > alive;
+      std::shared_ptr<std::atomic<bool> > page_ready;
+      std::shared_ptr<std::atomic<bool> > mounted;
     };
     std::shared_ptr<std::atomic<bool> > alive =
         std::make_shared<std::atomic<bool> >(true);
     PumpCtx ctx;
     ctx.app = &ui;
+    ctx.dom = dom;
     ctx.alive = alive;
+    ctx.page_ready = page_ready;
+    ctx.mounted = mounted;
     std::atomic<bool> running(true);
     std::thread ticker([&]() {
       while (running.load()) {
@@ -227,6 +236,19 @@ int run_webview_ui(FsApi* api) {
           // shutdown path clears it before the ctx goes away (see below).
           if (!c || !c->app) return;
           if (c->alive && !c->alive->load()) return;
+          // Do not mount into the pre-navigation document. The JS glue calls
+          // fs_ui_ready on DOMContentLoaded; on a slow engine (Linux/aarch64
+          // WebKit) the old synchronous mount made the real page replace the
+          // already-built DOM and the window stayed blank.
+          if (!c->mounted->load()) {
+            if (!c->page_ready->load()) return;
+            c->app->mount();
+            c->mounted->store(true);
+            if (std::getenv("FS_UI_WEBVIEW_DEBUG")) {
+              webview_debug_probe(wv, c->dom);
+            }
+            return;
+          }
           c->app->pump();
           c->app->tick_terminal();
           // Resource log: one line every 30 s with the handle count and the

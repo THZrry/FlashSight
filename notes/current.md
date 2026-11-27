@@ -3603,3 +3603,10 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **容器查询**：旧 WebKitGTK/Firefox 不支持 `@container`，已加 `@supports not (container-type: inline-size)` 的 viewport fallback；现代引擎保留 container 行为。
   - **验证**：520 用例 4572 断言全过；web/webview/whaleui 重链；YAML 与 shell 语法通过。macOS 实际编译仍需 CI。
 
+
+<156>(MAC/LINUX): macOS 链接框架；WebView/Firefox 首次空白改为页面加载后挂载。
+  - **macOS 链接**：`fs_core` 用到 `CFConstantString`、`kCGWindowLayer/kCGWindowNumber`、`kSecPolicy*`，静态库上的 framework 不会传到最终 exe。给 `flashsight-web`、`flashsight-webview`、`flashsight-whaleui`、`fs_tests` 在 macOS 下统一加 `Foundation/CoreFoundation/CoreGraphics/Security`，webview 额外 `WebKit`。
+  - **WebView 首次空白**：根因是 `ui.mount()` 在 `webview_set_html` 后立刻执行，慢引擎（Linux/aarch64 WebKit）还在加载预导航文档，真实页面随后把已建 DOM 替换掉。现在 JS glue 在 DOMContentLoaded 调用 `fs_ui_ready` binding，C++ ticker 在 message loop 里等到该标志后再 `ui.mount()`；Windows 实机（独立 exe/user-data，避免和正式实例共用 WebView2）验证 `document.body.innerText` 正常。
+  - **Web/Firefox 首次空白/警告**：`startApp()` 改为等 `window.load` 后再 `_fs_ui_start()`，且用 `__fsUiStarted` 防重入；wasm runtime 先 ready 也只会排队，不再在样式表加载前强制布局。file:// 仍是明确的“请用 flashsight-web 启动”提示。
+  - **验证**：520 用例 4572 断言全过；web/webview/whaleui 已按最新 index/CSS/asset 重链；webview 独立实例实测 UI 渲染。macOS 链接仍需 CI。
+

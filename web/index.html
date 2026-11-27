@@ -88,18 +88,25 @@
   }
 
   function startApp() {
+    if (window.__fsUiStarted) return;
     gate.hidden = true;
-    // The module may have finished loading while the gate was up (its
-    // onRuntimeInitialized skipped the start because the gate was visible), so
-    // this is the one place that decides when the app begins.
-    if (window.Module && typeof window.Module._fs_ui_start === 'function') {
-      window.Module._fs_ui_start();
-    } else {
-      // Not loaded yet: onRuntimeInitialized will start it (the gate is hidden
-      // by then, so its own check passes).
-      window.__fsStartWhenReady = true;
+    // Start only after window.load: on slow machines the wasm runtime can be
+    // ready before the stylesheets finish, and mounting into an unstyled page
+    // is what caused the Firefox "layout forced before page loaded" warning
+    // and a blank first paint.
+    if (document.readyState !== 'complete') {
+      window.addEventListener('load', startApp, {once: true});
+      return;
     }
+    if (!(window.Module && typeof window.Module._fs_ui_start === 'function')) {
+      window.__fsStartWhenReady = true;
+      return;
+    }
+    window.__fsUiStarted = true;
+    gate.hidden = true;
+    window.Module._fs_ui_start();
   }
+  window.__fsStartApp = startApp;
 
   form.addEventListener('submit', function (ev) {
     ev.preventDefault();
@@ -242,8 +249,11 @@
   var Module = Module || {};
   Module.onRuntimeInitialized = function () {
     if (typeof Module._fs_ui_start !== 'function') return;
+    window.__fsRuntimeReady = true;
     var gate = document.getElementById('fs-auth');
-    if (!gate || gate.hidden) Module._fs_ui_start();
+    // onRuntimeInitialized can fire before window.load and before the auth
+    // gate is dismissed; startApp owns both checks.
+    if ((!gate || gate.hidden) && window.__fsStartApp) window.__fsStartApp();
   };
 </script>
 </body>

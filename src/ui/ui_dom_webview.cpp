@@ -982,6 +982,19 @@ const char* kGlueJs = R"JS(
     }
   };
 })();
+// Tell C++ the document exists before it mounts the UI. On a slow engine the
+// old code built into the pre-navigation document and the real page replaced
+// it, leaving a blank window.
+(function () {
+  function ready() {
+    try { if (typeof fs_ui_ready === 'function') fs_ui_ready(); } catch (e) {}
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', ready);
+  } else {
+    ready();
+  }
+})();
 )JS";
 
 // The glue above uses `post(name, args)` to call back into C++. webview exposes
