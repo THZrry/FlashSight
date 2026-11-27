@@ -81,6 +81,13 @@ FsApi::FsApi(const ghc::filesystem::path& root_dir, const Clock* clock, Random* 
   net_.reset(new HttplibNetClient(sample));
   coding_plans_.reset(new PlanManager(root_, net_.get(), clock_));
   coding_plans_->set_ready_fn([this](const Json& c) { mirror_plan_connection(c); });
+  // Saved plans must exist as providers on the NEXT start too, not only in the
+  // login callback: without this the card said "connected" while the provider
+  // list/model picker had no plan_<provider> entry after a restart.
+  {
+    Json saved = coding_plans_->mirror_connections();
+    for (size_t i = 0; i < saved.size(); ++i) mirror_plan_connection(saved[i]);
+  }
   // P3: agent 宿主
   mcp_registry_.reset(new McpRegistry());
   AgentHostDeps deps;
@@ -4065,6 +4072,10 @@ FsResult FsApi::plan_add_key(const std::string& provider, const std::string& key
 FsResult FsApi::plan_usage(const std::string& connectionId) {
   if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
   return coding_plans_->refresh_usage(connectionId);
+}
+FsResult FsApi::plan_reset(const std::string& connectionId) {
+  if (!coding_plans_) return FsResult::error(ErrCode::kNotSupported, "plans not wired");
+  return coding_plans_->reset_credit(connectionId);
 }
 
 // ----- model.*（逐模型设置）-----

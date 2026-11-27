@@ -2958,6 +2958,57 @@ FS_TEST(uiapp_providers_page_auto_selects) {
   EXPECT_EQ(app.state().provider_selected, std::string("pr_a"));
 }
 
+// 新建页最上面是套餐连接卡片；连上的套餐显示套餐名、5h/周额度与剩余重置次数，
+// 未连接的显示连接/添加密钥。The plan cards used to live in Settings > 供应商.
+FS_TEST(uiapp_new_page_shows_plan_cards_and_quota) {
+  NullDom dom;
+  AppState st = AppState::make();
+  class PlanUiBackend : public IUiBackend {
+   public:
+    BackendResult call(const std::string& method, const Json&) override {
+      BackendResult r;
+      r.ok = true;
+      if (method == "plan.list") {
+        Json quotas = Json::array();
+        quotas.push_back(Json{{"key", "5h"}, {"used", 40}, {"remaining", 60},
+                              {"resetAt", "2026-12-01T09:00:00Z"}});
+        quotas.push_back(Json{{"key", "week"}, {"used", 10}, {"remaining", 90}});
+        Json usage;
+        usage["plan"] = "Claude Max";
+        usage["quotas"] = quotas;
+        usage["resetCredits"] = Json{{"availableCount", 2}, {"grants", Json::array()}};
+        Json conn;
+        conn["id"] = "pl_claude";
+        conn["provider"] = "claude";
+        conn["label"] = "Claude Code";
+        conn["plan"] = "Claude Max";
+        conn["usage"] = usage;
+        Json providers = Json::array();
+        providers.push_back(Json{{"id", "claude"}, {"name", "Claude Code"},
+                                 {"auth", "oauth"}});
+        providers.push_back(Json{{"id", "qwen"}, {"name", "Qwen Coding"},
+                                 {"auth", "apikey"}});
+        r.data = Json{{"providers", providers},
+                      {"connections", Json::array({conn})}};
+      }
+      if (method == "provider.listProviders") r.data = Json::array();
+      return r;
+    }
+    std::function<void()> subscribe(BackendEvent) override { return []() {}; }
+  } backend;
+  UiApp app(dom, st, &backend);
+  app.mount();
+  app.open_new_tab();
+  EXPECT_TRUE(dump_has(dom, "plan-tile connected"));
+  EXPECT_TRUE(dump_has(dom, "Claude Max"));
+  EXPECT_TRUE(dump_has(dom, "5h"));
+  EXPECT_TRUE(dump_has(dom, "week"));
+  EXPECT_TRUE(dump_has(dom, "可用重置 2 次"));
+  EXPECT_TRUE(dump_has(dom, "Qwen Coding"));
+  EXPECT_TRUE(dump_has(dom, "未连接"));
+  EXPECT_TRUE(dump_has(dom, "添加密钥"));
+}
+
 FS_TEST(uiapp_side_panel_defaults_to_usage) {
   NullDom dom;
   AppState st = AppState::make();

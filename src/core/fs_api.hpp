@@ -343,6 +343,7 @@ class FsApi {
   FsResult plan_add_key(const std::string& provider, const std::string& key,
                         const std::string& region, bool remote);
   FsResult plan_usage(const std::string& connectionId);
+  FsResult plan_reset(const std::string& connectionId);
   // ----- model.*（逐模型设置：能力/档位/重试/启用/图标）-----
   // 某 provider 的完整模型列表（用户 + API + 预置兜底，含档位与图标）
   FsResult model_list(const std::string& providerId);

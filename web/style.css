@@ -3837,42 +3837,141 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
 ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* ============================ coding plans ============================ */
-.plan-box {
-  margin: 0 0 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
-  display: flex; flex-direction: column; gap: 8px;
+/* ============================ coding plans ============================
+   The connection cards are the first thing on the New page. They follow the
+   project-card language (panel surface, hairline accent, colour-only hover)
+   but are narrower: a plan is an identity + quotas + two actions. */
+.plan-section { flex: none; margin: 18px 18px 2px; display: flex; flex-direction: column; gap: 12px; }
+.plan-section-head { display: flex; align-items: flex-start; gap: 10px; padding: 0 2px; }
+.plan-title-box { min-width: 0; }
+.plan-section-title { font-size: 15px; font-weight: 600; line-height: 1.35; }
+.plan-section-sub { font-size: 12px; margin-top: 2px; }
+.plan-section-sub.dim { max-width: 720px; }
+.plan-loading { font-size: 11.5px; align-self: center; }
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
 }
-.plan-box-head { display: flex; align-items: center; gap: 8px; }
-.plan-box-title { font-size: 13px; color: var(--text); }
-.plan-box-remote { font-size: 11.5px; color: var(--warn, #d9a441); }
-.plan-card {
+.plan-tile {
+  position: relative;
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 13px 15px 12px 17px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  display: flex; flex-direction: column; gap: 6px;
+  border-radius: calc(var(--radius) + 2px);
   background: var(--panel-2);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color .14s ease, box-shadow .14s ease;
 }
-.plan-card-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.plan-name { font-size: 12.5px; }
-.plan-plan { font-size: 11px; }
-.plan-acts { display: flex; gap: 4px; }
-.plan-quotas { display: flex; gap: 6px; flex-wrap: wrap; }
-.plan-quota {
-  display: inline-flex; align-items: baseline; gap: 4px;
-  padding: 2px 7px; border-radius: 999px;
-  background: var(--bg); border: 1px solid var(--border);
-  font-size: 11px;
+/* A connected plan is a wide SUMMARY card: identity on the left, quota bars in
+   the middle, reset/actions on the right. Keeping it out of the 3-up catalog
+   row also stops "connected" from stretching every unconnected card to its
+   height (a wall of empty space). */
+.plan-tile.connected {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2.2fr) auto;
+  grid-template-areas:
+    "head bars reset"
+    "plan bars foot";
+  align-items: center;
+  gap: 8px 24px;
+  padding: 15px 18px 14px 20px;
 }
-.plan-quota.empty { border-color: var(--err, #d15b5b); color: var(--err, #d15b5b); }
-.pq-key { color: var(--text-dim); }
-.pq-val { font-family: var(--mono); }
-.plan-quota-note { font-size: 11px; }
-.plan-card-foot { display: flex; gap: 6px; justify-content: flex-end; }
-.plan-empty { font-size: 12px; }
+.plan-tile::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity .14s ease;
+}
+.plan-tile:hover { border-color: var(--border-strong); box-shadow: var(--shadow-2); }
+.plan-tile:hover::before { opacity: .55; }
+.plan-tile.connected {
+  cursor: default;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.plan-tile.connected::before { opacity: .9; }
+.plan-tile-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.plan-tile-top > .badge, .plan-tile-top > .plan-off { margin-left: auto; flex: none; }
+.plan-tile.connected .plan-tile-top { grid-area: head; align-self: end; }
+.plan-tile.connected .plan-plan-line { grid-area: plan; align-self: start; }
+.plan-tile.connected .plan-bars {
+  grid-area: bars;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 9px 20px;
+}
+.plan-tile.connected > .plan-quota-note { grid-area: bars; }
+.plan-tile.connected .plan-reset { grid-area: reset; align-self: start; }
+.plan-tile.connected .plan-tile-foot { grid-area: foot; align-self: end; }
+.plan-mark {
+  flex: none;
+  width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700; font-size: 13px;
+}
+.plan-tile-names { min-width: 0; flex: 1; }
+.plan-tile-name {
+  font-size: 14px; font-weight: 600; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.plan-tile-kind { font-size: 11.5px; margin-top: 1px; }
+.plan-off { font-size: 11.5px; flex: none; }
+.plan-tile-hint { font-size: 11.5px; line-height: 1.45; min-height: 32px; }
+.plan-tile-foot { display: flex; gap: 6px; justify-content: flex-end; align-items: center; margin-top: auto; padding-top: 2px; }
+@media (max-width: 980px) {
+  .plan-tile.connected {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "head" "plan" "bars" "reset" "foot";
+    gap: 9px;
+  }
+  .plan-tile.connected .plan-tile-foot { justify-content: flex-start; }
+}
+.plan-plan-line { display: flex; align-items: baseline; gap: 6px; font-size: 12px; min-width: 0; }
+.plan-plan-line .plan-label { font-size: 11px; flex: none; }
+.plan-plan-line .plan-value {
+  font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.plan-bars { display: flex; flex-direction: column; gap: 7px; }
+.pq { display: flex; flex-direction: column; gap: 3px; }
+.pq-line { display: flex; align-items: baseline; gap: 6px; font-size: 11px; min-width: 0; }
+.pq-key { color: var(--text-dim); flex: none; }
+.pq-val { font-family: var(--mono); flex: none; }
+.pq-reset { margin-left: auto; font-size: 10.5px; white-space: nowrap; }
+.pq-track {
+  height: 5px; border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.pq-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2, var(--accent)));
+  transition: width .35s ease;
+}
+.pq-fill.empty { background: var(--err, #d15b5b); }
+.plan-quota-note { font-size: 11px; line-height: 1.45; }
+.plan-reset {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+.plan-reset-badge { font-size: 11.5px; color: var(--warn, #d9a441); flex: 1; }
+.plan-empty {
+  font-size: 12px;
+  padding: 18px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  grid-column: 1 / -1;
+}
 .plan-modal {
   width: min(560px, 92vw);
   margin: 18vh auto 0;

@@ -1108,7 +1108,9 @@ class UiApp {
   void complete_plan_code();
   void poll_plan_flow();
   void close_plan_modal();
-  void refresh_plan_usage();
+  void refresh_plan_usage(const std::string& connection_id = "");
+  void reset_plan_credit(const std::string& connection_id);
+  void apply_plan_reset(const std::string& connection_id);
   bool ui_remote() const;
   VNodePtr build_plan_box();
   VNodePtr build_plan_modal();

@@ -38,6 +38,8 @@ class PlanManager {
 
   // Provider catalog + saved connections (tokens masked).
   Json list() const;
+  // Connections WITH tokens, for FsApi's startup mirror. Never exposed to UI.
+  Json mirror_connections() const;
   // Start an OAuth/poll/key flow. `remote` is true when the UI is NOT on a
   // loopback address: remote clients cannot complete a loopback redirect.
   FsResult start(const std::string& provider, bool remote);
@@ -53,6 +55,9 @@ class PlanManager {
                    const std::string& region, bool remote);
   // Refresh quotas for all connections (or one) and persist lastUsage.
   FsResult refresh_usage(const std::string& connection_id);
+  // Spend one quota-reset credit/grant (Claude cedar_ember, Codex reset
+  // credits). Refreshes usage afterwards.
+  FsResult reset_credit(const std::string& connection_id);
   // True when provider_id is a connection created by this manager. FsApi calls
   // this before a model request to refresh an expired access token in place.
   bool touch_provider(const std::string& provider_id, std::string* api_key);
@@ -72,6 +77,10 @@ class PlanManager {
   FsResult exchange_tokens(Flow* f, const std::string& code);
   FsResult poll_glm(Flow* f);
   FsResult refresh_conn(Conn* c);
+  // One live connection per provider: re-login / a new key REPLACES the old
+  // one instead of leaving a stale duplicate that the card would read first.
+  // Caller holds mu_.
+  void upsert_connection(Conn* c);
   Json conn_public(const Conn& c) const;
   Json conn_private(const Conn& c) const;
   Json refresh_usage_one(Conn* c);

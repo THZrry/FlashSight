@@ -447,6 +447,9 @@ UiApi::UiApi(FsApi* api) : api_(api) {
   reg("plan.usage", [api](const Json& a) {
     return api->plan_usage(s(a, "connectionId"));
   });
+  reg("plan.reset", [api](const Json& a) {
+    return api->plan_reset(s(a, "connectionId"));
+  });
 
   // ---- model.*（逐模型设置：能力/档位/重试/启用/图标）----
   reg("model.list", [api](const Json& a) { return api->model_list(s(a, "providerId")); });
@@ -571,6 +574,7 @@ FsResult UiApi::call(const std::string& method, const Json& args) {
       method == "provider.balances" || method == "plan.start" ||
       method == "plan.poll" || method == "plan.complete" ||
       method == "plan.addKey" || method == "plan.usage" ||
+      method == "plan.reset" ||
       method == "terminal.grid" ||
       method == "terminal.poll" || method == "terminal.kill" ||
       method == "terminal.tick") {

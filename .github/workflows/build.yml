@@ -83,8 +83,8 @@ jobs:
           #   windows-x86_64   native MSYS2 mingw64
           #   windows-arm64    llvm-mingw aarch64 (cross from the x64 runner)
           #   macos-arm64      Xcode clang, WKWebView
-          #   linux-x86_64     gcc, WebKitGTK 4.1
-          #   linux-aarch64    gcc on an arm64 runner, WebKitGTK 4.1
+          #   linux-x86_64     gcc, GTK4 + WebKitGTK 6.0
+          #   linux-aarch64    gcc on an arm64 runner, GTK4 + WebKitGTK 6.0
           #
           # Nothing else is attempted: webview has no backend for the remaining
           # platforms, so a package would not run there.
@@ -268,8 +268,8 @@ jobs:
           targets=()
           if [ "${{ steps.want.outputs.web }}" = "1" ]; then targets+=(flashsight-web); fi
           if [ "${{ steps.want.outputs.webview }}" = "1" ]; then targets+=(flashsight-webview); fi
-          echo "xmake b ${targets[*]}"
-          xmake -y b "${targets[@]}"
+          echo "xmake build ${targets[*]}"
+          xmake build "${targets[@]}"
 
       # The two failures that actually shipped a broken package: a webview exe
       # with no embedded CSS (the asset pack had been overwritten by the web
@@ -486,7 +486,7 @@ jobs:
             --whaleui_dir="$(cd ../WhaleUI && pwd)"
 
       - name: Build (whaleui)
-        run: xmake -y b flashsight-whaleui
+        run: xmake build flashsight-whaleui
 
       # WhaleUI reads its stylesheet from disk (through the engine's VFS), so
       # the build copies web/ next to the exe and the package has to carry it.

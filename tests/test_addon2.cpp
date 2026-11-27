@@ -13,6 +13,7 @@
 #include "agent/agent_loop.hpp"
 #include "agent/todo_store.hpp"
 #include "common/fs_clock.hpp"
+#include "common/fs_i18n.hpp"
 #include "common/fs_path.hpp"
 #include "core/fs_api.hpp"
 #include "core/workflow.hpp"
@@ -777,6 +778,23 @@ FS_TEST(addon2_plan_catalog_key_and_remote_guard) {
   // A subscription API key is allowed (no browser) and creates plan_qwen.
   FsResult key = api.plan_add_key("qwen", "sk-plan-test", "", false);
   ASSERT_TRUE(key.ok());
+  // Replacing the key updates that connection instead of leaving a stale
+  // duplicate (the card reads the first one, the provider mirror the last).
+  FsResult key2 = api.plan_add_key("qwen", "sk-plan-test-2", "", false);
+  ASSERT_TRUE(key2.ok());
+  FsResult plans = api.plan_list();
+  ASSERT_TRUE(plans.ok());
+  int qwen_conns = 0;
+  const Json& conns = plans.data.contains("connections") ? plans.data["connections"]
+                                                         : Json::array();
+  for (size_t i = 0; i < conns.size(); ++i) {
+    if (jsonutil::get<std::string>(conns[i], "provider", "") == "qwen") ++qwen_conns;
+  }
+  EXPECT_EQ(qwen_conns, 1);
+  EXPECT_EQ(jsonutil::get<std::string>(conns[0], "id", ""),
+            jsonutil::get<std::string>(key.data["connection"], "id", ""));
+  // Unknown connections cannot spend a reset grant.
+  EXPECT_FALSE(api.plan_reset("pl_missing").ok());
   FsResult ps = api.provider_list_providers();
   ASSERT_TRUE(ps.ok());
   bool have = false;
@@ -787,6 +805,38 @@ FS_TEST(addon2_plan_catalog_key_and_remote_guard) {
   FsResult ml = api.model_list("plan_qwen");
   ASSERT_TRUE(ml.ok());
   EXPECT_TRUE(ml.data["models"].size() >= 3);
+  // A restart must re-mirror the saved plan into providers, not only show the
+  // card as connected: the provider list/model picker have to keep working.
+  {
+    FsApi restarted(ghc::filesystem::path(td.path()), &clock, nullptr);
+    FsResult ps2 = restarted.provider_list_providers();
+    ASSERT_TRUE(ps2.ok());
+    bool mirrored = false;
+    for (size_t i = 0; i < ps2.data.size(); ++i) {
+      if (jsonutil::get<std::string>(ps2.data[i], "id", "") == "plan_qwen") {
+        mirrored = true;
+      }
+    }
+    EXPECT_TRUE(mirrored);
+    FsResult ml2 = restarted.model_list("plan_qwen");
+    ASSERT_TRUE(ml2.ok());
+    EXPECT_TRUE(ml2.data["models"].size() >= 3);
+  }
+}
+
+// The plan cards are user-facing text too: an English UI must not leave the
+// labels/actions in Chinese (the recurring "many strings are Chinese-only").
+FS_TEST(addon2_plan_ui_strings_are_translated) {
+  i18n::set_lang(i18n::Lang::kEn);
+  EXPECT_EQ(i18n::tr("订阅套餐"), std::string("Plans"));
+  EXPECT_EQ(i18n::tr("已连接"), std::string("Connected"));
+  EXPECT_EQ(i18n::tr("未连接"), std::string("Not connected"));
+  EXPECT_EQ(i18n::tr("添加密钥"), std::string("Add API key"));
+  EXPECT_EQ(i18n::tr("使用重置"), std::string("Use reset"));
+  EXPECT_EQ(i18n::tr("% 剩余"), std::string("% left"));
+  EXPECT_EQ(i18n::tr("远程连接不能添加套餐"),
+            std::string("Plans cannot be added from a remote connection"));
+  i18n::set_lang(i18n::Lang::kAuto);
 }
 
 // Paged history reads only the shards covering the page. A wrong absolute

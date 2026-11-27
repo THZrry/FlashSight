@@ -2957,6 +2957,8 @@ void UiApp::add_plan_key(const std::string& provider, const std::string& key,
       update([&](AppState& s) { s.plan_error = r.message; s.plan_status = "error"; });
       return;
     }
+    std::string cid = jsonutil::get<std::string>(
+        r.data.contains("connection") ? r.data["connection"] : Json::object(), "id", "");
     update([&](AppState& s) {
       s.plan_modal_open = false;
       s.plan_flow.clear();
@@ -2965,6 +2967,7 @@ void UiApp::add_plan_key(const std::string& provider, const std::string& key,
     toast(tr("套餐已连接"));
     load_plans(true);
     load_providers();
+    if (!cid.empty()) refresh_plan_usage(cid);
   });
 }
 
@@ -2986,6 +2989,8 @@ void UiApp::poll_plan_flow() {
       return;
     }
     if (status == "ready") {
+      std::string cid = jsonutil::get<std::string>(
+          r.data.contains("connection") ? r.data["connection"] : Json::object(), "id", "");
       update([&](AppState& s) {
         s.plan_modal_open = false;
         s.plan_flow.clear();
@@ -2994,6 +2999,7 @@ void UiApp::poll_plan_flow() {
       toast(tr("套餐已连接"));
       load_plans(true);
       load_providers();
+      if (!cid.empty()) refresh_plan_usage(cid);
       return;
     }
     if (status == "error") {
@@ -3030,6 +3036,8 @@ void UiApp::complete_plan_code() {
       });
       return;
     }
+    std::string cid = jsonutil::get<std::string>(
+        r.data.contains("connection") ? r.data["connection"] : Json::object(), "id", "");
     update([&](AppState& s) {
       s.plan_modal_open = false;
       s.plan_flow.clear();
@@ -3039,6 +3047,7 @@ void UiApp::complete_plan_code() {
     toast(tr("套餐已连接"));
     load_plans(true);
     load_providers();
+    if (!cid.empty()) refresh_plan_usage(cid);
   });
 }
 
@@ -3057,11 +3066,11 @@ void UiApp::close_plan_modal() {
   });
 }
 
-void UiApp::refresh_plan_usage() {
+void UiApp::refresh_plan_usage(const std::string& connection_id) {
   if (st_.plan_usage_loading) return;
   st_.plan_usage_loading = true;
   render();
-  call_async("plan.usage", Json{{"connectionId", ""}}, [this](const BackendResult& r) {
+  call_async("plan.usage", Json{{"connectionId", connection_id}}, [this](const BackendResult& r) {
     st_.plan_usage_loading = false;
     if (!r.ok) {
       toast(tr("额度刷新失败：") + r.message);
@@ -3073,22 +3082,84 @@ void UiApp::refresh_plan_usage() {
   }, true);
 }
 
+// A reset grant restarts the 5h/week window immediately. It is destructive on
+// the provider side (a consumed grant is gone), so ask first.
+void UiApp::reset_plan_credit(const std::string& connection_id) {
+  if (connection_id.empty()) return;
+  update([&](AppState& s) {
+    s.confirm_kind = "plan-reset";
+    s.confirm_id = connection_id;
+    s.confirm_arg.clear();
+    s.confirm_text = tr("使用一次重置额度？这会立即重置该套餐的限额窗口，已用次数不会退回。");
+  });
+}
+
+void UiApp::apply_plan_reset(const std::string& connection_id) {
+  if (connection_id.empty()) return;
+  call_async("plan.reset", Json{{"connectionId", connection_id}},
+             [this](const BackendResult& r) {
+    if (!r.ok) {
+      toast(tr("重置失败：") + r.message);
+      return;
+    }
+    std::string msg = jsonutil::get<std::string>(r.data, "message", "");
+    toast(msg.empty() ? tr("额度已重置") : msg);
+    load_plans(true);
+    load_providers();
+  }, true);
+}
+
 VNodePtr UiApp::build_plan_box() {
   // Recomputed here, not only after the async list: the first paint on a remote
   // page must not briefly offer a login that cannot complete.
   st_.plan_remote = ui_remote();
-  H box = el("div", "plan-box");
-  H head = el("div", "plan-box-head");
-  head.add(el("span", "plan-box-title").text(tr("订阅套餐")));
-  if (st_.plan_remote) {
-    head.add(el("span", "plan-box-remote").text(
-        tr("远程连接不能添加套餐（授权回调需要在本机浏览器完成）")));
-  }
+  H section = el("div", "plan-section");
+  H head = el("div", "plan-section-head");
+  H titles = el("div", "plan-title-box");
+  titles.add(el("div", "plan-section-title").text(tr("订阅套餐")));
+  titles.add(el("div", "plan-section-sub dim").text(
+      st_.plan_remote
+          ? tr("远程连接不能添加套餐：授权回调需要在本机浏览器完成")
+          : tr("连接一个订阅套餐，它会自动加入左侧供应商列表；额度可随时刷新。")));
+  head.add(titles);
   head.add(el("span", "grow"));
+  if (st_.plan_usage_loading) {
+    head.add(el("span", "plan-loading dim").text(tr("刷新额度中…")));
+  }
   head.add(comp::icon_button("rotate", tr("刷新额度"), [this](const std::string&) {
     refresh_plan_usage();
   }));
-  box.add(head);
+  section.add(head);
+
+  // Reset times come as ISO strings (Claude/Gemini) or epoch ms (Codex/GLM).
+  auto reset_label = [](const Json& q) -> std::string {
+    if (!q.is_object() || !q.contains("resetAt")) return std::string();
+    const Json& v = q["resetAt"];
+    int64_t ms = 0;
+    if (v.is_number()) {
+      ms = v.get<int64_t>();
+      // Codex reports seconds; normalize so the label is not 1970.
+      if (ms > 0 && ms < 100000000000LL) ms *= 1000;
+    } else if (v.is_string()) {
+      const std::string s = v.get<std::string>();
+      if (s.size() >= 16) {
+        std::string out = s.substr(5, 11);
+        if (out.size() == 11 && out[5] == 'T') out[5] = ' ';
+        return out;
+      }
+      return s;
+    }
+    if (ms <= 0) return std::string();
+    time_t t = static_cast<time_t>(ms / 1000);
+    struct tm* g = localtime(&t);
+    if (!g) return std::string();
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d", g->tm_mon + 1,
+                  g->tm_mday, g->tm_hour, g->tm_min);
+    return std::string(buf);
+  };
+
+  H grid = el("div", "plan-grid");
   const Json& conns = st_.plan_connections;
   for (size_t i = 0; i < st_.plan_catalog.size(); ++i) {
     const Json& p = st_.plan_catalog[i];
@@ -3103,88 +3174,209 @@ VNodePtr UiApp::build_plan_box() {
         break;
       }
     }
-    H card = el("div", "plan-card");
-    H top = el("div", "plan-card-top");
-    top.add(el("span", "plan-name").text(name));
-    if (!conn.empty()) {
+    const bool connected = conn.is_object() && !conn.empty();
+    const std::string cid = jsonutil::get<std::string>(conn, "id", "");
+    H card = el("div", connected ? "plan-tile connected" : "plan-tile");
+    card.attr("title", connected ? tr("已连接；可刷新/断开") : tr("点击连接此套餐"));
+    // Clicking the tile performs the same action as its primary button.
+    if (!connected) {
+      card.on(EventKind::kClick, [this, pid, auth](const std::string&) {
+        if (ui_remote()) {
+          toast(tr("远程连接不能添加套餐"));
+          return;
+        }
+        if (auth == "apikey") {
+          update([&](AppState& s) {
+            s.plan_modal_open = true;
+            s.plan_key_mode = true;
+            s.plan_provider = pid;
+            s.plan_status.clear();
+            s.plan_error.clear();
+            s.plan_key_draft.clear();
+            s.plan_region = "intl";
+          });
+        } else {
+          start_plan(pid);
+        }
+      });
+    }
+
+    H top = el("div", "plan-tile-top");
+    H mark = el("div", "plan-mark");
+    std::string brand = pid == "claude" ? "claude"
+                        : pid == "codex" ? "openai"
+                        : pid == "gemini" ? "gemini"
+                        : pid == "glm" ? "zai" : "";
+    if (!brand.empty()) {
+      mark.add(comp::model_icon(brand, name, "mi-lg"));
+    } else {
+      size_t n = first_utf8_len(name);
+      mark.text(n > 0 ? name.substr(0, n) : "?");
+    }
+    top.add(mark);
+    H names = el("div", "plan-tile-names");
+    names.add(el("div", "plan-tile-name").text(name));
+    names.add(el("div", "plan-tile-kind dim").text(
+        auth == "apikey" ? tr("订阅 API Key") : (auth == "poll" ? tr("OAuth 轮询") : tr("OAuth"))));
+    top.add(names);
+    if (connected) {
       top.add(comp::badge(tr("已连接")));
-      std::string plan = jsonutil::get<std::string>(conn, "plan", "");
-      if (!plan.empty() && plan != name) top.add(el("span", "plan-plan dim").text(plan));
     } else {
       top.add(el("span", "plan-off dim").text(tr("未连接")));
     }
-    top.add(el("span", "grow"));
-    if (!conn.empty()) {
-      std::string cid = jsonutil::get<std::string>(conn, "id", "");
-      H acts = el("span", "plan-acts");
-      acts.add(comp::button(tr("断开"), [this, cid](const std::string&) {
+    card.add(top);
+
+    if (connected) {
+      const Json& u = conn.contains("usage") ? conn["usage"] : Json::object();
+      std::string plan = jsonutil::get<std::string>(u, "plan",
+                          jsonutil::get<std::string>(conn, "plan", ""));
+      if (!plan.empty()) {
+        H line = el("div", "plan-plan-line");
+        line.add(el("span", "plan-label dim").text(tr("套餐")));
+        line.add(el("span", "plan-value").text(plan));
+        card.add(line);
+      }
+      const Json& qs = u.contains("quotas") ? u["quotas"] : Json::array();
+      if (qs.is_array() && !qs.empty()) {
+        H bars = el("div", "plan-bars");
+        for (size_t k = 0; k < qs.size(); ++k) {
+          std::string key = jsonutil::get<std::string>(qs[k], "key", "");
+          double remain = jsonutil::get_number(qs[k], "remaining", 0);
+          double used = jsonutil::get_number(qs[k], "used", 0);
+          if (remain < 0) remain = 0;
+          if (remain > 100) remain = 100;
+          H bar = el("div", "pq");
+          H pl = el("div", "pq-line");
+          pl.add(el("span", "pq-key").text(key));
+          pl.add(el("span", "pq-val").text(
+              itos(static_cast<int>(remain)) + tr("% 剩余")));
+          std::string reset = reset_label(qs[k]);
+          if (!reset.empty()) pl.add(el("span", "pq-reset dim").text(
+              tr("· 重置 ") + reset));
+          bar.add(pl);
+          H track = el("div", "pq-track");
+          H fill = el("div", remain <= 0.01 ? "pq-fill empty" : "pq-fill");
+          fill.style("width", itos(static_cast<int>(remain)) + "%");
+          track.add(fill);
+          bar.add(track);
+          bar.attr("title", tr("已用 ") + itos(static_cast<int>(used)) + "%");
+          bars.add(bar);
+        }
+        card.add(bars);
+      } else {
+        std::string err = jsonutil::get<std::string>(u, "error", "");
+        if (err == "quota API is not available for this plan") {
+          err = tr("该套餐没有公开的额度接口，请在官网控制台查看用量");
+        } else if (err == "not connected") {
+          err = tr("连接已失效，请重新登录");
+        } else if (!err.empty()) {
+          err = tr("额度读取失败：") + err;
+        }
+        card.add(el("div", "plan-quota-note dim").text(
+            err.empty() ? tr("额度：尚未读取，点右上角刷新") : err));
+      }
+      // Paid plans hand out a few "reset the 5h/week window" grants.
+      const Json& rc = u.contains("resetCredits") ? u["resetCredits"] : Json::object();
+      int reset_count = static_cast<int>(jsonutil::get_int(rc, "availableCount", 0));
+      if (reset_count > 0) {
+        H rr = el("div", "plan-reset");
+        rr.add(el("span", "plan-reset-badge").text(
+            tr("可用重置 ") + itos(reset_count) + tr(" 次")));
+        rr.add(comp::button(tr("使用重置"), [this, cid](const std::string&) {
+          reset_plan_credit(cid);
+        }, "ghost"));
+        card.add(rr);
+      }
+      H foot = el("div", "plan-tile-foot");
+      if (pid == "glm" || auth == "apikey") {
+        foot.add(comp::button(tr("更换密钥"), [this, pid](const std::string&) {
+          if (ui_remote()) {
+            toast(tr("远程连接不能添加套餐"));
+            return;
+          }
+          update([&](AppState& s) {
+            s.plan_modal_open = true;
+            s.plan_key_mode = true;
+            s.plan_provider = pid;
+            s.plan_status.clear();
+            s.plan_error.clear();
+            s.plan_key_draft.clear();
+            s.plan_region = "intl";
+          });
+        }, "ghost"));
+      }
+      if (auth != "apikey") {
+        foot.add(comp::button(tr("重新登录"), [this, pid](const std::string&) {
+          start_plan(pid);
+        }, "ghost"));
+      }
+      foot.add(comp::button(tr("断开"), [this, cid](const std::string&) {
         if (cid.empty()) return;
         call_async("plan.disconnect", Json{{"connectionId", cid}},
                    [this](const BackendResult&) { load_plans(true); load_providers(); },
                    true);
       }, "ghost"));
-      top.add(acts);
-    }
-    card.add(top);
-    // Quotas from the last read. Never invent a number: a plan whose gateway
-    // has no quota API says so.
-    if (!conn.empty()) {
-      const Json& u = conn.contains("usage") ? conn["usage"] : Json::object();
-      const Json& qs = u.contains("quotas") ? u["quotas"] : Json::array();
-      H qrow = el("div", "plan-quotas");
-      if (qs.is_array() && !qs.empty()) {
-        for (size_t k = 0; k < qs.size(); ++k) {
-          std::string key = jsonutil::get<std::string>(qs[k], "key", "");
-          double remain = jsonutil::get_number(qs[k], "remaining", 0);
-          double used = jsonutil::get_number(qs[k], "used", 0);
-          H chip = el("div", remain <= 0.01 ? "plan-quota empty" : "plan-quota");
-          chip.add(el("span", "pq-key").text(key));
-          chip.add(el("span", "pq-val").text(itos(static_cast<int>(remain)) + "%"));
-          chip.attr("title", tr("已用 ") + itos(static_cast<int>(used)) + "%");
-          qrow.add(chip);
-        }
+      card.add(foot);
+    } else {
+      card.add(el("div", "plan-tile-hint dim").text(
+          auth == "apikey"
+              ? tr("粘贴官网控制台的套餐 API Key 即可接入")
+              : tr("用浏览器登录订阅账号；完成后这里显示 5h / 周额度")));
+      H foot = el("div", "plan-tile-foot");
+      if (auth == "apikey") {
+        H b = comp::button(tr("添加密钥"), [this, pid](const std::string&) {
+          if (ui_remote()) {
+            toast(tr("远程连接不能添加套餐"));
+            return;
+          }
+          update([&](AppState& s) {
+            s.plan_modal_open = true;
+            s.plan_key_mode = true;
+            s.plan_provider = pid;
+            s.plan_status.clear();
+            s.plan_error.clear();
+            s.plan_key_draft.clear();
+            s.plan_region = "intl";
+          });
+        }, "primary");
+        if (st_.plan_remote) b.cls("disabled");
+        foot.add(b);
       } else {
-        std::string err = jsonutil::get<std::string>(u, "error", "");
-        qrow.add(el("span", "plan-quota-note dim").text(
-            err.empty() ? tr("额度：尚未读取") : tr("额度：") + err));
-      }
-      card.add(qrow);
-    }
-    H foot = el("div", "plan-card-foot");
-    if (auth == "apikey" || pid == "glm") {
-      foot.add(comp::button(tr("使用 API Key"), [this, pid, auth](const std::string&) {
-        if (ui_remote()) {
-          toast(tr("远程连接不能添加套餐"));
-          return;
+        H b = comp::button(tr("连接"), [this, pid](const std::string&) {
+          start_plan(pid);
+        }, "primary");
+        if (st_.plan_remote) {
+          b.cls("disabled");
+          b.attr("title", tr("远程连接不能添加套餐"));
         }
-        update([&](AppState& s) {
-          s.plan_modal_open = true;
-          s.plan_key_mode = true;
-          s.plan_provider = pid;
-          s.plan_status.clear();
-          s.plan_error.clear();
-          s.plan_key_draft.clear();
-          s.plan_region = "intl";
-        });
-      }, "ghost"));
-    }
-    if (auth != "apikey") {
-      std::string label = conn.empty() ? tr("连接") : tr("重新登录");
-      H b = comp::button(label, [this, pid](const std::string&) { start_plan(pid); },
-                         conn.empty() ? "primary" : "ghost");
-      if (st_.plan_remote) {
-        b.cls("disabled");
-        b.attr("title", tr("远程连接不能添加套餐"));
+        foot.add(b);
+        if (pid == "glm") {
+          foot.add(comp::button(tr("API Key"), [this, pid](const std::string&) {
+            if (ui_remote()) {
+              toast(tr("远程连接不能添加套餐"));
+              return;
+            }
+            update([&](AppState& s) {
+              s.plan_modal_open = true;
+              s.plan_key_mode = true;
+              s.plan_provider = pid;
+              s.plan_status.clear();
+              s.plan_error.clear();
+              s.plan_key_draft.clear();
+              s.plan_region = "intl";
+            });
+          }, "ghost"));
+        }
       }
-      foot.add(b);
+      card.add(foot);
     }
-    card.add(foot);
-    box.add(card);
+    grid.add(card);
   }
   if (st_.plan_catalog.empty()) {
-    box.add(el("div", "plan-empty dim").text(tr("正在读取套餐列表…")));
+    grid.add(el("div", "plan-empty dim").text(tr("正在读取套餐列表…")));
   }
-  return box.get();
+  section.add(grid);
+  return section.get();
 }
 
 VNodePtr UiApp::build_plan_modal() {
@@ -6883,6 +7075,11 @@ VNodePtr UiApp::build_new_tab() {
   wrap.add(head);
   H body = el("div", "new-body");
   if (st_.search_query.empty()) {
+    // Connects first: a subscription is the top-level source of models, and a
+    // connected plan is mirrored into the provider list in Settings.
+    VNodePtr plans = build_plan_box();
+    plans->key = "new:plans";
+    body.add(plans);
     VNodePtr cards = build_home_projects();
     cards->key = "new:projects";
     body.add(cards);
@@ -11488,9 +11685,8 @@ VNodePtr UiApp::build_settings() {
           static_cast<int>(st_.provider_creating),
           static_cast<int>(st_.pv_template_picked), st_.provider_selected.c_str(),
           st_.provider_templates.size());
-    // Subscription plans live ABOVE the endpoint fields: a plan is a login, a
-    // provider is an endpoint, and the login is what decides which endpoint.
-    body.add(build_plan_box());
+    // Connected plans are mirrored as providers, so they show up in the list
+    // below; the login cards themselves live on the New page.
     // --- 供应商：左列表（选择/新建），右侧编辑或模板向导 ---
     H two = el("div", "pv-two");
     two.key("pv-two");
@@ -11531,6 +11727,9 @@ VNodePtr UiApp::build_settings() {
       }
       H top = el("div", "pv-item-top");
       top.add(el("span", "pv-item-name").text(p.name.empty() ? p.id : p.name));
+      // Mirrored subscription connections are providers too, but the user needs
+      // to know where they came from (they are managed on the New page).
+      if (p.id.rfind("plan_", 0) == 0) top.add(comp::badge(tr("套餐")));
       if (!p.enabled) top.add(comp::badge(tr("停用")));
       if (!p.has_key) top.add(comp::badge(tr("无密钥")));
       it.add(top);
@@ -13264,6 +13463,7 @@ VNodePtr UiApp::build_overlays() {
     if (kind == "rollback") ok_label = tr("回滚");
     else if (kind == "discard-turn") ok_label = tr("撤销");
     else if (kind == "forget") ok_label = tr("忘记");
+    else if (kind == "plan-reset") ok_label = tr("重置");
     std::vector<H> body;
     body.push_back(el("div").text(st_.confirm_text));
     layer.add(comp::modal(tr("请确认"), body, ok_label,
@@ -13277,6 +13477,7 @@ VNodePtr UiApp::build_overlays() {
       if (kind == "session") delete_session(id);
       else if (kind == "rollback") rollback_to_turn(id, arg);
       else if (kind == "forget") forget_turn(id, arg);
+      else if (kind == "plan-reset") apply_plan_reset(id);
     },
                           [this](const std::string&) {
       update([&](AppState& s) {
@@ -13902,6 +14103,8 @@ void UiApp::open_modal_page(const std::string& page) {
   // build_settings must stay a pure function of state: when it kicked off a
   // load whose reply re-renders, the Web-service page looped forever.
   if (page == "settings" && backend_) load_settings_section(st_.settings_nav);
+  // Same rule for New: opening the page is the effect, build_* stays pure.
+  if (page == "new" && backend_) load_plans();
   render();
 }
 

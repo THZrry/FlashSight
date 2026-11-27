@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -174,25 +175,96 @@ std::string google_client_secret() {
   return (v && *v) ? std::string(v) : std::string();
 }
 
-// Quota reset times arrive as an epoch (Codex/GLM) or ISO-8601 (Claude/Gemini).
-int64_t reset_ms(const Json& q) {
-  if (!q.is_object() || !q.contains("resetAt")) return 0;
-  const Json& v = q["resetAt"];
-  if (v.is_number()) return v.get<int64_t>();
-  if (!v.is_string()) return 0;
-  std::string s = v.get<std::string>();
+int64_t iso_ms(const std::string& s) {
   if (s.empty()) return 0;
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0;
+  // Tolerates the trailing Z, fractional seconds and a numeric timezone: all
+  // quota timestamps are UTC, so only the wall-clock fields matter.
+  if (std::sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) < 5) {
+    return 0;
+  }
   struct tm t;
   std::memset(&t, 0, sizeof(t));
-  std::istringstream in(s);
-  in >> std::get_time(&t, "%Y-%m-%dT%H:%M");
-  if (in.fail()) return 0;
+  t.tm_year = y - 1900;
+  t.tm_mon = mo - 1;
+  t.tm_mday = d;
+  t.tm_hour = h;
+  t.tm_min = mi;
+  t.tm_sec = se;
 #ifdef _WIN32
   time_t epoch = _mkgmtime(&t);
 #else
   time_t epoch = timegm(&t);
 #endif
   return epoch > 0 ? static_cast<int64_t>(epoch) * 1000 : 0;
+}
+
+// Reset times arrive in three shapes: epoch ms (GLM), epoch SECONDS (Codex
+// reset_at) and ISO-8601 (Claude/Gemini). Normalize to ms so scheduling and the
+// card's date don't land in 1970.
+int64_t epoch_ms(int64_t v) {
+  if (v <= 0) return 0;
+  return v < 100000000000LL ? v * 1000 : v;
+}
+
+int64_t reset_ms(const Json& q) {
+  if (!q.is_object() || !q.contains("resetAt")) return 0;
+  const Json& v = q["resetAt"];
+  if (v.is_number()) return epoch_ms(v.get<int64_t>());
+  if (!v.is_string()) return 0;
+  return iso_ms(v.get<std::string>());
+}
+
+// Claude's usage reply carries the free "limit reset" grants (program
+// cedar_ember): {eligible,next_grant_id,grants:[{id,resets_left,ends_at,...}]}.
+Json parse_claude_reset(const Json& block) {
+  Json out = Json::object();
+  if (!block.is_object() || !jsonutil::get<bool>(block, "eligible", false)) {
+    return out;
+  }
+  Json arr = Json::array();
+  int available = 0;
+  const Json& grants = block.contains("grants") && block["grants"].is_array()
+                           ? block["grants"]
+                           : Json::array();
+  for (size_t i = 0; i < grants.size(); ++i) {
+    const Json& g = grants[i];
+    if (!g.is_object()) continue;
+    std::string id = jsonutil::get<std::string>(g, "id", "");
+    int left = static_cast<int>(jsonutil::get_int(g, "resets_left", 0));
+    if (id.empty() || left <= 0 || jsonutil::get<bool>(g, "paused", false)) continue;
+    available += left;
+    Json row = Json::object();
+    row["id"] = id;
+    row["label"] = jsonutil::get<std::string>(g, "label", "");
+    row["resetsLeft"] = left;
+    row["endsAt"] = iso_ms(jsonutil::get<std::string>(g, "ends_at", ""));
+    row["usableNow"] = jsonutil::get<bool>(g, "usable_now", true);
+    arr.push_back(row);
+  }
+  out["availableCount"] = available;
+  out["grants"] = arr;
+  out["nextGrantId"] = jsonutil::get<std::string>(block, "next_grant_id", "");
+  return out;
+}
+
+std::string uuid_like() {
+  std::string h = random_hex(16);
+  return h.substr(0, 8) + "-" + h.substr(8, 4) + "-" + h.substr(12, 4) +
+         "-" + h.substr(16, 4) + "-" + h.substr(20);
+}
+
+// Grant ids come from the server and only ever go in a request body, but a
+// malformed/surprisingly long value is still a protocol error worth refusing.
+bool valid_grant_id(const std::string& id) {
+  if (id.empty() || id.size() > 64) return false;
+  for (size_t i = 0; i < id.size(); ++i) {
+    char c = id[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-';
+    if (!ok) return false;
+  }
+  return true;
 }
 
 // Decode a JWT payload (no signature check - it is the token we just received
@@ -347,6 +419,16 @@ Json PlanManager::conn_public(const Conn& c) const {
   j.erase("refreshToken");
   j["connected"] = !c.access.empty();
   return j;
+}
+
+Json PlanManager::mirror_connections() const {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  Json out = Json::array();
+  const Json& arr = doc_.contains("connections") && doc_["connections"].is_array()
+                        ? doc_["connections"]
+                        : Json::array();
+  for (size_t i = 0; i < arr.size(); ++i) out.push_back(arr[i]);
+  return out;
 }
 
 Json PlanManager::list() const {
@@ -581,8 +663,7 @@ FsResult PlanManager::exchange_tokens(Flow* f, const std::string& code) {
   c.meta = "oauth";
   {
     std::lock_guard<std::recursive_mutex> lk(mu_);
-    if (!doc_.contains("connections")) doc_["connections"] = Json::array();
-    doc_["connections"].push_back(c.to_json());
+    upsert_connection(&c);
     save();
     f->status = "ready";
   }
@@ -737,8 +818,7 @@ FsResult PlanManager::poll_glm(Flow* f) {
   c.created_at = now_ms_clock(clock_);
   {
     std::lock_guard<std::recursive_mutex> lk(mu_);
-    if (!doc_.contains("connections")) doc_["connections"] = Json::array();
-    doc_["connections"].push_back(c.to_json());
+    upsert_connection(&c);
     save();
     f->status = "ready";
   }
@@ -826,6 +906,34 @@ FsResult PlanManager::disconnect(const std::string& connection_id) {
   return FsResult::success();
 }
 
+void PlanManager::upsert_connection(Conn* c) {
+  if (!c) return;
+  if (!doc_.contains("connections") || !doc_["connections"].is_array()) {
+    doc_["connections"] = Json::array();
+  }
+  Json keep = Json::array();
+  bool placed = false;
+  for (size_t i = 0; i < doc_["connections"].size(); ++i) {
+    const Json& old = doc_["connections"][i];
+    if (jsonutil::get<std::string>(old, "provider", "") != c->provider) {
+      keep.push_back(old);
+      continue;
+    }
+    if (!placed) {
+      // Keep the identity (and creation time) so open cards and the mirrored
+      // provider id stay stable across a re-login/key replacement.
+      std::string old_id = jsonutil::get<std::string>(old, "id", "");
+      if (!old_id.empty()) c->id = old_id;
+      int64_t old_created = jsonutil::get_int(old, "createdAt", 0);
+      if (old_created > 0) c->created_at = old_created;
+      keep.push_back(c->to_json());
+      placed = true;
+    }
+  }
+  if (!placed) keep.push_back(c->to_json());
+  doc_["connections"] = keep;
+}
+
 FsResult PlanManager::add_key(const std::string& provider, const std::string& key,
                               const std::string& region, bool remote) {
   // A remote page cannot complete plan login either; keep the whole plans UI
@@ -850,8 +958,7 @@ FsResult PlanManager::add_key(const std::string& provider, const std::string& ke
   c.created_at = now_ms_clock(clock_);
   {
     std::lock_guard<std::recursive_mutex> lk(mu_);
-    if (!doc_.contains("connections")) doc_["connections"] = Json::array();
-    doc_["connections"].push_back(c.to_json());
+    upsert_connection(&c);
     save();
   }
   Json pub = conn_public(c);
@@ -864,7 +971,11 @@ bool PlanManager::touch_provider(const std::string& provider_id, std::string* ap
   if (!doc_.contains("connections") || !doc_["connections"].is_array()) return false;
   for (size_t i = 0; i < doc_["connections"].size(); ++i) {
     Json& j = doc_["connections"][i];
-    if (jsonutil::get<std::string>(j, "provider", "") != provider_id) continue;
+    // The caller passes the mirrored provider id (plan_claude), while the
+    // connection stores the bare provider (claude). Comparing only the bare id
+    // meant the token was never refreshed on the model-call path.
+    const std::string bare = jsonutil::get<std::string>(j, "provider", "");
+    if (bare != provider_id && "plan_" + bare != provider_id) continue;
     Conn c;
     c.provider = provider_id;
     c.access = jsonutil::get<std::string>(j, "accessToken", "");
@@ -975,6 +1086,8 @@ Json PlanManager::refresh_usage_one(Conn* c) {
     auto add = [&](const char* key, const Json& w) {
       if (!w.is_object() || !w.contains("utilization")) return;
       double used = jsonutil::get_number(w, "utilization", 0);
+      if (used < 0) used = 0;
+      if (used > 100) used = 100;
       Json q = Json::object();
       q["key"] = key;
       q["used"] = used;
@@ -984,7 +1097,45 @@ Json PlanManager::refresh_usage_one(Conn* c) {
     };
     add("5h", j.contains("five_hour") ? j["five_hour"] : Json());
     add("week", j.contains("seven_day") ? j["seven_day"] : Json());
+    // Model-scoped weekly windows (seven_day_opus, seven_day_sonnet, ...).
+    for (Json::const_iterator it = j.begin(); it != j.end(); ++it) {
+      const std::string& key = it.key();
+      if (key.rfind("seven_day_", 0) == 0 && key != "seven_day" &&
+          it.value().is_object() && it.value().contains("utilization")) {
+        std::string label = "week " + key.substr(10);
+        add(label.c_str(), it.value());
+      }
+    }
+    // Newer replies put scoped windows in limits[] instead.
+    if (j.contains("limits") && j["limits"].is_array()) {
+      const Json& limits = j["limits"];
+      for (size_t i = 0; i < limits.size(); ++i) {
+        if (jsonutil::get<std::string>(limits[i], "kind", "") != "weekly_scoped") {
+          continue;
+        }
+        std::string model = jsonutil::get<std::string>(
+            limits[i].contains("scope") && limits[i]["scope"].is_object() &&
+                    limits[i]["scope"].contains("model")
+                ? limits[i]["scope"]["model"]
+                : Json::object(),
+            "display_name", "");
+        if (model.empty() || !limits[i].contains("percent")) continue;
+        double pct = jsonutil::get_number(limits[i], "percent", 0);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        Json q = Json::object();
+        q["key"] = "week " + model;
+        q["used"] = pct;
+        q["remaining"] = 100.0 - pct;
+        q["resetAt"] = jsonutil::get<std::string>(limits[i], "resets_at", "");
+        out["quotas"].push_back(q);
+      }
+    }
     out["plan"] = "Claude Code";
+    if (j.contains("cedar_ember")) {
+      Json rc = parse_claude_reset(j["cedar_ember"]);
+      if (!rc.empty()) out["resetCredits"] = rc;
+    }
   } else if (c->provider == "codex") {
     HttpRequest req;
     req.url = "https://chatgpt.com/backend-api/wham/usage";
@@ -1000,25 +1151,57 @@ Json PlanManager::refresh_usage_one(Conn* c) {
     try { j = Json::parse(res.body); } catch (...) {
       out["error"] = "invalid usage JSON"; return out;
     }
-    Json rl = j.contains("rate_limit") ? j["rate_limit"] : j;
-    auto add = [&](const char* key, const Json& w) {
-      if (!w.is_object()) return;
+    Json rl = j.contains("rate_limit") ? j["rate_limit"]
+             : j.contains("rate_limits") ? j["rate_limits"] : j;
+    std::vector<std::string> seen;
+    auto add_window = [&](const Json& w, const char* fallback) {
+      // An empty placeholder (used_percent 0, no reset_at) is common in the
+      // secondary slot; counting it produced a fake "100% left" week.
+      if (!w.is_object() ||
+          (!w.contains("used_percent") && !w.contains("percent_used"))) {
+        return;
+      }
       double used = jsonutil::get_number(w, "used_percent",
                                          jsonutil::get_number(w, "percent_used", 0));
+      if (used < 0) used = 0;
+      if (used > 100) used = 100;
+      int64_t secs = jsonutil::get_int(w, "limit_window_seconds", 0);
+      std::string key = fallback;
+      if (secs > 0) {
+        if (secs <= 6 * 3600) key = "5h";
+        else if (secs >= 6 * 86400) key = "week";
+        else key = std::to_string(static_cast<int>(secs / 3600)) + "h";
+      }
+      for (size_t i = 0; i < seen.size(); ++i) {
+        if (seen[i] == key) return;
+      }
+      seen.push_back(key);
       Json q = Json::object();
       q["key"] = key;
       q["used"] = used;
       q["remaining"] = 100.0 - used;
-      q["resetAt"] = jsonutil::get_int(w, "reset_at", 0);
+      int64_t reset = epoch_ms(jsonutil::get_int(w, "reset_at", 0));
+      if (reset <= 0) {
+        int64_t after = jsonutil::get_int(w, "reset_after_seconds", 0);
+        if (after > 0) reset = now_ms_clock(clock_) + after * 1000;
+      }
+      q["resetAt"] = reset;
       out["quotas"].push_back(q);
     };
-    add("5h", rl.contains("primary_window") ? rl["primary_window"] : Json());
-    add("week", rl.contains("secondary_window") ? rl["secondary_window"] : Json());
-    out["plan"] = jsonutil::get<std::string>(j, "plan_type", "ChatGPT");
-    if (j.contains("rate_limit_reset_credits") &&
-        j["rate_limit_reset_credits"].is_object()) {
-      out["resetCredits"] = j["rate_limit_reset_credits"].value("available_count", 0);
-    }
+    add_window(rl.contains("primary_window") ? rl["primary_window"] : Json(), "5h");
+    add_window(rl.contains("secondary_window") ? rl["secondary_window"] : Json(), "week");
+    out["plan"] = jsonutil::get<std::string>(
+        j, "plan_type",
+        jsonutil::get<std::string>(
+            j.contains("summary") ? j["summary"] : Json::object(), "plan", "ChatGPT"));
+      if (j.contains("rate_limit_reset_credits") &&
+          j["rate_limit_reset_credits"].is_object()) {
+        Json rc = Json::object();
+        rc["availableCount"] = jsonutil::get_int(
+            j["rate_limit_reset_credits"], "available_count", 0);
+        rc["grants"] = Json::array();
+        out["resetCredits"] = rc;
+      }
   } else if (c->provider == "gemini") {
     // loadCodeAssist gives the project id + tier; retrieveUserQuota gives buckets.
     HttpRequest req;
@@ -1080,14 +1263,24 @@ Json PlanManager::refresh_usage_one(Conn* c) {
     for (size_t i = 0; i < limits.size(); ++i) {
       std::string type = jsonutil::get<std::string>(limits[i], "type", "");
       if (type != "TOKENS_LIMIT" && type != "CREDIT_LIMIT") continue;
-      double pct = jsonutil::get_number(limits[i], "percentage", 0);
+      // Newer responses omit percentage and only carry used/total credits.
+      double pct = 0;
+      if (limits[i].contains("percentage")) {
+        pct = jsonutil::get_number(limits[i], "percentage", 0);
+      } else {
+        double total = jsonutil::get_number(limits[i], "usage", 0);
+        double used_credits = jsonutil::get_number(limits[i], "currentValue", 0);
+        if (total > 0) pct = used_credits / total * 100.0;
+      }
+      if (pct < 0) pct = 0;
+      if (pct > 100) pct = 100;
       int unit = static_cast<int>(jsonutil::get_int(limits[i], "unit", 0));
       std::string key = unit == 3 ? "5h" : unit == 6 ? "week" : type;
       Json q = Json::object();
       q["key"] = key;
       q["used"] = pct;
       q["remaining"] = 100.0 - pct;
-      q["resetAt"] = jsonutil::get_int(limits[i], "nextResetTime", 0);
+      q["resetAt"] = epoch_ms(jsonutil::get_int(limits[i], "nextResetTime", 0));
       out["quotas"].push_back(q);
     }
   } else {
@@ -1099,10 +1292,172 @@ Json PlanManager::refresh_usage_one(Conn* c) {
   return out;
 }
 
+// ---- quota reset credits --------------------------------------------------
+
+FsResult PlanManager::reset_credit(const std::string& connection_id) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  if (!doc_.contains("connections") || !doc_["connections"].is_array()) {
+    return FsResult::error(ErrCode::kNotFound, "no plan connections");
+  }
+  size_t idx = 0;
+  bool found = false;
+  for (size_t i = 0; i < doc_["connections"].size(); ++i) {
+    if (jsonutil::get<std::string>(doc_["connections"][i], "id", "") ==
+        connection_id) {
+      idx = i;
+      found = true;
+      break;
+    }
+  }
+  if (!found) return FsResult::error(ErrCode::kNotFound, "plan connection not found");
+  Json& j = doc_["connections"][idx];
+  Conn c;
+  c.id = connection_id;
+  c.provider = jsonutil::get<std::string>(j, "provider", "");
+  c.label = jsonutil::get<std::string>(j, "label", "");
+  c.access = jsonutil::get<std::string>(j, "accessToken", "");
+  c.refresh = jsonutil::get<std::string>(j, "refreshToken", "");
+  c.account_id = jsonutil::get<std::string>(j, "accountId", "");
+  c.expires_at = jsonutil::get_int(j, "expiresAt", 0);
+  if (c.access.empty()) return FsResult::error(ErrCode::kNotFound, "not connected");
+  refresh_conn(&c);
+  Json u = refresh_usage_one(&c);
+  const Json& rc = u.contains("resetCredits") ? u["resetCredits"] : Json::object();
+  int available = static_cast<int>(jsonutil::get_int(rc, "availableCount", 0));
+  if (available <= 0) {
+    return FsResult::error(ErrCode::kNotFound,
+                           "no quota reset credit is available right now");
+  }
+  if (c.provider == "claude") {
+    const Json& grants = rc.contains("grants") && rc["grants"].is_array()
+                             ? rc["grants"]
+                             : Json::array();
+    // Claude names the grant to spend in next_grant_id; use it when it is
+    // usable, otherwise the first usable one.
+    std::string preferred = jsonutil::get<std::string>(rc, "nextGrantId", "");
+    std::string grant_id;
+    auto usable = [&](const Json& g) {
+      return jsonutil::get<bool>(g, "usableNow", true) &&
+             jsonutil::get_int(g, "resetsLeft", 0) > 0 &&
+             valid_grant_id(jsonutil::get<std::string>(g, "id", ""));
+    };
+    for (size_t i = 0; i < grants.size(); ++i) {
+      if (usable(grants[i]) &&
+          jsonutil::get<std::string>(grants[i], "id", "") == preferred) {
+        grant_id = preferred;
+        break;
+      }
+    }
+    for (size_t i = 0; i < grants.size() && grant_id.empty(); ++i) {
+      if (usable(grants[i])) {
+        grant_id = jsonutil::get<std::string>(grants[i], "id", "");
+      }
+    }
+    if (grant_id.empty()) {
+      return FsResult::error(ErrCode::kNotFound,
+                             "no usable Claude reset grant (the limit may not be reached yet)");
+    }
+    HttpRequest prof;
+    prof.url = "https://api.anthropic.com/api/oauth/profile";
+    prof.headers["Authorization"] = "Bearer " + c.access;
+    prof.headers["anthropic-beta"] = "oauth-2025-04-20";
+    prof.headers["anthropic-version"] = "2023-06-01";
+    prof.headers["User-Agent"] = "claude-cli/2.0.0 (external, cli)";
+    HttpResponse pr;
+    FsResult pfr = net_->request(prof, &pr);
+    if (!pfr.ok()) return pfr;
+    Json pj;
+    try { pj = Json::parse(pr.body); } catch (...) {
+      return FsResult::error(ErrCode::kParse, "Claude profile is invalid JSON");
+    }
+    std::string org = jsonutil::get<std::string>(
+        pj.contains("organization") ? pj["organization"] : Json::object(),
+        "uuid", "");
+    if (org.empty()) {
+      return FsResult::error(ErrCode::kRemote,
+                             "Claude profile is missing the organization id");
+    }
+    HttpRequest reset;
+    reset.method = "POST";
+    reset.url = "https://api.anthropic.com/api/organizations/" + org +
+                "/reset_rate_limits";
+    reset.headers["Authorization"] = "Bearer " + c.access;
+    reset.headers["anthropic-beta"] = "oauth-2025-04-20";
+    reset.headers["anthropic-version"] = "2023-06-01";
+    reset.headers["User-Agent"] = "claude-cli/2.0.0 (external, cli)";
+    reset.headers["Content-Type"] = "application/json";
+    reset.body = Json{{"program", "cedar_ember"},
+                      {"grant_id", grant_id},
+                      {"request_id", uuid_like()}}.dump();
+    HttpResponse rr;
+    FsResult rfr = net_->request(reset, &rr);
+    if (!rfr.ok()) return rfr;
+    Json rj;
+    try { rj = Json::parse(rr.body); } catch (...) {
+      rj = Json::object();
+    }
+    if (jsonutil::get<std::string>(rj, "result", "") != "reset") {
+      return FsResult::error(
+          ErrCode::kRemote,
+          "Claude did not accept the reset: " +
+              jsonutil::get<std::string>(rj, "reason",
+                                         jsonutil::get<std::string>(rj, "error", "unknown")));
+    }
+  } else if (c.provider == "codex") {
+    HttpRequest reset;
+    reset.method = "POST";
+    reset.url =
+        "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+    reset.headers["Authorization"] = "Bearer " + c.access;
+    reset.headers["Accept"] = "application/json";
+    reset.headers["Content-Type"] = "application/json";
+    reset.headers["OpenAI-Beta"] = "codex-1";
+    reset.headers["originator"] = "codex_cli_rs";
+    if (!c.account_id.empty()) reset.headers["ChatGPT-Account-ID"] = c.account_id;
+    reset.body = Json{{"redeem_request_id", uuid_like()}}.dump();
+    HttpResponse rr;
+    FsResult rfr = net_->request(reset, &rr);
+    if (!rfr.ok()) return rfr;
+    Json rj;
+    try { rj = Json::parse(rr.body); } catch (...) {
+      rj = Json::object();
+    }
+    std::string code = jsonutil::get<std::string>(rj, "code", "");
+    int windows = static_cast<int>(jsonutil::get_int(rj, "windows_reset", 0));
+    // "already_redeemed" is the idempotent replay of a successful redemption.
+    if (code != "reset" && code != "already_redeemed" && windows <= 0) {
+      std::string msg = "Codex did not accept the reset";
+      if (code == "no_credit") msg = "no Codex reset credit is available";
+      else if (code == "nothing_to_reset") {
+        msg = "no Codex rate-limit window needs a reset right now";
+      }
+      return FsResult::error(ErrCode::kRemote, msg);
+    }
+  } else {
+    return FsResult::error(ErrCode::kNotSupported,
+                           "this plan has no quota reset credits");
+  }
+  // Reflect the new limits immediately.
+  Json after = refresh_usage_one(&c);
+  j["accessToken"] = c.access;
+  j["refreshToken"] = c.refresh;
+  j["expiresAt"] = c.expires_at;
+  j["usage"] = after;
+  j["lastUsageAt"] = now_ms_clock(clock_);
+  if (ready_) ready_(c.to_json());
+  save();
+  return FsResult::success(Json{{"ok", true}, {"usage", after}});
+}
+
 // ---- token refresh --------------------------------------------------------
 
 FsResult PlanManager::refresh_conn(Conn* c) {
   if (!c || c->refresh.empty()) return FsResult::success();
+  // A quota read used to force a refresh on every call. Besides the waste, the
+  // refresh tokens rotate: hammering the endpoint can invalidate the connection.
+  if (c->expires_at > 0 && c->expires_at - now_ms_clock(clock_) > 60 * 1000) {
+    return FsResult::success();
+  }
   if (c->provider == "claude") {
     HttpRequest req;
     req.method = "POST";
