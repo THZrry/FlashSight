@@ -1913,3 +1913,10 @@ The process of project: P0 环境搭建
   - **验证**：临时移走 `3rdparty/json/json.hpp` 时 `xmake f` 打印 missing 清单；恢复后 configure 成功。`g++ -fsyntax-only fs_json.cpp` 只靠 vendored include 通过。520 用例 4572 断言全过；web/whaleui 重链，webview 正式文件仍被占用，最新 `flashsight-webview-new.exe`。
   - **SVG**：`temp/flashsight.jpg` 实际是 2048×2048 PNG（扩展名不对）；用临时 potrace 转成 `temp/flashsight.svg`：2048 viewBox、白底、`#2d70a7`、平滑 Bézier、约 5KB，保留原图留白。转换用的 node_modules、中间截图和测试 root 已清理，temp 里只留原 jpg 和最终 svg。
 
+
+<148>(CI/GTK/ICON): Linux webview 补 pkg-config 包到实际编译/链接 target；Windows 补 PATH/CC；SVG/ICO 进仓库并嵌进 exe。
+  - **Linux `gtk/gtk.h`**：`webview.h` 在 `ui_dom_webview.cpp` 里被 include，但这个文件属于 `fs_ui_host_webview`，不是 `webview_host`；xmake 的 `add_packages` include/link 值不会通过 `add_deps` 传给消费者。现在 `webview_host`、`fs_ui_host_webview`、`flashsight-webview` 三个 target 都声明 `pkgconfig::gtk4` / `pkgconfig::webkitgtk-6.0`，最终 exe 也拿到 GTK/WebKit 链接行。`add_requires` 去掉与 `pkgconfig::` 冲突的 `system=true`，保留 `optional=true`，Web/WhaleUI-only 仍然可配置。
+  - **Windows `cannot get program for cc`**：给 MSYS2 x64 和 llvm-mingw arm64 两条路径都把 `mingw64/bin` / llvm-mingw `bin` 加入 `GITHUB_PATH`，并设置 `CC`/`CXX` 为目标前缀编译器；避免 webview target 在第二个 `xmake build` 里回退找不存在的裸 `cc`。
+  - **图标**：`packaging/flashsight.svg` 换成新 logo；新增 `packaging/flashsight.ico`（单条 256×256 PNG-compressed ICO，Windows 能读）和 `packaging/flashsight.rc`（`1 ICON "packaging/flashsight.ico"`）。Windows 的 web/webview/whaleui 三个 exe 都通过 xmake 编译 `.rc` 并链接资源；本地 `ExtractAssociatedIcon` 能取到图标。AppImage 继续使用 `packaging/flashsight.svg`。
+  - **验证**：xmake configure 成功；web/whaleui 带资源重链，webview 正式文件仍被运行实例占用，最新 `flashsight-webview-new.exe`（带 rc.obj）；520 用例 4572 断言全过。Linux 交叉编译与 Windows arm64 的 windres 路径没有本地环境实测，需要在 CI 验证。
+

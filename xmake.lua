@@ -176,8 +176,11 @@ option_end()
 -- Linux webview runs on GTK4 + WebKitGTK 6.0. Declared as system pkg-config
 -- packages (optional so a Web/WhaleUI build without GTK still configures).
 if is_plat("linux", "bsd") then
+    -- `pkgconfig::` already forces the system pkg-config source; `system=true`
+    -- on top of that made the optional lookup silently skip on some xmake
+    -- versions. Keep only optional so a Web/WhaleUI-only build still works.
     add_requires("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0",
-                 {system = true, optional = true})
+                 {optional = true})
 end
 
 -- wasm needs a smaller include set (no mbedtls/httplib/md4c/reproc)
@@ -825,6 +828,13 @@ target("fs_ui_host_webview")
     add_defines("FS_UI_WEBVIEW")
     add_deps("fs_ui", "fs_core", "mbedtls_src", "webview_host")
     add_cxxflags("-Wall")
+    -- ui_dom_webview.cpp includes webview.h, which includes gtk/gtk.h on Linux.
+    -- Package include dirs are per-TARGET, not inherited through add_deps, so
+    -- this target needs the same pkg-config packages as webview_host. Without
+    -- them the first compile failed with "gtk/gtk.h: No such file or directory".
+    if is_plat("linux", "bsd") then
+        add_packages("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0")
+    end
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi",
@@ -869,6 +879,7 @@ target("flashsight-web")
     add_deps("fs_ui", "fs_core", "mbedtls_src")
     add_cxxflags("-Wall")
     if is_plat("windows") then
+        add_files("packaging/flashsight.rc")
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
     else
@@ -887,6 +898,14 @@ target("flashsight-webview")
     add_defines("FS_UI_WEBVIEW")
     add_deps("fs_ui_host_webview", "fs_ui", "fs_core", "mbedtls_src")
     add_cxxflags("-Wall")
+    if is_plat("windows") then
+        add_files("packaging/flashsight.rc")
+    end
+    -- Link the GTK/WebKitGTK libs into the executable as well; package links on
+    -- a static dependency do not automatically become an executable's link line.
+    if is_plat("linux", "bsd") then
+        add_packages("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0")
+    end
     if is_plat("windows") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi",
@@ -909,6 +928,7 @@ target("flashsight-whaleui")
     add_headerfiles(web_assets)
     add_cxxflags("-Wall")
     if is_plat("windows") then
+        add_files("packaging/flashsight.rc")
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
     else

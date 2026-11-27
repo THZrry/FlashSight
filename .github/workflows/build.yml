@@ -191,12 +191,26 @@ jobs:
             exit 1
           }
           "MINGW_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # xmake finds the target-prefixed compilers via --mingw, but a few
+          # sub-tools fall back to PATH/CC; keep both pointed at the cross
+          # toolchain so a webview-only compile never asks for a missing `cc`.
+          "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "CC=$gcc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CXX=$($dir)\bin\aarch64-w64-mingw32-g++.exe" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "llvm-mingw at $dir"
           & $gcc --version | Select-Object -First 1
 
       - name: Set MSYS2 mingw dir
         if: matrix.mingw == 'msys2'
-        run: echo "MINGW_DIR=C:/msys64/mingw64" >> "$GITHUB_ENV"
+        run: |
+          echo "MINGW_DIR=C:/msys64/mingw64" >> "$GITHUB_ENV"
+          # setup-msys2 exposes the MSYS shell, not necessarily mingw64/bin to
+          # the GitHub PATH. xmake's C fallback (`cc`) otherwise fails with
+          # "cannot get program for cc" on the webview target.
+          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+          echo "CC=x86_64-w64-mingw32-gcc" >> "$GITHUB_ENV"
+          echo "CXX=x86_64-w64-mingw32-g++" >> "$GITHUB_ENV"
 
       - name: Install Linux dependencies
         if: matrix.os != 'windows-latest' && matrix.os != 'macos-14'

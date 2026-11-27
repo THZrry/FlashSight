@@ -1,0 +1,3 @@
+// Windows executable icon. xmake compiles this with windres/llvm-rc.
+// Numeric ID 1 is the conventional application icon; no windows.h needed.
+1 ICON "packaging/flashsight.ico"
