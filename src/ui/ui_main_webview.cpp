@@ -145,6 +145,19 @@ int run_webview_ui(FsApi* api) {
   }
   webview_set_title(w, "FlashSight");
   webview_set_size(w, 1280, 820, WEBVIEW_HINT_NONE);
+#ifdef _WIN32
+  // The exe resource (packaging/flashsight.rc) gives Explorer/the taskbar its
+  // icon, but WebView2's top-level window uses its own class icon. Set both
+  // WM_SETICON sizes on the real HWND explicitly.
+  if (HWND hwnd = static_cast<HWND>(webview_get_window(w))) {
+    HICON icon = static_cast<HICON>(
+        ::LoadIconW(::GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1)));
+    if (icon) {
+      ::SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
+      ::SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
+    }
+  }
+#endif
 
   // ORDER MATTERS: webview_init registers a document-creation script, so the
   // glue has to be installed BEFORE the first document is loaded. Doing it the

@@ -14,6 +14,12 @@ exe="${2:?exe path}"
 out="${3:?output path}"
 version="${4:-0.1.0}"
 arch="${5:?x86_64 or aarch64}"
+# xmake/matrix calls the 64-bit ARM architecture "arm64"; AppImage names it
+# "aarch64". Normalize so the runner's matrix value cannot produce a 404.
+case "$arch" in
+  arm64|arm64-v8a) arch=aarch64 ;;
+  x64|amd64) arch=x86_64 ;;
+esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d)"

@@ -26,10 +26,10 @@ namespace fs {
 // ---- libregexp 宿主回调（QuickJS 移植要求，见 libregexp.h 末尾）----
 extern "C" {
 
-bool lre_check_stack_overflow(void* opaque, size_t alloca_size) {
+int lre_check_stack_overflow(void* opaque, size_t alloca_size) {
   (void)opaque;
   (void)alloca_size;
-  return false;  // 单线程工具调用，栈充足
+  return 0;  // 单线程工具调用，栈充足；qjs 声明的是 int，不是 bool
 }
 
 int lre_check_timeout(void* opaque) {

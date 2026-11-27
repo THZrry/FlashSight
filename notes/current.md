@@ -3572,3 +3572,11 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **Windows 两次构建**：CI 在**每个 target 前执行 `xmake f -c`**（清配置缓存后重新写入 `-p mingw --mingw`），再做 `xmake build -v`；`-v` 是用户要求的诊断，下一次失败会打印具体 target/工具探测。并继续不导出全局 `CC`/`CXX`（会被 xmake 当成显式 host 工具，后续回退裸 `cc`）。本机按 configure(-c) → build web → configure(-c) → build webview 顺序通过；仍未复现 CI 的 cc 失败，需要新日志定位是哪个 target/资源规则触发。
   - **验证**：520 用例 4572 断言全过；mingw 下三变体重链；YAML 解析通过。macOS Xcode、Linux aarch64 实际构建仍需 CI。
 
+
+<152>(CI/MAC/WIN/UI): MSYS2 编译器显式路径、Mac regex 回调签名、aarch64 AppImage 命名、窗口图标/favicon。
+  - **Windows `cc` 真因**：MSYS2 的 mingw64 工具链常只有 `x86_64-w64-mingw32-gcc.exe`，没有裸 `gcc.exe`；`xmake --mingw=C:/msys64/mingw64` 的探测只试 `x86_64-w64-mingw32-gcc`（PATH，未加入）和 `<prefix>/bin/gcc`（不存在），于是 web target 已缓存时显示 0.0s，webview 第一次真正编译才报 `cannot get program for cc`。现在 configure 显式传 `--cc=<prefix>/bin/x86_64-w64-mingw32-gcc.exe --cxx=...-g++.exe`（arm64 用 aarch64 前缀），MSYS2 改装完整 toolchain 并在步骤里先断言 gcc/g++ 存在；每次 target 前仍 `xmake f -c`，构建加 `-v`。
+  - **MAC regex**：`lre_check_stack_overflow` 的宿主实现写成 `bool`，qjs 头声明 `int`；clang 报 “functions that differ only in their return type cannot be overloaded”。改为 `int` 返回 0。多字节字符字面量（`'「'` 等）已在 5b0fc01 改为 UTF-8 string 比较。
+  - **Linux aarch64 404**：矩阵 arch 是 `arm64`，`make_appimage.sh` 直接拿它拼 `appimagetool-arm64.AppImage`；官方资产名是 `aarch64`。脚本现在把 `arm64 → aarch64`、`x64 → x86_64` 归一化，URL 仍用新的 `AppImage/appimagetool`。
+  - **窗口图标/favicon**：Windows webview 创建窗口后用 `webview_get_window` 取 HWND，`WM_SETICON` 设置 BIG/SMALL 图标（资源 ID 1）；新增 `web/favicon.svg`，`index.html` 加了 `<link rel="icon">`，asset packer 把 favicon 嵌入，`/favicon.svg` 实测 HTTP 200（image/svg+xml, 5034 bytes）。Windows exe 图标、ICO 透明 alpha 仍保留。
+  - **验证**：520 用例 4572 断言全过；mingw 下 web/webview/whaleui 均链接；YAML 与 shell 语法校验通过；测试 webview 进程已停止，用户正在运行的正式 FlashSight 未关闭。
+

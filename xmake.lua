@@ -309,6 +309,7 @@ ui_shared = {
 -- outputs, so listing them as inputs would be circular.
 web_assets = {
     "web/index.html",
+    "web/favicon.svg",
     "web/style.css",
     "web/icons/fa-subset.css",
     "web/icons/fa-solid-900.woff2",
@@ -692,6 +693,7 @@ target("fs_ui")
             os.mkdir(gen_dir)
             local items = {
                 {name = "index.html", mime = "text/html; charset=utf-8"},
+                {name = "favicon.svg", mime = "image/svg+xml"},
                 {name = "style.css",  mime = "text/css; charset=utf-8"},
                 {name = "icons/fa-subset.css", mime = "text/css; charset=utf-8"},
                 {name = "icons/fa-solid-900.woff2", mime = "font/woff2"},

@@ -169,7 +169,7 @@ jobs:
         with:
           msystem: mingw64
           update: false
-          install: mingw-w64-x86_64-gcc
+          install: mingw-w64-x86_64-toolchain
 
       - name: Install llvm-mingw (Windows arm64)
         if: matrix.mingw == 'llvm'
@@ -185,8 +185,9 @@ jobs:
           Expand-Archive llvm-mingw.zip -DestinationPath C:\llvm-mingw -Force
           $dir = (Get-ChildItem C:\llvm-mingw -Directory | Select-Object -First 1).FullName
           $gcc = Join-Path $dir "bin\aarch64-w64-mingw32-gcc.exe"
-          if (-not (Test-Path $gcc)) {
-            Write-Error "llvm-mingw has no aarch64-w64-mingw32-gcc wrapper at $gcc"
+          $gxx = Join-Path $dir "bin\aarch64-w64-mingw32-g++.exe"
+          if (-not (Test-Path $gcc) -or -not (Test-Path $gxx)) {
+            Write-Error "llvm-mingw is missing aarch64-w64-mingw32-gcc/g++ under $dir\bin"
             exit 1
           }
           "MINGW_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -206,6 +207,16 @@ jobs:
           # the GitHub PATH. xmake's C fallback (`cc`) otherwise fails with
           # "cannot get program for cc" on the webview target.
           echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+          # Fail with the directory listing instead of a later xmake `cc`
+          # probe if the toolchain package did not land where we think.
+          for tool in x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++; do
+            f="C:/msys64/mingw64/bin/$tool.exe"
+            if [ ! -f "$f" ]; then
+              echo "missing $f"
+              ls -l C:/msys64/mingw64/bin | head -40 || true
+              exit 1
+            fi
+          done
 
       - name: Install Linux dependencies
         if: matrix.os != 'windows-latest' && !startsWith(matrix.os, 'macos-')
@@ -272,7 +283,16 @@ jobs:
             args+=(--toolchain=${{ matrix.toolchain }})
           fi
           if [ -n "${MINGW_DIR:-}" ]; then
-            args+=(--mingw="$MINGW_DIR")
+            if [ "${{ matrix.arch }}" = "arm64" ]; then
+              prefix=aarch64-w64-mingw32
+            else
+              prefix=x86_64-w64-mingw32
+            fi
+            # MSYS2 often has no un-prefixed gcc.exe; --mingw alone then fails
+            # detection. Pass the target-prefixed compilers explicitly.
+            args+=(--mingw="$MINGW_DIR"
+                   --cc="$MINGW_DIR/bin/$prefix-gcc.exe"
+                   --cxx="$MINGW_DIR/bin/$prefix-g++.exe")
           fi
           echo "xmake f -c ${args[*]}"
           xmake f -c "${args[@]}"
@@ -293,7 +313,16 @@ jobs:
           if [ -n "${{ matrix.toolchain }}" ] && [ -z "${{ matrix.plat }}" ]; then
             cfg+=(--toolchain=${{ matrix.toolchain }})
           fi
-          if [ -n "${MINGW_DIR:-}" ]; then cfg+=(--mingw="$MINGW_DIR"); fi
+          if [ -n "${MINGW_DIR:-}" ]; then
+            if [ "${{ matrix.arch }}" = "arm64" ]; then
+              prefix=aarch64-w64-mingw32
+            else
+              prefix=x86_64-w64-mingw32
+            fi
+            cfg+=(--mingw="$MINGW_DIR"
+                  --cc="$MINGW_DIR/bin/$prefix-gcc.exe"
+                  --cxx="$MINGW_DIR/bin/$prefix-g++.exe")
+          fi
           for t in "${targets[@]}"; do
             echo "xmake f -c ${cfg[*]}"
             # -c clears the cached configuration first. Some xmake versions
