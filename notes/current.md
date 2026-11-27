@@ -3535,3 +3535,11 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **i18n**：套餐卡片/弹窗/重置/额度提示补齐英文条目，并新增 `addon2_plan_ui_strings_are_translated`。
   - **测试/构建**：520 用例 4572 断言全过；`addon2_plan_catalog_key_and_remote_guard` 增加重复 key 只留一条、未知连接 reset 报错、重启后仍镜像 `plan_qwen`；`uiapp_new_page_shows_plan_cards_and_quota` 验证新建页套餐卡/额度/重置次数。web + whaleui 已重链；正式 `flashsight-webview.exe` 仍被用户运行中的实例占用，最新为 `flashsight-webview-new.exe`。隔离 webview（`--root C:\aaa\FlashSight\temp\fsplanui`）实测新建页卡片、3 条额度、重置按钮、供应商列表“Claude Code + 套餐”徽标与镜像模型。**没有关闭用户的 FlashSight**；OAuth 真授权与 AppImage 未在无账号/Linux 环境复测。
 
+
+<147>(BUILD/CI/SVG): 修正 xmake 调用方式与 3rdparty JSON 依赖；CI 逐 target 构建；logo 转成 SVG。
+  - **CI 根因**：`xmake -y b target` 的选项在任务名前面，xmake 会把 `b` 当成 target（本地复现 `'b' is not a valid target name`）；同时当前 pinned 的 build 任务一次只接受一个 target，第二个名字会报 `invalid argument: flashsight-webview`。现在 CI 用 `for t in ...; do xmake build "$t"; done`，每次一个 target；WhaleUI job 的 `xmake b -y whaleui-full` 改为 `xmake build whaleui-full`。`doc-internal/build.md` 与 `xmake.lua` 里“多个 target 一起传”的旧说明同步改掉；YAML 重新用 `yaml.safe_load` 校验。
+  - **nlohmann/json**：源码 include 的是 `nlohmann/json.hpp`，但 `scripts/fetch_3rdparty.py` 只下载 `3rdparty/json/json.hpp`；本地能编是因为有人手工建过一个 38 字节的 `nlohmann/json.hpp` shim，这个 shim 既不在 fetch 脚本也不在 git，另一台机器必然找不到。现在 `fs_json.hpp`/`fs_error.hpp` 直接 include `"json.hpp"`（用 vendored 单头文件），fetch 脚本仍生成 `nlohmann/json.hpp` shim 供外部片段使用。
+  - **configure 检查**：xmake 在描述阶段检查 `json/httplib/dtl/filesystem/md4c/reproc/mbedtls/stb/qjs` 的核心文件，缺失时打印完整缺失清单和 `python scripts/fetch_3rdparty.py` 并中止，不再等到第一个编译单元才报 include 错。project-description 沙箱没有 `assert/error/raise/os.exit`，所以用 `print` + 故意 nil 调用中止（正常依赖齐全时不会走到）。
+  - **验证**：临时移走 `3rdparty/json/json.hpp` 时 `xmake f` 打印 missing 清单；恢复后 configure 成功。`g++ -fsyntax-only fs_json.cpp` 只靠 vendored include 通过。520 用例 4572 断言全过；web/whaleui 重链，webview 正式文件仍被占用，最新 `flashsight-webview-new.exe`。
+  - **SVG**：`temp/flashsight.jpg` 实际是 2048×2048 PNG（扩展名不对）；用临时 potrace 转成 `temp/flashsight.svg`：2048 viewBox、白底、`#2d70a7`、平滑 Bézier、约 5KB，保留原图留白。转换用的 node_modules、中间截图和测试 root 已清理，temp 里只留原 jpg 和最终 svg。
+

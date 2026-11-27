@@ -17,13 +17,23 @@ Webview 变体另有 `webview_host`。
 
 ## 2.1 三个 UI 变体 = 三个 xmake target
 
+干净 checkout 先拉一次依赖（`3rdparty/` 不入 git；缺文件时 `xmake f`
+会在 configure 阶段直接列出缺的路径并提示这条命令）：
+
+```sh
+python scripts/fetch_3rdparty.py
+```
+
 ```sh
 xmake f -y --toolchain=mingw --mingw="C:/Program Files/mingw64"
-xmake b flashsight-web          # browser + embedded HTTP server
-xmake b flashsight-webview      # native window via the OS web engine
-xmake b flashsight-whaleui      # native window via WhaleUI
-# 一条命令编全部三个（target 名一起传）：
-xmake b flashsight-web flashsight-webview flashsight-whaleui
+xmake build flashsight-web          # browser + embedded HTTP server
+xmake build flashsight-webview      # native window via the OS web engine
+xmake build flashsight-whaleui      # native window via WhaleUI
+# 编全部三个：每个 target 单独一次（xmake build 只接受一个 target，
+# 第二个会被报 invalid argument）：
+for t in flashsight-web flashsight-webview flashsight-whaleui; do
+  xmake build "$t"
+done
 ```
 
 三个可执行文件是三个独立的 target，输出名互不覆盖。`flashsight-web` 只在
@@ -60,8 +70,8 @@ webview` 只重编 `ui_server.cpp`（资源头变了）+ 两个后端 + `main.cp
 
 `.github/workflows/build.yml` 按 tag（`v*`）与 `release: published` 触发，
 矩阵覆盖 Windows x86_64/arm64、macOS arm64、Linux x86_64/aarch64；每个 job
-一次 configure，按 target 名构建选中的变体（`xmake b flashsight-web
-flashsight-webview`），共享 `fs_ui` 只编译一次，`scripts/package.py` 按变体名
+一次 configure，按 target 名逐个构建选中的变体（`xmake build flashsight-web`
+再 `xmake build flashsight-webview`），共享 `fs_ui` 只编译一次，`scripts/package.py` 按变体名
 找可执行文件——**找不到就报错并提示该编哪个 target，绝不退化成"随便找个
 flashsight*"**，那个 fallback 正是错的二进制进发布包的原因。
 

@@ -1,5 +1,5 @@
 -- FlashSight build script
--- One command builds everything:
+-- Build each variant with `xmake build <target>` (one target per invocation):
 --   * fs_ui_wasm : the UI, compiled to WebAssembly (per-target platform override, emcc)
 --   * fs_ui      : native UI lib (same sources + null/Whale DOM adapter)
 --   * flashsight : native exe with the web assets embedded (served over local HTTP)
@@ -81,10 +81,46 @@ if is_plat("windows") then
     table.insert(includedirs, "3rdparty/mswebview2/include")
 end
 
+-- 3rdparty/ is not committed. Catch a missing fetch at CONFIGURE time with an
+-- actionable message instead of a compiler error from the first translation
+-- unit ("nlohmann/json.hpp: No such file or directory" was exactly that).
+local required_3rdparty = {
+    "3rdparty/json/json.hpp",
+    "3rdparty/httplib/httplib.h",
+    "3rdparty/dtl-1.20/dtl/dtl.hpp",
+    "3rdparty/filesystem-1.5.14/include/ghc/filesystem.hpp",
+    "3rdparty/md4c-master/src/md4c.h",
+    "3rdparty/reproc/include/reproc/reproc.h",
+    "3rdparty/mbedtls-3.6.4/include/mbedtls/build_info.h",
+    "3rdparty/stb/stb_image.h",
+    "3rdparty/qjs-regex/libregexp.c",
+}
+local missing_3rdparty = {}
+for _, p in ipairs(required_3rdparty) do
+    if not os.isfile(p) then
+        table.insert(missing_3rdparty, p)
+    end
+end
+if #missing_3rdparty > 0 then
+    -- Neither assert() nor error() is exposed in the project-description
+    -- sandbox; os/print are. Print an actionable block and stop configure.
+    print("error: missing 3rdparty dependencies:\n  " ..
+          table.concat(missing_3rdparty, "\n  ") ..
+          "\nrun: python scripts/fetch_3rdparty.py")
+    -- The project-description sandbox exposes print but not assert/error/
+    -- raise/os.exit. A deliberate nil call is the only portable way to make
+    -- configure stop after the actionable message above.
+    local abort = nil
+    abort()
+end
+
 -- The three variants are three targets, not one target selected by a cached
--- option. Build them by name:
+-- option. Build them ONE AT A TIME (xmake's build task takes a single target;
+-- a second name is reported as "invalid argument"):
 --
---   xmake b flashsight-web flashsight-webview flashsight-whaleui
+--   xmake build flashsight-web
+--   xmake build flashsight-webview
+--   xmake build flashsight-whaleui
 --
 -- `flashsight-whaleui` is defined only when --whaleui_libdir contains the built
 -- WhaleUI library; `flashsight-web` only when emcc is on PATH. No `--variant`
@@ -777,9 +813,9 @@ target("fs_ui")
 -- recompiles two backend files plus main.cpp.
 -- ==========================================================================
 
--- Per-variant backend libraries. Each exists as its own target, so one
--- `xmake build flashsight-web flashsight-webview flashsight-whaleui` builds all
--- three without reconfiguring or juggling a cached --variant value.
+-- Per-variant backend libraries. Each exists as its own target, so building
+-- each target name (one per xmake invocation) covers all three without
+-- reconfiguring or juggling a cached --variant value.
 target("fs_ui_host_webview")
     set_kind("static")
     set_languages("c++14")
@@ -959,5 +995,7 @@ target("fs_tests")
 
 end  -- not wasm
 
--- Build every target in ONE command:
---   xmake b flashsight-web flashsight-webview flashsight-whaleui
+-- Build every target (one xmake build invocation per target name):
+--   xmake build flashsight-web
+--   xmake build flashsight-webview
+--   xmake build flashsight-whaleui

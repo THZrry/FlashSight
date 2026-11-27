@@ -3,7 +3,12 @@
 
 #include <string>
 
-#include "nlohmann/json.hpp"
+// The vendored dependency is nlohmann's single header at
+// 3rdparty/json/json.hpp (scripts/fetch_3rdparty.py). Do not include
+// "nlohmann/json.hpp": that path only existed on machines where someone had
+// created a shim by hand, so a clean checkout failed with "nlohmann/json.hpp:
+// No such file or directory".
+#include "json.hpp"
 
 namespace fs {
 

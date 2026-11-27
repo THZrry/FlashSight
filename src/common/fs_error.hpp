@@ -6,7 +6,7 @@
 #include <string>
 #include <utility>
 
-#include "nlohmann/json.hpp"
+#include "json.hpp"  // vendored single header (3rdparty/json/json.hpp)
 
 namespace fs {
 

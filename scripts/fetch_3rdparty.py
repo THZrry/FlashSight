@@ -118,6 +118,13 @@ def main():
     # --- nlohmann/json (single header) ---
     download("https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp",
              TP / "json" / "json.hpp")
+    # Compatibility include for external snippets/tools that spell
+    # <nlohmann/json.hpp>. The project itself includes "json.hpp" (the
+    # vendored layout); this shim makes both spellings work and is part of the
+    # fetch script so a clean checkout gets it too.
+    shim = TP / "json" / "nlohmann" / "json.hpp"
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text('#pragma once\n#include "../json.hpp"\n', encoding="utf-8")
 
     # --- dtl (diff algorithm) ---
     fetch_archive(

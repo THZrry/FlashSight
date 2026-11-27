@@ -268,8 +268,15 @@ jobs:
           targets=()
           if [ "${{ steps.want.outputs.web }}" = "1" ]; then targets+=(flashsight-web); fi
           if [ "${{ steps.want.outputs.webview }}" = "1" ]; then targets+=(flashsight-webview); fi
-          echo "xmake build ${targets[*]}"
-          xmake build "${targets[@]}"
+          # Build ONE target per invocation. xmake's build task accepts a
+          # single target name across the versions we pin; passing a second
+          # name makes it print `invalid argument: flashsight-webview` (the
+          # first target still builds, which is why the error moved from
+          # flashsight-web to the second name after the previous fix).
+          for t in "${targets[@]}"; do
+            echo "xmake build $t"
+            xmake build "$t"
+          done
 
       # The two failures that actually shipped a broken package: a webview exe
       # with no embedded CSS (the asset pack had been overwritten by the web
@@ -462,7 +469,7 @@ jobs:
           # `-p mingw` makes the output land in build/mingw/<arch>/<mode>,
           # which is the layout the local build uses too.
           xmake f -y -p mingw -m release --toolchain=mingw --mingw="$MINGW_DIR"
-          xmake b -y whaleui-full
+          xmake build whaleui-full
 
       - name: Fetch 3rdparty (FlashSight)
         run: python scripts/fetch_3rdparty.py
