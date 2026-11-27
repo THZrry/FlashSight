@@ -119,11 +119,21 @@ def mingw_bin_dirs():
 
 def imported_dlls(exe):
     """Names of the DLLs an executable imports (via objdump -p)."""
-    if not shutil.which("objdump"):
-        log("warning: objdump not found; cannot inspect the import table")
+    # llvm-mingw ships llvm-objdump, not GNU objdump. Without this fallback
+    # the Windows package silently omitted libc++.dll/libunwind.dll.
+    objdump = None
+    for name in ("objdump", "llvm-objdump",
+                 "x86_64-w64-mingw32-objdump",
+                 "aarch64-w64-mingw32-objdump"):
+        found = shutil.which(name)
+        if found:
+            objdump = found
+            break
+    if not objdump:
+        log("warning: no objdump/llvm-objdump; cannot inspect the import table")
         return set()
     try:
-        dump = subprocess.run(["objdump", "-p", str(exe)], capture_output=True,
+        dump = subprocess.run([objdump, "-p", str(exe)], capture_output=True,
                               text=True, check=False).stdout
     except OSError:
         return set()

@@ -13,12 +13,18 @@
 
 #include <cstring>
 
-// CreatePseudoConsole lives in kernel32 on 1809+; the headers only declare it
-// when _WIN32_WINNT >= 0x0A00, which the build sets.
+// HPCON is absent from some older MinGW/llvm-mingw headers (e.g. the 20240417
+// llvm-mingw used by CI). HPCON is just an opaque VOID*, and we only call the
+// APIs through GetProcAddress, so use void* instead of depending on the typedef.
+#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+// ProcThreadAttributeValue(ProcThreadAttributePseudoConsole=22, FALSE, TRUE,
+// FALSE) = 22 | PROC_THREAD_ATTRIBUTE_INPUT(0x00020000).
+#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
+#endif
 typedef HRESULT(WINAPI* CreatePseudoConsoleFn)(COORD, HANDLE, HANDLE, DWORD,
-                                              HPCON*);
-typedef void(WINAPI* ResizePseudoConsoleFn)(HPCON, COORD);
-typedef void(WINAPI* ClosePseudoConsoleFn)(HPCON);
+                                              void**);
+typedef void(WINAPI* ResizePseudoConsoleFn)(void*, COORD);
+typedef void(WINAPI* ClosePseudoConsoleFn)(void*);
 
 namespace fs {
 
@@ -88,7 +94,7 @@ const Api& api() {
 }  // namespace
 
 struct ConPty::Impl {
-  HPCON pc = nullptr;
+  void* pc = nullptr;
   HANDLE in_w = nullptr;   // we write here -> child's stdin
   HANDLE out_r = nullptr;  // we read here  <- child's stdout
   PROCESS_INFORMATION pi;
@@ -172,7 +178,7 @@ bool ConPty::start(const std::string& exe, const std::vector<std::string>& args,
   }
   UpdateProcThreadAttribute(si.lpAttributeList, 0,
                             PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, impl_->pc,
-                            sizeof(HPCON), nullptr, nullptr);
+                            sizeof(void*), nullptr, nullptr);
 
   std::wstring cmd = quote_arg(widen(exe));
   for (size_t i = 0; i < args.size(); ++i) {

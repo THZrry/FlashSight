@@ -3588,3 +3588,11 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **窗口图标**：`WM_SETICON` 现在在创建后设置一次，并在 WebView2 消息循环内再设置一次（避免 WebView2 初始化覆盖）；实测 `WM_GETICON` 的 0/1/2 都返回非零 HICON。favicon `/favicon.svg` 仍返回 200；ICO alpha=0。
   - **验证**：520 用例 4572 断言全过；web/webview/whaleui 重链；YAML 解析通过。Windows llvm-mingw x64/arm64、Linux aarch64 和 macOS 仍需 CI 实跑。
 
+
+<154>(WIN/WEB): llvm-mingw 旧头缺 HPCON；旧 WebKit/Firefox 的 container query 与 file://。
+  - **Windows HPCON**：llvm-mingw 20240417 的 headers 没有 `HPCON` 和 `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`。`conpty.cpp` 只用 GetProcAddress 调 ConPTY，`HPCON` 本质是 `VOID*`，所以函数指针/Impl 全改成 `void*`；缺宏时定义标准值 `0x00020016`（ProcThreadAttributePseudoConsole=22 | INPUT）。不再依赖新版 SDK 头。
+  - **WebKit/Firefox 布局**：`@container` 在这些引擎不生效，补了 `@supports not (container-type: inline-size)` 下的 viewport 媒体查询 fallback（项目卡折叠、阅读列宽、composer 图标化），现代浏览器继续走 container query。
+  - **file://**：直接打开 `web/index.html` 是 opaque origin，`sessionStorage` 会抛 SecurityError，wasm fetch 也被禁。页面在 file:// 下改为显示“请用 flashsight-web 启动”的说明并提前返回，不再在 token 初始化处抛异常。
+  - **打包**：Windows 现在用 llvm-mingw，`package.py` 的导入表检查补 `llvm-objdump`/target-prefixed objdump fallback，避免漏带 `libc++.dll`/`libunwind.dll`。
+  - **验证**：520 用例 4572 断言全过；web/webview/whaleui 重链；窗口图标此前实测 WM_GETICON 0/1/2 非零；favicon 200。
+

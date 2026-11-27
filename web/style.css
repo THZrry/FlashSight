@@ -3987,3 +3987,32 @@ label.checkbox { display: inline-flex; align-items: center; gap: 7px; cursor: po
 .plan-status { font-size: 12px; }
 .plan-status.err { color: var(--err, #d15b5b); }
 .plan-modal-acts { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* Container queries are the right tool for the project card, transcript and
+   composer (their width changes with the side panel / rail), but older
+   WebKitGTK and Firefox do not implement them. Fall back to viewport
+   breakpoints so the UI still has a usable narrow layout instead of leaving
+   the wide layout stuck on a small screen. Modern engines take @container. */
+@supports not (container-type: inline-size) {
+  @media (max-width: 900px) {
+    .proj-right:not(.open) .proj-sessions { display: none; }
+    .proj-right .prh-toggle { display: inline; }
+    .proj-right-head { cursor: pointer; }
+    .proj-right-head:hover { background: var(--hover); color: var(--text); }
+    .proj-right .proj-sessions { max-height: none; overflow: visible; }
+    .history-inner { max-width: calc(100% - 20px); }
+    .session-center .composer { max-width: calc(100% - 64px); }
+  }
+  @media (max-width: 760px) {
+    .ct-left .it-btn .it-label { display: none; }
+    .ct-left .it-btn { padding-left: 6px; padding-right: 6px; }
+  }
+  @media (max-width: 700px) {
+    .composer-tools { gap: 3px; row-gap: 6px; }
+    .it-btn { padding-left: 5px; padding-right: 5px; }
+    .it-btn .it-label { display: none; }
+    .composer-tools .select { max-width: 78px; }
+    .model-pick-btn { max-width: 120px; padding: 0 6px; }
+    .interrupt-bar .ib-text, .interrupt-bar .ib-reason { display: none; }
+  }
+}
