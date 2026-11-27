@@ -3550,3 +3550,10 @@ The process of project: P0 环境搭建 + P1 AppCore
   - **图标**：`packaging/flashsight.svg` 换成新 logo；新增 `packaging/flashsight.ico`（单条 256×256 PNG-compressed ICO，Windows 能读）和 `packaging/flashsight.rc`（`1 ICON "packaging/flashsight.ico"`）。Windows 的 web/webview/whaleui 三个 exe 都通过 xmake 编译 `.rc` 并链接资源；本地 `ExtractAssociatedIcon` 能取到图标。AppImage 继续使用 `packaging/flashsight.svg`。
   - **验证**：xmake configure 成功；web/whaleui 带资源重链，webview 正式文件仍被运行实例占用，最新 `flashsight-webview-new.exe`（带 rc.obj）；520 用例 4572 断言全过。Linux 交叉编译与 Windows arm64 的 windres 路径没有本地环境实测，需要在 CI 验证。
 
+
+<149>(CI/LINUX/ICON): Linux 的 X11 `KeyPress` 宏冲突改为 `KeyInput`；Windows 改用 `-p mingw` 平台；图标透明并放大。
+  - **Linux 编译错误的真因**：`ui_dom.hpp` 的结构体叫 `KeyPress`，而 X11 的 `X.h` 有 `#define KeyPress 2`；Windows 不包含 Xlib 所以一直能编，Linux 的 GTK/WebKit 头把 Xlib 带进来后，`const KeyPress&` 变成 `const 2&`，GCC 报 “ISO C++ forbids declaration of parameter with no type”。全部 22 处重命名为 `KeyInput`（`ui_dom.hpp`、wasm/webview/whale/null adapter、ui_app）。这不是把宏 undef 掉，而是从根上避开系统头命名空间。
+  - **Windows `cannot get program for cc`**：改用 xmake 的 MinGW **平台** `-p mingw`，不再只在默认 windows 平台上加 `--toolchain=mingw`；同时保留 `mingw64/bin`/llvm-mingw `bin` 的 PATH 和 `CC`/`CXX`。`xmake.lua` 里所有 Windows 条件改成 `is_plat("windows", "mingw")`，因此 `-p mingw` 仍拿到 WebView2 头/系统库。本机实测 `xmake f -p mingw -a x86_64 --mingw=...` 后 web/webview/whaleui 三个 exe 都能链接（输出在 `build/mingw/x86_64/release`，webview 不再被正在运行的旧 exe 占用）。
+  - **图标**：`packaging/flashsight.svg` 去掉白底、viewBox 裁成 `349 347.5 1355 1355`（logo 横向约 98%），透明背景；重新生成 256×256 ICO（PNG 压缩、alpha 透明，约 8KB）。`packaging/flashsight.rc` 继续把 ICO 嵌入三个 Windows exe；本地 `ExtractAssociatedIcon` 角像素 alpha=0。
+  - **验证**：520 用例 4572 断言全过（mingw 平台）；`build/mingw/x86_64/release` 下 web/webview/whaleui 均带资源重链；`is_plat("windows","mingw")` 同时保留默认 windows 平台兼容。Linux GTK 编译和 Windows arm64 的 `llvm-rc` 仍需 CI 实测。
+

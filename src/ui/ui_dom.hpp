@@ -55,7 +55,11 @@ const char* event_kind_name(EventKind k);
 // string: Ctrl+C is not the character 'c', Shift+Tab is not Tab, and paste is
 // not typing. The adapter reports the raw facts and the terminal engine
 // (fs_vt) turns them into the escape sequence the child expects.
-struct KeyPress {
+//
+// Deliberately NOT named KeyPress: X11/X.h defines `#define KeyPress 2`, and
+// on Linux webview.h pulls Xlib in through GTK/WebKit. A struct called
+// KeyPress then becomes `const 2&` in every webview translation unit.
+struct KeyInput {
   std::string key;   // "a" | "Enter" | "ArrowUp" | "F1" | "Escape" | "Tab" ...
   std::string text;  // paste payload when paste == true
   bool ctrl = false;
@@ -223,7 +227,7 @@ class IDom {
   // Unlike the generic kKeyDown binding this also prevents the browser's default
   // action (so Ctrl+W does not close the tab) and reports modifier state, which
   // is what a terminal needs. Paste arrives through the same callback.
-  virtual void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) {
+  virtual void bind_key_input(Node node, std::function<void(const KeyInput&)> cb) {
     (void)node;
     (void)cb;
   }
@@ -430,7 +434,7 @@ class NullDom : public IDom {
   void bind_drop_zone(Node node,
                       std::function<void(const std::string&, const std::string&)> cb) override;
   void bind_global_key(std::function<void(const std::string&)> cb) override;
-  void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override;
+  void bind_key_input(Node node, std::function<void(const KeyInput&)> cb) override;
   void focus(Node node) override;
   void bind_cell_size(Node node, std::function<void(int, int)> cb) override;
   void bind_file_picker(Node node, const std::string& pid,
@@ -474,7 +478,7 @@ class NullDom : public IDom {
     if (file_pick_cb_) file_pick_cb_(reply);
   }
   // test hook: simulate a key press (with modifiers) on the bound terminal node
-  void fire_key_input_for_test(const KeyPress& k) {
+  void fire_key_input_for_test(const KeyInput& k) {
     if (key_input_cb_) key_input_cb_(k);
   }
   // test hook: simulate the adapter measuring the terminal surface
@@ -548,7 +552,7 @@ class NullDom : public IDom {
   std::map<uint64_t, int> client_heights_;
   std::function<void(int)> vsplit_cb_;
   std::function<void(const std::string&)> key_cb_;
-  std::function<void(const KeyPress&)> key_input_cb_;
+  std::function<void(const KeyInput&)> key_input_cb_;
   std::function<void(int, int)> cell_size_cb_;
   std::function<void(const std::string&)> file_pick_cb_;
   std::function<void(bool)> scroll_pin_cb_;

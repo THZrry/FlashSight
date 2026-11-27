@@ -282,7 +282,7 @@ void NullDom::bind_global_key(std::function<void(const std::string&)> cb) {
   calls_.push_back(Call{"bind_global_key", 0, ""});
 }
 
-void NullDom::bind_key_input(Node node, std::function<void(const KeyPress&)> cb) {
+void NullDom::bind_key_input(Node node, std::function<void(const KeyInput&)> cb) {
   key_input_cb_ = cb;
   calls_.push_back(Call{"bind_key_input", node.id, ""});
 }

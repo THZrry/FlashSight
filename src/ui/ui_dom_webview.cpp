@@ -1180,7 +1180,7 @@ class WebViewDom : public IDom {
     global_key_bound_ = true;
     call("globalKey", 0, 0, "", "");
   }
-  void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override {
+  void bind_key_input(Node node, std::function<void(const KeyInput&)> cb) override {
     key_input_cb_ = cb;
     call("keyInput", idx(node), 0, "", "");
   }
@@ -1463,7 +1463,7 @@ class WebViewDom : public IDom {
   }
   void on_key_input(const std::string& json) {
     if (!key_input_cb_) return;
-    KeyPress k;
+    KeyInput k;
     try {
       Json j = Json::parse(json);
       k.key = jsonutil::get<std::string>(j, "key", "");
@@ -1643,7 +1643,7 @@ class WebViewDom : public IDom {
   bool drop_bound_ = false;
   std::function<void(const std::string&)> global_key_cb_;
   bool global_key_bound_ = false;
-  std::function<void(const KeyPress&)> key_input_cb_;
+  std::function<void(const KeyInput&)> key_input_cb_;
   std::function<void(int, int)> cell_cb_;
   std::function<void(bool)> scroll_pin_cb_;
   std::function<void(bool, bool)> scroll_edges_cb_;

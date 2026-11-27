@@ -479,13 +479,13 @@ class WhaleDom : public IDom {
   // on the surface sets - so the terminal must be clicked once before it takes
   // keys (WhaleUI's programmatic focus does not move the engine focus; see
   // doc-internal/ui-whaleui.md).
-  void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override {
+  void bind_key_input(Node node, std::function<void(const KeyInput&)> cb) override {
     key_input_cb_ = cb;
     whaleui_dom_element_t* el = el_of(node);
     if (!el) return;
     bind_aux(key_down_, el, "keydown", [this](whaleui_dom_event_t* ev) {
       if (!key_input_cb_) return;
-      KeyPress k = key_press(ev);
+      KeyInput k = key_press(ev);
       // Ctrl+V: the surface is not an editable control, so the engine's own
       // paste path never runs for it - read the system clipboard here.
       if (k.ctrl && (k.key == "v" || k.key == "V")) {
@@ -1035,8 +1035,8 @@ class WhaleDom : public IDom {
 
   // The key + modifiers of a DOM keydown, in the shape the terminal engine
   // (fs_vt) expects.
-  static KeyPress key_press(whaleui_dom_event_t* ev) {
-    KeyPress k;
+  static KeyInput key_press(whaleui_dom_event_t* ev) {
+    KeyInput k;
     k.key = str_of(whaleui_dom_event_key(ev));
     if (k.key.empty()) {
       // fall back to the keycode when the engine has no name for it
@@ -1100,7 +1100,7 @@ class WhaleDom : public IDom {
   // Document-level keydown listener for app shortcuts (installed by
   // bind_global_key_dom; carries modifiers, which the window key callback lacks).
   Listener* key_down_aux_ = nullptr;
-  std::function<void(const KeyPress&)> key_input_cb_;
+  std::function<void(const KeyInput&)> key_input_cb_;
   std::function<void(int, int)> cell_cb_;
   std::function<void(bool)> scroll_pin_cb_;
 

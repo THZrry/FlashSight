@@ -6375,7 +6375,7 @@ void UiApp::render() {
     // every browser shortcut must be suppressed while it has focus)
     VNodePtr term = find_by_key(tree_, "term-screen");
     if (term && term->dom.valid()) {
-      dom_.bind_key_input(term->dom, [this](const KeyPress& k) {
+      dom_.bind_key_input(term->dom, [this](const KeyInput& k) {
         send_terminal_key(k);
       });
       // How many character cells fit? Only the DOM knows its own pixel size, so
@@ -15384,7 +15384,7 @@ void UiApp::start_terminal(const std::string& shell, const std::string& label) {
 // arrows depend on the program's cursor-key mode, and paste must be bracketed.
 // The term engine owns that encoding (it is terminal knowledge); here we only
 // forward the key press.
-void UiApp::send_terminal_key(const KeyPress& k) {
+void UiApp::send_terminal_key(const KeyInput& k) {
   if (st_.term_tab == "all") return;  // the aggregate view has no single stdin
   std::string tid = st_.term_tab;
   std::string bytes;

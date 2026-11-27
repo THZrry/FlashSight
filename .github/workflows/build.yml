@@ -99,6 +99,7 @@ jobs:
                 "name": "windows-x86_64",
                 "os": "windows-latest",
                 "arch": "x86_64",
+                "plat": "mingw",
                 "toolchain": "mingw",
                 "mingw": "msys2",
                 "py": "python"
@@ -107,6 +108,7 @@ jobs:
                 "name": "windows-arm64",
                 "os": "windows-latest",
                 "arch": "arm64",
+                "plat": "mingw",
                 "toolchain": "mingw",
                 "mingw": "llvm",
                 "py": "python"
@@ -268,6 +270,14 @@ jobs:
       - name: Configure
         run: |
           args=(-y -m release --arch=${{ matrix.arch }})
+          # Windows uses the MinGW PLATFORM (-p mingw), not just the MinGW
+          # toolchain on the default windows platform. That is what makes
+          # xmake resolve cc/ld/windres from the same toolchain for every
+          # target; without it the second xmake build (webview) could fail
+          # with "cannot get program for cc".
+          if [ -n "${{ matrix.plat }}" ]; then
+            args+=(--plat=${{ matrix.plat }})
+          fi
           if [ -n "${{ matrix.toolchain }}" ]; then
             args+=(--toolchain=${{ matrix.toolchain }})
           fi

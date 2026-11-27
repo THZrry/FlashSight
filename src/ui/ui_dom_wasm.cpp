@@ -692,8 +692,8 @@ EM_JS(void, fs_dom_vsplitter, (int split_node, int panel_node, int cb_id), {
 // while the user types. So the terminal surface is a focusable <div> and this
 // listener (a) reports key + modifiers, (b) prevents the browser's default
 // action, and (c) forwards paste as one chunk.
-std::map<int, std::function<void(const KeyPress&)> >& key_input_cbs() {
-  static std::map<int, std::function<void(const KeyPress&)> > m;
+std::map<int, std::function<void(const KeyInput&)> >& key_input_cbs() {
+  static std::map<int, std::function<void(const KeyInput&)> > m;
   return m;
 }
 int& key_input_seq() {
@@ -1528,7 +1528,7 @@ class WasmDom : public IDom {
     fs_dom_global_key(cb_id);
   }
 
-  void bind_key_input(Node node, std::function<void(const KeyPress&)> cb) override {
+  void bind_key_input(Node node, std::function<void(const KeyInput&)> cb) override {
     int cb_id = ++key_input_seq();
     key_input_cbs().clear();
     key_input_cbs()[cb_id] = std::move(cb);
@@ -1789,10 +1789,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_scroll_edges(int cb_id, int at_top,
 
 // Called from JS (fs_dom_key_input) with a JSON key description.
 extern "C" EMSCRIPTEN_KEEPALIVE void fs_ui_key_input(int cb_id, const char* json) {
-  std::map<int, std::function<void(const KeyPress&)> >::iterator it =
+  std::map<int, std::function<void(const KeyInput&)> >::iterator it =
       key_input_cbs().find(cb_id);
   if (it == key_input_cbs().end() || !it->second) return;
-  KeyPress k;
+  KeyInput k;
   try {
     Json j = Json::parse(json ? json : "{}");
     k.key = jsonutil::get<std::string>(j, "key", "");

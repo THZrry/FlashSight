@@ -25,7 +25,10 @@ python scripts/fetch_3rdparty.py
 ```
 
 ```sh
-xmake f -y --toolchain=mingw --mingw="C:/Program Files/mingw64"
+# Windows: use the mingw PLATFORM, not only the mingw toolchain. This keeps
+# cc/ld/windres on one toolchain for web and webview targets.
+xmake f -y -p mingw -a x86_64 --mingw="C:/Program Files/mingw64"
+# arm64 cross: xmake f -y -p mingw -a arm64 --mingw=C:/llvm-mingw/.../
 xmake build flashsight-web          # browser + embedded HTTP server
 xmake build flashsight-webview      # native window via the OS web engine
 xmake build flashsight-whaleui      # native window via WhaleUI

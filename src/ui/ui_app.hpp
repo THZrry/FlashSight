@@ -1317,7 +1317,7 @@ class UiApp {
   // the filter row itself (only built once the strip is crowded)
   H build_terminal_search();
   // send one key press to the selected terminal (VT-encoded by the term engine)
-  void send_terminal_key(const KeyPress& k);
+  void send_terminal_key(const KeyInput& k);
   // send the queued keystrokes in order (one write in flight at a time)
   void flush_terminal_keys();
   // pull the screen grid for one terminal (what the panel draws)

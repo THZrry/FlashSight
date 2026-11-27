@@ -76,7 +76,7 @@ includedirs = {
 -- Windows-only vendored headers: the MinGW compatibility header and the
 -- WebView2 SDK are not fetched on other hosts (see scripts/fetch_3rdparty.py),
 -- so pointing -I at them would only add noise.
-if is_plat("windows") then
+if is_plat("windows", "mingw") then
     table.insert(includedirs, "3rdparty/webview/compat-mingw")
     table.insert(includedirs, "3rdparty/mswebview2/include")
 end
@@ -191,7 +191,7 @@ wasm_includedirs = {
     "3rdparty/json",
 }
 
-if is_plat("windows") then
+if is_plat("windows", "mingw") then
     add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN")
 elseif is_plat("macosx", "iphoneos") then
     -- set_languages("c++14") passes -std=c++14, which makes clang define
@@ -404,7 +404,7 @@ if not is_plat("wasm") then
 -- Always the source build below - see the note at the top of the file for why
 -- the vendored MSVC archives must not be linked into a MinGW executable.
 function mbedtls_link()
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_syslinks("bcrypt", "crypt32")
     end
 end
@@ -495,7 +495,7 @@ function whaleui_link()
             print("[whaleui] warning: " .. e.name .. " not found under " .. pkg)
         end
     end
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_syslinks("gdi32", "winmm", "imm32", "oleaut32", "version", "advapi32",
                      "setupapi")
     end
@@ -573,7 +573,7 @@ target("fs_core")
         "3rdparty/reproc/src/strv.c",
     }
     local reproc_plat = {}
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         reproc_plat = {
             "3rdparty/reproc/src/process.windows.c",
             "3rdparty/reproc/src/clock.windows.c",
@@ -600,7 +600,7 @@ target("fs_core")
     add_files(reproc_plat)
     add_cflags("-Wall")
     add_cxxflags("-Wall")
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         -- gdi32: screen capture fallback (fs_screen.cpp BitBlt/GetDIBits).
         -- d3d11/dxgi: Desktop Duplication, the primary capture path (it reads the
         -- DWM-composited surface, which GDI cannot on several real setups).
@@ -812,8 +812,8 @@ target("fs_ui")
 --   whaleui : WhaleDom    - native window, DOM driven by WhaleUI
 --
 -- Only the DOM backend and the window differ. The variant macro is applied to
--- fs_ui_host and flashsight ONLY, so `xmake f --variant=... && xmake b`
--- recompiles two backend files plus main.cpp.
+-- fs_ui_host and flashsight ONLY, so switching `xmake build <variant>` only
+-- recompiles two backend files plus main.cpp (fs_ui is shared).
 -- ==========================================================================
 
 -- Per-variant backend libraries. Each exists as its own target, so building
@@ -835,7 +835,7 @@ target("fs_ui_host_webview")
     if is_plat("linux", "bsd") then
         add_packages("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0")
     end
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi",
                      "advapi32", "version")
@@ -855,7 +855,7 @@ target("fs_ui_host_whaleui")
     add_defines("FS_UI_WHALEUI")
     add_deps("fs_ui", "fs_core", "mbedtls_src")
     add_cxxflags("-Wall")
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi",
                      "gdi32", "winmm", "imm32", "oleaut32", "version",
@@ -878,7 +878,7 @@ target("flashsight-web")
     add_files("src/main.cpp")
     add_deps("fs_ui", "fs_core", "mbedtls_src")
     add_cxxflags("-Wall")
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_files("packaging/flashsight.rc")
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
@@ -898,7 +898,7 @@ target("flashsight-webview")
     add_defines("FS_UI_WEBVIEW")
     add_deps("fs_ui_host_webview", "fs_ui", "fs_core", "mbedtls_src")
     add_cxxflags("-Wall")
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_files("packaging/flashsight.rc")
     end
     -- Link the GTK/WebKitGTK libs into the executable as well; package links on
@@ -906,7 +906,7 @@ target("flashsight-webview")
     if is_plat("linux", "bsd") then
         add_packages("pkgconfig::gtk4", "pkgconfig::webkitgtk-6.0")
     end
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi",
                      "advapi32", "version")
@@ -927,7 +927,7 @@ target("flashsight-whaleui")
     add_deps("fs_ui_host_whaleui", "fs_ui", "fs_core", "mbedtls_src")
     add_headerfiles(web_assets)
     add_cxxflags("-Wall")
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_files("packaging/flashsight.rc")
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
@@ -963,7 +963,7 @@ if not is_plat("wasm") then
         add_files("3rdparty/webview/src/webview.cc")
         add_defines("WEBVIEW_STATIC")
         add_cxxflags("-Wall")
-        if is_plat("windows") then
+        if is_plat("windows", "mingw") then
             -- The built-in WebView2 loader reads the SDK headers and resolves
             -- WebView2Loader.dll's exports at run time, so no import lib is
             -- linked. shlwapi: the loader uses PathFindFileNameW.
@@ -999,7 +999,7 @@ target("fs_tests")
     add_deps("fs_ui", "fs_core")
     add_deps("mbedtls_src")
     add_cxxflags("-Wall")
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         add_syslinks("ws2_32", "user32", "gdi32", "d3d11", "dxgi", "shell32",
                      "ole32", "uuid", "crypt32", "bcrypt", "psapi", "winhttp")
     else
