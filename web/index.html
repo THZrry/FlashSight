@@ -56,12 +56,38 @@
       '<p>然后打开它打印的 http://127.0.0.1:端口 地址。</p></div>';
     return;
   }
+  // A blank page is worse than a visible error: surface startup failures
+  // (including a wasm/engine incompatibility) instead of leaving #fs-root empty.
+  function showFatal(msg) {
+    var box = document.getElementById('fs-fatal');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'fs-fatal';
+      box.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;z-index:99999;' +
+        'padding:12px 14px;border:1px solid #a44;border-radius:10px;background:#2a1d1d;' +
+        'color:#fdd;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap';
+      document.body.appendChild(box);
+    }
+    box.textContent = String(msg || 'unknown error');
+  }
+  window.addEventListener('error', function (e) {
+    showFatal('FlashSight startup error: ' + (e.message || e.type) +
+              (e.filename ? ' @ ' + e.filename + ':' + e.lineno : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    showFatal('FlashSight promise error: ' + (e.reason && e.reason.message || e.reason));
+  });
+
   // ---- token plumbing -----------------------------------------------------
   // Every request the app makes must carry the token once one exists. Wrapping
   // fetch here (before the wasm module runs) covers /api/call, /api/events and
   // the EventSource polyfill path alike.
   var TOKEN_KEY = 'fs_token';
-  var token = sessionStorage.getItem(TOKEN_KEY) || '';
+  // Storage can be disabled (hardened Firefox / opaque origin). A throw here
+  // used to abort this whole IIFE before the /api/auth fetch, leaving a blank
+  // page with no requests at all.
+  var token = '';
+  try { token = sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) {}
   var origFetch = window.fetch.bind(window);
   window.__fsToken = function () { return token; };
   window.fetch = function (url, opts) {
@@ -121,7 +147,7 @@
         go.disabled = false;
         if (j && j.ok) {
           token = (j.data && j.data.token) || '';
-          sessionStorage.setItem(TOKEN_KEY, token);
+          try { sessionStorage.setItem(TOKEN_KEY, token); } catch (e) {}
           startApp();
         } else {
           showGate('密码不正确');

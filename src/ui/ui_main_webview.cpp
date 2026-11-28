@@ -213,6 +213,7 @@ int run_webview_ui(FsApi* api) {
       std::shared_ptr<std::atomic<bool> > alive;
       std::shared_ptr<std::atomic<bool> > page_ready;
       std::shared_ptr<std::atomic<bool> > mounted;
+      std::chrono::steady_clock::time_point started;
     };
     std::shared_ptr<std::atomic<bool> > alive =
         std::make_shared<std::atomic<bool> >(true);
@@ -222,6 +223,7 @@ int run_webview_ui(FsApi* api) {
     ctx.alive = alive;
     ctx.page_ready = page_ready;
     ctx.mounted = mounted;
+    ctx.started = std::chrono::steady_clock::now();
     std::atomic<bool> running(true);
     std::thread ticker([&]() {
       while (running.load()) {
@@ -241,7 +243,15 @@ int run_webview_ui(FsApi* api) {
           // WebKit) the old synchronous mount made the real page replace the
           // already-built DOM and the window stayed blank.
           if (!c->mounted->load()) {
-            if (!c->page_ready->load()) return;
+            // Normal path: DOMContentLoaded called fs_ui_ready. Fallback: some
+            // WebKit builds do not run webview_init user scripts reliably; if
+            // the page has had time to load, mount anyway rather than stay
+            // blank forever.
+            const bool ready = c->page_ready->load();
+            const bool timeout =
+                std::chrono::steady_clock::now() - c->started >
+                std::chrono::seconds(3);
+            if (!ready && !timeout) return;
             c->app->mount();
             c->mounted->store(true);
             if (std::getenv("FS_UI_WEBVIEW_DEBUG")) {

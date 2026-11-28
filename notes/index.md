@@ -1980,3 +1980,9 @@ The process of project: P0 环境搭建
   - **Web/Firefox 首次空白/警告**：`startApp()` 改为等 `window.load` 后再 `_fs_ui_start()`，且用 `__fsUiStarted` 防重入；wasm runtime 先 ready 也只会排队，不再在样式表加载前强制布局。file:// 仍是明确的“请用 flashsight-web 启动”提示。
   - **验证**：520 用例 4572 断言全过；web/webview/whaleui 已按最新 index/CSS/asset 重链；webview 独立实例实测 UI 渲染。macOS 链接仍需 CI。
 
+
+<157>(WEB/WEBVIEW): 启动失败可见化 + WebView 挂载兜底。
+  - **Firefox 无任何 fetch**：`web/index.html` 的 auth IIFE 直接读 `sessionStorage`；在禁用 storage 的 Firefox（或异常隐私配置）会先抛 SecurityError，导致后面的 `/api/auth` fetch 根本不执行。现在读取/写入都 try/catch，并在窗口级 error/unhandledrejection 上显示右下角红色 `fs-fatal` 面板，不再只留空白 DOM。启动仍在 `window.load` 后执行。
+  - **WebView 空白**：正常路径等 DOMContentLoaded 的 `fs_ui_ready`；如果某些 WebKitGTK 不执行 webview_init 用户脚本，3 秒后 ticker 兜底挂载 UI，避免永久空白。Windows 独立实例仍正常；Linux 实机需要下一次 CI/机器验证。
+  - **验证**：520 用例 4572 断言全过；web/webview 已重链。
+
